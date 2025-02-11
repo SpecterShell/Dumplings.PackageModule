@@ -351,3 +351,5 @@ function ConvertTo-SortedYamlObject {
     }
   }
 }
+
+Export-ModuleMember -Function *

@@ -29,8 +29,8 @@ $ManifestSchemaDirectUrl = @{
 
 $Encoding = [System.Text.UTF8Encoding]::new($false)
 $Culture = 'en-US'
-$UserAgent = 'Microsoft-Delivery-Optimization/10.0'
-$BackupUserAgent = 'winget-cli WindowsPackageManager/1.7.10661 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.22.10661.0'
+$WinGetUserAgent = 'Microsoft-Delivery-Optimization/10.0'
+$WinGetBackupUserAgent = 'winget-cli WindowsPackageManager/1.7.10661 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.22.10661.0'
 
 filter UniqueItems {
   [string]$($_.Split(',').Trim() | Select-Object -Unique)
@@ -354,11 +354,11 @@ function Update-WinGetInstallerManifestInstallers {
       } else {
         $Task.Log("Downloading $($Installer.InstallerUrl)", 'Verbose')
         try {
-          $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:UserAgent
+          $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
           $InstallerFiles[$Installer.InstallerUrl] = $InstallerPath
         } catch {
           $Task.Log('Failed to download with the Delivery-Optimization User Agent. Try again with the WinINet User Agent...', 'Warning')
-          $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:BackupUserAgent
+          $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
         }
       }
 
@@ -1058,3 +1058,5 @@ function Send-WinGetManifest {
   }
   #endregion
 }
+
+Export-ModuleMember -Function 'Send-WinGetManifest' -Variable 'WinGetUserAgent', 'WinGetBackupUserAgent'

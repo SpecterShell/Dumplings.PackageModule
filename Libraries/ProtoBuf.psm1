@@ -201,4 +201,4 @@ function ConvertFrom-ProtoBuf {
   }
 }
 
-Export-ModuleMember -Function ConvertFrom-ProtoBuf
+Export-ModuleMember -Function 'ConvertFrom-ProtoBuf'

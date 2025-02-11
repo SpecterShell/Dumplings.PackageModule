@@ -69,4 +69,4 @@ function ConvertFrom-PropertyList {
   }
 }
 
-Export-ModuleMember -Function ConvertFrom-PropertyList
+Export-ModuleMember -Function 'ConvertFrom-PropertyList'

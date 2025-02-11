@@ -210,4 +210,4 @@ function Convert-MarkdownToHtml {
   }
 }
 
-Export-ModuleMember -Function Get-TextContent, Convert-MarkdownToHtml
+Export-ModuleMember -Function 'Get-TextContent', 'Convert-MarkdownToHtml'
