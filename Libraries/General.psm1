@@ -1431,5 +1431,6 @@ function Copy-Object {
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'DumplingsDefaultUserAgent', Justification = 'This variable will be exported')]
 $DumplingsDefaultUserAgent = [Microsoft.PowerShell.Commands.PSUserAgent].GetProperty('UserAgent', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static).GetValue($null)
+$DumplingsBrowserUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0'
 
-Export-ModuleMember -Function * -Variable 'DumplingsDefaultUserAgent'
+Export-ModuleMember -Function * -Variable 'DumplingsDefaultUserAgent', 'DumplingsBrowserUserAgent'
