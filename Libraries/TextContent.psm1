@@ -7,7 +7,7 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 $ErrorActionPreference = 'Stop'
 
 # Node types that will be ignored during traversing
-$IgnoredNodes = @('img', 'script', 'style', 'video', '#comment')
+$IgnoredNodes = @('head', 'img', 'script', 'style', 'svg', 'video', '#comment')
 # Node types that always start at new line, as well as <li>
 # https://developer.mozilla.org/docs/Web/HTML/Block-level_elements
 $BlockNodes = @(
