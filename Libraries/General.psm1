@@ -1412,25 +1412,20 @@ function Copy-Object {
   #>
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The object to clone')]
-    $InputObject
+    $InputObject,
+
+    [Parameter(HelpMessage = 'The depth of the object to clone')]
+    [int]$Depth = 10
   )
 
-  begin {
-    $BinaryFormatter = [System.Runtime.Serialization.Formatters.Binary.BinaryFormatter]::new()
-    $BinaryFormatter.Context = [System.Runtime.Serialization.StreamingContext]::new([System.Runtime.Serialization.StreamingContextStates]::Clone)
-  }
-
   process {
-    $MemoryStream = [System.IO.MemoryStream]::new()
-    $BinaryFormatter.Serialize($MemoryStream, $InputObject)
-    $MemoryStream.Position = 0
-    $BinaryFormatter.Deserialize($MemoryStream)
-    $MemoryStream.Close()
+    $InputObject | ConvertTo-Json -Depth $Depth -Compress | ConvertFrom-Json -AsHashtable
   }
 }
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'DumplingsDefaultUserAgent', Justification = 'This variable will be exported')]
 $DumplingsDefaultUserAgent = [Microsoft.PowerShell.Commands.PSUserAgent].GetProperty('UserAgent', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static).GetValue($null)
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'DumplingsBrowserUserAgent', Justification = 'This variable will be exported')]
 $DumplingsBrowserUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0'
 
 Export-ModuleMember -Function * -Variable 'DumplingsDefaultUserAgent', 'DumplingsBrowserUserAgent'
