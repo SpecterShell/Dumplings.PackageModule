@@ -172,4 +172,4 @@ function Format-Text {
   }
 }
 
-Export-ModuleMember -Function 'Format-Text'
+Export-ModuleMember -Function 'Format-Text' -Variable 'CJK'
