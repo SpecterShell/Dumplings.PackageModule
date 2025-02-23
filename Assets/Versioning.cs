@@ -611,8 +611,7 @@ namespace Dumplings.Versioning
                     if (cmp != 0) return cmp;
                 }
                 // Sane values can't be extracted from one or both of the arguments.
-                else if (left is not null || right is null) return ToComplexVersion().CompareTo(other);
-                else throw new Exception("This should never happen.");
+                else return ToComplexVersion().CompareTo(other);
             }
             return ToComplexVersion().CompareTo(other);
         }
