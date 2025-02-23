@@ -255,17 +255,238 @@ function Move-KeysToManifestLevel {
   }
 }
 
+function Update-WinGetInstallerManifestInstallerMetadata {
+  <#
+  .SYNOPSIS
+    Update the metadata of the installer entry
+  .DESCRIPTION
+    Update the metadata of the installer entry using the provided installer metadata
+  .PARAMETER OldInstaller
+    The installer to update
+  .PARAMETER InstallerEntry
+    The installer entry to use for updating the installer
+  .PARAMETER Installers
+    The installers that have updated for reference (e.g., hashes)
+  .PARAMETER InstallerFiles
+    The dictionary to store the filenames and the hashes of the downloaded installer files
+  #>
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The installer to update')]
+    [System.Collections.IDictionary]$OldInstaller,
+    [Parameter(Mandatory, HelpMessage = 'The installer entry to use for updating the installer')]
+    [System.Collections.IDictionary]$InstallerEntry,
+    [Parameter(HelpMessage = 'The installers that have updated for reference')]
+    [System.Collections.IDictionary[]]$Installers = @(),
+    [Parameter(HelpMessage = 'The dictionary to store the filenames and the hashes of the downloaded installer files')]
+    [System.Collections.IDictionary]$InstallerFiles = [ordered]@{}
+  )
+
+  # Deep copy the old installer
+  $Installer = $OldInstaller | Copy-Object
+
+  # Clean up volatile fields
+  $Installer.Remove('InstallerSha256')
+  if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
+
+  # Update the installer using the matching installer entry
+  foreach ($Key in $InstallerEntry.Keys) {
+    if ($Key -in @('Query')) {
+      # Skip the entries used for matching
+      continue
+    } elseif (-not $InstallerEntry.Contains('Query') -and $Key -in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
+      # Skip the entries used for matching if Query is not present
+      continue
+    } elseif ($Key -notin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
+      # Check if the key is a valid installer property
+      throw "The installer entry has an invalid key: ${Key}"
+    } else {
+      try {
+        $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop
+        if ($Key -eq 'InstallerUrl') {
+          $Installer.$Key = $InstallerEntry.$Key.Replace(' ', '%20')
+        } else {
+          $Installer.$Key = $InstallerEntry.$Key
+        }
+      } catch {
+        $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
+      }
+    }
+  }
+
+  # Update the installer using the matching installer
+  $MatchingInstaller = $Installers | Where-Object -FilterScript { $_.InstallerUrl -ceq $Installer.InstallerUrl } | Select-Object -First 1
+  if ($MatchingInstaller -and ($Installer.Contains('NestedInstallerFiles') ? ((ConvertTo-Json -InputObject $Installer.NestedInstallerFiles -Depth 10 -Compress) -ceq (ConvertTo-Json -InputObject $MatchingInstaller.NestedInstallerFiles -Depth 10 -Compress)) : $true)) {
+    foreach ($Key in @('InstallerSha256', 'SignatureSha256', 'PackageFamilyName', 'ProductCode', 'ReleaseDate', 'AppsAndFeaturesEntries')) {
+      if ($MatchingInstaller.Contains($Key) -and -not $InstallerEntry.Contains($Key)) {
+        $Installer.$Key = $MatchingInstaller.$Key
+      } elseif (-not $MatchingInstaller.Contains($Key) -and $Installer.Contains($Key)) {
+        $Installer.Remove($Key)
+      }
+    }
+  }
+
+  # Download and analyze the installer file
+  # Skip if there is matching installer, or the "InstallerSha256" is explicitly specified
+  if (-not $Installer.Contains('InstallerSha256')) {
+    if ($InstallerFiles.Contains($Installer.InstallerUrl) -and (Test-Path -Path $InstallerFiles[$Installer.InstallerUrl])) {
+      $InstallerPath = $InstallerFiles[$Installer.InstallerUrl]
+    } else {
+      $Task.Log("Downloading $($Installer.InstallerUrl)", 'Verbose')
+      try {
+        $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
+        $InstallerFiles[$Installer.InstallerUrl] = $InstallerPath
+      } catch {
+        $Task.Log('Failed to download with the Delivery-Optimization User Agent. Try again with the WinINet User Agent...', 'Warning')
+        $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
+      }
+    }
+
+    $Task.Log('Processing installer data...', 'Verbose')
+
+    # Get installer SHA256
+    $Installer.InstallerSha256 = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash
+
+    # If the installer is an archive and the nested installer is msi or wix, expand the archive to get the nested installer
+    $EffectiveInstallerType = $Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType
+    $EffectiveInstallerPath = $Installer.InstallerType -in @('zip') -and $Installer.NestedInstallerType -ne 'portable' ? (Expand-TempArchive -Path $InstallerPath | Join-Path -ChildPath $Installer.NestedInstallerFiles[0].RelativeFilePath) : $InstallerPath
+
+    # Update ProductCode, UpgradeCode and ProductVersion if the installer is msi, wix or burn, and such fields exist in the old installer
+    # ProductCode
+    $ProductCode = $null
+    if ($EffectiveInstallerType -in @('msi', 'wix')) {
+      $ProductCode = $EffectiveInstallerPath | Read-ProductCodeFromMsi -ErrorAction 'Continue'
+    } elseif ($EffectiveInstallerType -eq 'burn') {
+      $ProductCode = $EffectiveInstallerPath | Read-ProductCodeFromBurn -ErrorAction 'Continue'
+    }
+    if (-not $InstallerEntry.Contains('ProductCode') -and $EffectiveInstallerType -in @('msi', 'wix', 'burn') -and $Installer.Contains('ProductCode')) {
+      if (-not [string]::IsNullOrWhiteSpace($ProductCode)) {
+        $Installer.ProductCode = $ProductCode
+      } else {
+        throw 'Failed to get ProductCode'
+      }
+    }
+    if (-not $InstallerEntry.Contains('AppsAndFeaturesEntries') -and $EffectiveInstallerType -in @('msi', 'wix', 'burn') -and $Installer['AppsAndFeaturesEntries']) {
+      # UpgradeCode
+      $UpgradeCode = $null
+      if ($EffectiveInstallerType -in @('msi', 'wix')) {
+        $UpgradeCode = $EffectiveInstallerPath | Read-UpgradeCodeFromMsi -ErrorAction 'Continue'
+      } elseif ($EffectiveInstallerType -eq 'burn') {
+        $UpgradeCode = $EffectiveInstallerPath | Read-UpgradeCodeFromBurn -ErrorAction 'Continue'
+      }
+      # DisplayVersion
+      $DisplayVersion = $null
+      if ($EffectiveInstallerType -in @('msi', 'wix')) {
+        $DisplayVersion = $EffectiveInstallerPath | Read-ProductVersionFromMsi -ErrorAction 'Continue'
+      } elseif ($EffectiveInstallerType -eq 'burn') {
+        $DisplayVersion = $EffectiveInstallerPath | Read-ProductVersionFromExe -ErrorAction 'Continue'
+      }
+      # DisplayName
+      $DisplayName = $null
+      if ($EffectiveInstallerType -in @('msi', 'wix')) {
+        $DisplayName = $EffectiveInstallerPath | Read-ProductNameFromMsi -ErrorAction 'Continue'
+      } elseif ($EffectiveInstallerType -eq 'burn') {
+        $DisplayName = $EffectiveInstallerPath | Read-ProductNameFromBurn -ErrorAction 'Continue'
+      }
+      # Match the AppsAndFeaturesEntries that...
+      $Installer.AppsAndFeaturesEntries | Where-Object -FilterScript {
+        # ...have the same UpgradeCode as the new installer, or...
+          ($UpgradeCode -and $_['UpgradeCode'] -and $UpgradeCode -eq $_.UpgradeCode) -or
+        # ...have the same ProductCode as the old installer, or...
+          ($OldInstaller['ProductCode'] -and $_['ProductCode'] -and $OldInstaller.ProductCode -eq $_.ProductCode) -or
+        # ...is the only entry in the installer
+          ($Installer.AppsAndFeaturesEntries.Count -eq 1)
+      } | ForEach-Object -Process {
+        if ($_.Contains('DisplayName')) {
+          if (-not [string]::IsNullOrWhiteSpace($DisplayName)) {
+            $_.DisplayName = $DisplayName
+          } else {
+            throw 'Failed to get DisplayName'
+          }
+        }
+        if ($_.Contains('DisplayVersion')) {
+          if (-not [string]::IsNullOrWhiteSpace($DisplayVersion)) {
+            $_.DisplayVersion = $DisplayVersion
+          } else {
+            throw 'Failed to get DisplayVersion'
+          }
+        }
+        if ($_.Contains('ProductCode')) {
+          if (-not [string]::IsNullOrWhiteSpace($ProductCode)) {
+            $_.ProductCode = $ProductCode
+          } else {
+            throw 'Failed to get ProductCode'
+          }
+        }
+        if ($_.Contains('UpgradeCode')) {
+          if (-not [string]::IsNullOrWhiteSpace($UpgradeCode)) {
+            $_.UpgradeCode = $UpgradeCode
+          } else {
+            throw 'Failed to get UpgradeCode'
+          }
+        }
+      }
+    }
+
+    # Update SignatureSha256 if the installer is msix or appx
+    if ($Installer.InstallerType -in @('msix', 'appx')) {
+      $SignatureSha256 = $null
+      $WinGetMaximumRetryCount = 3
+      for ($i = 0; $i -lt $WinGetMaximumRetryCount; $i++) {
+        try {
+          $SignatureSha256 = winget hash -m $InstallerPath | Select-String -Pattern 'SignatureSha256:' | ConvertFrom-String
+          break
+        } catch {
+          if ($_.FullyQualifiedErrorId -eq 'CommandNotFoundException') {
+            $Task.Log('Could not find the WinGet client for getting SignatureSha256. Is it installed and added to PATH?', 'Error')
+          } elseif ($_.FullyQualifiedErrorId -eq 'ProgramExitedWithNonZeroCode' -and $i -lt $WinGetMaximumRetryCount - 1) {
+            $Task.Log("WinGet exits with exitcode $($_.Exception.ExitCode)", 'Warning')
+          }
+        }
+      }
+      if ($SignatureSha256 -and $SignatureSha256.P2) { $SignatureSha256 = $SignatureSha256.P2.ToUpper() }
+      if (-not [string]::IsNullOrWhiteSpace($SignatureSha256)) {
+        $Installer.SignatureSha256 = $SignatureSha256
+      } elseif ($Installer.Contains('SignatureSha256')) {
+        $Task.Log('Failed to get SignatureSha256', 'Warning')
+        $Installer.Remove('SignatureSha256')
+      }
+    }
+
+    # Update PackageFamilyName if the installer is msix or appx
+    if ($Installer.InstallerType -in @('msix', 'appx')) {
+      $PackageFamilyName = $InstallerPath | Read-FamilyNameFromMSIX
+      if (-not [string]::IsNullOrWhiteSpace($PackageFamilyName)) {
+        $Installer.PackageFamilyName = $PackageFamilyName
+      } elseif ($Installer.Contains('PackageFamilyName')) {
+        $Task.Log('Failed to get PackageFamilyName', 'Warning')
+        $Installer.Remove('PackageFamilyName')
+      }
+    }
+  }
+
+  # Clean up the existing files just in case
+  if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
+  if ($Installer.Contains('Protocols')) { $Installer.Protocols = @($Installer.Protocols | ToLower | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
+  if ($Installer.Contains('FileExtensions')) { $Installer.FileExtensions = @($Installer.FileExtensions | ToLower | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
+
+  return $Installer
+}
+
 function Update-WinGetInstallerManifestInstallers {
   <#
   .SYNOPSIS
-    Update the installer entries of the manifest
+    Update the installers of the manifest
   .DESCRIPTION
-    Update the installer entries of the manifest using the provided installer entries
+    Iterate over the installers of the old manifest and update them using the provided installer entries
+  .PARAMETER OldInstallers
+    The old installers to update
+  .PARAMETER InstallerEntries
+    The installer entries to use for updating the installers
   #>
   param (
-    [Parameter(Position = 0)]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installers to update')]
     [System.Collections.IDictionary[]]$OldInstallers,
-    [Parameter(Position = 1)]
+    [Parameter(Mandatory, HelpMessage = 'The installer entries to use for updating the installers')]
     [System.Collections.IDictionary[]]$InstallerEntries
   )
 
@@ -274,216 +495,132 @@ function Update-WinGetInstallerManifestInstallers {
   $InstallerFiles = [ordered]@{}
   foreach ($OldInstaller in $OldInstallers) {
     $iteration += 1
-    $Installer = $OldInstaller | Copy-Object
-    $Task.Log("Updating installer #${iteration}/$($OldInstallers.Count) [$($Installer['InstallerLocale']), $($Installer['Architecture']), $($Installer['InstallerType']), $($Installer['NestedInstallerType']), $($Installer['Scope'])]", 'Verbose')
-
-    # Clean up volatile fields
-    $Installer.Remove('InstallerSha256')
-    if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
+    $Task.Log("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
 
     # Apply inputs
-    $ToUpdate = $false
+    $MatchingInstallerEntry = $null
     foreach ($InstallerEntry in $InstallerEntries) {
       $Updatable = $true
       # Find matching installer entry
-      # The installer entry will be chosen if the installer contain all the keys present in the installer entry, and their values are the same
-      foreach ($Key in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
-        if ($InstallerEntry.Contains($Key) -and $Installer.Contains($Key) -and $Installer.$Key -ne $InstallerEntry.$Key) {
-          # Skip this entry if the installer has this key, but with a different value
-          $Updatable = $false
-        } elseif ($InstallerEntry.Contains($Key) -and -not $Installer.Contains($Key)) {
-          # Skip this entry if the installer doesn't have this key
-          $Updatable = $false
+      if ($InstallerEntry.Contains('Query')) {
+        if ($InstallerEntry.Query -is [scriptblock]) {
+          # The installer entry will be chosen if the scriptblock passed with the installer entry returns something
+          if (-not (Invoke-Command -ScriptBlock $InstallerEntry.Query -InputObject $OldInstaller)) {
+            $Updatable = $false
+          }
+        } elseif ($InstallerEntry.Query -is [System.Collections.IDictionary]) {
+          # The installer entry will be chosen if the installer contain all the keys present in the installer entry Query field, and their values are the same
+          foreach ($Key in $InstallerEntry.Query.Keys) {
+            if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -ne $InstallerEntry.Query.$Key) {
+              # Skip this entry if the installer has this key, but with a different value
+              $Updatable = $false
+            } elseif (-not $OldInstaller.Contains($Key)) {
+              # Skip this entry if the installer doesn't have this key
+              $Updatable = $false
+            }
+          }
+        } else {
+          throw 'The installer entry Query field should be either a scriptblock or a dictionary'
+        }
+      } else {
+        # The installer entry will be chosen if the installer contain all the keys present in the installer entry, and their values are the same
+        foreach ($Key in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
+          if ($InstallerEntry.Contains($Key) -and $OldInstaller.Contains($Key) -and $OldInstaller.$Key -ne $InstallerEntry.$Key) {
+            # Skip this entry if the installer has this key, but with a different value
+            $Updatable = $false
+          } elseif ($InstallerEntry.Contains($Key) -and -not $OldInstaller.Contains($Key)) {
+            # Skip this entry if the installer doesn't have this key
+            $Updatable = $false
+          }
         }
       }
       # If the installer entry matches the installer, use the last matching entry for updating the installer
       if ($Updatable) {
-        $ToUpdate = $true
         $MatchingInstallerEntry = $InstallerEntry
       }
     }
     # If no matching installer entry is found, throw an error
-    if (-not $ToUpdate) {
-      throw "No matching installer entry for [$($Installer['InstallerLocale']), $($Installer['Architecture']), $($Installer['InstallerType']), $($Installer['tNestedInstallerType']), $($Installer['Scope'])]"
+    if (-not $MatchingInstallerEntry) {
+      throw "No matching installer entry for [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['tNestedInstallerType']), $($OldInstaller['Scope'])]"
     }
-    # Update the installer using the matching installer entry
-    foreach ($Key in $MatchingInstallerEntry.Keys) {
-      if ($Key -eq 'Script') {
-        # Run custom script if exists
-        Invoke-Command -ScriptBlock $MatchingInstallerEntry.$Key -NoNewScope
-      } elseif ($Key -notin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
-        # Check if the key is a valid installer property
-        throw "The installer entry has an invalid key: ${Key}"
-      } elseif ($Key -in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
-        # Skip the entries used for matching
-        continue
-      } else {
-        try {
-          if (Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop) {
-            if ($Key -eq 'InstallerUrl') {
-              $Installer.$Key = $MatchingInstallerEntry.$Key.Replace(' ', '%20')
-            } else {
-              $Installer.$Key = $MatchingInstallerEntry.$Key
-            }
-          } else {
-            $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded", 'Warning')
+
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
+
+    # Add the updated installer to the new installers array
+    $Installers += $Installer
+  }
+
+  # Remove the downloaded files
+  foreach ($InstallerPath in $InstallerFiles.Values) {
+    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
+  }
+
+  return $Installers
+}
+
+function Update-WinGetInstallerManifestInstallersAlt {
+  <#
+  .SYNOPSIS
+    Update the installers of the manifest
+  .DESCRIPTION
+    Iterate over the installer entries and update the matching installers using the provided installer entries
+  .PARAMETER OldInstallers
+    The old installers to update
+  .PARAMETER InstallerEntries
+    The installer entries to use for updating the installers
+  #>
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installers to update')]
+    [System.Collections.IDictionary[]]$OldInstallers,
+    [Parameter(Mandatory, HelpMessage = 'The installer entries to use for updating the installers')]
+    [System.Collections.IDictionary[]]$InstallerEntries
+  )
+
+  $iteration = 0
+  $Installers = @()
+  $InstallerFiles = [ordered]@{}
+  foreach ($InstallerEntry in $InstallerEntries) {
+    $iteration += 1
+    $Task.Log("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
+
+    # Find matching installer
+    $MatchingInstaller = $null
+    foreach ($OldInstaller in $OldInstallers) {
+      $Updatable = $true
+      # If Query is present, select the installer based on the query. If not, select the first installer
+      if ($InstallerEntry.Contains('Query')) {
+        # The installer will be chosen if the scriptblock passed with the installer returns something
+        if ($InstallerEntry.Query -is [scriptblock]) {
+          if (-not (Invoke-Command -ScriptBlock $InstallerEntry.Query -InputObject $OldInstaller)) {
+            $Updatable = $false
           }
-        } catch {
-          $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
-        }
-      }
-    }
-
-    # Update the installer using the matching installer
-    $MatchingInstaller = $Installers | Where-Object -FilterScript { $_.InstallerUrl -ceq $Installer.InstallerUrl } | Select-Object -First 1
-    if ($MatchingInstaller -and ($Installer.Contains('NestedInstallerFiles') ? ((ConvertTo-Json -InputObject $Installer.NestedInstallerFiles -Depth 10 -Compress) -ceq (ConvertTo-Json -InputObject $MatchingInstaller.NestedInstallerFiles -Depth 10 -Compress)) : $true)) {
-      foreach ($Key in @('InstallerSha256', 'SignatureSha256', 'PackageFamilyName', 'ProductCode', 'ReleaseDate', 'AppsAndFeaturesEntries')) {
-        if ($MatchingInstaller.Contains($Key) -and -not $MatchingInstallerEntry.Contains($Key)) {
-          $Installer.$Key = $MatchingInstaller.$Key
-        } elseif (-not $MatchingInstaller.Contains($Key) -and $Installer.Contains($Key)) {
-          $Installer.Remove($Key)
-        }
-      }
-    }
-
-    # Download and analyze the installer file
-    # Skip if there is matching installer, or the "InstallerSha256" is explicitly specified
-    if (-not $Installer.Contains('InstallerSha256')) {
-      if ($InstallerFiles.Contains($Installer.InstallerUrl) -and (Test-Path -Path $InstallerFiles[$Installer.InstallerUrl])) {
-        $InstallerPath = $InstallerFiles[$Installer.InstallerUrl]
-      } else {
-        $Task.Log("Downloading $($Installer.InstallerUrl)", 'Verbose')
-        try {
-          $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
-          $InstallerFiles[$Installer.InstallerUrl] = $InstallerPath
-        } catch {
-          $Task.Log('Failed to download with the Delivery-Optimization User Agent. Try again with the WinINet User Agent...', 'Warning')
-          $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
-        }
-      }
-
-      $Task.Log('Processing installer data...', 'Verbose')
-
-      # Get installer SHA256
-      $Installer.InstallerSha256 = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash
-
-      # If the installer is an archive and the nested installer is msi or wix, expand the archive to get the nested installer
-      $EffectiveInstallerType = $Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType
-      $EffectiveInstallerPath = $Installer.InstallerType -in @('zip') -and $Installer.NestedInstallerType -ne 'portable' ? (Expand-TempArchive -Path $InstallerPath | Join-Path -ChildPath $Installer.NestedInstallerFiles[0].RelativeFilePath) : $InstallerPath
-
-      # Update ProductCode, UpgradeCode and ProductVersion if the installer is msi, wix or burn, and such fields exist in the old installer
-      # ProductCode
-      $ProductCode = $null
-      if ($EffectiveInstallerType -in @('msi', 'wix')) {
-        $ProductCode = $EffectiveInstallerPath | Read-ProductCodeFromMsi -ErrorAction 'Continue'
-      } elseif ($EffectiveInstallerType -eq 'burn') {
-        $ProductCode = $EffectiveInstallerPath | Read-ProductCodeFromBurn -ErrorAction 'Continue'
-      }
-      if (-not $MatchingInstallerEntry.Contains('ProductCode') -and $EffectiveInstallerType -in @('msi', 'wix', 'burn') -and $Installer.Contains('ProductCode')) {
-        if (-not [string]::IsNullOrWhiteSpace($ProductCode)) {
-          $Installer.ProductCode = $ProductCode
+        } elseif ($InstallerEntry.Query -is [System.Collections.IDictionary]) {
+          # The installer will be chosen if the installer contain all the keys present in the installer entry Query field, and their values are the same
+          foreach ($Key in $InstallerEntry.Query.Keys) {
+            if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -ne $InstallerEntry.Query.$Key) {
+              # Skip this entry if the installer has this key, but with a different value
+              $Updatable = $false
+            } elseif (-not $OldInstaller.Contains($Key)) {
+              # Skip this entry if the installer doesn't have this key
+              $Updatable = $false
+            }
+          }
         } else {
-          throw 'Failed to get ProductCode'
+          throw 'The installer entry Query field should be either a scriptblock or a dictionary'
         }
       }
-      if (-not $MatchingInstallerEntry.Contains('AppsAndFeaturesEntries') -and $EffectiveInstallerType -in @('msi', 'wix', 'burn') -and $Installer['AppsAndFeaturesEntries']) {
-        # UpgradeCode
-        $UpgradeCode = $null
-        if ($EffectiveInstallerType -in @('msi', 'wix')) {
-          $UpgradeCode = $EffectiveInstallerPath | Read-UpgradeCodeFromMsi -ErrorAction 'Continue'
-        } elseif ($EffectiveInstallerType -eq 'burn') {
-          $UpgradeCode = $EffectiveInstallerPath | Read-UpgradeCodeFromBurn -ErrorAction 'Continue'
-        }
-        # DisplayVersion
-        $DisplayVersion = $null
-        if ($EffectiveInstallerType -in @('msi', 'wix')) {
-          $DisplayVersion = $EffectiveInstallerPath | Read-ProductVersionFromMsi -ErrorAction 'Continue'
-        } elseif ($EffectiveInstallerType -eq 'burn') {
-          $DisplayVersion = $EffectiveInstallerPath | Read-ProductVersionFromExe -ErrorAction 'Continue'
-        }
-        # DisplayName
-        $DisplayName = $null
-        if ($EffectiveInstallerType -in @('msi', 'wix')) {
-          $DisplayName = $EffectiveInstallerPath | Read-ProductNameFromMsi -ErrorAction 'Continue'
-        } elseif ($EffectiveInstallerType -eq 'burn') {
-          $DisplayName = $EffectiveInstallerPath | Read-ProductNameFromBurn -ErrorAction 'Continue'
-        }
-        # Match the AppsAndFeaturesEntries that...
-        $Installer.AppsAndFeaturesEntries | Where-Object -FilterScript {
-          # ...have the same UpgradeCode as the new installer, or...
-          ($UpgradeCode -and $_['UpgradeCode'] -and $UpgradeCode -eq $_.UpgradeCode) -or
-          # ...have the same ProductCode as the old installer, or...
-          ($OldInstaller['ProductCode'] -and $_['ProductCode'] -and $OldInstaller.ProductCode -eq $_.ProductCode) -or
-          # ...is the only entry in the installer
-          ($Installer.AppsAndFeaturesEntries.Count -eq 1)
-        } | ForEach-Object -Process {
-          if ($_.Contains('DisplayName')) {
-            if (-not [string]::IsNullOrWhiteSpace($DisplayName)) {
-              $_.DisplayName = $DisplayName
-            } else {
-              throw 'Failed to get DisplayName'
-            }
-          }
-          if ($_.Contains('DisplayVersion')) {
-            if (-not [string]::IsNullOrWhiteSpace($DisplayVersion)) {
-              $_.DisplayVersion = $DisplayVersion
-            } else {
-              throw 'Failed to get DisplayVersion'
-            }
-          }
-          if ($_.Contains('ProductCode')) {
-            if (-not [string]::IsNullOrWhiteSpace($ProductCode)) {
-              $_.ProductCode = $ProductCode
-            } else {
-              throw 'Failed to get ProductCode'
-            }
-          }
-          if ($_.Contains('UpgradeCode')) {
-            if (-not [string]::IsNullOrWhiteSpace($UpgradeCode)) {
-              $_.UpgradeCode = $UpgradeCode
-            } else {
-              throw 'Failed to get UpgradeCode'
-            }
-          }
-        }
-      }
-
-      # Update SignatureSha256 if the installer is msix or appx
-      if ($Installer.InstallerType -in @('msix', 'appx')) {
-        $SignatureSha256 = $null
-        $WinGetMaximumRetryCount = 3
-        for ($i = 0; $i -lt $WinGetMaximumRetryCount; $i++) {
-          try {
-            $SignatureSha256 = winget hash -m $InstallerPath | Select-String -Pattern 'SignatureSha256:' | ConvertFrom-String
-            break
-          } catch {
-            if ($_.FullyQualifiedErrorId -eq 'CommandNotFoundException') {
-              $Task.Log('Could not find the WinGet client for getting SignatureSha256. Is it installed and added to PATH?', 'Error')
-            } elseif ($_.FullyQualifiedErrorId -eq 'ProgramExitedWithNonZeroCode' -and $i -lt $WinGetMaximumRetryCount - 1) {
-              $Task.Log("WinGet exits with exitcode $($_.Exception.ExitCode)", 'Warning')
-            }
-          }
-        }
-        if ($SignatureSha256 -and $SignatureSha256.P2) { $SignatureSha256 = $SignatureSha256.P2.ToUpper() }
-        if (-not [string]::IsNullOrWhiteSpace($SignatureSha256)) {
-          $Installer.SignatureSha256 = $SignatureSha256
-        } elseif ($Installer.Contains('SignatureSha256')) {
-          $Task.Log('Failed to get SignatureSha256', 'Warning')
-          $Installer.Remove('SignatureSha256')
-        }
-      }
-
-      # Update PackageFamilyName if the installer is msix or appx
-      if ($Installer.InstallerType -in @('msix', 'appx')) {
-        $PackageFamilyName = $InstallerPath | Read-FamilyNameFromMSIX
-        if (-not [string]::IsNullOrWhiteSpace($PackageFamilyName)) {
-          $Installer.PackageFamilyName = $PackageFamilyName
-        } elseif ($Installer.Contains('PackageFamilyName')) {
-          $Task.Log('Failed to get PackageFamilyName', 'Warning')
-          $Installer.Remove('PackageFamilyName')
-        }
+      # If the installer entry matches the installers, use the first matching installer for updating
+      if ($Updatable) {
+        $MatchingInstaller = $OldInstaller
+        break
       }
     }
+    # If no matching installer entry is found, throw an error
+    if (-not $MatchingInstaller) {
+      throw 'No matching installer for the installer entry'
+    }
+
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -498,10 +635,20 @@ function Update-WinGetInstallerManifestInstallers {
 }
 
 function Update-WinGetVersionManifest {
+  <#
+  .SYNOPSIS
+    Update the version manifest
+  .DESCRIPTION
+    Update the version manifest using the provided package version
+  .PARAMETER OldVersionManifest
+    The old version manifest to update
+  .PARAMETER PackageVersion
+    The package version to use for updating the version manifest
+  #>
   param (
-    [Parameter(Position = 0, Mandatory)]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The old version manifest to update')]
     [System.Collections.IDictionary]$OldVersionManifest,
-    [Parameter(Position = 1, Mandatory)]
+    [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the version manifest')]
     [string]$PackageVersion
   )
 
@@ -517,13 +664,29 @@ function Update-WinGetVersionManifest {
 }
 
 function Update-WinGetInstallerManifest {
+  <#
+  .SYNOPSIS
+    Update the installer manifest
+  .DESCRIPTION
+    Update the installer manifest using the provided installer entries
+  .PARAMETER OldInstallerManifest
+    The old installer manifest to update
+  .PARAMETER InstallerEntries
+    The installer entries to use for updating the installer manifest
+  .PARAMETER PackageVersion
+    The package version to use for updating the installer manifest
+  .PARAMETER AltMode
+    Use the alternative mode for updating the installers
+  #>
   param (
-    [Parameter(Position = 0, Mandatory)]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installer manifest to update')]
     [System.Collections.IDictionary]$OldInstallerManifest,
-    [Parameter(Position = 1, Mandatory)]
+    [Parameter(Mandatory, HelpMessage = 'The installer entries to use for updating the installer manifest')]
     [System.Collections.IDictionary[]]$InstallerEntries,
-    [Parameter(Position = 2, Mandatory)]
-    [string]$PackageVersion
+    [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the installer manifest')]
+    [string]$PackageVersion,
+    [Parameter(HelpMessage = 'Use the alternative mode for updating the installers')]
+    [switch]$AltMode = $false
   )
 
   # Deep copy the old installer manifest
@@ -537,25 +700,32 @@ function Update-WinGetInstallerManifest {
   # Move Manifest Level Keys to installer Level
   Move-KeysToInstallerLevel -Manifest $InstallerManifest -Installers $InstallerManifest.Installers -Property $Script:ManifestSchema.installer.definitions.Installer.properties.Keys.Where({ $_ -in $Script:ManifestSchema.installer.properties.Keys })
   # Update installer entries
-  $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries
+  if (-not $AltMode) {
+    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries
+  } else {
+    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallersAlt -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries
+  }
   # Move Installer Level Keys to Manifest Level
   Move-KeysToManifestLevel -Installers $InstallerManifest.Installers -Manifest $InstallerManifest -Property $Script:ManifestSchema.installer.definitions.Installer.properties.Keys.Where({ $_ -in $Script:ManifestSchema.installer.properties.Keys })
-
-  # Clean up the existing files just in case
-  if ($InstallerManifest.Contains('Commands')) { $InstallerManifest.Commands = @($InstallerManifest.Commands | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
-  if ($InstallerManifest.Contains('Protocols')) { $InstallerManifest.Protocols = @($InstallerManifest.Protocols | ToLower | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
-  if ($InstallerManifest.Contains('FileExtensions')) { $InstallerManifest.FileExtensions = @($InstallerManifest.FileExtensions | ToLower | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
 
   return ConvertTo-SortedYamlObject -InputObject $InstallerManifest -Schema $Script:ManifestSchema.installer -Culture $Script:Culture
 }
 
 function Update-WinGetLocaleManifest {
+  <#
+  .SYNOPSIS
+    Update the locale manifest
+  .DESCRIPTION
+    Update the locale manifest using the provided locale entries
+  .PARAMETER PackageVersion
+    The package version to use for updating the locale manifest
+  #>
   param (
-    [Parameter(Mandatory, HelpMessage = 'The old locale manifests to update')]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The old locale manifests to update')]
     [System.Collections.IDictionary[]]$OldLocaleManifests,
-    [Parameter(Position = 1)]
-    [System.Collections.IDictionary[]]$LocaleEntries,
-    [Parameter(Position = 2, Mandatory)]
+    [Parameter(HelpMessage = 'The locale entries to use for updating the locale manifests')]
+    [System.Collections.IDictionary[]]$LocaleEntries = @(),
+    [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the locale manifest')]
     [string]$PackageVersion
   )
 
@@ -712,6 +882,8 @@ function Update-WinGetManifests {
     The installer entries to be applied to the installer manifest
   .PARAMETER LocaleEntries
     The locale entries to be applied to the locale manifest
+  .PARAMETER AltMode
+    Use the alternative mode for updating the installers
   #>
   [OutputType([System.Collections.IDictionary])]
   param (
@@ -726,11 +898,13 @@ function Update-WinGetManifests {
     [Parameter(Mandatory, HelpMessage = 'The installer entries to be applied to the installer manifest')]
     [System.Collections.IDictionary[]]$InstallerEntries,
     [Parameter(HelpMessage = 'The locale entries to be applied to the locale manifest')]
-    [System.Collections.IDictionary[]]$LocaleEntries = @()
+    [System.Collections.IDictionary[]]$LocaleEntries = @(),
+    [Parameter(HelpMessage = 'Use the alternative mode for updating the installers')]
+    [switch]$AltMode = $false
   )
 
   return @{
-    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion
+    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion -AltMode:$AltMode
     Locale    = Update-WinGetLocaleManifest -OldLocaleManifests $LocaleManifests -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion
     Version   = Update-WinGetVersionManifest -OldVersionManifest $VersionManifest -PackageVersion $PackageVersion
   }
@@ -911,11 +1085,17 @@ function Send-WinGetManifest {
     # If the old manifests exist, make sure to use the same casing as the existing package identifier
     $PackageIdentifier = $OldManifests.Version.PackageIdentifier
     # Update the manifests
-    $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale
+    if (-not $Task.Config['WinGetReplaceMode']) {
+      $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale
+    } else {
+      $Task.Log('Generating manifests in replace mode', 'Info')
+      $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -AltMode
+    }
     # Write the new manifests
     Write-WinGetManifests -PackageIdentifier $PackageIdentifier -VersionManifest $NewManifests.Version -InstallerManifest $NewManifests.Installer -LocaleManifests $NewManifests.Locale -ManifestsPath $NewManifestsPath
   } catch {
-    throw "Failed to generate manifests: ${_}"
+    $Task.Log("Failed to generate manifests: ${_}", 'Error')
+    throw $_
   }
   #endregion
 
@@ -942,7 +1122,8 @@ function Send-WinGetManifest {
           }
         }
       } else {
-        throw "Failed to validate manifests: ${_}"
+        $Task.Log("Failed to validate manifests: ${_}", 'Error')
+        throw $_
       }
     }
   }
@@ -965,7 +1146,8 @@ function Send-WinGetManifest {
       sha = $OriginRepoBranchRef.object.sha
     }
   } catch {
-    throw "Failed to create a new branch in the origin repo: ${_}"
+    $Task.Log("Failed to create a new branch in the origin repo: ${_}", 'Error')
+    throw $_
   }
   #endregion
 
@@ -1007,7 +1189,8 @@ function Send-WinGetManifest {
       }
     }
   } catch {
-    throw "Failed to upload manifests: ${_}"
+    $Task.Log("Failed to upload manifests: ${_}", 'Error')
+    throw $_
   }
   #endregion
 
@@ -1018,7 +1201,8 @@ function Send-WinGetManifest {
       base_tree = $NewBranchRef.object.sha
     }
   } catch {
-    throw "Failed to create a new tree: ${_}"
+    $Task.Log("Failed to create a new tree: ${_}", 'Error')
+    throw $_
   }
   #endregion
 
@@ -1030,7 +1214,8 @@ function Send-WinGetManifest {
       parents = @($NewBranchRef.object.sha)
     }
   } catch {
-    throw "Failed to create a new commit: ${_}"
+    $Task.Log("Failed to create a new commit: ${_}", 'Error')
+    throw $_
   }
   #endregion
 
@@ -1040,7 +1225,8 @@ function Send-WinGetManifest {
       sha = $NewCommit.sha
     }
   } catch {
-    throw "Failed to move the branch HEAD to the commit: ${_}"
+    $Task.Log("Failed to move the branch HEAD to the commit: ${_}", 'Error')
+    throw $_
   }
   #endregion
 
@@ -1054,7 +1240,8 @@ function Send-WinGetManifest {
     }
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
   } catch {
-    throw "Failed to create a pull request: ${_}"
+    $Task.Log("Failed to create a pull request: ${_}", 'Error')
+    throw $_
   }
   #endregion
 }

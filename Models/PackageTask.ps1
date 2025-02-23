@@ -149,31 +149,20 @@ class PackageTask {
 
   # Compare current state with last state
   [string] Check() {
+    # Check whether the version property is present and valid
+    if (-not $this.CurrentState.Contains('Version')) { throw 'The current state does not contain Version' }
+    if ([string]::IsNullOrWhiteSpace($this.CurrentState.Version)) { throw 'The current state has an empty Version' }
+
+    # Check whether the installer URL(s) is present and valid
+    if (-not $this.Config.Contains('CheckVersionOnly') -or -not $this.Config.CheckVersionOnly) {
+      foreach ($InstallerEntry in $this.CurrentState.Installer) {
+        if (-not $InstallerEntry.Contains('InstallerUrl')) { throw 'One of the installer entries in the current state does not contain InstallerUrl' }
+        if ([string]::IsNullOrWhiteSpace($InstallerEntry.InstallerUrl)) { throw 'One of the installer entries in the current state has an empty InstallerUrl' }
+      }
+    }
+
     if (-not $Global:DumplingsPreference.Contains('Force') -or -not $Global:DumplingsPreference.Force) {
-      # Check whether the version property is present and valid
-      if (-not $this.CurrentState.Contains('Version')) {
-        throw 'The current state has no version'
-      }
-      if ([string]::IsNullOrWhiteSpace($this.CurrentState.Version)) {
-        throw 'The current state has an invalid version'
-      }
-
-      # Check whether the installer URL(s) is present and valid
-      if (-not $this.Config.Contains('CheckVersionOnly') -or -not $this.Config.CheckVersionOnly) {
-        foreach ($Installer in $this.CurrentState.Installer) {
-          if (-not $Installer.Contains('InstallerUrl')) {
-            throw 'One of the installer entries in the current state does not contain InstallerUrl'
-          }
-          if ([string]::IsNullOrWhiteSpace($Installer.InstallerUrl)) {
-            throw 'One of the installer entries in the current state has an invalid InstallerUrl'
-          }
-        }
-      }
-
-      if ($this.Status.Contains('New')) {
-        # If this is a new task (no last state exists), skip the steps below
-        $this.Log('New task', 'Info')
-      } else {
+      if (-not $this.Status.Contains('New')) {
         switch (([Versioning]$this.CurrentState.Version).CompareTo([Versioning]$this.LastState.Version)) {
           { $_ -gt 0 } {
             $this.Log("Updated: $($this.LastState.Version) → $($this.CurrentState.Version)", 'Info')
@@ -200,11 +189,15 @@ class PackageTask {
             continue
           }
         }
+      } else {
+        # If this is a new task (no last state exists), skip the steps below
+        $this.Log('New task', 'Info')
       }
     } else {
       $this.Log('Skip checking states', 'Info')
       $this.Status.AddRange([string[]]@('Changed', 'Updated'))
     }
+
     return ($this.Status -join '|')
   }
 
@@ -242,15 +235,33 @@ class PackageTask {
     for ($i = 0; $i -lt $this.CurrentState.Installer.Count; $i++) {
       $Installer = $this.CurrentState.Installer[$i]
       $Message = $Message.Append("**Installer \#$($i + 1)/$($this.CurrentState.Installer.Count) \(")
-      $Message = $Message.Append(($Installer.Contains('InstallerLocale') ? ($Installer['InstallerLocale'] | ConvertTo-MarkdownEscapedText) : '\*'))
-      $Message = $Message.Append(', ')
-      $Message = $Message.Append(($Installer.Contains('Architecture') ? ($Installer['Architecture'] | ConvertTo-MarkdownEscapedText) : '\*'))
-      $Message = $Message.Append(', ')
-      $Message = $Message.Append(($Installer.Contains('InstallerType') ? ($Installer['InstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
-      $Message = $Message.Append(', ')
-      $Message = $Message.Append(($Installer.Contains('NestedInstallerType') ? ($Installer['NestedInstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
-      $Message = $Message.Append(', ')
-      $Message = $Message.Append(($Installer.Contains('Scope') ? ($Installer['Scope'] | ConvertTo-MarkdownEscapedText) : '\*'))
+      if ($Installer.Contains('Query')) {
+        if ($Installer.Query -is [scriptblock]) {
+          $Message = $Message.Append('ScriptBlock')
+        } elseif ($Installer.Query -is [System.Collections.IDictionary]) {
+          $Message = $Message.Append(($Installer.Query.Contains('InstallerLocale') ? ($Installer.Query['InstallerLocale'] | ConvertTo-MarkdownEscapedText) : '\*'))
+          $Message = $Message.Append(', ')
+          $Message = $Message.Append(($Installer.Query.Contains('Architecture') ? ($Installer.Query['Architecture'] | ConvertTo-MarkdownEscapedText) : '\*'))
+          $Message = $Message.Append(', ')
+          $Message = $Message.Append(($Installer.Query.Contains('InstallerType') ? ($Installer.Query['InstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
+          $Message = $Message.Append(', ')
+          $Message = $Message.Append(($Installer.Query.Contains('NestedInstallerType') ? ($Installer.Query['NestedInstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
+          $Message = $Message.Append(', ')
+          $Message = $Message.Append(($Installer.Query.Contains('Scope') ? ($Installer.Query['Scope'] | ConvertTo-MarkdownEscapedText) : '\*'))
+        } else {
+          throw 'Invalid Query type'
+        }
+      } else {
+        $Message = $Message.Append(($Installer.Contains('InstallerLocale') ? ($Installer['InstallerLocale'] | ConvertTo-MarkdownEscapedText) : '\*'))
+        $Message = $Message.Append(', ')
+        $Message = $Message.Append(($Installer.Contains('Architecture') ? ($Installer['Architecture'] | ConvertTo-MarkdownEscapedText) : '\*'))
+        $Message = $Message.Append(', ')
+        $Message = $Message.Append(($Installer.Contains('InstallerType') ? ($Installer['InstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
+        $Message = $Message.Append(', ')
+        $Message = $Message.Append(($Installer.Contains('NestedInstallerType') ? ($Installer['NestedInstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
+        $Message = $Message.Append(', ')
+        $Message = $Message.Append(($Installer.Contains('Scope') ? ($Installer['Scope'] | ConvertTo-MarkdownEscapedText) : '\*'))
+      }
       $Message = $Message.AppendLine('\):**')
       $Message = $Message.AppendLine(($Installer['InstallerUrl'].Replace(' ', '%20') | ConvertTo-MarkdownEscapedText))
     }
@@ -304,15 +315,33 @@ class PackageTask {
     for ($i = 0; $i -lt $this.CurrentState.Installer.Count -and $i -lt 10; $i++) {
       $Installer = $this.CurrentState.Installer[$i]
       $Message = $Message.Append("*Installer \#$($i + 1)/$($this.CurrentState.Installer.Count) \(")
-      $Message = $Message.Append(($Installer.Contains('InstallerLocale') ? ($Installer['InstallerLocale'] | ConvertTo-TelegramEscapedText) : '\*'))
-      $Message = $Message.Append(', ')
-      $Message = $Message.Append(($Installer.Contains('Architecture') ? ($Installer['Architecture'] | ConvertTo-TelegramEscapedText) : '\*'))
-      $Message = $Message.Append(', ')
-      $Message = $Message.Append(($Installer.Contains('InstallerType') ? ($Installer['InstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
-      $Message = $Message.Append(', ')
-      $Message = $Message.Append(($Installer.Contains('NestedInstallerType') ? ($Installer['NestedInstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
-      $Message = $Message.Append(', ')
-      $Message = $Message.Append(($Installer.Contains('Scope') ? ($Installer['Scope'] | ConvertTo-TelegramEscapedText) : '\*'))
+      if ($Installer.Contains('Query')) {
+        if ($Installer.Query -is [scriptblock]) {
+          $Message = $Message.Append('ScriptBlock')
+        } elseif ($Installer.Query -is [System.Collections.IDictionary]) {
+          $Message = $Message.Append(($Installer.Query.Contains('InstallerLocale') ? ($Installer.Query['InstallerLocale'] | ConvertTo-TelegramEscapedText) : '\*'))
+          $Message = $Message.Append(', ')
+          $Message = $Message.Append(($Installer.Query.Contains('Architecture') ? ($Installer.Query['Architecture'] | ConvertTo-TelegramEscapedText) : '\*'))
+          $Message = $Message.Append(', ')
+          $Message = $Message.Append(($Installer.Query.Contains('InstallerType') ? ($Installer.Query['InstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
+          $Message = $Message.Append(', ')
+          $Message = $Message.Append(($Installer.Query.Contains('NestedInstallerType') ? ($Installer.Query['NestedInstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
+          $Message = $Message.Append(', ')
+          $Message = $Message.Append(($Installer.Query.Contains('Scope') ? ($Installer.Query['Scope'] | ConvertTo-TelegramEscapedText) : '\*'))
+        } else {
+          throw 'Invalid Query type'
+        }
+      } else {
+        $Message = $Message.Append(($Installer.Contains('InstallerLocale') ? ($Installer['InstallerLocale'] | ConvertTo-TelegramEscapedText) : '\*'))
+        $Message = $Message.Append(', ')
+        $Message = $Message.Append(($Installer.Contains('Architecture') ? ($Installer['Architecture'] | ConvertTo-TelegramEscapedText) : '\*'))
+        $Message = $Message.Append(', ')
+        $Message = $Message.Append(($Installer.Contains('InstallerType') ? ($Installer['InstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
+        $Message = $Message.Append(', ')
+        $Message = $Message.Append(($Installer.Contains('NestedInstallerType') ? ($Installer['NestedInstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
+        $Message = $Message.Append(', ')
+        $Message = $Message.Append(($Installer.Contains('Scope') ? ($Installer['Scope'] | ConvertTo-TelegramEscapedText) : '\*'))
+      }
       $Message = $Message.AppendLine('\):*')
       $Message = $Message.AppendLine(($Installer['InstallerUrl'].Replace(' ', '%20') | ConvertTo-TelegramEscapedText))
     }
