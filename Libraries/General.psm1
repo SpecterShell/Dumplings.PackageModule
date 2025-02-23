@@ -622,7 +622,7 @@ function Expand-InstallShield {
 
   process {
     # Obtain the absolute path of the file
-    $Path = (Get-Item -Path $Path).FullName
+    $Path = (Get-Item -Path $Path -Force).FullName
 
     & $ISxPath $Path | Out-Host
 
@@ -666,7 +666,7 @@ function Expand-Burn {
   }
 
   process {
-    $Item = Get-Item -Path $Path
+    $Item = Get-Item -Path $Path -Force
     if ($Item.Extension -ne '.exe') {
       $Path = New-Item -Path "${Path}.exe" -ItemType HardLink -Value $Path -Force
     } else {
@@ -834,7 +834,7 @@ function Read-ProductVersionFromExe {
 
   process {
     # Obtain the absolute path of the file
-    $Path = (Get-Item -Path $Path).FullName
+    $Path = (Get-Item -Path $Path -Force).FullName
 
     [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion.Trim()
   }
@@ -855,7 +855,7 @@ function Read-ProductVersionRawFromExe {
 
   process {
     # Obtain the absolute path of the file
-    $Path = (Get-Item -Path $Path).FullName
+    $Path = (Get-Item -Path $Path -Force).FullName
 
     [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersionRaw
   }
@@ -876,7 +876,7 @@ function Read-FileVersionFromExe {
 
   process {
     # Obtain the absolute path of the file
-    $Path = (Get-Item -Path $Path).FullName
+    $Path = (Get-Item -Path $Path -Force).FullName
 
     [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileVersion.Trim()
   }
@@ -897,7 +897,7 @@ function Read-FileVersionRawFromExe {
 
   process {
     # Obtain the absolute path of the file
-    $Path = (Get-Item -Path $Path).FullName
+    $Path = (Get-Item -Path $Path -Force).FullName
 
     [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileVersionRaw
   }
@@ -927,7 +927,7 @@ function Read-MsiProperty {
 
   process {
     # Obtain the absolute path of the file
-    $Path = (Get-Item -Path $Path).FullName
+    $Path = (Get-Item -Path $Path -Force).FullName
 
     $Database = $WindowsInstaller.OpenDatabase($Path, 0)
     $View = $Database.OpenView($Query)
@@ -1064,7 +1064,7 @@ function Read-MsiSummaryValue {
 
   process {
     # Obtain the absolute path of the file
-    $Path = (Get-Item -Path $Path).FullName
+    $Path = (Get-Item -Path $Path -Force).FullName
 
     $Database = $WindowsInstaller.OpenDatabase($Path, 0)
     $SummaryInfo = $Database.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null , $Database, $null)
@@ -1243,7 +1243,7 @@ function Read-FamilyNameFromMSIX {
   process {
     $FolderPath = Expand-TempArchive -Path $Path
 
-    $ManifestPath = Get-ChildItem -Path $FolderPath -Include @('AppxManifest.xml', 'AppxBundleManifest.xml') -Recurse -File | Select-Object -First 1
+    $ManifestPath = Get-ChildItem -Path $FolderPath -Include @('AppxManifest.xml', 'AppxBundleManifest.xml') -Recurse -File -Force | Select-Object -First 1
     if (Test-Path -Path $ManifestPath.FullName) {
       $Manifest = Get-Content -Path $ManifestPath.FullName -Raw | ConvertFrom-Xml
       $Identity = $Manifest.GetElementsByTagName('Identity')[0]
