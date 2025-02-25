@@ -84,7 +84,7 @@ if ($AppInstallerParsedVersion -ge [System.Version]'1.9.25180') {
 
   $DependenciesTempPath = Join-Path ([System.IO.Path]::GetTempPath()) 'DesktopAppInstaller_Dependencies'
   Expand-Archive -Path $DependenciesArchivePath -DestinationPath $DependenciesTempPath -Force
-  $DependenciesPath += Join-Path $DependenciesTempPath 'x64' | Get-ChildItem -Include '*.appx' -Recurse -File | Select-Object -ExpandProperty 'FullName'
+  $DependenciesPath += Get-ChildItem -Path $DependenciesTempPath -Include '*.appx' -Recurse -File | Where-Object -FilterScript { $_.FullName.Contains('x64') } | Select-Object -ExpandProperty 'FullName'
 } else {
   $VCLibsUri = 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx'
   $VCLibsPath = New-TemporaryFile
