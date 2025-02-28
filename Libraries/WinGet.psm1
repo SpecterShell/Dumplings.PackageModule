@@ -1062,7 +1062,11 @@ function Send-WinGetManifest {
   } elseif ($Task.Config['IgnorePRCheck']) {
     $Task.Log('Skip checking pull requests in the upstream repo as the task is set to do so', 'Info')
   } elseif ($Task.LastState.Contains('Version') -and $Task.LastState.Contains('RealVersion') -and ($Task.LastState.Version -ne $Task.CurrentState.Version) -and ($Task.LastState.RealVersion -eq $Task.CurrentState.RealVersion)) {
-    $Task.Log("Skip checking pull requests in the upstream repo as the version is updated while the real version isn't", 'Info')
+    $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
+    $OldPullRequests = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=repo%3A${UpstreamRepoOwner}%2F${UpstreamRepoName}%20is%3Apr%20$($PackageIdentifier.Replace('.', '%2F'))%2F$($Task.CurrentState.RealVersion)%20in%3Apath"
+    if ($OldPullRequestsItems = $OldPullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($PackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($Task.CurrentState.RealVersion))(\s|$)" -and $_.title -match "(\s|\(|^)$([regex]::Escape($Task.CurrentState.Version))(\s|\)|$)" }) {
+      throw "Found existing pull requests:`n$($OldPullRequestsItems | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
+    }
   } else {
     $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
     $OldPullRequests = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=repo%3A${UpstreamRepoOwner}%2F${UpstreamRepoName}%20is%3Apr%20$($PackageIdentifier.Replace('.', '%2F'))%2F${PackageVersion}%20in%3Apath"
