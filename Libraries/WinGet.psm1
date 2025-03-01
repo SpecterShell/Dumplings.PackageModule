@@ -281,38 +281,6 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     [System.Collections.IDictionary]$InstallerFiles = [ordered]@{}
   )
 
-  # Deep copy the old installer
-  $Installer = $OldInstaller | Copy-Object
-
-  # Clean up volatile fields
-  $Installer.Remove('InstallerSha256')
-  if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
-
-  # Update the installer using the matching installer entry
-  foreach ($Key in $InstallerEntry.Keys) {
-    if ($Key -in @('Query')) {
-      # Skip the entries used for matching
-      continue
-    } elseif (-not $InstallerEntry.Contains('Query') -and $Key -in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
-      # Skip the entries used for matching if Query is not present
-      continue
-    } elseif ($Key -notin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
-      # Check if the key is a valid installer property
-      throw "The installer entry has an invalid key: ${Key}"
-    } else {
-      try {
-        $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop
-        if ($Key -eq 'InstallerUrl') {
-          $Installer.$Key = $InstallerEntry.$Key.Replace(' ', '%20')
-        } else {
-          $Installer.$Key = $InstallerEntry.$Key
-        }
-      } catch {
-        $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
-      }
-    }
-  }
-
   # Update the installer using the matching installer
   $MatchingInstaller = $Installers | Where-Object -FilterScript { $_.InstallerUrl -ceq $Installer.InstallerUrl } | Select-Object -First 1
   if ($MatchingInstaller -and ($Installer.Contains('NestedInstallerFiles') ? ((ConvertTo-Json -InputObject $Installer.NestedInstallerFiles -Depth 10 -Compress) -ceq (ConvertTo-Json -InputObject $MatchingInstaller.NestedInstallerFiles -Depth 10 -Compress)) : $true)) {
@@ -544,6 +512,38 @@ function Update-WinGetInstallerManifestInstallers {
       throw "No matching installer entry for [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['tNestedInstallerType']), $($OldInstaller['Scope'])]"
     }
 
+    # Deep copy the old installer
+    $Installer = $OldInstaller | Copy-Object
+
+    # Clean up volatile fields
+    $Installer.Remove('InstallerSha256')
+    if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
+
+    # Update the installer using the matching installer entry
+    foreach ($Key in $MatchingInstallerEntry.Keys) {
+      if ($Key -eq 'Query') {
+        # Skip the entries used for matching
+        continue
+      } elseif (-not $MatchingInstallerEntry.Contains('Query') -and $Key -in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
+        # Skip the entries used for matching if Query is not present
+        continue
+      } elseif ($Key -notin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
+        # Check if the key is a valid installer property
+        throw "The installer entry has an invalid key: ${Key}"
+      } else {
+        try {
+          $null = Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop
+          if ($Key -eq 'InstallerUrl') {
+            $Installer.$Key = $MatchingInstallerEntry.$Key.Replace(' ', '%20')
+          } else {
+            $Installer.$Key = $MatchingInstallerEntry.$Key
+          }
+        } catch {
+          $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
+        }
+      }
+    }
+
     $Installer = Update-WinGetInstallerManifestInstallerMetadata -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
 
     # Add the updated installer to the new installers array
@@ -618,6 +618,35 @@ function Update-WinGetInstallerManifestInstallersAlt {
     # If no matching installer entry is found, throw an error
     if (-not $MatchingInstaller) {
       throw 'No matching installer for the installer entry'
+    }
+
+    # Deep copy the old installer
+    $Installer = $MatchingInstaller | Copy-Object
+
+    # Clean up volatile fields
+    $Installer.Remove('InstallerSha256')
+    if ($Installer.Contains('ReleaseDate')) { $Installer.Remove('ReleaseDate') }
+
+    # Update the installer using the matching installer entry
+    foreach ($Key in $InstallerEntry.Keys) {
+      if ($Key -eq 'Query') {
+        # Skip the entries used for matching
+        continue
+      } elseif ($Key -notin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
+        # Check if the key is a valid installer property
+        throw "The installer entry has an invalid key: ${Key}"
+      } else {
+        try {
+          $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop
+          if ($Key -eq 'InstallerUrl') {
+            $Installer.$Key = $InstallerEntry.$Key.Replace(' ', '%20')
+          } else {
+            $Installer.$Key = $InstallerEntry.$Key
+          }
+        } catch {
+          $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
+        }
+      }
     }
 
     $Installer = Update-WinGetInstallerManifestInstallerMetadata -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
