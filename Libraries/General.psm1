@@ -1256,68 +1256,6 @@ function Read-FamilyNameFromMSIX {
   }
 }
 
-function ConvertFrom-ElectronUpdater {
-  <#
-  .SYNOPSIS
-    Convert Electron Updater manifest into organized hashtable
-  .PARAMETER Content
-    The YAML object of the Electron Updater manifest
-  .PARAMETER Prefix
-    The prefix of the installer URL
-  .PARAMETER Locale
-    The locale of the release notes (if present)
-  #>
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName, Mandatory, HelpMessage = 'The YAML object of the Electron Updater manifest')]
-    $Content,
-
-    [Parameter(HelpMessage = 'The prefix of the installer URL')]
-    [ValidateNotNullOrWhiteSpace()]
-    [string]$Prefix,
-
-    [Parameter(HelpMessage = 'The locale of the release notes (if present)')]
-    [ValidateNotNullOrWhiteSpace()]
-    [string]$Locale = 'en-US'
-  )
-
-  $Result = [ordered]@{
-    Installer = @()
-    Locale    = @()
-  }
-
-  # Version
-  $Result.Version = $Content.version
-
-  # InstallerUrl
-  try {
-    # The prefix is a valid URL
-    $Result.Installer += [ordered]@{
-      InstallerUrl = Join-Uri $Prefix $Content.files[0].url
-    }
-  } catch {
-    # The prefix is not a valid URL
-    $Result.Installer += [ordered]@{
-      InstallerUrl = $Prefix + $Content.files[0].url
-    }
-  }
-
-  # ReleaseTime
-  if ($Content.releaseDate) {
-    $Result.ReleaseTime = $Content.releaseDate | Get-Date -AsUTC
-  }
-
-  # ReleaseNotes
-  if ($Content.releaseNotes) {
-    $Result.Locale += [ordered]@{
-      Locale = $Locale
-      Key    = 'ReleaseNotes'
-      Value  = $Content.releaseNotes | Format-Text
-    }
-  }
-
-  return $Result
-}
-
 function ConvertFrom-SquirrelReleases {
   <#
   .SYNOPSIS
