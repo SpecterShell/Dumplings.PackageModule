@@ -433,9 +433,9 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   }
 
   # Clean up the existing files just in case
-  if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
-  if ($Installer.Contains('Protocols')) { $Installer.Protocols = @($Installer.Protocols | ToLower | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
-  if ($Installer.Contains('FileExtensions')) { $Installer.FileExtensions = @($Installer.FileExtensions | ToLower | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
+  if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
+  if ($Installer.Contains('Protocols')) { $Installer.Protocols = @($Installer.Protocols | ToLower  | NoWhitespace| UniqueItems | Sort-Object -Culture $Script:Culture) }
+  if ($Installer.Contains('FileExtensions')) { $Installer.FileExtensions = @($Installer.FileExtensions | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
 
   return $Installer
 }
@@ -803,7 +803,7 @@ function Update-WinGetLocaleManifest {
       }
     }
 
-    if ($LocaleManifest.Contains('Tags')) { $LocaleManifest.Tags = @($LocaleManifest.Tags | ToLower | UniqueItems | NoWhitespace | Sort-Object -Culture $Script:Culture) }
+    if ($LocaleManifest.Contains('Tags')) { $LocaleManifest.Tags = @($LocaleManifest.Tags | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
     if ($LocaleManifest.Contains('Moniker')) {
       if ($LocaleManifest.ManifestType -eq 'defaultLocale') {
         $LocaleManifest['Moniker'] = $LocaleManifest['Moniker'] | ToLower | NoWhitespace
