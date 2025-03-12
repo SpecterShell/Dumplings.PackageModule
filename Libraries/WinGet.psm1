@@ -262,25 +262,30 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     Update the metadata of the installer entry
   .DESCRIPTION
     Update the metadata of the installer entry using the provided installer metadata
-  .PARAMETER OldInstaller
+  .PARAMETER Installer
     The installer to update
+  .PARAMETER OldInstaller
+    The old installer for reference
   .PARAMETER InstallerEntry
     The installer entry to use for updating the installer
   .PARAMETER Installers
     The installers that have updated for reference (e.g., hashes)
-  .PARAMETER InstallerFiles
-    The dictionary to store the filenames and the hashes of the downloaded installer files
   #>
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The installer to update')]
+    [System.Collections.IDictionary]$Installer,
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installer for reference')]
     [System.Collections.IDictionary]$OldInstaller,
     [Parameter(Mandatory, HelpMessage = 'The installer entry to use for updating the installer')]
     [System.Collections.IDictionary]$InstallerEntry,
     [Parameter(HelpMessage = 'The installers that have updated for reference')]
-    [System.Collections.IDictionary[]]$Installers = @(),
-    [Parameter(HelpMessage = 'The dictionary to store the filenames and the hashes of the downloaded installer files')]
-    [System.Collections.IDictionary]$InstallerFiles = [ordered]@{}
+    [System.Collections.IDictionary[]]$Installers = @()
   )
+
+  # Replace the whitespace in the installer URL with %20 to make it clickable
+  # Keep the original URL for reference in downloading
+  $OriginalInstallerUrl = $Installer.InstallerUrl
+  $Installer.InstallerUrl = $Installer.InstallerUrl.Replace(' ', '%20')
 
   # Update the installer using the matching installer
   $MatchingInstaller = $Installers | Where-Object -FilterScript { $_.InstallerUrl -ceq $Installer.InstallerUrl } | Select-Object -First 1
@@ -297,20 +302,16 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   # Download and analyze the installer file
   # Skip if there is matching installer, or the "InstallerSha256" is explicitly specified
   if (-not $Installer.Contains('InstallerSha256')) {
-    if ($InstallerFiles.Contains($Installer.InstallerUrl) -and (Test-Path -Path $InstallerFiles[$Installer.InstallerUrl])) {
-      # Skip downloading if the installer file is already downloaded
-      $InstallerPath = $InstallerFiles[$Installer.InstallerUrl]
-    } elseif ($WinGetInstallerFiles.Contains($Installer.InstallerUrl) -and (Test-Path -Path $WinGetInstallerFiles[$Installer.InstallerUrl])) {
-      # Skip downloading if the "InstallerPath" is specified
-      $InstallerPath = $WinGetInstallerFiles[$Installer.InstallerUrl]
+    if ($Script:WinGetInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetInstallerFiles[$OriginalInstallerUrl])) {
+      # Skip downloading if the installer file is previously downloaded
+      $InstallerPath = $Script:WinGetInstallerFiles[$OriginalInstallerUrl]
     } else {
       $Task.Log("Downloading $($Installer.InstallerUrl)", 'Verbose')
       try {
-        $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
-        $InstallerFiles[$Installer.InstallerUrl] = $InstallerPath
+        $Script:WinGetInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
       } catch {
         $Task.Log('Failed to download with the Delivery-Optimization User Agent. Try again with the WinINet User Agent...', 'Warning')
-        $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
+        $Script:WinGetInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
       }
     }
 
@@ -450,7 +451,6 @@ function Update-WinGetInstallerManifestInstallers {
 
   $iteration = 0
   $Installers = @()
-  $InstallerFiles = [ordered]@{}
   foreach ($OldInstaller in $OldInstallers) {
     $iteration += 1
     $Task.Log("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
@@ -523,26 +523,17 @@ function Update-WinGetInstallerManifestInstallers {
       } else {
         try {
           $null = Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop
-          if ($Key -ceq 'InstallerUrl') {
-            $Installer.$Key = $MatchingInstallerEntry.$Key.Replace(' ', '%20')
-          } else {
-            $Installer.$Key = $MatchingInstallerEntry.$Key
-          }
+          $Installer.$Key = $MatchingInstallerEntry.$Key
         } catch {
           $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
         }
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
-  }
-
-  # Remove the downloaded files
-  foreach ($InstallerPath in $InstallerFiles.Values) {
-    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
 
   return $Installers
@@ -568,7 +559,6 @@ function Update-WinGetInstallerManifestInstallersAlt {
 
   $iteration = 0
   $Installers = @()
-  $InstallerFiles = [ordered]@{}
   foreach ($InstallerEntry in $InstallerEntries) {
     $iteration += 1
     $Task.Log("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
@@ -628,26 +618,17 @@ function Update-WinGetInstallerManifestInstallersAlt {
       } else {
         try {
           $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop
-          if ($Key -ceq 'InstallerUrl') {
-            $Installer.$Key = $InstallerEntry.$Key.Replace(' ', '%20')
-          } else {
-            $Installer.$Key = $InstallerEntry.$Key
-          }
+          $Installer.$Key = $InstallerEntry.$Key
         } catch {
           $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
         }
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
-  }
-
-  # Remove the downloaded files
-  foreach ($InstallerPath in $InstallerFiles.Values) {
-    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
 
   return $Installers
