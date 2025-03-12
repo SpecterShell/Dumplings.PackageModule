@@ -31,6 +31,7 @@ $Encoding = [System.Text.UTF8Encoding]::new($false)
 $Culture = 'en-US'
 $WinGetUserAgent = 'Microsoft-Delivery-Optimization/10.0'
 $WinGetBackupUserAgent = 'winget-cli WindowsPackageManager/1.7.10661 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.22.10661.0'
+$WinGetInstallerFiles = [ordered]@{}
 
 filter UniqueItems {
   [string]$($_.Split(',').Trim() | Select-Object -Unique)
@@ -144,7 +145,7 @@ function Move-KeysToInstallerLevel {
 
   if ($CurrentDepth -ge $Depth) { return }
   foreach ($Key in @($Manifest.Keys)) {
-    if ($Property -and $Key -notin $Property) { continue }
+    if ($Property -and $Key -cnotin $Property) { continue }
     $ToRemove = $true
     if ($Manifest.$Key -is [System.Collections.IDictionary]) {
       $PreservedManifestKeys = [System.Collections.Generic.HashSet[string]]::new()
@@ -157,7 +158,7 @@ function Move-KeysToInstallerLevel {
       }
       if ($PreservedManifestKeys.Count -gt 0) {
         $ToRemove = $false
-        foreach ($KeyToRemove in $Manifest.$Key.Keys.Where({ $_ -notin $PreservedManifestKeys })) { $Manifest.$Key.Remove($KeyToRemove) }
+        foreach ($KeyToRemove in $Manifest.$Key.Keys.Where({ $_ -cnotin $PreservedManifestKeys })) { $Manifest.$Key.Remove($KeyToRemove) }
       }
     } elseif ($Manifest.$Key -is [System.Collections.IEnumerable] -and $Manifest.$Key -isnot [string]) {
       $ManifestEntry = $Manifest.$Key
@@ -167,7 +168,7 @@ function Move-KeysToInstallerLevel {
           $Installer.$Key = $Manifest.$Key
         } elseif ($Installer.Contains($Key) -and -not $Installer.$Key) {
           $Installer.$Key = $Manifest.$Key
-        } elseif ($Installer.Contains($Key) -and (ConvertTo-Json -InputObject $Installer.$Key -Depth 10 -Compress) -ne $ManifestEntryHash) {
+        } elseif ($Installer.Contains($Key) -and (ConvertTo-Json -InputObject $Installer.$Key -Depth 10 -Compress) -cne $ManifestEntryHash) {
           $ToRemove = $false
         }
       }
@@ -177,7 +178,7 @@ function Move-KeysToInstallerLevel {
           $Installer.$Key = $Manifest.$Key
         } elseif ($Installer.Contains($Key) -and -not $Installer.$Key) {
           $Installer.$Key = $Manifest.$Key
-        } elseif ($Installer.Contains($Key) -and $Installer.$Key -ne $Manifest.$Key) {
+        } elseif ($Installer.Contains($Key) -and $Installer.$Key -cne $Manifest.$Key) {
           $ToRemove = $false
         }
       }
@@ -205,7 +206,7 @@ function Move-KeysToManifestLevel {
   if ($CurrentDepth -ge $Depth) { return }
   $AllKeys = @($Installers | ForEach-Object -Process { $_.Keys } | Select-Object -Unique)
   foreach ($Key in $AllKeys) {
-    if ($Property -and $Key -notin $Property) { continue }
+    if ($Property -and $Key -cnotin $Property) { continue }
     if ($Installers.Where({ $_.Contains($Key) -and $_.$Key -is [System.Collections.IDictionary] })) {
       $InstallersEntry = @($Installers | ForEach-Object -Process { $_.Contains($Key) -and $_.$Key ? $_.$Key : [ordered]@{} })
       $ManifestEntry = $Manifest.Contains($Key) -and $Manifest.$Key ? $Manifest.$Key : [ordered]@{}
@@ -297,7 +298,11 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   # Skip if there is matching installer, or the "InstallerSha256" is explicitly specified
   if (-not $Installer.Contains('InstallerSha256')) {
     if ($InstallerFiles.Contains($Installer.InstallerUrl) -and (Test-Path -Path $InstallerFiles[$Installer.InstallerUrl])) {
+      # Skip downloading if the installer file is already downloaded
       $InstallerPath = $InstallerFiles[$Installer.InstallerUrl]
+    } elseif ($WinGetInstallerFiles.Contains($Installer.InstallerUrl) -and (Test-Path -Path $WinGetInstallerFiles[$Installer.InstallerUrl])) {
+      # Skip downloading if the "InstallerPath" is specified
+      $InstallerPath = $WinGetInstallerFiles[$Installer.InstallerUrl]
     } else {
       $Task.Log("Downloading $($Installer.InstallerUrl)", 'Verbose')
       try {
@@ -316,51 +321,51 @@ function Update-WinGetInstallerManifestInstallerMetadata {
 
     # If the installer is an archive and the nested installer is msi or wix, expand the archive to get the nested installer
     $EffectiveInstallerType = $Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType
-    $EffectiveInstallerPath = $Installer.InstallerType -in @('zip') -and $Installer.NestedInstallerType -ne 'portable' ? (Expand-TempArchive -Path $InstallerPath | Join-Path -ChildPath $Installer.NestedInstallerFiles[0].RelativeFilePath) : $InstallerPath
+    $EffectiveInstallerPath = $Installer.InstallerType -cin @('zip') -and $Installer.NestedInstallerType -cne 'portable' ? (Expand-TempArchive -Path $InstallerPath | Join-Path -ChildPath $Installer.NestedInstallerFiles[0].RelativeFilePath) : $InstallerPath
 
     # Update ProductCode, UpgradeCode and ProductVersion if the installer is msi, wix or burn, and such fields exist in the old installer
     # ProductCode
     $ProductCode = $null
-    if ($EffectiveInstallerType -in @('msi', 'wix')) {
+    if ($EffectiveInstallerType -cin @('msi', 'wix')) {
       $ProductCode = $EffectiveInstallerPath | Read-ProductCodeFromMsi -ErrorAction 'Continue'
-    } elseif ($EffectiveInstallerType -eq 'burn') {
+    } elseif ($EffectiveInstallerType -ceq 'burn') {
       $ProductCode = $EffectiveInstallerPath | Read-ProductCodeFromBurn -ErrorAction 'Continue'
     }
-    if (-not $InstallerEntry.Contains('ProductCode') -and $EffectiveInstallerType -in @('msi', 'wix', 'burn') -and $Installer.Contains('ProductCode')) {
+    if (-not $InstallerEntry.Contains('ProductCode') -and $EffectiveInstallerType -cin @('msi', 'wix', 'burn') -and $Installer.Contains('ProductCode')) {
       if (-not [string]::IsNullOrWhiteSpace($ProductCode)) {
         $Installer.ProductCode = $ProductCode
       } else {
         throw 'Failed to get ProductCode'
       }
     }
-    if (-not $InstallerEntry.Contains('AppsAndFeaturesEntries') -and $EffectiveInstallerType -in @('msi', 'wix', 'burn') -and $Installer['AppsAndFeaturesEntries']) {
+    if (-not $InstallerEntry.Contains('AppsAndFeaturesEntries') -and $EffectiveInstallerType -cin @('msi', 'wix', 'burn') -and $Installer['AppsAndFeaturesEntries']) {
       # UpgradeCode
       $UpgradeCode = $null
-      if ($EffectiveInstallerType -in @('msi', 'wix')) {
+      if ($EffectiveInstallerType -cin @('msi', 'wix')) {
         $UpgradeCode = $EffectiveInstallerPath | Read-UpgradeCodeFromMsi -ErrorAction 'Continue'
-      } elseif ($EffectiveInstallerType -eq 'burn') {
+      } elseif ($EffectiveInstallerType -ceq 'burn') {
         $UpgradeCode = $EffectiveInstallerPath | Read-UpgradeCodeFromBurn -ErrorAction 'Continue'
       }
       # DisplayVersion
       $DisplayVersion = $null
-      if ($EffectiveInstallerType -in @('msi', 'wix')) {
+      if ($EffectiveInstallerType -cin @('msi', 'wix')) {
         $DisplayVersion = $EffectiveInstallerPath | Read-ProductVersionFromMsi -ErrorAction 'Continue'
-      } elseif ($EffectiveInstallerType -eq 'burn') {
+      } elseif ($EffectiveInstallerType -ceq 'burn') {
         $DisplayVersion = $EffectiveInstallerPath | Read-ProductVersionFromExe -ErrorAction 'Continue'
       }
       # DisplayName
       $DisplayName = $null
-      if ($EffectiveInstallerType -in @('msi', 'wix')) {
+      if ($EffectiveInstallerType -cin @('msi', 'wix')) {
         $DisplayName = $EffectiveInstallerPath | Read-ProductNameFromMsi -ErrorAction 'Continue'
-      } elseif ($EffectiveInstallerType -eq 'burn') {
+      } elseif ($EffectiveInstallerType -ceq 'burn') {
         $DisplayName = $EffectiveInstallerPath | Read-ProductNameFromBurn -ErrorAction 'Continue'
       }
       # Match the AppsAndFeaturesEntries that...
       $Installer.AppsAndFeaturesEntries | Where-Object -FilterScript {
         # ...have the same UpgradeCode as the new installer, or...
-          ($UpgradeCode -and $_['UpgradeCode'] -and $UpgradeCode -eq $_.UpgradeCode) -or
+          ($UpgradeCode -and $_['UpgradeCode'] -and $UpgradeCode -ceq $_.UpgradeCode) -or
         # ...have the same ProductCode as the old installer, or...
-          ($OldInstaller['ProductCode'] -and $_['ProductCode'] -and $OldInstaller.ProductCode -eq $_.ProductCode) -or
+          ($OldInstaller['ProductCode'] -and $_['ProductCode'] -and $OldInstaller.ProductCode -ceq $_.ProductCode) -or
         # ...is the only entry in the installer
           ($Installer.AppsAndFeaturesEntries.Count -eq 1)
       } | ForEach-Object -Process {
@@ -395,33 +400,18 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       }
     }
 
-    # Update SignatureSha256 if the installer is msix or appx
-    if ($Installer.InstallerType -in @('msix', 'appx')) {
-      $SignatureSha256 = $null
-      $WinGetMaximumRetryCount = 3
-      for ($i = 0; $i -lt $WinGetMaximumRetryCount; $i++) {
-        try {
-          $SignatureSha256 = winget hash -m $InstallerPath | Select-String -Pattern 'SignatureSha256:' | ConvertFrom-String
-          break
-        } catch {
-          if ($_.FullyQualifiedErrorId -eq 'CommandNotFoundException') {
-            $Task.Log('Could not find the WinGet client for getting SignatureSha256. Is it installed and added to PATH?', 'Error')
-          } elseif ($_.FullyQualifiedErrorId -eq 'ProgramExitedWithNonZeroCode' -and $i -lt $WinGetMaximumRetryCount - 1) {
-            $Task.Log("WinGet exits with exitcode $($_.Exception.ExitCode)", 'Warning')
-          }
-        }
-      }
-      if ($SignatureSha256 -and $SignatureSha256.P2) { $SignatureSha256 = $SignatureSha256.P2.ToUpper() }
+    # Update SignatureSha256 and PackageFamilyName if the installer is msix or appx
+    if ($Installer.InstallerType -cin @('msix', 'appx')) {
+      # SignatureSha256
+      $SignatureSha256 = $InstallerPath | Get-MSIXSignatureHash
       if (-not [string]::IsNullOrWhiteSpace($SignatureSha256)) {
         $Installer.SignatureSha256 = $SignatureSha256
       } elseif ($Installer.Contains('SignatureSha256')) {
         $Task.Log('Failed to get SignatureSha256', 'Warning')
         $Installer.Remove('SignatureSha256')
       }
-    }
 
-    # Update PackageFamilyName if the installer is msix or appx
-    if ($Installer.InstallerType -in @('msix', 'appx')) {
+      # PackageFamilyName
       $PackageFamilyName = $InstallerPath | Read-FamilyNameFromMSIX
       if (-not [string]::IsNullOrWhiteSpace($PackageFamilyName)) {
         $Installer.PackageFamilyName = $PackageFamilyName
@@ -432,9 +422,9 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     }
   }
 
-  # Clean up the existing files just in case
+  # Beautify entries
   if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
-  if ($Installer.Contains('Protocols')) { $Installer.Protocols = @($Installer.Protocols | ToLower  | NoWhitespace| UniqueItems | Sort-Object -Culture $Script:Culture) }
+  if ($Installer.Contains('Protocols')) { $Installer.Protocols = @($Installer.Protocols | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
   if ($Installer.Contains('FileExtensions')) { $Installer.FileExtensions = @($Installer.FileExtensions | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
 
   return $Installer
@@ -479,7 +469,7 @@ function Update-WinGetInstallerManifestInstallers {
         } elseif ($InstallerEntry.Query -is [System.Collections.IDictionary]) {
           # The installer entry will be chosen if the installer contain all the keys present in the installer entry Query field, and their values are the same
           foreach ($Key in $InstallerEntry.Query.Keys) {
-            if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -ne $InstallerEntry.Query.$Key) {
+            if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.Query.$Key) {
               # Skip this entry if the installer has this key, but with a different value
               $Updatable = $false
             } elseif (-not $OldInstaller.Contains($Key)) {
@@ -493,7 +483,7 @@ function Update-WinGetInstallerManifestInstallers {
       } else {
         # The installer entry will be chosen if the installer contain all the keys present in the installer entry, and their values are the same
         foreach ($Key in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
-          if ($InstallerEntry.Contains($Key) -and $OldInstaller.Contains($Key) -and $OldInstaller.$Key -ne $InstallerEntry.$Key) {
+          if ($InstallerEntry.Contains($Key) -and $OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.$Key) {
             # Skip this entry if the installer has this key, but with a different value
             $Updatable = $false
           } elseif ($InstallerEntry.Contains($Key) -and -not $OldInstaller.Contains($Key)) {
@@ -521,19 +511,19 @@ function Update-WinGetInstallerManifestInstallers {
 
     # Update the installer using the matching installer entry
     foreach ($Key in $MatchingInstallerEntry.Keys) {
-      if ($Key -eq 'Query') {
+      if ($Key -ceq 'Query') {
         # Skip the entries used for matching
         continue
-      } elseif (-not $MatchingInstallerEntry.Contains('Query') -and $Key -in @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
+      } elseif (-not $MatchingInstallerEntry.Contains('Query') -and $Key -cin @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
         # Skip the entries used for matching if Query is not present
         continue
-      } elseif ($Key -notin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
+      } elseif ($Key -cnotin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
         # Check if the key is a valid installer property
         throw "The installer entry has an invalid key: ${Key}"
       } else {
         try {
           $null = Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop
-          if ($Key -eq 'InstallerUrl') {
+          if ($Key -ceq 'InstallerUrl') {
             $Installer.$Key = $MatchingInstallerEntry.$Key.Replace(' ', '%20')
           } else {
             $Installer.$Key = $MatchingInstallerEntry.$Key
@@ -597,7 +587,7 @@ function Update-WinGetInstallerManifestInstallersAlt {
         } elseif ($InstallerEntry.Query -is [System.Collections.IDictionary]) {
           # The installer will be chosen if the installer contain all the keys present in the installer entry Query field, and their values are the same
           foreach ($Key in $InstallerEntry.Query.Keys) {
-            if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -ne $InstallerEntry.Query.$Key) {
+            if ($OldInstaller.Contains($Key) -and $OldInstaller.$Key -cne $InstallerEntry.Query.$Key) {
               # Skip this entry if the installer has this key, but with a different value
               $Updatable = $false
             } elseif (-not $OldInstaller.Contains($Key)) {
@@ -629,16 +619,16 @@ function Update-WinGetInstallerManifestInstallersAlt {
 
     # Update the installer using the matching installer entry
     foreach ($Key in $InstallerEntry.Keys) {
-      if ($Key -eq 'Query') {
+      if ($Key -ceq 'Query') {
         # Skip the entries used for matching
         continue
-      } elseif ($Key -notin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
+      } elseif ($Key -cnotin $Script:ManifestSchema.installer.definitions.Installer.properties.Keys) {
         # Check if the key is a valid installer property
         throw "The installer entry has an invalid key: ${Key}"
       } else {
         try {
           $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema $Script:ManifestSchema.installer.properties.Installers.items.properties.$Key -WarningAction Stop
-          if ($Key -eq 'InstallerUrl') {
+          if ($Key -ceq 'InstallerUrl') {
             $Installer.$Key = $InstallerEntry.$Key.Replace(' ', '%20')
           } else {
             $Installer.$Key = $InstallerEntry.$Key
@@ -727,7 +717,7 @@ function Update-WinGetInstallerManifest {
   $InstallerManifest.ManifestVersion = $Script:ManifestVersion
 
   # Move Manifest Level Keys to installer Level
-  Move-KeysToInstallerLevel -Manifest $InstallerManifest -Installers $InstallerManifest.Installers -Property $Script:ManifestSchema.installer.definitions.Installer.properties.Keys.Where({ $_ -in $Script:ManifestSchema.installer.properties.Keys })
+  Move-KeysToInstallerLevel -Manifest $InstallerManifest -Installers $InstallerManifest.Installers -Property $Script:ManifestSchema.installer.definitions.Installer.properties.Keys.Where({ $_ -cin $Script:ManifestSchema.installer.properties.Keys })
   # Update installer entries
   if (-not $AltMode) {
     $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries
@@ -735,7 +725,7 @@ function Update-WinGetInstallerManifest {
     $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallersAlt -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries
   }
   # Move Installer Level Keys to Manifest Level
-  Move-KeysToManifestLevel -Installers $InstallerManifest.Installers -Manifest $InstallerManifest -Property $Script:ManifestSchema.installer.definitions.Installer.properties.Keys.Where({ $_ -in $Script:ManifestSchema.installer.properties.Keys })
+  Move-KeysToManifestLevel -Installers $InstallerManifest.Installers -Manifest $InstallerManifest -Property $Script:ManifestSchema.installer.definitions.Installer.properties.Keys.Where({ $_ -cin $Script:ManifestSchema.installer.properties.Keys })
 
   return ConvertTo-SortedYamlObject -InputObject $InstallerManifest -Schema $Script:ManifestSchema.installer -Culture $Script:Culture
 }
@@ -777,7 +767,7 @@ function Update-WinGetLocaleManifest {
         if (-not $LocaleEntry.Contains('Key') -or -not $LocaleEntry.Contains('Value') -or [string]::IsNullOrWhiteSpace($LocaleEntry.Key)) {
           # Check if the locale entry contains the required properties
           throw 'The locale entry does not contain the required properties'
-        } elseif ($LocaleEntry.Key -notin $Script:ManifestSchema.locale.properties.Keys) {
+        } elseif ($LocaleEntry.Key -cnotin $Script:ManifestSchema.locale.properties.Keys) {
           # Check if the key property is a valid locale property
           throw "The locale entry has an invalid key `"$($LocaleEntry.Key)`""
         } elseif ($LocaleEntry.Contains('Locale') -and $LocaleEntry.Locale -notmatch $Script:ManifestSchema.locale.properties.PackageLocale.pattern) {
@@ -786,7 +776,7 @@ function Update-WinGetLocaleManifest {
         } elseif ($LocaleEntry.Contains('Locale') -and $LocaleEntry.Locale -notcontains $LocaleManifest.PackageLocale) {
           # If the locale entry contains a locale property, only match the locale manifests with these locales
           continue
-        } elseif ($null -eq $LocaleEntry.Value) {
+        } elseif ($null -ceq $LocaleEntry.Value) {
           # If the value is null, remove the key from the locale manifest
           $LocaleManifest.Remove($LocaleEntry.Key)
         } else {
@@ -805,7 +795,7 @@ function Update-WinGetLocaleManifest {
 
     if ($LocaleManifest.Contains('Tags')) { $LocaleManifest.Tags = @($LocaleManifest.Tags | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
     if ($LocaleManifest.Contains('Moniker')) {
-      if ($LocaleManifest.ManifestType -eq 'defaultLocale') {
+      if ($LocaleManifest.ManifestType -ceq 'defaultLocale') {
         $LocaleManifest['Moniker'] = $LocaleManifest['Moniker'] | ToLower | NoWhitespace
       } else {
         $LocaleManifest.Remove('Moniker')
@@ -814,7 +804,7 @@ function Update-WinGetLocaleManifest {
     # Remove ReleaseNotes if too long
     if ($LocaleManifest.Contains('ReleaseNotes') -and $LocaleManifest.ReleaseNotes.Length -gt $Script:ManifestSchema.locale.properties.ReleaseNotes.maxLength) { $LocaleManifest.Remove('ReleaseNotes') }
 
-    $Schema = $LocaleManifest.ManifestType -eq 'defaultLocale' ? $Script:ManifestSchema.defaultLocale : $Script:ManifestSchema.locale
+    $Schema = $LocaleManifest.ManifestType -ceq 'defaultLocale' ? $Script:ManifestSchema.defaultLocale : $Script:ManifestSchema.locale
     $LocaleManifests += ConvertTo-SortedYamlObject -InputObject $LocaleManifest -Schema $Schema -Culture $Script:Culture
   }
 
@@ -842,11 +832,11 @@ function Read-WinGetManifests {
 
   # If the old manifests exist, find the default locale
   $Manifests = Join-Path $ManifestsPath '*.yaml' | Get-ChildItem -File
-  $Manifest = $Manifests | Where-Object -FilterScript { $_.Name -eq "${PackageIdentifier}.yaml" } | Get-Content -Raw -Encoding $Script:Encoding | ConvertFrom-Yaml -Ordered
-  if ($Manifest.ManifestType -eq 'version') {
+  $Manifest = $Manifests | Where-Object -FilterScript { $_.Name -ceq "${PackageIdentifier}.yaml" } | Get-Content -Raw -Encoding $Script:Encoding | ConvertFrom-Yaml -Ordered
+  if ($Manifest.ManifestType -ceq 'version') {
     $ManifestType = 'MultiManifest'
     $PackageLocale = $Manifest.DefaultLocale
-  } elseif ($Manifest.ManifestType -eq 'singleton') {
+  } elseif ($Manifest.ManifestType -ceq 'singleton') {
     $ManifestType = 'SingletonManifest'
     $PackageLocale = $Manifest.PackageLocalet
   } else {
@@ -855,28 +845,28 @@ function Read-WinGetManifests {
 
   # If the old manifests exist, read their information into variables
   # Also ensure additional requirements are met for creating or updating files
-  if ($ManifestType -eq 'MultiManifest' -and $Manifests.Name -contains "${PackageIdentifier}.yaml" -and $Manifests.Name -contains "${PackageIdentifier}.installer.yaml" -and $Manifests.Name -contains "${PackageIdentifier}.locale.${PackageLocale}.yaml") {
+  if ($ManifestType -ceq 'MultiManifest' -and $Manifests.Name -contains "${PackageIdentifier}.yaml" -and $Manifests.Name -contains "${PackageIdentifier}.installer.yaml" -and $Manifests.Name -contains "${PackageIdentifier}.locale.${PackageLocale}.yaml") {
     $VersionManifest = $Manifest
-    $InstallerManifest = $Manifests | Where-Object -FilterScript { $_.Name -eq "${PackageIdentifier}.installer.yaml" } | Get-Content -Raw -Encoding $Script:Encoding | ConvertFrom-Yaml -Ordered
-    $LocaleManifests = @($Manifests | Where-Object -FilterScript { $_.Name -like "${PackageIdentifier}.locale.*.yaml" } | ForEach-Object -Process { Get-Content -Path $_ -Raw -Encoding $Script:Encoding | ConvertFrom-Yaml -Ordered })
-  } elseif ($ManifestType -eq 'Singleton' -and $Manifests.Name -contains "${PackageIdentifier}.yaml") {
+    $InstallerManifest = $Manifests | Where-Object -FilterScript { $_.Name -ceq "${PackageIdentifier}.installer.yaml" } | Get-Content -Raw -Encoding $Script:Encoding | ConvertFrom-Yaml -Ordered
+    $LocaleManifests = @($Manifests | Where-Object -FilterScript { $_.Name -clike "${PackageIdentifier}.locale.*.yaml" } | ForEach-Object -Process { Get-Content -Path $_ -Raw -Encoding $Script:Encoding | ConvertFrom-Yaml -Ordered })
+  } elseif ($ManifestType -ceq 'Singleton' -and $Manifests.Name -contains "${PackageIdentifier}.yaml") {
     $SingletonManifest = $Manifest
     # Parse version keys to version manifest
     $VersionManifest = [ordered]@{}
-    foreach ($Key in $SingletonManifest.Keys.Where({ $_ -in $Script:ManifestSchema.version.properties.Keys })) {
+    foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin $Script:ManifestSchema.version.properties.Keys })) {
       $VersionManifest[$Key] = $SingletonManifest.$Key
     }
     $VersionManifest['DefaultLocale'] = $PackageLocale
     $VersionManifest['ManifestType'] = 'version'
     # Parse installer keys to installer manifest
     $InstallerManifest = [ordered]@{}
-    foreach ($Key in $SingletonManifest.Keys.Where({ $_ -in $Script:ManifestSchema.installer.properties.Keys })) {
+    foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin $Script:ManifestSchema.installer.properties.Keys })) {
       $InstallerManifest[$Key] = $SingletonManifest.$Key
     }
     $InstallerManifest['ManifestType'] = 'installer'
     # Parse default locale keys to default locale manifest
     $DefaultLocaleManifest = [ordered]@{}
-    foreach ($Key in $SingletonManifest.Keys.Where({ $_ -in $Script:ManifestSchema.locale.properties.Keys })) {
+    foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin $Script:ManifestSchema.locale.properties.Keys })) {
       $DefaultLocaleManifest[$Key] = $SingletonManifest.$Key
     }
     $DefaultLocaleManifest['ManifestType'] = 'defaultLocale'
@@ -994,7 +984,7 @@ function Write-WinGetManifests {
 
   foreach ($LocaleManifest in $LocaleManifests) {
     $LocaleManifestPath = Join-Path $ManifestsPath "${PackageIdentifier}.locale.$($LocaleManifest.PackageLocale).yaml"
-    $SchemaUrl = $LocaleManifest.ManifestType -eq 'defaultLocale' ? $Script:ManifestSchemaUrl.defaultLocale : $Script:ManifestSchemaUrl.locale
+    $SchemaUrl = $LocaleManifest.ManifestType -ceq 'defaultLocale' ? $Script:ManifestSchemaUrl.defaultLocale : $Script:ManifestSchemaUrl.locale
     Write-WinGetManifestContent -FilePath $LocaleManifestPath -YamlContent $LocaleManifest -Schema $SchemaUrl
   }
 
@@ -1090,7 +1080,7 @@ function Send-WinGetManifest {
     $Task.Log('Skip checking pull requests in the upstream repo in dry mode', 'Info')
   } elseif ($Task.Config['IgnorePRCheck']) {
     $Task.Log('Skip checking pull requests in the upstream repo as the task is set to do so', 'Info')
-  } elseif ($Task.LastState.Contains('Version') -and $Task.LastState.Contains('RealVersion') -and ($Task.LastState.Version -ne $Task.CurrentState.Version) -and ($Task.LastState.RealVersion -eq $Task.CurrentState.RealVersion)) {
+  } elseif ($Task.LastState.Contains('Version') -and $Task.LastState.Contains('RealVersion') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and ($Task.LastState.RealVersion -ceq $Task.CurrentState.RealVersion)) {
     $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
     $OldPullRequests = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=repo%3A${UpstreamRepoOwner}%2F${UpstreamRepoName}%20is%3Apr%20$($PackageIdentifier.Replace('.', '%2F'))%2F$($Task.CurrentState.RealVersion)%20in%3Apath"
     if ($OldPullRequestsItems = $OldPullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($PackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($Task.CurrentState.RealVersion))(\s|$)" -and $_.title -match "(\s|\(|^)$([regex]::Escape($Task.CurrentState.Version))(\s|\)|$)" }) {
@@ -1205,11 +1195,11 @@ function Send-WinGetManifest {
     $RemoveLastVersionReason = $null
     if ($Task.Config['RemoveLastVersion']) {
       $RemoveLastVersionReason = 'This task is configured to remove the last version'
-    } elseif ($Task.LastState.Contains('Version') -and ($Task.LastState.Version -ne $Task.CurrentState.Version) -and -not (Compare-Object -ReferenceObject $Task.LastState -DifferenceObject $Task.CurrentState -Property { $_.Installer.InstallerUrl })) {
+    } elseif ($Task.LastState.Contains('Version') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and -not (Compare-Object -ReferenceObject $Task.LastState -DifferenceObject $Task.CurrentState -Property { $_.Installer.InstallerUrl })) {
       $RemoveLastVersionReason = 'No installer URL is changed compared with the last state while the version is updated'
     }
     if ($RemoveLastVersionReason) {
-      if ($PackageLastVersion -ne $PackageVersion) {
+      if ($PackageLastVersion -cne $PackageVersion) {
         $Task.Log("Removing the manifests of the last version ${PackageLastVersion}: ${RemoveLastVersionReason}", 'Info')
         Get-ChildItem -Path "${LocalRepoPath}\$($PackageIdentifier.ToLower().Chars(0))\$($PackageIdentifier.Replace('.', '\'))\${PackageLastVersion}\*.yaml" -File | ForEach-Object -Process {
           $NewBlobs += @{
@@ -1279,4 +1269,4 @@ function Send-WinGetManifest {
   #endregion
 }
 
-Export-ModuleMember -Function 'Send-WinGetManifest' -Variable 'WinGetUserAgent', 'WinGetBackupUserAgent'
+Export-ModuleMember -Function 'Send-WinGetManifest' -Variable 'WinGetUserAgent', 'WinGetBackupUserAgent', 'WinGetInstallerFiles'

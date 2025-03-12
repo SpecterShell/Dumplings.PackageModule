@@ -1235,6 +1235,7 @@ function Read-FamilyNameFromMSIX {
   .PARAMETER Path
     The path to the MSIX/AppX package
   #>
+  [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
     [string]$Path
@@ -1250,6 +1251,62 @@ function Read-FamilyNameFromMSIX {
       Write-Output -InputObject "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
     } else {
       throw 'The manifest file does not exist'
+    }
+
+    Remove-Item -Path $FolderPath -Recurse -Force
+  }
+}
+
+function Read-ProductVersionFromMSIX {
+  <#
+  .SYNOPSIS
+    Read the product version of the MSIX/AppX package
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process {
+    $FolderPath = Expand-TempArchive -Path $Path
+
+    $ManifestPath = Get-ChildItem -Path $FolderPath -Include @('AppxManifest.xml', 'AppxBundleManifest.xml') -Recurse -File -Force | Select-Object -First 1
+    if (Test-Path -Path $ManifestPath.FullName) {
+      $Manifest = Get-Content -Path $ManifestPath.FullName -Raw | ConvertFrom-Xml
+      $Identity = $Manifest.GetElementsByTagName('Identity')[0]
+      Write-Output -InputObject $Identity.Version
+    } else {
+      throw 'The manifest file does not exist'
+    }
+
+    Remove-Item -Path $FolderPath -Recurse -Force
+  }
+}
+
+function Get-MSIXSignatureHash {
+  <#
+  .SYNOPSIS
+    Calculate the hash of the MSIX/AppX package signature
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process {
+    $FolderPath = Expand-TempArchive -Path $Path
+
+    $SignaturePath = Join-Path $FolderPath 'AppxSignature.p7x'
+    if (Test-Path -Path $SignaturePath) {
+      Write-Output -InputObject (Get-FileHash -Path $SignaturePath -Algorithm SHA256).Hash
+    } else {
+      throw 'The signature file does not exist'
     }
 
     Remove-Item -Path $FolderPath -Recurse -Force
