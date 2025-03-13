@@ -31,6 +31,7 @@ $Encoding = [System.Text.UTF8Encoding]::new($false)
 $Culture = 'en-US'
 $WinGetUserAgent = 'Microsoft-Delivery-Optimization/10.0'
 $WinGetBackupUserAgent = 'winget-cli WindowsPackageManager/1.7.10661 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.22.10661.0'
+$WinGetTempInstallerFiles = [ordered]@{}
 $WinGetInstallerFiles = [ordered]@{}
 
 filter UniqueItems {
@@ -302,16 +303,19 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   # Download and analyze the installer file
   # Skip if there is matching installer, or the "InstallerSha256" is explicitly specified
   if (-not $Installer.Contains('InstallerSha256')) {
-    if ($Script:WinGetInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetInstallerFiles[$OriginalInstallerUrl])) {
-      # Skip downloading if the installer file is previously downloaded
+    if ($Script:WinGetTempInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl])) {
+      # Skip downloading if the installer file is already downloaded
+      $InstallerPath = $InstallerFiles[$Installer.InstallerUrl]
+    } elseif ($Script:WinGetInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetInstallerFiles[$OriginalInstallerUrl])) {
+      # Skip downloading if the installer file was previously downloaded
       $InstallerPath = $Script:WinGetInstallerFiles[$OriginalInstallerUrl]
     } else {
       $Task.Log("Downloading $($Installer.InstallerUrl)", 'Verbose')
       try {
-        $Script:WinGetInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
+        $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
       } catch {
         $Task.Log('Failed to download with the Delivery-Optimization User Agent. Try again with the WinINet User Agent...', 'Warning')
-        $Script:WinGetInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
+        $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
       }
     }
 
@@ -536,6 +540,14 @@ function Update-WinGetInstallerManifestInstallers {
     $Installers += $Installer
   }
 
+  # Remove the downloaded files
+  foreach ($InstallerPath in $Script:WinGetTempInstallerFiles.Values) {
+    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
+  }
+  foreach ($InstallerPath in $Script:WinGetInstallerFiles.Values) {
+    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
+  }
+
   return $Installers
 }
 
@@ -629,6 +641,14 @@ function Update-WinGetInstallerManifestInstallersAlt {
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
+  }
+
+  # Remove the downloaded files
+  foreach ($InstallerPath in $Script:WinGetTempInstallerFiles.Values) {
+    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
+  }
+  foreach ($InstallerPath in $Script:WinGetInstallerFiles.Values) {
+    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
 
   return $Installers
