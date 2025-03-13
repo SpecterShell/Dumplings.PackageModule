@@ -54,66 +54,91 @@ enum LogLevel {
   Error
 }
 
-class PackageTask {
+class PackageTask: System.IDisposable {
   #region Properties
   [ValidateNotNullOrEmpty()][string]$Name
   [ValidateNotNullOrEmpty()][string]$Path
-  [string]$ScriptPath
   [System.Collections.IDictionary]$Config = [ordered]@{}
-
-  [System.Collections.IDictionary]$LastState = [ordered]@{
-    Installer = @()
-    Locale    = @()
-  }
-  [System.Collections.IDictionary]$CurrentState = [ordered]@{
-    Installer = @()
-    Locale    = @()
-  }
+  [System.Collections.IDictionary]$LastState = [ordered]@{ Version = $null; Installer = @(); Locale = @() }
+  [System.Collections.IDictionary]$CurrentState = [ordered]@{ Version = $null; Installer = @(); Locale = @() }
+  [ValidateNotNullOrEmpty()][string]$ScriptPath
   [System.Collections.Generic.List[string]]$Status = [System.Collections.Generic.List[string]]@()
-
   [System.Collections.Generic.List[string]]$Logs = [System.Collections.Generic.List[string]]@()
+  [System.Collections.IDictionary]$InstallerFiles = [ordered]@{}
   [bool]$MessageEnabled = $false
-  [int[]]$MessageID = [int[]]@()
+  [System.Collections.Generic.List[System.Tuple[string, Int64]]]$MessageSession = @()
   #endregion
 
   # Initialize task
   PackageTask([System.Collections.IDictionary]$Properties) {
     # Load name
-    if (-not $Properties.Contains('Name')) {
-      throw 'PackageTask: The property Name is undefined and should be specified'
-    }
+    if (-not $Properties.Contains('Name') -or [string]::IsNullOrEmpty($Properties.Name)) { throw 'PackageTask: The provided task name is null or empty' }
     $this.Name = $Properties.Name
 
     # Load path
-    if (-not $Properties.Contains('Path')) {
-      throw 'PackageTask: The property Path is undefined and should be specified'
-    }
-    if (-not (Test-Path -Path $Properties.Path)) {
-      throw 'PackageTask: The property Path is not reachable'
-    }
+    if (-not $Properties.Contains('Path') -or [string]::IsNullOrEmpty($Properties.Path)) { throw 'PackageTask: The provided task path is null or empty' }
+    if (-not (Test-Path -Path $Properties.Path)) { throw 'PackageTask: The provided task path is not reachable' }
     $this.Path = $Properties.Path
 
-    # Probe script
-    $this.ScriptPath ??= Join-Path $this.Path 'Script.ps1' -Resolve
-
     # Load config
-    if ($Properties.Contains('Config') -and $Properties.Config -is [System.Collections.IDictionary]) {
-      $this.Config = $Properties.Config
+    if ($Properties.Contains('Config')) {
+      if ($Properties.Config -and $Properties.Config -is [System.Collections.IDictionary]) {
+        $this.Config = $Properties.Config
+      } else {
+        throw 'PackageTask: The provided task config is empty or not a valid dictionary'
+      }
     } else {
-      $this.Config ??= Join-Path $this.Path 'Config.yaml' -Resolve | Get-Item | Get-Content -Raw | ConvertFrom-Yaml -Ordered
+      $Private:ConfigPath = Join-Path $this.Path 'Config.yaml'
+      if (Test-Path -Path $Private:ConfigPath) {
+        try {
+          $RawConfig = Get-Content -Path $Private:ConfigPath -Raw | ConvertFrom-Yaml -Ordered
+          if ($RawConfig -and $RawConfig -is [System.Collections.IDictionary]) {
+            $this.Config = $RawConfig
+          } else {
+            Write-Log -Object 'The config file is invalid. Assigning an empty hashtable' -Level Warning
+          }
+        } catch {
+          Write-Log -Object "Failed to load config. Assigning an empty hashtable: ${_}" -Level Warning
+        }
+      }
     }
 
     # Load last state
-    $LastStatePath = Join-Path $this.Path 'State.yaml'
-    if (Test-Path -Path $LastStatePath) {
-      $this.LastState = Get-Content -Path $LastStatePath -Raw | ConvertFrom-Yaml -Ordered
+    $Private:LastStatePath = Join-Path $this.Path 'State.yaml'
+    if (Test-Path -Path $Private:LastStatePath) {
+      try {
+        $RawLastState = Get-Content -Path $Private:LastStatePath -Raw | ConvertFrom-Yaml -Ordered
+        if ($RawLastState -and $RawLastState -is [System.Collections.IDictionary]) {
+          $this.LastState = $RawLastState
+        } else {
+          Write-Log -Object 'The last state file is invalid. Assigning an empty hashtable' -Level Warning
+        }
+      } catch {
+        Write-Log -Object "Failed to load last state. Assigning an empty hashtable: ${_}" -Level Warning
+      }
     } else {
       $this.Status.Add('New')
     }
 
+    # Probe script
+    $this.ScriptPath = Join-Path $this.Path 'Script.ps1'
+    if (-not (Test-Path -Path $this.ScriptPath)) { throw 'PackageTask: The script file is not found' }
+
     # Log notes
-    if ($this.Config.Contains('Notes')) {
-      $this.Logs.Add($this.Config.Notes)
+    if ($this.Config.Contains('Notes')) { $this.Logs.Add($this.Config.Notes) }
+  }
+
+  PackageTask([string]$Name, [string]$Path) {
+    PackageTask(@{ Name = $Name; Path = $Path })
+  }
+
+  PackageTask([string]$Name, [string]$Path, [System.Collections.IDictionary]$Config) {
+    PackageTask(@{ Name = $Name; Path = $Path; Config = $Config })
+  }
+
+  [void] Dispose() {
+    foreach ($InstallerPath in $this.InstallerFiles.Values) {
+      Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
     }
   }
 
@@ -389,7 +414,7 @@ class PackageTask {
     if (-not $this.MessageEnabled) { $this.MessageEnabled = $true }
     if ($Global:DumplingsPreference.Contains('EnableMessage') -and $Global:DumplingsPreference.EnableMessage) {
       try {
-        $this.MessageID = Send-TelegramMessage -Message $this.ToTelegramMarkdown() -AsMarkdown -MessageID $this.MessageID
+        $null = Send-TelegramMessage -Message $this.ToTelegramMarkdown() -AsMarkdown -Session $this.MessageSession
       } catch {
         Write-Log -Object "Failed to send default message: ${_}" -Level Error
         $this.Logs.Add($_.ToString())

@@ -128,7 +128,7 @@ function Remove-TelegramMessage {
     Method = 'deleteMessage'
     Body   = @{
       chat_id    = $ChatID
-      message_id = $ID
+      message_id = $MessageID
     }
     Token  = $Token
   }
@@ -213,7 +213,7 @@ function Send-TelegramMessage {
     The IDs of the messages
   #>
   [CmdletBinding(DefaultParameterSetName = 'PlainText')]
-  [OutputType([System.Collections.Generic.IEnumerable[int]])]
+  [OutputType([System.Collections.Generic.List[System.Tuple[string, Int64]]])]
   param (
     [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The message content')]
     [string]$Message,
@@ -227,8 +227,8 @@ function Send-TelegramMessage {
     [Parameter(ParameterSetName = 'Markdown', HelpMessage = 'Parse the message content as Markdown (Telegram format, see https://core.telegram.org/bots/api#markdownv2-style)')]
     [switch]$AsMarkdown,
 
-    [Parameter(HelpMessage = 'The ID of messages to be updated')]
-    [int[]]$MessageID = [int[]]@(),
+    [Parameter(HelpMessage = 'The content and ID of the messages to update')]
+    [System.Collections.Generic.List[System.Tuple[string, Int64]]]$Session = @(),
 
     [Parameter(HelpMessage = 'The ID of the group chat or the user')]
     [ValidateNotNullOrWhiteSpace()]
@@ -258,49 +258,45 @@ function Send-TelegramMessage {
     $Cursor += $Window
   }
 
-  $IDs = [System.Collections.Generic.List[int]]::new()
-  if ($MessageID.Count -eq 0) {
+  if ($Session.Count -eq 0) {
     # If no message ID is provided, send new messages directly
     foreach ($Message in $Messages) {
-      $Response = New-TelegramMessage @Params -Message $Message -ChatID $ChatID
-      if ($Response.ok -eq $false) {
-        throw "$($Response.error_code) $($Response.description)"
-      }
-      $IDs.Add($Response.result.message_id)
-    }
-  } elseif ($MessageID.Count -gt 0 -and $Messages.Count -eq $MessageID.Count) {
-    # If message IDs are provided and the numbers of the old messages and the new messages are equal, update the messages directly
-    for ($i = 0; $i -lt $MessageID.Count; $i++) {
-      $Response = Update-TelegramMessage @Params -Message $Messages[$i] -MessageID $MessageID[$i] -ChatID $ChatID
-      if ($Response.ok -eq $false) {
-        # Telegram API will throw an error if the new message content is the same as the old one
-        # Here we ignore this kind of error and add the original message ID
-        if ($Response.error_code -ne 400) {
-          throw "$($Response.error_code) $($Response.description)"
-        } else {
-          $IDs.Add($MessageID[$i])
-        }
-      } else {
-        $IDs.Add($Response.result.message_id)
-      }
+      $Response = New-TelegramMessage -Message $Message -ChatID $ChatID @Params
+      if ($Response.ok -eq $false) { throw "$($Response.error_code) $($Response.description)" }
+      $Session.Add([System.Tuple]::Create($Message, $Response.result.message_id))
     }
   } else {
-    # If message IDs are provided and the numbers of the old messages and the new messages are not equal, remove the old ones first and then send the new ones to keep messages consistent
-    foreach ($ID in $MessageID) {
-      $Response = Remove-TelegramMessage -MessageID $ID -ChatID $ChatID -Token $Token
-      if ($Response.ok -eq $false) {
-        throw "$($Response.error_code) $($Response.description)"
+    # If message IDs are provided, update the existing messages
+    $i = 0
+    for (; $i -lt [System.Math]::Min($Messages.Count, $Session.Count); $i++) {
+      # Update the message if the content is different
+      if ($Messages[$i] -ne $Session[$i].Item1) {
+        $Response = Update-TelegramMessage -Message $Messages[$i] -MessageID $Session[$i].Item2 -ChatID $ChatID @Params
+        if ($Response.ok -eq $false) {
+          # Telegram API will throw an error if the new message content is the same as the old one
+          # Here we ignore this kind of error and add the original message ID
+          if ($Response.error_code -ne 400) { throw "$($Response.error_code) $($Response.description)" }
+          $Session[$i] = [System.Tuple]::Create($Messages[$i], $Session[$i].Item2)
+        } else {
+          $Session[$i] = [System.Tuple]::Create($Messages[$i], $Response.result.message_id)
+        }
       }
     }
-    foreach ($Message in $Messages) {
-      $Response = New-TelegramMessage @Params -Message $Message -ChatID $ChatID
-      if ($Response.ok -eq $false) {
-        throw "$($Response.error_code) $($Response.description)"
+    if ($i -lt $Messages.Count) {
+      for (; $i -lt $Messages.Count; $i++) {
+        $Response = New-TelegramMessage -Message $Messages[$i] -ChatID $ChatID @Params
+        if ($Response.ok -eq $false) { throw "$($Response.error_code) $($Response.description)" }
+        $Session.Add([System.Tuple]::Create($Messages[$i], $Response.result.message_id))
       }
-      $IDs.Add($Response.result.message_id)
+    } elseif ($i -lt $Session.Count) {
+      for ($j = $Session.Count - 1; $j -ge $i; $j--) {
+        $Response = Remove-TelegramMessage -MessageID $Session[$j].Item2 -ChatID $ChatID -Token $Token
+        if ($Response.ok -eq $false) { throw "$($Response.error_code) $($Response.description)" }
+        $Session.RemoveAt($j)
+      }
     }
   }
-  return $IDs
+  return $Session
 }
 
 Export-ModuleMember -Function *

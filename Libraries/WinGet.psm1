@@ -280,7 +280,9 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     [Parameter(Mandatory, HelpMessage = 'The installer entry to use for updating the installer')]
     [System.Collections.IDictionary]$InstallerEntry,
     [Parameter(HelpMessage = 'The installers that have updated for reference')]
-    [System.Collections.IDictionary[]]$Installers = @()
+    [System.Collections.IDictionary[]]$Installers = @(),
+    [Parameter(HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
+    [System.Collections.IDictionary]$InstallerFiles
   )
 
   # Replace the whitespace in the installer URL with %20 to make it clickable
@@ -305,7 +307,10 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   if (-not $Installer.Contains('InstallerSha256')) {
     if ($Script:WinGetTempInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl])) {
       # Skip downloading if the installer file is already downloaded
-      $InstallerPath = $InstallerFiles[$Installer.InstallerUrl]
+      $InstallerPath = $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl]
+    } elseif ($InstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $InstallerFiles[$OriginalInstallerUrl])) {
+      # Skip downloading if the installer file was previously downloaded
+      $InstallerPath = $InstallerFiles[$OriginalInstallerUrl]
     } elseif ($Script:WinGetInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetInstallerFiles[$OriginalInstallerUrl])) {
       # Skip downloading if the installer file was previously downloaded
       $InstallerPath = $Script:WinGetInstallerFiles[$OriginalInstallerUrl]
@@ -450,7 +455,9 @@ function Update-WinGetInstallerManifestInstallers {
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installers to update')]
     [System.Collections.IDictionary[]]$OldInstallers,
     [Parameter(Mandatory, HelpMessage = 'The installer entries to use for updating the installers')]
-    [System.Collections.IDictionary[]]$InstallerEntries
+    [System.Collections.IDictionary[]]$InstallerEntries,
+    [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
+    [System.Collections.IDictionary]$InstallerFiles
   )
 
   $iteration = 0
@@ -534,7 +541,7 @@ function Update-WinGetInstallerManifestInstallers {
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -542,9 +549,6 @@ function Update-WinGetInstallerManifestInstallers {
 
   # Remove the downloaded files
   foreach ($InstallerPath in $Script:WinGetTempInstallerFiles.Values) {
-    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
-  }
-  foreach ($InstallerPath in $Script:WinGetInstallerFiles.Values) {
     Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
 
@@ -566,7 +570,9 @@ function Update-WinGetInstallerManifestInstallersAlt {
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installers to update')]
     [System.Collections.IDictionary[]]$OldInstallers,
     [Parameter(Mandatory, HelpMessage = 'The installer entries to use for updating the installers')]
-    [System.Collections.IDictionary[]]$InstallerEntries
+    [System.Collections.IDictionary[]]$InstallerEntries,
+    [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
+    [System.Collections.IDictionary]$InstallerFiles
   )
 
   $iteration = 0
@@ -637,7 +643,7 @@ function Update-WinGetInstallerManifestInstallersAlt {
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -645,9 +651,6 @@ function Update-WinGetInstallerManifestInstallersAlt {
 
   # Remove the downloaded files
   foreach ($InstallerPath in $Script:WinGetTempInstallerFiles.Values) {
-    Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
-  }
-  foreach ($InstallerPath in $Script:WinGetInstallerFiles.Values) {
     Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
 
@@ -705,6 +708,8 @@ function Update-WinGetInstallerManifest {
     [System.Collections.IDictionary[]]$InstallerEntries,
     [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the installer manifest')]
     [string]$PackageVersion,
+    [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
+    [System.Collections.IDictionary]$InstallerFiles,
     [Parameter(HelpMessage = 'Use the alternative mode for updating the installers')]
     [switch]$AltMode = $false
   )
@@ -721,9 +726,9 @@ function Update-WinGetInstallerManifest {
   Move-KeysToInstallerLevel -Manifest $InstallerManifest -Installers $InstallerManifest.Installers -Property $Script:ManifestSchema.installer.definitions.Installer.properties.Keys.Where({ $_ -cin $Script:ManifestSchema.installer.properties.Keys })
   # Update installer entries
   if (-not $AltMode) {
-    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries
+    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles
   } else {
-    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallersAlt -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries
+    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallersAlt -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles
   }
   # Move Installer Level Keys to Manifest Level
   Move-KeysToManifestLevel -Installers $InstallerManifest.Installers -Manifest $InstallerManifest -Property $Script:ManifestSchema.installer.definitions.Installer.properties.Keys.Where({ $_ -cin $Script:ManifestSchema.installer.properties.Keys })
@@ -919,12 +924,14 @@ function Update-WinGetManifests {
     [System.Collections.IDictionary[]]$InstallerEntries,
     [Parameter(HelpMessage = 'The locale entries to be applied to the locale manifest')]
     [System.Collections.IDictionary[]]$LocaleEntries = @(),
+    [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
+    [System.Collections.IDictionary]$InstallerFiles = @(),
     [Parameter(HelpMessage = 'Use the alternative mode for updating the installers')]
     [switch]$AltMode = $false
   )
 
   return @{
-    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion -AltMode:$AltMode
+    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion -InstallerFiles $InstallerFiles -AltMode:$AltMode
     Locale    = Update-WinGetLocaleManifest -OldLocaleManifests $LocaleManifests -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion
     Version   = Update-WinGetVersionManifest -OldVersionManifest $VersionManifest -PackageVersion $PackageVersion
   }
@@ -1110,10 +1117,10 @@ function Send-WinGetManifest {
     $PackageIdentifier = $OldManifests.Version.PackageIdentifier
     # Update the manifests
     if (-not $Task.Config['WinGetReplaceMode']) {
-      $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale
+      $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles
     } else {
       $Task.Log('Generating manifests in replace mode', 'Info')
-      $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -AltMode
+      $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -AltMode
     }
     # Write the new manifests
     Write-WinGetManifests -PackageIdentifier $PackageIdentifier -VersionManifest $NewManifests.Version -InstallerManifest $NewManifests.Installer -LocaleManifests $NewManifests.Locale -ManifestsPath $NewManifestsPath

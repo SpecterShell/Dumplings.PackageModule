@@ -21,45 +21,55 @@ enum LogLevel {
   Error
 }
 
-class SimpleTask {
+class SimpleTask: System.IDisposable {
   #region Properties
   [ValidateNotNullOrEmpty()][string]$Name
-
   [ValidateNotNullOrEmpty()][string]$Path
-  [string]$ScriptPath
-
   [System.Collections.IDictionary]$Config = [ordered]@{}
-  [System.Collections.IDictionary]$Preference = [ordered]@{}
+  [string]$ScriptPath
   #endregion
 
   SimpleTask([System.Collections.IDictionary]$Properties) {
     # Load name
-    if (-not $Properties.Contains('Name')) {
-      throw 'SimpleTask: The property Name is undefined and should be specified'
-    }
+    if (-not $Properties.Contains('Name') -or [string]::IsNullOrEmpty($Properties.Name)) { throw 'SimpleTask: The provided task name is null or empty' }
     $this.Name = $Properties.Name
 
     # Load path
-    if (-not $Properties.Contains('Path')) {
-      throw 'SimpleTask: The property Path is undefined and should be specified'
-    }
-    if (-not (Test-Path -Path $Properties.Path)) {
-      throw 'SimpleTask: The property Path is not reachable'
-    }
+    if (-not $Properties.Contains('Path') -or [string]::IsNullOrEmpty($Properties.Path)) { throw 'SimpleTask: The provided task path is null or empty' }
+    if (-not (Test-Path -Path $Properties.Path)) { throw 'SimpleTask: The provided task path is not reachable' }
     $this.Path = $Properties.Path
 
-    # Probe script
-    $this.ScriptPath ??= Join-Path $this.Path 'Script.ps1' -Resolve
-
     # Load config
-    if ($Properties.Contains('Config') -and $Properties.Config -is [System.Collections.IDictionary]) {
-      $this.Config = $Properties.Config
+    if ($Properties.Contains('Config')) {
+      if ($Properties.Config -and $Properties.Config -is [System.Collections.IDictionary]) {
+        $this.Config = $Properties.Config
+      } else {
+        throw 'SimpleTask: The provided task config is empty or not a valid dictionary'
+      }
     } else {
-      $this.Config ??= Join-Path $this.Path 'Config.yaml' -Resolve | Get-Item | Get-Content -Raw | ConvertFrom-Yaml -Ordered
+      $Private:ConfigPath = Join-Path $this.Path 'Config.yaml'
+      if (Test-Path -Path $Private:ConfigPath) {
+        try {
+          $RawConfig = Get-Content -Path $Private:ConfigPath -Raw | ConvertFrom-Yaml -Ordered
+          if ($RawConfig -and $RawConfig -is [System.Collections.IDictionary]) {
+            $this.Config = $RawConfig
+          } else {
+            Write-Log -Object 'The config file is invalid. Assigning an empty hashtable' -Level Warning
+          }
+        } catch {
+          Write-Log -Object "Failed to load config. Assigning an empty hashtable: ${_}" -Level Warning
+        }
+      }
     }
+
+    # Probe script
+    $this.ScriptPath = Join-Path $this.Path 'Script.ps1'
+    if (-not (Test-Path -Path $this.ScriptPath)) { throw 'SimpleTask: The script file is not found' }
   }
 
-  # Log with template, specifying log level
+  [void] Dispose() {}
+
+  # Log in specified level
   [void] Log([string]$Message, [LogLevel]$Level) {
     Write-Log -Object $Message -Level $Level
   }
