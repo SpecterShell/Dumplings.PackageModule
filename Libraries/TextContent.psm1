@@ -1,5 +1,3 @@
-#Requires -Module PowerHTML
-
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
