@@ -1088,7 +1088,7 @@ function Send-WinGetManifest {
     $Task.Log('Skip checking pull requests in the upstream repo in dry mode', 'Info')
   } elseif ($Task.Config['IgnorePRCheck']) {
     $Task.Log('Skip checking pull requests in the upstream repo as the task is set to do so', 'Info')
-  } elseif ($Task.Status.Contains('New') -and $Task.LastState.Contains('RealVersion') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and ($Task.LastState.RealVersion -ceq $Task.CurrentState.RealVersion)) {
+  } elseif (-not $Task.Status.Contains('New') -and $Task.LastState.Contains('RealVersion') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and ($Task.LastState.RealVersion -ceq $Task.CurrentState.RealVersion)) {
     $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
     $OldPullRequests = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=repo%3A${UpstreamRepoOwner}%2F${UpstreamRepoName}%20is%3Apr%20$($PackageIdentifier.Replace('.', '%2F'))%2F$($Task.CurrentState.RealVersion)%20in%3Apath"
     if ($OldPullRequestsItems = $OldPullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($PackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($Task.CurrentState.RealVersion))(\s|$)" -and $_.title -match "(\s|\(|^)$([regex]::Escape($Task.CurrentState.Version))(\s|\)|$)" }) {
@@ -1203,7 +1203,7 @@ function Send-WinGetManifest {
     $RemoveLastVersionReason = $null
     if ($Task.Config['RemoveLastVersion']) {
       $RemoveLastVersionReason = 'This task is configured to remove the last version'
-    } elseif ($Task.Status.Contains('New') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and -not (Compare-Object -ReferenceObject $Task.LastState -DifferenceObject $Task.CurrentState -Property { $_.Installer.InstallerUrl })) {
+    } elseif (-not $Task.Status.Contains('New') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and -not (Compare-Object -ReferenceObject $Task.LastState -DifferenceObject $Task.CurrentState -Property { $_.Installer.InstallerUrl })) {
       $RemoveLastVersionReason = 'No installer URL is changed compared with the last state while the version is updated'
     }
     if ($RemoveLastVersionReason) {
