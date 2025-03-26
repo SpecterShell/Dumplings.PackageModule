@@ -188,7 +188,7 @@ class PackageTask: System.IDisposable {
 
     if (-not $Global:DumplingsPreference.Contains('Force') -or -not $Global:DumplingsPreference.Force) {
       if (-not $this.Status.Contains('New')) {
-        switch (([Versioning]$this.CurrentState.Version).CompareTo([Versioning]$this.LastState.Version)) {
+        switch (([RawVersion]$this.CurrentState.Version).CompareTo([RawVersion]$this.LastState.Version)) {
           { $_ -gt 0 } {
             $this.Log("Updated: $($this.LastState.Version) → $($this.CurrentState.Version)", 'Info')
             $this.Status.Add('Updated')
