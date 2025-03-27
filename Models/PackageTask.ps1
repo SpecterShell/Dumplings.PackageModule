@@ -434,6 +434,10 @@ class PackageTask: System.IDisposable {
     }
   }
 
+  [void] ResetMessage() {
+    $this.MessageSession = [System.Collections.Generic.List[System.Tuple[string, Int64]]]@()
+  }
+
   # Generate manifests and upload them to the origin repository, and then create pull request in the upstream repository
   [void] Submit() {
     if ($Global:DumplingsPreference.Contains('EnableSubmit') -and $Global:DumplingsPreference.EnableSubmit) {
