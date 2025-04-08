@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
 
 $ManifestHeader = '# Created with YamlCreate.ps1 Dumplings Mod'
-$ManifestVersion = '1.9.0'
+$ManifestVersion = '1.10.0'
 $ManifestSchema = @{
   version       = $null
   installer     = $null
