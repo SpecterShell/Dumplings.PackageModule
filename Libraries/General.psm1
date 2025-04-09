@@ -1108,9 +1108,15 @@ function Read-ProductCodeFromBurn {
       $BootstrapperApplicationData = Get-Content -Path $BootstrapperApplicationDataPath -Raw | ConvertFrom-Xml
       Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.Id
     } elseif (Test-Path -Path $ManifestPath) {
-      Write-Host -Object 'Fallbacking to the manifest file'
+      # WiX v5+
+      Write-Host -Object 'The BootstrapperApplicationData file does not exist. Fallbacking to the manifest file'
       $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Xml
-      Write-Output -InputObject $Manifest.BurnManifest.Registration.Id
+      if ($Manifest.BurnManifest.Registration.HasAttribute('Code')) {
+        # WiX v6+
+        Write-Output -InputObject $Manifest.BurnManifest.Registration.Code
+      } else {
+        Write-Output -InputObject $Manifest.BurnManifest.Registration.Id
+      }
     } else {
       throw 'The BootstrapperApplicationData and manifest files do not exist'
     }
@@ -1146,9 +1152,15 @@ function Read-UpgradeCodeFromBurn {
       $BootstrapperApplicationData = Get-Content -Path $BootstrapperApplicationDataPath -Raw | ConvertFrom-Xml
       Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.UpgradeCode
     } elseif (Test-Path -Path $ManifestPath) {
-      Write-Host -Object 'Fallbacking to the manifest file'
+      # WiX v5+
+      Write-Host -Object 'The BootstrapperApplicationData file does not exist. Fallbacking to the manifest file'
       $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Xml
-      Write-Output -InputObject $Manifest.BurnManifest.RelatedBundle.Id
+      if ($Manifest.BurnManifest.RelatedBundle.HasAttribute('Code')) {
+        # WiX v6+
+        Write-Output -InputObject $Manifest.BurnManifest.RelatedBundle.Code
+      } else {
+        Write-Output -InputObject $Manifest.BurnManifest.RelatedBundle.Id
+      }
     } else {
       throw 'The BootstrapperApplicationData and manifest files do not exist'
     }
@@ -1184,7 +1196,8 @@ function Read-ProductNameFromBurn {
       $BootstrapperApplicationData = Get-Content -Path $BootstrapperApplicationDataPath -Raw | ConvertFrom-Xml
       Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.DisplayName
     } elseif (Test-Path -Path $ManifestPath) {
-      Write-Host -Object 'Fallbacking to the manifest file'
+      # WiX v5+
+      Write-Host -Object 'The BootstrapperApplicationData file does not exist. Fallbacking to the manifest file'
       $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Xml
       Write-Output -InputObject $Manifest.BurnManifest.Registration.Arp.DisplayName
     } else {
