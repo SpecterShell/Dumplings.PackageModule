@@ -8,12 +8,6 @@ Set-StrictMode -Version 3
 
 $ManifestHeader = '# Created with YamlCreate.ps1 Dumplings Mod'
 $ManifestVersion = '1.10.0'
-$ManifestSchema = @{
-  version       = $null
-  installer     = $null
-  defaultLocale = $null
-  locale        = $null
-}
 $ManifestSchemaUrl = @{
   version       = "https://aka.ms/winget-manifest.version.${ManifestVersion}.schema.json"
   installer     = "https://aka.ms/winget-manifest.installer.${ManifestVersion}.schema.json"
@@ -25,6 +19,40 @@ $ManifestSchemaDirectUrl = @{
   installer     = "https://raw.githubusercontent.com/microsoft/winget-cli/master/schemas/JSON/manifests/v${ManifestVersion}/manifest.installer.${ManifestVersion}.json"
   defaultLocale = "https://raw.githubusercontent.com/microsoft/winget-cli/master/schemas/JSON/manifests/v${ManifestVersion}/manifest.defaultLocale.${ManifestVersion}.json"
   locale        = "https://raw.githubusercontent.com/microsoft/winget-cli/master/schemas/JSON/manifests/v${ManifestVersion}/manifest.locale.${ManifestVersion}.json"
+}
+$ManifestSchema = [pscustomobject]@{
+  _version       = $null
+  _installer     = $null
+  _defaultLocale = $null
+  _locale        = $null
+}
+Add-Member -InputObject $ManifestSchema -MemberType ScriptProperty -Name 'version' -Value {
+  if ($null -eq $ManifestSchema._version) {
+    $this._version = Invoke-WebRequest -Uri $Script:ManifestSchemaDirectUrl.version | ConvertFrom-Json -AsHashtable
+    Expand-YamlSchema -InputObject $this._version
+  }
+  return $this._version
+}
+Add-Member -InputObject $ManifestSchema -MemberType ScriptProperty -Name 'installer' -Value {
+  if ($null -eq $ManifestSchema._installer) {
+    $this._installer = Invoke-WebRequest -Uri $Script:ManifestSchemaDirectUrl.installer | ConvertFrom-Json -AsHashtable
+    Expand-YamlSchema -InputObject $this._installer
+  }
+  return $this._installer
+}
+Add-Member -InputObject $ManifestSchema -MemberType ScriptProperty -Name 'defaultLocale' -Value {
+  if ($null -eq $ManifestSchema._defaultLocale) {
+    $this._defaultLocale = Invoke-WebRequest -Uri $Script:ManifestSchemaDirectUrl.defaultLocale | ConvertFrom-Json -AsHashtable
+    Expand-YamlSchema -InputObject $this._defaultLocale
+  }
+  return $this._defaultLocale
+}
+Add-Member -InputObject $ManifestSchema -MemberType ScriptProperty -Name 'locale' -Value {
+  if ($null -eq $ManifestSchema._locale) {
+    $this._locale = Invoke-WebRequest -Uri $Script:ManifestSchemaDirectUrl.locale | ConvertFrom-Json -AsHashtable
+    Expand-YamlSchema -InputObject $this._locale
+  }
+  return $this._locale
 }
 
 $Encoding = [System.Text.UTF8Encoding]::new($false)
@@ -47,32 +75,6 @@ filter NoWhitespace {
 }
 
 $ToNatural = { [regex]::Replace($_, '\d+', { $args[0].Value.PadLeft(20) }) }
-
-function Initialize-WinGetManifestSchema {
-  <#
-  .SYNOPSIS
-    Get WinGet manifest schema
-  .DESCRIPTION
-    Fetch Schema data from github for entry validation, key ordering, and automatic commenting
-  #>
-
-  if (-not $Script:ManifestSchema['version']) {
-    $Script:ManifestSchema['version'] = Invoke-WebRequest -Uri $Script:ManifestSchemaDirectUrl.version | ConvertFrom-Json -AsHashtable
-    Expand-YamlSchema -InputObject $Script:ManifestSchema['version']
-  }
-  if (-not $Script:ManifestSchema['installer']) {
-    $Script:ManifestSchema['installer'] = Invoke-WebRequest -Uri $Script:ManifestSchemaDirectUrl.installer | ConvertFrom-Json -AsHashtable
-    Expand-YamlSchema -InputObject $Script:ManifestSchema['installer']
-  }
-  if (-not $Script:ManifestSchema['defaultLocale']) {
-    $Script:ManifestSchema['defaultLocale'] = Invoke-WebRequest -Uri $Script:ManifestSchemaDirectUrl.defaultLocale | ConvertFrom-Json -AsHashtable
-    Expand-YamlSchema -InputObject $Script:ManifestSchema['defaultLocale']
-  }
-  if (-not $Script:ManifestSchema['locale']) {
-    $Script:ManifestSchema['locale'] = Invoke-WebRequest -Uri $Script:ManifestSchemaDirectUrl.locale | ConvertFrom-Json -AsHashtable
-    Expand-YamlSchema -InputObject $Script:ManifestSchema['locale']
-  }
-}
 
 function Get-WinGetLocalRepoPath {
   <#
@@ -551,6 +553,7 @@ function Update-WinGetInstallerManifestInstallers {
   foreach ($InstallerPath in $Script:WinGetTempInstallerFiles.Values) {
     Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
+  $Script:WinGetTempInstallerFiles.Clear()
 
   return $Installers
 }
@@ -653,6 +656,7 @@ function Update-WinGetInstallerManifestInstallersAlt {
   foreach ($InstallerPath in $Script:WinGetTempInstallerFiles.Values) {
     Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
+  $Script:WinGetTempInstallerFiles.Clear()
 
   return $Installers
 }
@@ -1040,8 +1044,6 @@ function Send-WinGetManifest {
   #endregion
 
   #region Parameters for package
-  Initialize-WinGetManifestSchema
-
   [string]$PackageIdentifier = $Task.Config.WinGetIdentifier
   try {
     $null = Test-YamlObject -InputObject $PackageIdentifier -Schema $Script:ManifestSchema.version.properties.PackageIdentifier -WarningAction Stop
