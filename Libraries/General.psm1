@@ -800,7 +800,7 @@ function Get-RedirectedUrl1st {
 function Get-EmbeddedJson {
   <#
   .SYNOPSIS
-    Extract embedded JSON from the string, especially the JSONP ones
+    Extract embedded JSON from string. Useful for JSONP content
   .PARAMETER InputObject
     The string containing the JSON
   .PARAMETER StartsFrom
@@ -830,6 +830,32 @@ function Get-EmbeddedJson {
         CheckAdditionalContent   = $false
       }
     ).ToString()
+  }
+}
+
+function Get-EmbeddedLinks {
+  <#
+  .SYNOPSIS
+    Extract embedded <a>links</a> from string
+  .PARAMETER InputObject
+    The string containing the links
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName, Mandatory, HelpMessage = 'The string containing the links')]
+    [ValidateNotNullOrEmpty()]
+    [string]$Content
+  )
+
+  begin {
+    $LinkRegex = [Microsoft.PowerShell.Commands.BasicHtmlWebResponseObject].GetNestedType('HtmlParser', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static).GetField('LinkRegex', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static).GetValue($null)
+    $CreateHtmlObject = [Microsoft.PowerShell.Commands.BasicHtmlWebResponseObject].GetMethod('CreateHtmlObject', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static)
+  }
+
+  process {
+    foreach ($Match in $LinkRegex.Matches($Content)) {
+      Write-Output -InputObject $CreateHtmlObject.Invoke($null, @($Match.Value, 'A'))
+    }
   }
 }
 
@@ -1480,5 +1506,7 @@ function Copy-Object {
 $DumplingsDefaultUserAgent = [Microsoft.PowerShell.Commands.PSUserAgent].GetProperty('UserAgent', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static).GetValue($null)
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'DumplingsBrowserUserAgent', Justification = 'This variable will be exported')]
 $DumplingsBrowserUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0'
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'DumplingsInternetExplorerUserAgent', Justification = 'This variable will be exported')]
+$DumplingsInternetExplorerUserAgent = 'Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko'
 
-Export-ModuleMember -Function * -Variable 'DumplingsDefaultUserAgent', 'DumplingsBrowserUserAgent'
+Export-ModuleMember -Function * -Variable 'DumplingsDefaultUserAgent', 'DumplingsBrowserUserAgent', 'DumplingsInternetExplorerUserAgent'
