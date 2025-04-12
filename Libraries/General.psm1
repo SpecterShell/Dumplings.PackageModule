@@ -714,41 +714,71 @@ function Get-RedirectedUrl {
   (Invoke-WebRequest -Method Head @args).BaseResponse.RequestMessage.RequestUri.AbsoluteUri
 }
 
-function Get-RedirectedUrl1st {
+function Get-RedirectedUrls {
   <#
   .SYNOPSIS
     Get the first redirected URI for the given URI
   .PARAMETER Uri
     The Uniform Resource Identifier (URI)
-  .PARAMETER UserAgent
-    The user agent string for the web request
+  .PARAMETER Method
+    The HTTP method for the web request
   .PARAMETER Headers
     The header hashtable for the web request
+  .PARAMETER UserAgent
+    The user agent string for the web request
+  .PARAMETER ConnectionTimeoutSeconds
+    The timeout in seconds for the web request
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The Uniform Resource Identifier (URI)')]
     [string]$Uri,
 
+    [Parameter(HelpMessage = 'The HTTP method for the web request')]
+    [ValidateSet('GET', 'HEAD')]
+    [System.Net.Http.HttpMethod]$Method = [System.Net.Http.HttpMethod]::Head,
+
+    [Parameter(HelpMessage = 'The header hashtable for the web request')]
+    [System.Collections.IDictionary]$Headers,
+
     [Parameter(HelpMessage = 'The user agent string for the web request')]
     [string]$UserAgent,
 
-    [Parameter(HelpMessage = 'The header hashtable for the web request')]
-    [System.Collections.IDictionary]$Headers
+    [Parameter(HelpMessage = 'The timeout in seconds for the web request')]
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$ConnectionTimeoutSeconds
   )
 
+  begin {
+    $HttpClientHandler = [System.Net.Http.HttpClientHandler]@{ AllowAutoRedirect = $false }
+    $HttpClient = [System.Net.Http.HttpClient]::new($HttpClientHandler)
+    $HttpClient.Timeout = $ConnectionTimeoutSeconds ? [timespan]::FromSeconds($ConnectionTimeoutSeconds) : [System.Threading.Timeout]::InfiniteTimeSpan
+  }
+
   process {
-    $Request = [System.Net.WebRequest]::Create($Uri)
-    if ($UserAgent) {
-      $Request.UserAgent = $UserAgent
-    }
-    if ($Headers) {
-      $Headers.GetEnumerator() | ForEach-Object -Process { $Request.Headers.Set($_.Key, $_.Value) }
-    }
-    $Request.AllowAutoRedirect = $false
-    $Response = $Request.GetResponse()
-    Write-Output -InputObject $Response.GetResponseHeader('Location')
-    $Response.Close()
+    $ShouldContinue = $true
+    do {
+      $HttpRequest = [System.Net.Http.HttpRequestMessage]::new($Method, $Uri)
+      if ($Headers) { $Headers.GetEnumerator().ForEach({ $null = $HttpRequest.Headers.TryAddWithoutValidation($_.Key, $_.Value) }) }
+      if ($UserAgent) { $HttpRequest.Headers.Add('User-Agent', $UserAgent) }
+
+      $HttpResponse = $HttpClient.Send($HttpRequest, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
+
+      Write-Output -InputObject $Uri
+
+      if ($HttpResponse.Headers.Contains('Location') -and $HttpResponse.Headers.Location.AbsoluteUri -ne $Uri) {
+        $Uri = $HttpResponse.Headers.Location.AbsoluteUri
+      } else {
+        $ShouldContinue = $false
+      }
+
+      $HttpResponse.Dispose()
+      $HttpRequest.Dispose()
+    } while ($ShouldContinue)
+  }
+
+  end {
+    $HttpClient.Dispose()
   }
 }
 
