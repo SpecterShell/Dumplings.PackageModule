@@ -717,7 +717,7 @@ function Get-RedirectedUrl {
 function Get-RedirectedUrls {
   <#
   .SYNOPSIS
-    Get the first redirected URI for the given URI
+    Get the redirected URIs for the given URI
   .PARAMETER Uri
     The Uniform Resource Identifier (URI)
   .PARAMETER Method
@@ -757,6 +757,7 @@ function Get-RedirectedUrls {
 
   process {
     $ShouldContinue = $true
+    $HasRedirected = $false
     do {
       $HttpRequest = [System.Net.Http.HttpRequestMessage]::new($Method, $Uri)
       if ($Headers) { $Headers.GetEnumerator().ForEach({ $null = $HttpRequest.Headers.TryAddWithoutValidation($_.Key, $_.Value) }) }
@@ -764,12 +765,15 @@ function Get-RedirectedUrls {
 
       $HttpResponse = $HttpClient.Send($HttpRequest, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
 
-      Write-Output -InputObject $Uri
-
       if ($HttpResponse.Headers.Contains('Location') -and $HttpResponse.Headers.Location.AbsoluteUri -ne $Uri) {
         $Uri = $HttpResponse.Headers.Location.AbsoluteUri
+        $HasRedirected = $true
+        Write-Output -InputObject $Uri
       } else {
         $ShouldContinue = $false
+        # Usually, the original URI is not returned for intuition
+        # But if no redirection happens, the original URI will be returned
+        if (-not $HasRedirected) { Write-Output -InputObject $Uri }
       }
 
       $HttpResponse.Dispose()
@@ -780,6 +784,17 @@ function Get-RedirectedUrls {
   end {
     $HttpClient.Dispose()
   }
+}
+
+function Get-RedirectedUrl1st {
+  <#
+  .SYNOPSIS
+    Get the first redirected URI for the given URI
+  #>
+  [OutputType([string])]
+  param ()
+
+  Get-RedirectedUrls @args | Select-Object -First 1
 }
 
 function Get-EmbeddedJson {
