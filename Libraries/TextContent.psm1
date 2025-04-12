@@ -6,15 +6,11 @@ $ErrorActionPreference = 'Stop'
 
 # Node types that will be ignored during traversing
 $IgnoredNodes = @('head', 'img', 'script', 'style', 'svg', 'video', '#comment')
-# Node types that always start at new line, as well as <li>
+# Node types that always start at new line
 # https://developer.mozilla.org/docs/Web/HTML/Block-level_elements
-$BlockNodes = @(
-  'address', 'article', 'aside', 'blockquote', 'dd', 'div', 'dl',
-  'fieldset', 'figcaption', 'figure', 'footer', 'form',
-  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup', 'hr',
-  'li', 'ol', 'p', 'pre', 'section', 'table', 'ul',
-  'tr'
-)
+$BlockNodes = @('address', 'article', 'aside', 'blockquote', 'dd', 'div', 'dl', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup', 'hr', 'li', 'ol', 'p', 'pre', 'section', 'table', 'tr', 'ul')
+
+Import-Module -Name 'PowerHTML'
 
 function Expand-Node {
   <#
@@ -66,6 +62,7 @@ function Get-TextContent {
   .EXAMPLE
     (Invoke-WebRequest -Uri 'https://example.com/' | ConvertFrom-Html).SelectSingleNode('/html/body/div/p[1]') | Get-TextContent | Format-Text
   #>
+  [OutputType([string])]
   param (
     [Parameter(ValueFromPipeline, HelpMessage = 'The nodes that containing the text')]
     $Node,
