@@ -980,6 +980,8 @@ function Read-MsiProperty {
     Query a value from the MSI file using SQL-like query
   .PARAMETER Path
     The path to the MSI file
+  .PARAMETER PatchFile
+    Indicate the file is a patch file
   .PARAMETER Query
     The SQL-like query
   #>
@@ -987,6 +989,9 @@ function Read-MsiProperty {
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSI file')]
     [string]$Path,
+
+    [Parameter(HelpMessage = 'Indicate the file is a patch file')]
+    [switch]$PatchFile,
 
     [Parameter(Mandatory, HelpMessage = 'The SQL-like query')]
     [string]$Query
@@ -999,8 +1004,9 @@ function Read-MsiProperty {
   process {
     # Obtain the absolute path of the file
     $Path = (Get-Item -Path $Path -Force).FullName
+    $OpenMode = $PatchFile ? 32 : 0
 
-    $Database = $WindowsInstaller.OpenDatabase($Path, 0)
+    $Database = $WindowsInstaller.OpenDatabase($Path, $OpenMode)
     $View = $Database.OpenView($Query)
     $View.Execute() | Out-Null
     $Record = $View.Fetch()
