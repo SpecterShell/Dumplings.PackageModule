@@ -1203,8 +1203,10 @@ function Send-WinGetManifest {
     # 1. The task is configured to remove the last version, or
     # 2. No installer URL is changed compared with the last state while the version is updated
     $RemoveLastVersionReason = $null
-    if ($Task.Config['RemoveLastVersion']) {
-      $RemoveLastVersionReason = 'This task is configured to remove the last version'
+    if ($Task.Config.Contains('RemoveLastVersion')) {
+      if ($Task.Config.RemoveLastVersion) {
+        $RemoveLastVersionReason = 'This task is configured to remove the last version'
+      }
     } elseif (-not $Task.Status.Contains('New') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and -not (Compare-Object -ReferenceObject $Task.LastState -DifferenceObject $Task.CurrentState -Property { $_.Installer.InstallerUrl })) {
       $RemoveLastVersionReason = 'No installer URL is changed compared with the last state while the version is updated'
     }
