@@ -1365,18 +1365,19 @@ function Read-FamilyNameFromMSIX {
   )
 
   process {
-    $FolderPath = Expand-TempArchive -Path $Path
+    $ZipFile = [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
 
-    $ManifestPath = Get-ChildItem -Path $FolderPath -Include @('AppxManifest.xml', 'AppxBundleManifest.xml') -Recurse -File -Force | Select-Object -First 1
-    if (Test-Path -Path $ManifestPath.FullName) {
-      $Manifest = Get-Content -Path $ManifestPath.FullName -Raw | ConvertFrom-Xml
-      $Identity = $Manifest.GetElementsByTagName('Identity')[0]
-      Write-Output -InputObject "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
-    } else {
-      throw 'The manifest file does not exist'
-    }
+    $ManifestEntry = $ZipFile.GetEntry('AppxManifest.xml') ?? $ZipFile.GetEntry('AppxMetadata/AppxBundleManifest.xml')
+    if (-not $ManifestEntry) { throw 'The AppxManifest.xml or AppxBundleManifest.xml file does not exist in the package' }
 
-    Remove-Item -Path $FolderPath -Recurse -Force
+    $ManifestStream = $ManifestEntry.Open()
+    $Manifest = [System.IO.StreamReader]::new($ManifestStream).ReadToEnd() | ConvertFrom-Xml
+    $ManifestStream.Dispose()
+
+    $Identity = $Manifest.GetElementsByTagName('Identity')[0]
+    Write-Output -InputObject "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
+
+    $ZipFile.Dispose()
   }
 }
 
@@ -1394,18 +1395,18 @@ function Read-ProductVersionFromMSIX {
   )
 
   process {
-    $FolderPath = Expand-TempArchive -Path $Path
+    $ZipFile = [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
 
-    $ManifestPath = Get-ChildItem -Path $FolderPath -Include @('AppxManifest.xml', 'AppxBundleManifest.xml') -Recurse -File -Force | Select-Object -First 1
-    if (Test-Path -Path $ManifestPath.FullName) {
-      $Manifest = Get-Content -Path $ManifestPath.FullName -Raw | ConvertFrom-Xml
-      $Identity = $Manifest.GetElementsByTagName('Identity')[0]
-      Write-Output -InputObject $Identity.Version
-    } else {
-      throw 'The manifest file does not exist'
-    }
+    $ManifestEntry = $ZipFile.GetEntry('AppxManifest.xml') ?? $ZipFile.GetEntry('AppxMetadata/AppxBundleManifest.xml')
+    if (-not $ManifestEntry) { throw 'The AppxManifest.xml or AppxBundleManifest.xml file does not exist in the package' }
 
-    Remove-Item -Path $FolderPath -Recurse -Force
+    $ManifestStream = $ManifestEntry.Open()
+    $Manifest = [System.IO.StreamReader]::new($ManifestStream).ReadToEnd() | ConvertFrom-Xml
+    $ManifestStream.Dispose()
+
+    Write-Output -InputObject $Manifest.GetElementsByTagName('Identity')[0].Version
+
+    $ZipFile.Dispose()
   }
 }
 
@@ -1423,16 +1424,16 @@ function Get-MSIXSignatureHash {
   )
 
   process {
-    $FolderPath = Expand-TempArchive -Path $Path
+    $ZipFile = [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
 
-    $SignaturePath = Join-Path $FolderPath 'AppxSignature.p7x'
-    if (Test-Path -Path $SignaturePath) {
-      Write-Output -InputObject (Get-FileHash -Path $SignaturePath -Algorithm SHA256).Hash
-    } else {
-      throw 'The signature file does not exist'
-    }
+    $SignatureEntry = $ZipFile.GetEntry('AppxSignature.p7x')
+    if (-not $SignatureEntry) { throw 'The AppxSignature.p7x file does not exist in the package' }
 
-    Remove-Item -Path $FolderPath -Recurse -Force
+    $SignatureStream = $SignatureEntry.Open()
+    Write-Output -InputObject ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($SignatureStream)) -replace '-', '')
+    $SignatureStream.Dispose()
+
+    $ZipFile.Dispose()
   }
 }
 
