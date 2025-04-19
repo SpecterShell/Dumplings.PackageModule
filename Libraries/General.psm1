@@ -982,6 +982,8 @@ function Read-MsiProperty {
     The path to the MSI file
   .PARAMETER PatchFile
     Indicate the file is a patch file
+  .PARAMETER TransformPath
+    The path to the transform files to be applied
   .PARAMETER Query
     The SQL-like query
   #>
@@ -992,6 +994,10 @@ function Read-MsiProperty {
 
     [Parameter(HelpMessage = 'Indicate the file is a patch file')]
     [switch]$PatchFile,
+
+    [Parameter(HelpMessage = 'The path to the transform file to be applied')]
+    [AllowNull()]
+    [string]$TransformPath,
 
     [Parameter(Mandatory, HelpMessage = 'The SQL-like query')]
     [string]$Query
@@ -1005,8 +1011,15 @@ function Read-MsiProperty {
     # Obtain the absolute path of the file
     $Path = (Get-Item -Path $Path -Force).FullName
     $OpenMode = $PatchFile ? 32 : 0
-
     $Database = $WindowsInstaller.OpenDatabase($Path, $OpenMode)
+
+    # Apply the transform if specified
+    if ($TransformPath) {
+      $TransformPath = (Get-Item -Path $TransformPath -Force).FullName
+      Write-Host $Path $TransformPath
+      $Database.ApplyTransform($TransformPath, 0)
+    }
+
     $View = $Database.OpenView($Query)
     $View.Execute() | Out-Null
     $Record = $View.Fetch()
@@ -1029,15 +1042,20 @@ function Read-ProductVersionFromMsi {
     Read the ProductVersion property value from the MSI file
   .PARAMETER Path
     The path to the MSI file
+  .PARAMETER TransformPath
+    The path to the transform file to be applied
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSI file')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The path to the transform file to be applied')]
+    [string]$TransformPath
   )
 
   process {
-    Read-MsiProperty -Path $Path -Query "SELECT Value FROM Property WHERE Property='ProductVersion'"
+    Read-MsiProperty @PSBoundParameters -Query "SELECT Value FROM Property WHERE Property='ProductVersion'"
   }
 }
 
@@ -1047,15 +1065,20 @@ function Read-ProductCodeFromMsi {
     Read the ProductCode property value from the MSI file
   .PARAMETER Path
     The path to the MSI file
+  .PARAMETER TransformPath
+    The path to the transform files to be applied
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSI file')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The path to the transform file to be applied')]
+    [string]$TransformPath
   )
 
   process {
-    Read-MsiProperty -Path $Path -Query "SELECT Value FROM Property WHERE Property='ProductCode'"
+    Read-MsiProperty @PSBoundParameters -Query "SELECT Value FROM Property WHERE Property='ProductCode'"
   }
 }
 
@@ -1065,15 +1088,20 @@ function Read-UpgradeCodeFromMsi {
     Read the UpgradeCode property value from the MSI file
   .PARAMETER Path
     The path to the MSI file
+  .PARAMETER TransformPath
+    The path to the transform files to be applied
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSI file')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The path to the transform file to be applied')]
+    [string]$TransformPath
   )
 
   process {
-    Read-MsiProperty -Path $Path -Query "SELECT Value FROM Property WHERE Property='UpgradeCode'"
+    Read-MsiProperty @PSBoundParameters -Query "SELECT Value FROM Property WHERE Property='UpgradeCode'"
   }
 }
 
@@ -1083,15 +1111,20 @@ function Read-ProductNameFromMsi {
     Read the ProductName property value from the MSI file
   .PARAMETER Path
     The path to the MSI file
+  .PARAMETER TransformPath
+    The path to the transform files to be applied
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSI file')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The path to the transform file to be applied')]
+    [string]$TransformPath
   )
 
   process {
-    Read-MsiProperty -Path $Path -Query "SELECT Value FROM Property WHERE Property='ProductName'"
+    Read-MsiProperty @PSBoundParameters -Query "SELECT Value FROM Property WHERE Property='ProductName'"
   }
 }
 
