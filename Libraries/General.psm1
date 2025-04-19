@@ -1318,6 +1318,35 @@ function Read-ProductNameFromBurn {
   }
 }
 
+function Get-MSIXManifest {
+  <#
+  .SYNOPSIS
+    Read the MSIX/AppX package manifest
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process {
+    $ZipFile = [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
+
+    $ManifestEntry = $ZipFile.GetEntry('AppxManifest.xml') ?? $ZipFile.GetEntry('AppxMetadata/AppxBundleManifest.xml')
+    if (-not $ManifestEntry) { throw 'The AppxManifest.xml or AppxBundleManifest.xml file does not exist in the package' }
+
+    $ManifestStream = $ManifestEntry.Open()
+    $ManifestStreamReader = [System.IO.StreamReader]::new($ManifestStream)
+    Write-Output -InputObject ($ManifestStreamReader.ReadToEnd())
+    $ManifestStreamReader.Dispose()
+    $ManifestStream.Dispose()
+
+    $ZipFile.Dispose()
+  }
+}
+
 function Get-MSIXPublisherHash {
   <#
   .SYNOPSIS
@@ -1365,19 +1394,9 @@ function Read-FamilyNameFromMSIX {
   )
 
   process {
-    $ZipFile = [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
-
-    $ManifestEntry = $ZipFile.GetEntry('AppxManifest.xml') ?? $ZipFile.GetEntry('AppxMetadata/AppxBundleManifest.xml')
-    if (-not $ManifestEntry) { throw 'The AppxManifest.xml or AppxBundleManifest.xml file does not exist in the package' }
-
-    $ManifestStream = $ManifestEntry.Open()
-    $Manifest = [System.IO.StreamReader]::new($ManifestStream).ReadToEnd() | ConvertFrom-Xml
-    $ManifestStream.Dispose()
-
+    $Manifest = Get-MSIXManifest @PSBoundParameters | ConvertFrom-Xml
     $Identity = $Manifest.GetElementsByTagName('Identity')[0]
     Write-Output -InputObject "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
-
-    $ZipFile.Dispose()
   }
 }
 
@@ -1395,18 +1414,8 @@ function Read-ProductVersionFromMSIX {
   )
 
   process {
-    $ZipFile = [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
-
-    $ManifestEntry = $ZipFile.GetEntry('AppxManifest.xml') ?? $ZipFile.GetEntry('AppxMetadata/AppxBundleManifest.xml')
-    if (-not $ManifestEntry) { throw 'The AppxManifest.xml or AppxBundleManifest.xml file does not exist in the package' }
-
-    $ManifestStream = $ManifestEntry.Open()
-    $Manifest = [System.IO.StreamReader]::new($ManifestStream).ReadToEnd() | ConvertFrom-Xml
-    $ManifestStream.Dispose()
-
+    $Manifest = Get-MSIXManifest @PSBoundParameters | ConvertFrom-Xml
     Write-Output -InputObject $Manifest.GetElementsByTagName('Identity')[0].Version
-
-    $ZipFile.Dispose()
   }
 }
 
