@@ -233,7 +233,7 @@ function ConvertFrom-Base64 {
 
     [Parameter(ParameterSetName = 'String', HelpMessage = 'The text encoding the Base64 string should be decoded to')]
     [ArgumentCompleter({ [System.Text.Encoding]::GetEncodings() | Select-Object -ExpandProperty Name | Select-String -Pattern "^$($args[2])" -Raw | ForEach-Object -Process { $_.Contains(' ') ? "'${_}'" : $_ } })]
-    [string]$Encoding,
+    [string]$Encoding = 'UTF-8',
 
     [Parameter(ParameterSetName = 'Bytes', HelpMessage = 'Decode the Base64 string to a byte array')]
     [switch]$AsByteStream
@@ -242,10 +242,10 @@ function ConvertFrom-Base64 {
   process {
     if ($AsByteStream) {
       [System.Convert]::FromBase64String($Content)
-    } elseif ($Encoding) {
-      [System.Text.Encoding]::GetEncoding($Encoding).GetString([System.Convert]::FromBase64String($Content))
     } else {
-      [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Content))
+      # Add padding if the length of the string length is not a multiple of 4
+      if ($Content.Length % 4 -ne 0) { $Content += '=' * (4 - ($Content.Length % 4)) }
+      [System.Text.Encoding]::GetEncoding($Encoding).GetString([System.Convert]::FromBase64String($Content))
     }
   }
 }
