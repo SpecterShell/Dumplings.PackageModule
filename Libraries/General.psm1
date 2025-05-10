@@ -816,8 +816,7 @@ function Get-EmbeddedJson {
     [ValidateNotNullOrEmpty()]
     [string]$Content,
 
-    [Parameter(Mandatory, HelpMessage = 'The string indicating where the JSON starts after')]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage = 'The string indicating where the JSON starts after')]
     [string]$StartsFrom
   )
 
