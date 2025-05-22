@@ -57,6 +57,8 @@ function ConvertFrom-PropertyList {
             Write-Output -InputObject $Node.'#text'
           }
         }
+        'true' { $true }
+        'false' { $false }
         'real' { [double]::Parse($Node.'#text') }
         'string' { if ([string]::IsNullOrEmpty($Node.'#text')) { '' } else { $Node.'#text' } }
         'date' { [datetime]::Parse($Node.'#text') }
