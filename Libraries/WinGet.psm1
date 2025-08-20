@@ -101,7 +101,7 @@ function Send-WinGetManifest {
     throw "The PackageVersion `"${PackageVersion}`" is invalid: ${_}"
   }
 
-  $PackageLastVersion = Get-WinGetGitHubPackageVersion -PackageIdentifier $PackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch | Select-Object -Last 1
+  $PackageLastVersion = Get-WinGetGitHubPackageVersion -PackageIdentifier $PackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath 'manifests' | Select-Object -Last 1
   if (-not $PackageLastVersion) { throw "Could not find any version of the package ${PackageIdentifier}" }
 
   $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $PackageIdentifier $PackageVersion) -ItemType Directory -Force).FullName
@@ -131,13 +131,13 @@ function Send-WinGetManifest {
     $Task.Log('Skip checking pull requests in the upstream repo as the task is set to do so', 'Info')
   } elseif (-not $Task.Status.Contains('New') -and $Task.LastState.Contains('RealVersion') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and ($Task.LastState.RealVersion -ceq $Task.CurrentState.RealVersion)) {
     $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
-    $OldPullRequests = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=repo%3A${UpstreamRepoOwner}%2F${UpstreamRepoName}%20is%3Apr%20$($PackageIdentifier.Replace('.', '%2F'))%2F$($Task.CurrentState.RealVersion)%20in%3Apath"
+    $OldPullRequests = Find-WinGetGitHubPullRequest -Query "$($PackageIdentifier.Replace('.', '/'))/$($Task.CurrentState.RealVersion) in:path" -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     if ($OldPullRequestsItems = $OldPullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($PackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($Task.CurrentState.RealVersion))(\s|$)" -and $_.title -match "(\s|\(|^)$([regex]::Escape($Task.CurrentState.Version))(\s|\)|$)" }) {
       throw "Found existing pull requests:`n$($OldPullRequestsItems | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
     }
   } else {
     $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
-    $OldPullRequests = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=repo%3A${UpstreamRepoOwner}%2F${UpstreamRepoName}%20is%3Apr%20$($PackageIdentifier.Replace('.', '%2F'))%2F${PackageVersion}%20in%3Apath"
+    $OldPullRequests = Find-WinGetGitHubPullRequest -Query "$($PackageIdentifier.Replace('.', '/'))/${PackageVersion} in:path" -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     if ($OldPullRequestsItems = $OldPullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($PackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($PackageVersion))(\s|$)" }) {
       throw "Found existing pull requests:`n$($OldPullRequestsItems | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
     }
@@ -176,7 +176,7 @@ function Send-WinGetManifest {
   $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch
 
   # Upload new manifests
-  $NewCommit = Add-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath 'manifests' -Manifest $NewManifests -CommitMessage $NewCommitName
+  $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath 'manifests' -Manifest $NewManifests -CommitMessage $NewCommitName
 
   #region Remove old manifests
   # Remove old manifests, if
@@ -194,7 +194,7 @@ function Send-WinGetManifest {
     if ($PackageLastVersion -cne $PackageVersion) {
       $Task.Log("Removing the manifests of the last version ${PackageLastVersion}: ${RemoveLastVersionReason}", 'Info')
       $CommitMessage = "Remove version: ${PackageIdentifier} version ${PackageLastVersion}"
-      $NewCommit = Remove-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $PackageLastVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewCommit.data.createCommitOnBranch.commit.oid -RootPath 'manifests' -CommitMessage $CommitMessage
+      $NewCommitSha = Remove-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $PackageLastVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewCommitSha -RootPath 'manifests' -CommitMessage $CommitMessage
     } else {
       $Task.Log("Overriding the manifests of the last version ${PackageLastVersion}: ${RemoveLastVersionReason}", 'Info')
     }

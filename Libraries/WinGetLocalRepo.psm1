@@ -12,29 +12,10 @@ $Culture = 'en-US'
 # The scriptblock for sorting natural numbers
 $ToNatural = { [regex]::Replace($_, '\d+', { $args[0].Value.PadLeft(20) }) }
 
-# The default root directory of the local WinGet package repository
-$DumplingsWinGetLocalRepoDefaultRootPath = $null
-
 class WinGetManifestRaw {
   [string]$Version
   [string]$Installer
   [System.Collections.Generic.IDictionary[string, string]]$Locale
-}
-
-function Get-WinGetLocalRepoDefaultRoot {
-  <#
-  .SYNOPSIS
-    Get the default root directory for the local WinGet repository
-  .DESCRIPTION
-    Get the default root directory for the local WinGet repository.
-    If the environment variable `DumplingsWinGetLocalRepoDefaultRootPath` is set, it will be used as the default root.
-    Otherwise, an error will be thrown.
-  #>
-  [OutputType([string])]
-  param()
-
-  if (-not $Script:DumplingsWinGetLocalRepoDefaultRootPath) { throw 'The default root directory for the local WinGet repository is not set. Please set the environment variable $DumplingsWinGetLocalRepoDefaultRootPath, or pass the root directory parameter explicitly' }
-  return $Script:DumplingsWinGetLocalRepoDefaultRootPath
 }
 
 function Get-WinGetLocalPackagePath {
@@ -56,7 +37,7 @@ function Get-WinGetLocalPackagePath {
   .PARAMETER Locale
     The locale of the locale manifest
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .EXAMPLE
     PS> Get-WinGetLocalPackagePath -PackageIdentifier 'SpecterShell.Dumplings'
 
@@ -92,7 +73,7 @@ function Get-WinGetLocalPackagePath {
     [ValidatePattern('^([a-zA-Z]{2,3}|[iI]-[a-zA-Z]+|[xX]-[a-zA-Z]{1,8})(-[a-zA-Z]{1,8})*$')]
     [ValidateLength(0, 20)]
     [string]$Locale,
-    [Parameter(HelpMessage = 'The root path to the manifests folder')]
+    [Parameter(HelpMessage = 'The path to the root folder of the manifests repository')]
     [ValidateNotNull()]
     [string]$RootPath = ''
   )
@@ -136,14 +117,14 @@ function Get-WinGetLocalPackageVersion {
   .PARAMETER PackageIdentifier
     The identifier of the package
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   #>
   [OutputType([string[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The identifier of the package')]
     [string]$PackageIdentifier,
-    [Parameter(HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = (Get-WinGetLocalRepoDefaultRoot)
+    [Parameter(Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath
   )
 
   process {
@@ -166,9 +147,9 @@ function Get-WinGetLocalManifests {
   .PARAMETER PackageVersion
     The version of the package
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .PARAMETER Path
-    The directory to the folder where the new manifests will be stored
+    The path to the folder containing the manifests
   #>
   [OutputType([System.IO.DirectoryInfo])]
   param (
@@ -176,9 +157,9 @@ function Get-WinGetLocalManifests {
     [string]$PackageIdentifier,
     [Parameter(ParameterSetName = 'RootPath', Position = 1, Mandatory, HelpMessage = 'The version of the package')]
     [string]$PackageVersion,
-    [Parameter(ParameterSetName = 'RootPath', HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = (Get-WinGetLocalRepoDefaultRoot),
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The directory to the folder where the new manifests will be stored')]
+    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path
   )
 
@@ -200,7 +181,7 @@ function Read-WinGetLocalManifestContent {
   #>
   [OutputType([string])]
   param (
-    [Parameter(Mandatory, ValueFromPipeline, HelpMessage = 'The path to the manifest')]
+    [Parameter(Position = 0, Mandatory, ValueFromPipeline, HelpMessage = 'The path to the manifest')]
     [string]$Path
   )
 
@@ -216,23 +197,23 @@ function Read-WinGetLocalManifests {
   .DESCRIPTION
     Read the installer, locale and version manifests for a package using the provided package identifier and manifests path
   .PARAMETER PackageIdentifier
-    The package identifier of the manifest
+    The identifier of the package
   .PARAMETER PackageVersion
     The version of the package
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .PARAMETER Path
-    The directory to the folder where the new manifests will be stored
+    The path to the folder containing the manifests
   #>
   [OutputType([WinGetManifestRaw])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The package identifier of the manifest')]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The identifier of the package')]
     [string]$PackageIdentifier,
-    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The version of the package')]
+    [Parameter(ParameterSetName = 'RootPath', Position = 1, Mandatory, HelpMessage = 'The version of the package')]
     [string]$PackageVersion,
-    [Parameter(ParameterSetName = 'RootPath', HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = (Get-WinGetLocalRepoDefaultRoot),
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The directory to the folder where the new manifests will be stored')]
+    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path
   )
 
@@ -270,14 +251,14 @@ function Write-WinGetLocalManifestContent {
   .SYNOPSIS
     Write the content of a manifest file
   .PARAMETER Content
-    The content of the manifest
+    The content of the manifest as a string
   .PARAMETER Path
-    The path to the manifest
+    The path to the folder containing the manifests
   #>
   param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The content of the manifest')]
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The content of the manifest as a string')]
     [string]$Content,
-    [Parameter(Position = 1, Mandatory, HelpMessage = 'The path to the manifest')]
+    [Parameter(Position = 1, Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path
   )
 
@@ -291,27 +272,27 @@ function Add-WinGetLocalManifests {
   .SYNOPSIS
     Add the new package manifests to the local WinGet repository or a specified path
   .PARAMETER PackageIdentifier
-    The package identifier of the manifest
+    The identifier of the package
   .PARAMETER PackageVersion
     The version of the package
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .PARAMETER Path
-    The directory to the folder where the new manifests will be stored
+    The path to the folder containing the manifests
   .PARAMETER Manifests
-    The manifests to add
+    The raw manifests to add
   #>
   [CmdletBinding(DefaultParameterSetName = 'RootPath')]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The package identifier of the manifest')]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The identifier of the package')]
     [string]$PackageIdentifier,
-    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The version of the package')]
+    [Parameter(ParameterSetName = 'RootPath', Position = 1, Mandatory, HelpMessage = 'The version of the package')]
     [string]$PackageVersion,
-    [Parameter(ParameterSetName = 'RootPath', HelpMessage = 'The root path to the manifests folder')]
+    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
     [string]$RootPath,
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The directory to the folder where the new manifests will be stored')]
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path,
-    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The manifests to add')]
+    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The raw manifests to add')]
     [WinGetManifestRaw[]]$Manifest
   )
 
@@ -342,23 +323,23 @@ function Remove-WinGetLocalManifests {
   .SYNOPSIS
     Remove the package manifests from the local WinGet repository or a specified path
   .PARAMETER PackageIdentifier
-    The package identifier of the manifest
+    The identifier of the package
   .PARAMETER PackageVersion
     The version of the package
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .PARAMETER Path
-    The directory to the folder where the new manifests will be stored
+    The path to the folder containing the manifests
   #>
   [CmdletBinding(DefaultParameterSetName = 'RootPath')]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The package identifier of the manifest')]
+    [Parameter(ValueFromPipeline, Position = 0, Mandatory, HelpMessage = 'The identifier of the package')]
     [string]$PackageIdentifier,
-    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The version of the package')]
+    [Parameter(ParameterSetName = 'RootPath', Position = 1, Mandatory, HelpMessage = 'The version of the package')]
     [string]$PackageVersion,
-    [Parameter(ParameterSetName = 'RootPath', HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = (Get-WinGetLocalRepoDefaultRoot),
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The directory to the folder where the new manifests will be stored')]
+    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path
   )
 

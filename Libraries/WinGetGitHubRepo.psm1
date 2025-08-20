@@ -10,15 +10,6 @@ $Culture = 'en-US'
 # The scriptblock for sorting natural numbers
 $ToNatural = { [regex]::Replace($_, '\d+', { $args[0].Value.PadLeft(20) }) }
 
-# The default owner of the GitHub-hosted WinGet package repository
-$DumplingsWinGetGitHubRepoDefaultOwner = 'microsoft'
-# The default name of the GitHub-hosted WinGet package repository
-$DumplingsWinGetGitHubRepoDefaultName = 'winget-pkgs'
-# The default branch of the GitHub-hosted WinGet package repository
-$DumplingsWinGetGitHubRepoDefaultBranch = 'master'
-# The default root directory of the GitHub-hosted WinGet package repository
-$DumplingsWinGetGitHubRepoDefaultRootPath = 'manifests'
-
 class WinGetManifestRaw {
   [string]$Version
   [string]$Installer
@@ -44,7 +35,7 @@ function Get-WinGetGitHubPackagePath {
   .PARAMETER Locale
     The locale of the locale manifest
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .EXAMPLE
     PS> Get-WinGetGitHubPackagePath -PackageIdentifier 'SpecterShell.Dumplings'
 
@@ -80,7 +71,7 @@ function Get-WinGetGitHubPackagePath {
     [ValidatePattern('^([a-zA-Z]{2,3}|[iI]-[a-zA-Z]+|[xX]-[a-zA-Z]{1,8})(-[a-zA-Z]{1,8})*$')]
     [ValidateLength(0, 20)]
     [string]$Locale,
-    [Parameter(HelpMessage = 'The root path to the manifests folder')]
+    [Parameter(HelpMessage = 'The path to the root folder of the manifests repository')]
     [ValidateNotNull()]
     [string]$RootPath = ''
   )
@@ -128,22 +119,22 @@ function Get-WinGetGitHubPackageVersion {
   .PARAMETER RepoName
     The name of the repository
   .PARAMETER RepoBranch
-    The branch of the repository
+    The branch name of the repository
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   #>
   [OutputType([string[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The identifier of the package')]
     [string]$PackageIdentifier,
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(HelpMessage = 'The branch of the repository')]
-    [string]$RepoBranch = $Script:DumplingsWinGetGitHubRepoDefaultBranch,
-    [Parameter(HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = $Script:DumplingsWinGetGitHubRepoDefaultRootPath
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
+    [Parameter(Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath
   )
 
   process {
@@ -170,11 +161,11 @@ function Get-WinGetGitHubManifests {
   .PARAMETER RepoName
     The name of the repository
   .PARAMETER RepoBranch
-    The branch of the repository
+    The branch name of the repository
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .PARAMETER Path
-    The directory to the folder where the manifests are stored
+    The path to the folder containing the manifests
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -182,15 +173,15 @@ function Get-WinGetGitHubManifests {
     [string]$PackageIdentifier,
     [Parameter(ParameterSetName = 'RootPath', Position = 1, Mandatory, HelpMessage = 'The version of the package')]
     [string]$PackageVersion,
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(HelpMessage = 'The branch of the repository')]
-    [string]$RepoBranch = $Script:DumplingsWinGetGitHubRepoDefaultBranch,
-    [Parameter(ParameterSetName = 'RootPath', HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = $Script:DumplingsWinGetGitHubRepoDefaultRootPath,
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The directory to the folder where the manifests are stored')]
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
+    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path
   )
 
@@ -233,21 +224,21 @@ function Read-WinGetGitHubManifestContent {
   .PARAMETER RepoName
     The name of the repository
   .PARAMETER RepoBranch
-    The branch of the repository
+    The branch name of the repository
   #>
   [OutputType([string])]
   param (
     [Parameter(ParameterSetName = 'Path', ValueFromPipeline, Mandatory, HelpMessage = 'The path to the manifest')]
     [string]$Path,
-    [Parameter(ParameterSetName = 'Uri', ValueFromPipeline, ValueFromPipelineByPropertyName, DontShow, Mandatory, HelpMessage = 'The path to the manifest')]
+    [Parameter(ParameterSetName = 'Uri', ValueFromPipeline, ValueFromPipelineByPropertyName, DontShow, Mandatory, HelpMessage = 'The URI to the manifest')]
     [Alias('Url')]
     [string]$Uri,
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The branch of the repository')]
-    [string]$RepoBranch = $Script:DumplingsWinGetGitHubRepoDefaultBranch
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch
   )
 
   process {
@@ -272,27 +263,27 @@ function Read-WinGetGitHubManifests {
   .PARAMETER RepoName
     The name of the repository
   .PARAMETER RepoBranch
-    The branch of the repository
+    The branch name of the repository
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .PARAMETER Path
-    The directory to the folder where the manifests are stored
+    The path to the folder containing the manifests
   #>
   [OutputType([WinGetManifestRaw])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The package identifier of the manifest')]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The package identifier of the manifest')]
     [string]$PackageIdentifier,
-    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The version of the package')]
+    [Parameter(ParameterSetName = 'RootPath', Position = 1, Mandatory, HelpMessage = 'The version of the package')]
     [string]$PackageVersion,
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(HelpMessage = 'The branch of the repository')]
-    [string]$RepoBranch = $Script:DumplingsWinGetGitHubRepoDefaultBranch,
-    [Parameter(ParameterSetName = 'RootPath', HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = $Script:DumplingsWinGetGitHubRepoDefaultRootPath,
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The directory to the folder where the manifests are stored')]
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
+    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path
   )
 
@@ -358,24 +349,26 @@ function Get-WinGetGitHubBranch {
   .PARAMETER RepoName
     The name of the repository
   .PARAMETER RepoBranch
-    The branch of the repository
+    The branch name of the repository
+  .PARAMETER RepoRef
+    The reference of the repository. Format: "ref/heads/branch" or "ref/tags/tag"
   #>
   [OutputType([pscustomobject[]])]
   param (
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(HelpMessage = 'The branch of the repository')]
-    [string]$RepoBranch = $Script:DumplingsWinGetGitHubRepoDefaultBranch
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(ParameterSetName = 'Branch', Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
+    [Parameter(ParameterSetName = 'Ref', Mandatory, HelpMessage = 'The reference of the repository. Format: "ref/heads/branch" or "ref/tags/tag"')]
+    [string]$RepoRef
   )
 
-  process {
-    # Get the branches of the repository
-    $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/ref/heads/${RepoBranch}"
+  # Get the branches of the repository
+  $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/$($PSCmdlet.ParameterSetName -eq 'Ref' ? $RepoRef : "ref/heads/${RepoBranch}")"
 
-    return $Response
-  }
+  return $Response
 }
 
 function New-WinGetGitHubBranch {
@@ -389,32 +382,34 @@ function New-WinGetGitHubBranch {
   .PARAMETER RepoName
     The name of the repository
   .PARAMETER RepoBranch
-    The source branch to create the new branch from
+    The source branch of the repository from which the new branch will be created
+  .PARAMETER RepoRef
+    The reference of the source branch from which the new branch will be created. Format: "refs/heads/branch" or "refs/tags/tag"
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The name of the new branch to create')]
     [string]$Name,
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(HelpMessage = 'The source branch to create the new branch from')]
-    [string]$RepoBranch = $Script:DumplingsWinGetGitHubRepoDefaultBranch
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(ParameterSetName = 'Branch', Mandatory, HelpMessage = 'The source branch of the repository from which the new branch will be created')]
+    [string]$RepoBranch,
+    [Parameter(ParameterSetName = 'Ref', Mandatory, HelpMessage = 'The reference of the source branch from which the new branch will be created. Format: "refs/heads/branch" or "refs/tags/tag"')]
+    [string]$RepoRef
   )
 
-  process {
-    # Get the reference of the source branch
-    $SourceBranch = Get-WinGetGitHubBranch -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch
+  # Get the reference of the source branch
+  $SourceBranch = Get-WinGetGitHubBranch -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch
 
-    # Create the new branch
-    $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/refs" -Method Post -Body @{
-      ref = "refs/heads/${Name}"
-      sha = $SourceBranch.object.sha
-    }
-
-    return $Response
+  # Create the new branch
+  $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/refs" -Method Post -Body @{
+    ref = $PSCmdlet.ParameterSetName -eq 'Ref' ? $RepoRef : "refs/heads/${Name}"
+    sha = $SourceBranch.object.sha
   }
+
+  return $Response
 }
 
 function Add-WinGetGitHubManifests {
@@ -432,40 +427,44 @@ function Add-WinGetGitHubManifests {
   .PARAMETER RepoName
     The name of the repository
   .PARAMETER RepoBranch
-    The branch of the repository
+    The branch name of the repository
   .PARAMETER RepoSha
     The SHA of the commit to create the new commit from
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .PARAMETER Path
-    The directory to the folder where the manifests are stored
+    The path to the folder containing the manifests
   .PARAMETER Manifest
     The manifest(s) to add
   .PARAMETER CommitMessage
     The message of the commit
+  .OUTPUTS
+    The SHA of the commit created in the remote repository.
   #>
+  [OutputType([string])]
   [CmdletBinding(DefaultParameterSetName = 'RootPath')]
   param (
-    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The package identifier of the manifest')]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The package identifier of the manifest')]
     [string]$PackageIdentifier,
-    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The version of the package')]
+    [Parameter(ParameterSetName = 'RootPath', Position = 1, Mandatory, HelpMessage = 'The version of the package')]
     [string]$PackageVersion,
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(HelpMessage = 'The branch of the repository')]
-    [string]$RepoBranch = $Script:DumplingsWinGetGitHubRepoDefaultBranch,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
     [Parameter(HelpMessage = 'The SHA of the commit to create the new commit from')]
     [string]$RepoSha = (Get-WinGetGitHubBranch -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch).object.sha,
-    [Parameter(ParameterSetName = 'RootPath', HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = $Script:DumplingsWinGetGitHubRepoDefaultRootPath,
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The directory to the folder where the manifests are stored')]
+    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path,
     [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The manifest(s) to add')]
     [WinGetManifestRaw[]]$Manifest,
-    [Parameter(HelpMessage = 'The message of the commit')]
-    [string]$CommitMessage = "Add version: ${PackageIdentifier} version ${PackageVersion}"
+    [Parameter(Mandatory, HelpMessage = 'The message of the commit')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$CommitMessage
   )
 
   process {
@@ -513,14 +512,13 @@ mutation {
   ) {
     commit {
       oid
-      url
     }
   }
 }
 "@
     }
 
-    return $Response
+    return $Response.data.createCommitOnBranch.commit.oid
   }
 }
 
@@ -539,40 +537,44 @@ function Remove-WinGetGitHubManifests {
   .PARAMETER RepoName
     The name of the repository
   .PARAMETER RepoBranch
-    The branch of the repository
+    The branch name of the repository
   .PARAMETER RepoSha
     The SHA of the commit to create the new commit from
   .PARAMETER RootPath
-    The root path to the manifests folder
+    The path to the root folder of the manifests repository
   .PARAMETER Path
-    The directory to the folder where the manifests are stored
+    The path to the folder containing the manifests
   .PARAMETER CommitMessage
     The message of the commit
+  .OUTPUTS
+    The SHA of the commit created in the remote repository.
   #>
+  [OutputType([string])]
   [CmdletBinding(DefaultParameterSetName = 'RootPath')]
   param (
-    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The package identifier of the manifest')]
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The package identifier of the manifest')]
     [string]$PackageIdentifier,
-    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The version of the package')]
+    [Parameter(ParameterSetName = 'RootPath', Position = 1, Mandatory, HelpMessage = 'The version of the package')]
     [string]$PackageVersion,
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(HelpMessage = 'The branch of the repository')]
-    [string]$RepoBranch = $Script:DumplingsWinGetGitHubRepoDefaultBranch,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
     [Parameter(HelpMessage = 'The SHA of the commit to create the new commit from')]
     [string]$RepoSha = (Get-WinGetGitHubBranch -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch).object.sha,
-    [Parameter(ParameterSetName = 'RootPath', HelpMessage = 'The root path to the manifests folder')]
-    [string]$RootPath = $Script:DumplingsWinGetGitHubRepoDefaultRootPath,
-    [Parameter(ParameterSetName = 'Path', HelpMessage = 'The directory to the folder where the manifests are stored')]
+    [Parameter(ParameterSetName = 'RootPath', Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath,
+    [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path,
-    [Parameter(HelpMessage = 'The message of the commit')]
-    [string]$CommitMessage = "Remove version: ${PackageIdentifier} version ${PackageVersion}"
+    [Parameter(Mandatory, HelpMessage = 'The message of the commit')]
+    [string]$CommitMessage
   )
 
   process {
     $Prefix = $PSCmdlet.ParameterSetName -eq 'Path' ? $Path : (Get-WinGetGitHubPackagePath -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RootPath $RootPath)
+    $PSBoundParameters.Remove('RepoSha'); $PSBoundParameters.Remove('CommitMessage')
     $Manifests = Get-WinGetGitHubManifests @PSBoundParameters
 
     $Response = Invoke-GitHubApi -Uri 'https://api.github.com/graphql' -Method Post -Body @{
@@ -602,14 +604,13 @@ mutation {
   ) {
     commit {
       oid
-      url
     }
   }
 }
 "@
     }
 
-    return $Response.data.createCommitOnBranch.commit
+    return $Response.data.createCommitOnBranch.commit.oid
   }
 }
 
@@ -632,31 +633,29 @@ function New-WinGetGitHubPullRequest {
   #>
   [OutputType([pscustomobject])]
   param (
-    [Parameter(Position = 0, Mandatory, HelpMessage = 'The title of the pull request')]
+    [Parameter(Mandatory, HelpMessage = 'The title of the pull request')]
     [string]$Title,
-    [Parameter(Position = 1, HelpMessage = 'The body content of the pull request')]
+    [Parameter(Mandatory, HelpMessage = 'The body content of the pull request')]
     [string]$Body,
-    [Parameter(Position = 2, Mandatory, HelpMessage = 'The head branch of the pull request (format: "branch" or "owner:branch")')]
+    [Parameter(Mandatory, HelpMessage = 'The head branch of the pull request (format: "branch" or "owner:branch")')]
     [string]$Head,
-    [Parameter(Position = 3, HelpMessage = 'The base branch of the pull request')]
-    [string]$Base = $Script:DumplingsWinGetGitHubRepoDefaultBranch,
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName
+    [Parameter(Mandatory, HelpMessage = 'The base branch of the pull request')]
+    [string]$Base,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName
   )
 
-  process {
-    # Create the pull request
-    $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls" -Method Post -Body @{
-      title = $Title
-      body  = $Body
-      head  = $Head
-      base  = $Base
-    }
-
-    return $Response
+  # Create the pull request
+  $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls" -Method Post -Body @{
+    title = $Title
+    body  = $Body
+    head  = $Head
+    base  = $Base
   }
+
+  return $Response
 }
 
 function Find-WinGetGitHubPullRequest {
@@ -669,34 +668,24 @@ function Find-WinGetGitHubPullRequest {
     The owner of the repository
   .PARAMETER RepoName
     The name of the repository
-  .PARAMETER State
-    The state of the pull requests to find (open, closed, all)
   #>
   [OutputType([pscustomobject[]])]
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The search query for finding pull requests')]
     [string]$Query,
-    [Parameter(HelpMessage = 'The owner of the repository')]
-    [string]$RepoOwner = $Script:DumplingsWinGetGitHubRepoDefaultOwner,
-    [Parameter(HelpMessage = 'The name of the repository')]
-    [string]$RepoName = $Script:DumplingsWinGetGitHubRepoDefaultName,
-    [Parameter(HelpMessage = 'The state of the pull requests to find (open, closed, all)')]
-    [ValidateSet('open', 'closed', 'all')]
-    [string]$State = 'open'
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName
   )
 
-  process {
-    # Build the search query
-    $SearchQuery = "repo:${RepoOwner}/${RepoName} is:pr ${Query}"
-    if ($State -ne 'all') {
-      $SearchQuery += " is:${State}"
-    }
+  # Build the search query
+  $SearchQuery = "repo:${RepoOwner}/${RepoName} is:pr ${Query}"
 
-    # Search for pull requests
-    $Response = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=$([Uri]::EscapeDataString($SearchQuery))"
+  # Search for pull requests
+  $Response = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=$([Uri]::EscapeDataString($SearchQuery))"
 
-    return $Response.items
-  }
+  return $Response
 }
 
 Export-ModuleMember -Function '*' -Variable 'DumplingsWinGetGitHubRepoDefaultOwner', 'DumplingsWinGetGitHubRepoDefaultName', 'DumplingsWinGetGitHubRepoDefaultBranch', 'DumplingsWinGetGitHubRepoDefaultRootPath'
