@@ -31,64 +31,6 @@ filter NoWhitespace {
   [string]$_ -replace '\s+', '-'
 }
 
-$ToNatural = { [regex]::Replace($_, '\d+', { $args[0].Value.PadLeft(20) }) }
-
-function Get-WinGetLocalRepoPath {
-  <#
-  .SYNOPSIS
-    Get the location of the local winget-pkgs repo
-  .PARAMETER RepoName
-    The name of the upstream repo
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, HelpMessage = 'The name of the upstream repo')]
-    [string]$RepoName = 'winget-pkgs'
-  )
-
-  if ((Test-Path -Path 'Variable:\DumplingsPreference') -and -not [string]::IsNullOrWhiteSpace($Global:DumplingsPreference['LocalRepoPath']) -and (Test-Path -Path ($Path = Join-Path $Global:DumplingsPreference.LocalRepoPath 'manifests'))) {
-    return Resolve-Path -Path $Path
-  } elseif ((Test-Path -Path 'Env:\GITHUB_WORKSPACE') -and (Test-Path -Path ($Path = Join-Path $Env:GITHUB_WORKSPACE $RepoName 'manifests'))) {
-    return Resolve-Path -Path $Path
-  } elseif ((Test-Path -Path 'Variable:\DumplingsRoot') -and (Test-Path -Path ($Path = Join-Path $Global:DumplingsRoot '..' $RepoName 'manifests'))) {
-    return Resolve-Path -Path $Path
-  } elseif (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' '..' '..' '..' $RepoName 'manifests')) {
-    return Resolve-Path -Path $Path
-  } else {
-    throw 'Could not locate local winget-pkgs repo'
-  }
-}
-
-function Get-WinGetLocalPackageVersion {
-  <#
-  .SYNOPSIS
-    Get the versions of a package
-  .DESCRIPTION
-    Get the versions of a package from the winget-pkgs repo
-  .PARAMETER PackageIdentifier
-    The identifier of the package
-  .PARAMETER Root
-    The root path to the manifests folder of the winget-pkgs repo
-  #>
-  [OutputType([string[]])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The identifier of the package')]
-    [string]$PackageIdentifier,
-
-    [Parameter(Position = 1, HelpMessage = 'The root path to the manifests folder of the winget-pkgs repo')]
-    [string]$Root = (Get-WinGetLocalRepoPath)
-  )
-
-  process {
-    @(
-      Join-Path $Root $PackageIdentifier.ToLower().Chars(0) $PackageIdentifier.Replace('.', '\') '*' "${PackageIdentifier}.yaml" |
-        Get-ChildItem -File |
-        Split-Path -Parent | Split-Path -Leaf |
-        Sort-Object $Script:ToNatural -Culture $Script:Culture -Stable
-    )
-  }
-}
-
 function Move-KeysToInstallerLevel {
   param (
     [Parameter(Position = 0, Mandatory)]
@@ -518,7 +460,7 @@ function Update-WinGetInstallerManifestInstallers {
 function Set-WinGetInstallerManifestInstallers {
   <#
   .SYNOPSIS
-    Update the installers of the manifest
+    Replace the installers of the manifest
   .DESCRIPTION
     Iterate over the installer entries and update the matching installers using the provided installer entries
   .PARAMETER OldInstallers
