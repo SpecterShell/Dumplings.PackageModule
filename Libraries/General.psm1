@@ -354,7 +354,7 @@ function Split-Uri {
         $Components = $Components | ForEach-Object -Begin { $Result = $null } -Process { $Result = $_ -bor $Result } -End { $Result }
         return $Uri.GetComponents($Components, $Format)
       }
-      Default {
+      default {
         throw 'Invalid parameter set'
       }
     }
@@ -627,56 +627,6 @@ function Expand-InstallShield {
     & $ISxPath $Path | Out-Host
 
     return "$(Join-Path (Split-Path -Path $Path -Parent) (Split-Path -Path $Path -LeafBase))_u"
-  }
-}
-
-function Expand-Burn {
-  <#
-  .SYNOPSIS
-    Read the ProductCode property value of the WiX bundle file
-  .PARAMETER Path
-    The path to the WiX bundle file
-  .PARAMETER DarkPath
-    The path to the Windows Installer XML Toolset Decompiler tool
-  .LINK
-    https://github.com/wixtoolset/wix3
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the WiX bundle file')]
-    [string]$Path,
-
-    [Parameter(HelpMessage = 'The path to the Windows Installer XML Toolset Decompiler (Dark) tool')]
-    [string]$DarkPath
-  )
-
-  begin {
-    if ([string]::IsNullOrEmpty($DarkPath)) {
-      if (Test-Path -Path Env:\WIX) {
-        $DarkPath = Join-Path $Env:WIX 'bin' 'dark.exe' -Resolve
-      } elseif (Get-Command 'dark.exe' -ErrorAction SilentlyContinue) {
-        $DarkPath = (Get-Command 'dark.exe').Path
-      } else {
-        throw 'The Dark tool could not be found'
-      }
-    }
-    if (-not (Test-Path -Path $DarkPath)) {
-      throw 'The path to the dark tool specified is invalid'
-    }
-  }
-
-  process {
-    $Item = Get-Item -Path $Path -Force
-    if ($Item.Extension -ne '.exe') {
-      $Path = New-Item -Path "${Path}.exe" -ItemType HardLink -Value $Path -Force
-    } else {
-      $Path = $Item.FullName
-    }
-
-    $TempFolderPath = New-TempFolder
-    & $DarkPath -nologo -x $TempFolderPath $Path | Out-Host
-
-    return $TempFolderPath
   }
 }
 
@@ -1167,7 +1117,7 @@ function Read-MsiSummaryValue {
       'CharCount' { 16 }
       'AppName' { 18 }
       'Security' { 19 }
-      Default { throw 'No such property or property not supported' }
+      default { throw 'No such property or property not supported' }
     }
   }
 
@@ -1187,133 +1137,6 @@ function Read-MsiSummaryValue {
     [System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($WindowsInstaller) | Out-Null
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
-  }
-}
-
-function Read-ProductCodeFromBurn {
-  <#
-  .SYNOPSIS
-    Read the ProductCode property of the WiX bundle file
-  .PARAMETER Path
-    The path to the WiX bundle file
-  .PARAMETER DarkPath
-    The path to the Windows Installer XML Toolset Decompiler tool
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the WiX bundle file')]
-    [string]$Path,
-
-    [Parameter(HelpMessage = 'The path to the Windows Installer XML Toolset Decompiler (Dark) tool')]
-    [string]$DarkPath
-  )
-
-  process {
-    $FolderPath = Expand-Burn -Path $Path -DarkPath $DarkPath
-
-    $BootstrapperApplicationDataPath = Join-Path $FolderPath 'UX' 'BootstrapperApplicationData.xml'
-    $ManifestPath = Join-Path $FolderPath 'UX' 'manifest.xml'
-    if (Test-Path -Path $BootstrapperApplicationDataPath) {
-      $BootstrapperApplicationData = Get-Content -Path $BootstrapperApplicationDataPath -Raw | ConvertFrom-Xml
-      Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.Id
-    } elseif (Test-Path -Path $ManifestPath) {
-      # WiX v5+
-      Write-Host -Object 'The BootstrapperApplicationData file does not exist. Fallbacking to the manifest file'
-      $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Xml
-      if ($Manifest.BurnManifest.Registration.HasAttribute('Code')) {
-        # WiX v6+
-        Write-Output -InputObject $Manifest.BurnManifest.Registration.Code
-      } else {
-        Write-Output -InputObject $Manifest.BurnManifest.Registration.Id
-      }
-    } else {
-      throw 'The BootstrapperApplicationData and manifest files do not exist'
-    }
-
-    Remove-Item -Path $FolderPath -Recurse -Force
-  }
-}
-
-function Read-UpgradeCodeFromBurn {
-  <#
-  .SYNOPSIS
-    Read the UpgradeCode property of the WiX bundle file
-  .PARAMETER Path
-    The path to the WiX bundle file
-  .PARAMETER DarkPath
-    The path to the Windows Installer XML Toolset Decompiler tool
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the WiX bundle file')]
-    [string]$Path,
-
-    [Parameter(HelpMessage = 'The path to the Windows Installer XML Toolset Decompiler (Dark) tool')]
-    [string]$DarkPath
-  )
-
-  process {
-    $FolderPath = Expand-Burn -Path $Path -DarkPath $DarkPath
-
-    $BootstrapperApplicationDataPath = Join-Path $FolderPath 'UX' 'BootstrapperApplicationData.xml'
-    $ManifestPath = Join-Path $FolderPath 'UX' 'manifest.xml'
-    if (Test-Path -Path $BootstrapperApplicationDataPath) {
-      $BootstrapperApplicationData = Get-Content -Path $BootstrapperApplicationDataPath -Raw | ConvertFrom-Xml
-      Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.UpgradeCode
-    } elseif (Test-Path -Path $ManifestPath) {
-      # WiX v5+
-      Write-Host -Object 'The BootstrapperApplicationData file does not exist. Fallbacking to the manifest file'
-      $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Xml
-      if ($Manifest.BurnManifest.RelatedBundle.HasAttribute('Code')) {
-        # WiX v6+
-        Write-Output -InputObject $Manifest.BurnManifest.RelatedBundle.Code
-      } else {
-        Write-Output -InputObject $Manifest.BurnManifest.RelatedBundle.Id
-      }
-    } else {
-      throw 'The BootstrapperApplicationData and manifest files do not exist'
-    }
-
-    Remove-Item -Path $FolderPath -Recurse -Force
-  }
-}
-
-function Read-ProductNameFromBurn {
-  <#
-  .SYNOPSIS
-    Read the ProductName property of the WiX bundle file
-  .PARAMETER Path
-    The path to the WiX bundle file
-  .PARAMETER DarkPath
-    The path to the Windows Installer XML Toolset Decompiler tool
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the WiX bundle file')]
-    [string]$Path,
-
-    [Parameter(HelpMessage = 'The path to the Windows Installer XML Toolset Decompiler (Dark) tool')]
-    [string]$DarkPath
-  )
-
-  process {
-    $FolderPath = Expand-Burn -Path $Path -DarkPath $DarkPath
-
-    $BootstrapperApplicationDataPath = Join-Path $FolderPath 'UX' 'BootstrapperApplicationData.xml'
-    $ManifestPath = Join-Path $FolderPath 'UX' 'manifest.xml'
-    if (Test-Path -Path $BootstrapperApplicationDataPath) {
-      $BootstrapperApplicationData = Get-Content -Path $BootstrapperApplicationDataPath -Raw | ConvertFrom-Xml
-      Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.DisplayName
-    } elseif (Test-Path -Path $ManifestPath) {
-      # WiX v5+
-      Write-Host -Object 'The BootstrapperApplicationData file does not exist. Fallbacking to the manifest file'
-      $Manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Xml
-      Write-Output -InputObject $Manifest.BurnManifest.Registration.Arp.DisplayName
-    } else {
-      throw 'The BootstrapperApplicationData and manifest files do not exist'
-    }
-
-    Remove-Item -Path $FolderPath -Recurse -Force
   }
 }
 
