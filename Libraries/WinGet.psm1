@@ -156,7 +156,7 @@ function Send-WinGetManifest {
   # If the old manifests exist, make sure to use the same casing as the existing package identifier
   $PackageIdentifier = $OldManifests.Version.PackageIdentifier
   # Update the manifests
-  $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] | Convert-WinGetManifestsToYaml
+  $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -Logger $Task.Log | Convert-WinGetManifestsToYaml
   #endregion
 
   # Validate manifests using WinGet client

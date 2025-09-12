@@ -183,7 +183,10 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     [Parameter(HelpMessage = 'The installers that have updated for reference')]
     [System.Collections.IDictionary[]]$Installers = @(),
     [Parameter(HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
-    [System.Collections.IDictionary]$InstallerFiles
+    [System.Collections.IDictionary]$InstallerFiles,
+    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
   # Replace the whitespace in the installer URL with %20 to make it clickable
@@ -216,16 +219,16 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       # Skip downloading if the installer file was previously downloaded
       $InstallerPath = $Script:WinGetInstallerFiles[$OriginalInstallerUrl]
     } else {
-      # $Task.Log("Downloading $($Installer.InstallerUrl)", 'Verbose')
+      $Logger.Invoke("Downloading $($Installer.InstallerUrl)", 'Verbose')
       try {
         $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
       } catch {
-        # $Task.Log('Failed to download with the Delivery-Optimization User Agent. Try again with the WinINet User Agent...', 'Warning')
+        $Logger.Invoke('Failed to download with the Delivery-Optimization User Agent. Try again with the WinINet User Agent...', 'Warning')
         $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
       }
     }
 
-    # $Task.Log('Processing installer data...', 'Verbose')
+    $Logger.Invoke('Processing installer data...', 'Verbose')
 
     # Get installer SHA256
     $Installer.InstallerSha256 = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash
@@ -318,8 +321,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       if (-not [string]::IsNullOrWhiteSpace($SignatureSha256)) {
         $Installer.SignatureSha256 = $SignatureSha256
       } elseif ($Installer.Contains('SignatureSha256')) {
-        # $Task.Log('Failed to get SignatureSha256', 'Warning')
-        $Installer.Remove('SignatureSha256')
+        throw 'Failed to get SignatureSha256'
       }
 
       # PackageFamilyName
@@ -327,8 +329,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       if (-not [string]::IsNullOrWhiteSpace($PackageFamilyName)) {
         $Installer.PackageFamilyName = $PackageFamilyName
       } elseif ($Installer.Contains('PackageFamilyName')) {
-        # $Task.Log('Failed to get PackageFamilyName', 'Warning')
-        $Installer.Remove('PackageFamilyName')
+        throw 'Failed to get PackageFamilyName'
       }
     }
   }
@@ -358,14 +359,17 @@ function Update-WinGetInstallerManifestInstallers {
     [Parameter(Mandatory, HelpMessage = 'The installer entries to use for updating the installers')]
     [System.Collections.IDictionary[]]$InstallerEntries,
     [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
-    [System.Collections.IDictionary]$InstallerFiles
+    [System.Collections.IDictionary]$InstallerFiles,
+    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
   $iteration = 0
   $Installers = @()
   foreach ($OldInstaller in $OldInstallers) {
     $iteration += 1
-    # $Task.Log("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
+    $Logger.Invoke("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
 
     # Apply inputs
     $MatchingInstallerEntry = $null
@@ -437,12 +441,12 @@ function Update-WinGetInstallerManifestInstallers {
           $null = Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType installer).properties.Installers.items.properties.$Key -WarningAction Stop
           $Installer.$Key = $MatchingInstallerEntry.$Key
         } catch {
-          # $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
+          $Logger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
         }
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -Logger $Logger
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -474,14 +478,17 @@ function Set-WinGetInstallerManifestInstallers {
     [Parameter(Mandatory, HelpMessage = 'The installer entries to use for updating the installers')]
     [System.Collections.IDictionary[]]$InstallerEntries,
     [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
-    [System.Collections.IDictionary]$InstallerFiles
+    [System.Collections.IDictionary]$InstallerFiles,
+    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
   $iteration = 0
   $Installers = @()
   foreach ($InstallerEntry in $InstallerEntries) {
     $iteration += 1
-    # $Task.Log("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
+    $Logger.Invoke("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
 
     # Find matching installer
     $MatchingInstaller = $null
@@ -540,12 +547,12 @@ function Set-WinGetInstallerManifestInstallers {
           $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType installer).properties.Installers.items.properties.$Key -WarningAction Stop
           $Installer.$Key = $InstallerEntry.$Key
         } catch {
-          # $Task.Log("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
+          $Logger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
         }
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -Logger $Logger
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -614,7 +621,10 @@ function Update-WinGetInstallerManifest {
     [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
     [System.Collections.IDictionary]$InstallerFiles,
     [Parameter(HelpMessage = 'Replace the installers rather than updating them')]
-    [switch]$Replace = $false
+    [switch]$Replace = $false,
+    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
   # Deep copy the old installer manifest
@@ -630,9 +640,9 @@ function Update-WinGetInstallerManifest {
   Move-KeysToInstallerLevel -Manifest $InstallerManifest -Installers $InstallerManifest.Installers -Property $InstallerSchema.definitions.Installer.properties.Keys.Where({ $_ -cin $InstallerSchema.properties.Keys })
   # Update installer entries
   if (-not $Replace) {
-    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles
+    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger
   } else {
-    $InstallerManifest.Installers = Set-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles
+    $InstallerManifest.Installers = Set-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger
   }
   # Move Installer Level Keys to Manifest Level
   $InstallerSchema = Get-WinGetManifestSchema -ManifestType installer
@@ -656,7 +666,10 @@ function Update-WinGetLocaleManifest {
     [Parameter(HelpMessage = 'The locale entries to use for updating the locale manifests')]
     [System.Collections.IDictionary[]]$LocaleEntries = @(),
     [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the locale manifest')]
-    [string]$PackageVersion
+    [string]$PackageVersion,
+    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
   $LocaleManifests = @()
@@ -695,10 +708,10 @@ function Update-WinGetLocaleManifest {
             if (Test-YamlObject -InputObject $LocaleEntry.Value -Schema (Get-WinGetManifestSchema -ManifestType locale).properties[$LocaleEntry.Key] -WarningAction Stop) {
               $LocaleManifest[$LocaleEntry.Key] = $LocaleEntry.Value
             } else {
-              # $Task.Log("The locale entry `"$($LocaleEntry.Key)`" has an invalid value and thus discarded", 'Warning')
+              $Logger.Invoke("The locale entry `"$($LocaleEntry.Key)`" has an invalid value and thus discarded", 'Warning')
             }
           } catch {
-            # $Task.Log("The locale entry `"$($LocaleEntry.Key)`" has an invalid value and thus discarded: ${_}", 'Warning')
+            $Logger.Invoke("The locale entry `"$($LocaleEntry.Key)`" has an invalid value and thus discarded: ${_}", 'Warning')
           }
         }
       }
@@ -760,12 +773,15 @@ function Update-WinGetManifests {
     [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
     [System.Collections.IDictionary]$InstallerFiles = @(),
     [Parameter(HelpMessage = 'Replace the installers rather than updating them')]
-    [switch]$ReplaceInstallers = $false
+    [switch]$ReplaceInstallers = $false,
+    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
   return [ordered]@{
-    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion -InstallerFiles $InstallerFiles -Replace:$ReplaceInstallers
-    Locale    = Update-WinGetLocaleManifest -OldLocaleManifests $LocaleManifests -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion
+    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion -InstallerFiles $InstallerFiles -Replace:$ReplaceInstallers -Logger $Logger
+    Locale    = Update-WinGetLocaleManifest -OldLocaleManifests $LocaleManifests -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -Logger $Logger
     Version   = Update-WinGetVersionManifest -OldVersionManifest $VersionManifest -PackageVersion $PackageVersion
   }
 }
