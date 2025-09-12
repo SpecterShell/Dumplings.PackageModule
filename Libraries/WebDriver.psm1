@@ -4,35 +4,34 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 # Force stop on error
 $ErrorActionPreference = 'Stop'
 
-function Get-WebDriverAssemblyPath {
+function Get-Assembly {
   <#
   .SYNOPSIS
-    Get the path of the WebDriver assembly
+    Get the WebDriver.dll assembly
   #>
   [OutputType([string])]
   param ()
 
   if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'WebDriver.dll')) {
-    return (Resolve-Path -Path $Path).Path
+    return (Get-Item -Path $Path -Force).FullName
   } else {
-    throw 'The WebDriver assembly could not be found'
+    throw 'The WebDriver.dll assembly could not be found'
   }
 }
 
-function Initialize-WebDriver {
+function Import-Assembly {
   <#
   .SYNOPSIS
-    Initialize the WebDriver module
+    Load the WebDriver.dll assembly
   #>
 
-  # Check if the WebDriver assembly is already loaded to prevent double loading
+  # Check if the assembly is already loaded to prevent double loading
   if (-not ([System.Management.Automation.PSTypeName]'OpenQA.Selenium.WebDriver').Type) {
-    Add-Type -Path (Get-WebDriverAssemblyPath)
+    Add-Type -Path (Get-Assembly)
   }
 }
-#endregion
 
-Initialize-WebDriver
+Import-Assembly
 
 #region Edge Driver
 [OpenQA.Selenium.Edge.EdgeDriver]$EdgeDriver = $null
@@ -215,4 +214,4 @@ $ExecutionContext.SessionState.Module.OnRemove += {
   Stop-FirefoxDriver -ErrorAction Continue
 }
 
-Export-ModuleMember -Function *
+Export-ModuleMember -Function New-EdgeDriver, Get-EdgeDriver, Stop-EdgeDriver, New-FirefoxDriver, Get-FirefoxDriver, Stop-FirefoxDriver
