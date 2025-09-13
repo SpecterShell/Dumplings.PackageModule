@@ -13,12 +13,6 @@ $WinGetBackupUserAgent = 'winget-cli WindowsPackageManager/1.7.10661 DesktopAppI
 $WinGetTempInstallerFiles = [ordered]@{}
 $WinGetInstallerFiles = [ordered]@{}
 
-class WinGetManifestRaw {
-  [string]$Version
-  [string]$Installer
-  [System.Collections.Generic.IDictionary[string, string]]$Locale
-}
-
 filter UniqueItems {
   [string]$($_.Split(',').Trim() | Select-Object -Unique)
 }
@@ -889,7 +883,7 @@ function Convert-WinGetManifestsToYaml {
   )
 
   process {
-    $LocaleManifestContent = [System.Collections.Generic.OrderedDictionary[string, string]]::new()
+    $LocaleManifestContent = [System.Collections.Specialized.OrderedDictionary]::new()
     $Manifests.Locale | ForEach-Object -Process { $LocaleManifestContent[$_.PackageLocale] = Convert-WinGetManifestContentToYaml -Manifest $_ -SchemaUri (Get-WinGetManifestSchemaUrl -ManifestType ($_.ManifestType -ceq 'defaultLocale' ? 'defaultLocale' : 'locale')) }
 
     [ordered]@{

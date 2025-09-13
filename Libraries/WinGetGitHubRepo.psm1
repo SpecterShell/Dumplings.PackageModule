@@ -10,12 +10,6 @@ $Culture = 'en-US'
 # The scriptblock for sorting natural numbers
 $ToNatural = { [regex]::Replace($_, '\d+', { $args[0].Value.PadLeft(20) }) }
 
-class WinGetManifestRaw {
-  [string]$Version
-  [string]$Installer
-  [System.Collections.Generic.IDictionary[string, string]]$Locale
-}
-
 function Get-WinGetGitHubPackagePath {
   <#
   .SYNOPSIS
@@ -269,7 +263,7 @@ function Read-WinGetGitHubManifests {
   .PARAMETER Path
     The path to the folder containing the manifests
   #>
-  [OutputType([WinGetManifestRaw])]
+  [OutputType([System.Collections.Specialized.OrderedDictionary])]
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The package identifier of the manifest')]
     [string]$PackageIdentifier,
@@ -326,14 +320,14 @@ function Read-WinGetGitHubManifests {
   elseif ($InstallerManifestItem.Count -eq 1) { $InstallerManifestContent = $InstallerManifestItem[0].object.text }
 
   # Process optional locale manifests. The number of locale manifests can be zero or more.
-  $LocaleManifestContent = [System.Collections.Generic.OrderedDictionary[string, string]]::new($ManifestItems.Count)
+  $LocaleManifestContent = [ordered]@{}
   $ManifestItems | ForEach-Object -Process {
     if ($_.name -match "^$([regex]::Escape($PackageIdentifier))\.locale\.(.+)\.yaml$") {
       $LocaleManifestContent[$Matches[1]] = $_.object.text
     }
   }
 
-  return [WinGetManifestRaw]@{
+  return [ordered]@{
     Version   = $VersionManifestContent
     Installer = $InstallerManifestContent
     Locale    = $LocaleManifestContent
@@ -461,7 +455,7 @@ function Add-WinGetGitHubManifests {
     [Parameter(ParameterSetName = 'Path', Mandatory, HelpMessage = 'The path to the folder containing the manifests')]
     [string]$Path,
     [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The manifest(s) to add')]
-    [WinGetManifestRaw[]]$Manifest,
+    [System.Collections.IDictionary[]]$Manifest,
     [Parameter(Mandatory, HelpMessage = 'The message of the commit')]
     [ValidateNotNullOrWhiteSpace()]
     [string]$CommitMessage
