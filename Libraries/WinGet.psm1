@@ -31,7 +31,7 @@ function Get-WinGetLocalRepoPath {
   } elseif (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' '..' '..' '..' $RepoName $RootPath)) {
     return Resolve-Path -Path $Path
   } else {
-    throw 'Could not locate local winget-pkgs repo'
+    return
   }
 }
 
