@@ -118,7 +118,7 @@ function Send-WinGetManifest {
     try { $null = Test-YamlObject -InputObject $NewPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier -WarningAction Stop } catch { throw "The PackageIdentifier `"${NewPackageIdentifier}`" is invalid: ${_}" }
     [string]$NewPackageVersion = $Task.CurrentState.Contains('RealVersion') ? $Task.CurrentState.RealVersion : $Task.CurrentState.Version
     try { $null = Test-YamlObject -InputObject $NewPackageVersion -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageVersion -WarningAction Stop } catch { throw "The PackageVersion `"${NewPackageVersion}`" is invalid: ${_}" }
-    $RefPackageVersion = Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | Select-Object -Last 1
+    $RefPackageVersion = ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath)) | Select-Object -Last 1
     if (-not $RefPackageVersion) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
 
     $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName
