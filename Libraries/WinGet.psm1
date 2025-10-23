@@ -127,7 +127,7 @@ function Send-WinGetManifest {
       $Task.CurrentState.Installer | ForEach-Object -Process { $_.ReleaseDate = $_.Contains('ReleaseDate') ? $_ -is [datetime] -or $_ -is [System.DateTimeOffset] ? $_.ToUniversalTime().ToString('yyyy-MM-dd') : ($_ | Get-Date -Format 'yyyy-MM-dd') : $ReleaseDate }
     }
     # Read the manifests
-    $RefManifestsObject = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath 'manifests' | Convert-WinGetManifestsFromYaml
+    $RefManifestsObject = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | Convert-WinGetManifestsFromYaml
     # Update the manifests
     $NewManifestsObject = Update-WinGetManifests -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -VersionManifest $RefManifestsObject.Version -InstallerManifest $RefManifestsObject.Installer -LocaleManifests $RefManifestsObject.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -Logger $Task.Log
     $NewManifests = $NewManifestsObject | Convert-WinGetManifestsToYaml
@@ -150,7 +150,7 @@ function Send-WinGetManifest {
     $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch
 
     # Upload new manifests
-    $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath 'manifests' -Manifest $NewManifests -CommitMessage $NewCommitName
+    $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath $RootPath -Manifest $NewManifests -CommitMessage $NewCommitName
 
     #region Remove old manifests
     # Remove old manifests, if
@@ -167,7 +167,7 @@ function Send-WinGetManifest {
       if ($RefPackageVersion -cne $NewPackageVersion) {
         $Task.Log("Removing the manifests of the last version ${RefPackageVersion}: ${RemoveLastVersionReason}", 'Info')
         $CommitMessage = "Remove version: ${RefPackageIdentifier} version ${RefPackageVersion}"
-        $NewCommitSha = Remove-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewCommitSha -RootPath 'manifests' -CommitMessage $CommitMessage
+        $NewCommitSha = Remove-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewCommitSha -RootPath $RootPath -CommitMessage $CommitMessage
       } else {
         $Task.Log("Overriding the manifests of the last version ${RefPackageVersion}: ${RemoveLastVersionReason}", 'Info')
       }
