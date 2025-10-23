@@ -582,11 +582,6 @@ function Update-WinGetVersionManifest {
   # Deep copy the old version manifest
   $VersionManifest = $OldVersionManifest | Copy-Object
 
-  # Bump package version
-  $VersionManifest.PackageVersion = $PackageVersion
-  # Bump manifest version
-  $VersionManifest.ManifestVersion = $ManifestVersion
-
   return ConvertTo-SortedYamlObject -InputObject $VersionManifest -Schema (Get-WinGetManifestSchema -ManifestType version) -Culture $Script:Culture
 }
 
@@ -623,11 +618,6 @@ function Update-WinGetInstallerManifest {
 
   # Deep copy the old installer manifest
   $InstallerManifest = $OldInstallerManifest | Copy-Object
-
-  # Bump package version
-  $InstallerManifest.PackageVersion = $PackageVersion
-  # Bump manifest version
-  $InstallerManifest.ManifestVersion = $ManifestVersion
 
   # Move Manifest Level Keys to installer Level
   $InstallerSchema = Get-WinGetManifestSchema -ManifestType installer
@@ -672,12 +662,13 @@ function Update-WinGetLocaleManifest {
   foreach ($OldLocaleManifest in $OldLocaleManifests) {
     $LocaleManifest = $OldLocaleManifest | Copy-Object
 
-    # Bump package version
-    $LocaleManifest.PackageVersion = $PackageVersion
-    # Bump manifest version
-    $LocaleManifest.ManifestVersion = $ManifestVersion
     # Clean up volatile fields
     if ($LocaleManifest.Contains('ReleaseNotes')) { $LocaleManifest.Remove('ReleaseNotes') }
+    # Update Copyright
+    if ($LocaleManifest.Contains('Copyright')) {
+      $Match = [regex]::Matches($LocaleManifest.Copyright, '20\d{2}')
+      if ($Match.Count -gt 0) { $LocaleManifest.Copyright = $LocaleManifest.Copyright.Remove($Match[-1].Index, $Match[-1].Length).Insert($Match[-1].Index, (Get-Date).Year.ToString()) }
+    }
 
     # Apply inputs
     if ($LocaleEntries) {
@@ -697,6 +688,8 @@ function Update-WinGetLocaleManifest {
         } elseif ($null -ceq $LocaleEntry.Value) {
           # If the value is null, remove the key from the locale manifest
           $LocaleManifest.Remove($LocaleEntry.Key)
+        } elseif ($LocaleEntry.Value -is [scriptblock]) {
+          $LocaleManifest[$LocaleEntry.Key] = $LocaleManifest[$LocaleEntry.Key] | ForEach-Object -Process $LocaleEntry.Value
         } else {
           try {
             if (Test-YamlObject -InputObject $LocaleEntry.Value -Schema (Get-WinGetManifestSchema -ManifestType locale).properties[$LocaleEntry.Key] -WarningAction Stop) {
@@ -729,12 +722,87 @@ function Update-WinGetLocaleManifest {
   return $LocaleManifests
 }
 
+function Update-WinGetManifestPackageVersion {
+  <#
+  .SYNOPSIS
+    Update the package version in the manifests
+  .DESCRIPTION
+    Update the package version in the installer, locale and version manifests
+  .PARAMETER Manifest
+    The manifests to update
+  .PARAMETER PackageVersion
+    The package version to use for updating the manifests
+  #>
+  [OutputType([System.Collections.Specialized.OrderedDictionary])]
+  param (
+    [Parameter(ValueFromPipeline, Position = 0, Mandatory, HelpMessage = 'The manifests to update')]
+    [System.Collections.IDictionary]$Manifest,
+    [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the manifests')]
+    [string]$PackageVersion
+  )
+
+  process {
+    $Manifest.PackageVersion = $PackageVersion
+    return $Manifest
+  }
+}
+
+function Update-WinGetManifestVersion {
+  <#
+  .SYNOPSIS
+    Update the manifest version in the manifests
+  .DESCRIPTION
+    Update the manifest version in the installer, locale and version manifests
+  .PARAMETER Manifest
+    The manifests to update
+  .PARAMETER ManifestVersion
+    The manifest version to use for updating the manifests
+  #>
+  param (
+    [Parameter(ValueFromPipeline, Position = 0, Mandatory, HelpMessage = 'The manifests to update')]
+    [System.Collections.IDictionary]$Manifest,
+    [Parameter(HelpMessage = 'The manifest version to use for updating the manifests')]
+    [string]$ManifestVersion = $ManifestVersion
+  )
+
+  process {
+    $Manifest.ManifestVersion = $ManifestVersion
+    return $Manifest
+  }
+}
+
+function Update-WinGetManifestPackageIdentifier {
+  <#
+  .SYNOPSIS
+    Update the package identifier in the manifests
+  .DESCRIPTION
+    Update the package identifier in the installer, locale and version manifests
+  .PARAMETER Manifest
+    The manifests to update
+  .PARAMETER PackageIdentifier
+    The package identifier to use for updating the manifests
+  #>
+  param (
+    [Parameter(ValueFromPipeline, Position = 0, Mandatory, HelpMessage = 'The manifests to update')]
+    [System.Collections.IDictionary]$Manifest,
+    [Parameter(Mandatory, HelpMessage = 'The package identifier to use for updating the manifests')]
+    [string]$PackageIdentifier
+  )
+
+  process {
+    $Manifest.PackageIdentifier = $PackageIdentifier
+    return $Manifest
+  }
+}
+
 function Update-WinGetManifests {
   <#
   .SYNOPSIS
     Update WinGet package manifests
   .DESCRIPTION
     Update WinGet package manifests using the provided installer and locale entries
+  .PARAMETER NewPackageIdentifier
+    The new package identifier of the manifests
   .PARAMETER PackageVersion
     The package version of the manifest
   .PARAMETER VersionManifest
@@ -752,6 +820,8 @@ function Update-WinGetManifests {
   #>
   [OutputType([System.Collections.Specialized.OrderedDictionary])]
   param (
+    [Parameter(HelpMessage = 'The new package identifier of the manifests')]
+    [string]$NewPackageIdentifier,
     [Parameter(Mandatory, HelpMessage = 'The package version of the manifest')]
     [string]$PackageVersion,
     [Parameter(Mandatory, HelpMessage = 'The version manifest to update')]
@@ -774,9 +844,9 @@ function Update-WinGetManifests {
   )
 
   return [ordered]@{
-    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion -InstallerFiles $InstallerFiles -Replace:$ReplaceInstallers -Logger $Logger
-    Locale    = Update-WinGetLocaleManifest -OldLocaleManifests $LocaleManifests -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -Logger $Logger
-    Version   = Update-WinGetVersionManifest -OldVersionManifest $VersionManifest -PackageVersion $PackageVersion
+    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion -InstallerFiles $InstallerFiles -Replace:$ReplaceInstallers -Logger $Logger | Update-WinGetManifestPackageVersion -PackageVersion $PackageVersion | Update-WinGetManifestVersion | Update-WinGetManifestPackageIdentifier -PackageIdentifier $NewPackageIdentifier
+    Locale    = Update-WinGetLocaleManifest -OldLocaleManifests $LocaleManifests -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -Logger $Logger | Update-WinGetManifestPackageVersion -PackageVersion $PackageVersion | Update-WinGetManifestVersion | Update-WinGetManifestPackageIdentifier -PackageIdentifier $NewPackageIdentifier
+    Version   = Update-WinGetVersionManifest -OldVersionManifest $VersionManifest -PackageVersion $PackageVersion | Update-WinGetManifestPackageVersion -PackageVersion $PackageVersion | Update-WinGetManifestVersion | Update-WinGetManifestPackageIdentifier -PackageIdentifier $NewPackageIdentifier
   }
 }
 

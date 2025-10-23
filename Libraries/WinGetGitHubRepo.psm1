@@ -666,20 +666,42 @@ function Find-WinGetGitHubPullRequest {
   [OutputType([pscustomobject[]])]
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The search query for finding pull requests')]
-    [string]$Query,
+    [string]$Query
+  )
+
+  return (Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=$([Uri]::EscapeDataString($Query))")
+}
+
+function Close-WinGetGitHubPullRequest {
+  <#
+  .SYNOPSIS
+    Close a pull request in a GitHub repository
+  .PARAMETER PullRequestNumber
+    The number of the pull request to close
+  .PARAMETER RepoOwner
+    The owner of the repository
+  .PARAMETER RepoName
+    The name of the repository
+  #>
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The number of the pull request to close')]
+    [int]$PullRequestNumber,
     [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
     [string]$RepoOwner,
     [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
     [string]$RepoName
   )
 
-  # Build the search query
-  $SearchQuery = "repo:${RepoOwner}/${RepoName} is:pr ${Query}"
+  return (Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}" -Method Patch -Body @{ state = 'closed' })
+}
 
-  # Search for pull requests
-  $Response = Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=$([Uri]::EscapeDataString($SearchQuery))"
+function Get-WinGetGitHubApiTokenUser {
+  <#
+  .SYNOPSIS
+    Get the user information of the provided GitHub API token
+  #>
 
-  return $Response
+  return (Invoke-GitHubApi -Uri 'https://api.github.com/user')
 }
 
 Export-ModuleMember -Function '*' -Variable 'DumplingsWinGetGitHubRepoDefaultOwner', 'DumplingsWinGetGitHubRepoDefaultName', 'DumplingsWinGetGitHubRepoDefaultBranch', 'DumplingsWinGetGitHubRepoDefaultRootPath'

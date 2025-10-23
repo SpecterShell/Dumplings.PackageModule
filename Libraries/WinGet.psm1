@@ -49,6 +49,8 @@ function Test-WinGetManifest {
   }
 }
 
+$GitHubActionsBotUsername = $null
+
 function Send-WinGetManifest {
   <#
   .SYNOPSIS
@@ -69,144 +71,124 @@ function Send-WinGetManifest {
     $Task
   )
 
-  #region Parameters for repo
-  # Parameters for repo
-  $UpstreamRepoOwner = $Global:DumplingsPreference['WinGetUpstreamRepoOwner'] ?? 'microsoft'
-  $UpstreamRepoName = $Global:DumplingsPreference['WinGetUpstreamRepoName'] ?? 'winget-pkgs'
-  $UpstreamRepoBranch = $Global:DumplingsPreference['WinGetUpstreamRepoBranch'] ?? 'master'
+  process {
+    #region Parameters
+    [string]$UpstreamRepoOwner = $Task.Config['WinGetUpstreamRepoOwner'] ?? $Global:DumplingsPreference['WinGetUpstreamRepoOwner'] ?? 'microsoft'
+    [string]$UpstreamRepoName = $Task.Config['WinGetUpstreamRepoName'] ?? $Global:DumplingsPreference['WinGetUpstreamRepoName'] ?? 'winget-pkgs'
+    [string]$UpstreamRepoBranch = $Task.Config['WinGetUpstreamRepoBranch'] ?? $Global:DumplingsPreference['WinGetUpstreamRepoBranch'] ?? 'master'
+    [string]$OriginRepoOwner = $Task.Config['WinGetOriginRepoOwner'] ?? $Global:DumplingsPreference['WinGetOriginRepoOwner'] ?? $Env:GITHUB_REPOSITORY_OWNER ?? (throw 'The WinGet origin repo owner is unset')
+    [string]$OriginRepoName = $Task.Config['WinGetOriginRepoName'] ?? $Global:DumplingsPreference['WinGetOriginRepoName'] ?? 'winget-pkgs'
+    [string]$OriginRepoBranch = $Task.Config['WinGetOriginRepoBranch'] ?? $Global:DumplingsPreference['WinGetOriginRepoBranch'] ?? 'master'
+    [string]$RootPath = $Task.Config['WinGetRootPath'] ?? $Global:DumplingsPreference['WinGetRootPath'] ?? 'manifests'
 
-  if ($Global:DumplingsPreference['WinGetOriginRepoOwner']) {
-    $OriginRepoOwner = $Global:DumplingsPreference.WinGetOriginRepoOwner
-  } elseif (Test-Path -Path 'Env:\GITHUB_ACTIONS') {
-    $OriginRepoOwner = $Env:GITHUB_REPOSITORY_OWNER
-  } else {
-    throw 'The WinGet origin repo owner is unset'
-  }
-  $OriginRepoName = $Global:DumplingsPreference['WinGetOriginRepoName'] ?? 'winget-pkgs'
-  $OriginRepoBranch = $Global:DumplingsPreference['WinGetOriginRepoBranch'] ?? 'master'
-  #endregion
+    [string]$RefPackageIdentifier = $Task.Config['WinGetPackageIdentifier'] ?? $Task.Config.WinGetIdentifier
+    try { $null = Test-YamlObject -InputObject $RefPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier -WarningAction Stop } catch { throw "The PackageIdentifier `"${RefPackageIdentifier}`" is invalid: ${_}" }
+    [string]$NewPackageIdentifier = $Task.Config['WinGetNewPackageIdentifier'] ?? $Task.Config['WinGetNewIdentifier'] ?? $RefPackageIdentifier
+    try { $null = Test-YamlObject -InputObject $NewPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier -WarningAction Stop } catch { throw "The PackageIdentifier `"${NewPackageIdentifier}`" is invalid: ${_}" }
+    [string]$NewPackageVersion = $Task.CurrentState.Contains('RealVersion') ? $Task.CurrentState.RealVersion : $Task.CurrentState.Version
+    try { $null = Test-YamlObject -InputObject $NewPackageVersion -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageVersion -WarningAction Stop } catch { throw "The PackageVersion `"${NewPackageVersion}`" is invalid: ${_}" }
+    $RefPackageVersion = Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | Select-Object -Last 1
+    if (-not $RefPackageVersion) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
 
-  #region Parameters for package
-  [string]$PackageIdentifier = $Task.Config.WinGetIdentifier
-  try {
-    $null = Test-YamlObject -InputObject $PackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier -WarningAction Stop
-  } catch {
-    throw "The PackageIdentifier `"${PackageIdentifier}`" is invalid: ${_}"
-  }
+    $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName
+    $NewBranchName = "${NewPackageIdentifier}-${NewPackageVersion}-$(Get-Random)" -replace '[\~,\^,\:,\\,\?,\@\{,\*,\[,\s]{1,}|[.lock|/|\.]*$|^\.{1,}|\.\.', ''
+    $NewCommitType = if ($NewPackageIdentifier -cne $RefPackageIdentifier) { 'New package' }
+    elseif ($Global:DumplingsPreference['NewCommitType']) { $Global:DumplingsPreference.NewCommitType }
+    else {
+      switch (([Versioning]$NewPackageVersion).CompareTo([Versioning]$RefPackageVersion)) {
+        { $_ -gt 0 } { 'New version'; continue }
+        0 { 'Update'; continue }
+        { $_ -lt 0 } { 'Add version'; continue }
+      }
+    }
+    $NewCommitName = "${NewCommitType}: ${NewPackageIdentifier} version ${NewPackageVersion}$($Task.CurrentState.Contains('RealVersion') ? " ($($Task.CurrentState.Version))" : '')"
 
-  [string]$PackageVersion = $Task.CurrentState.Contains('RealVersion') ? $Task.CurrentState.RealVersion : $Task.CurrentState.Version
-  try {
-    $null = Test-YamlObject -InputObject $PackageVersion -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageVersion -WarningAction Stop
-  } catch {
-    throw "The PackageVersion `"${PackageVersion}`" is invalid: ${_}"
-  }
+    if (Test-Path -Path 'Env:\GITHUB_ACTIONS') { $Script:GitHubActionsBotUsername ??= (Get-WinGetGitHubApiTokenUser).login }
+    #endregion
 
-  $PackageLastVersion = Get-WinGetGitHubPackageVersion -PackageIdentifier $PackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath 'manifests' | Select-Object -Last 1
-  if (-not $PackageLastVersion) { throw "Could not find any version of the package ${PackageIdentifier}" }
+    #region Check existing pull requests in the upstream repo
+    $PullRequests = $null
+    if ($Global:DumplingsPreference['Force']) { $Task.Log('Skip checking pull requests in the upstream repo in force mode', 'Info') }
+    elseif ($Global:DumplingsPreference['Dry']) { $Task.Log('Skip checking pull requests in the upstream repo in dry mode', 'Info') }
+    elseif ($Task.Config['IgnorePRCheck']) { $Task.Log('Skip checking pull requests in the upstream repo as the task is set to do so', 'Info') }
+    else {
+      $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
+      $PullRequests = Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/'))/${NewPackageVersion} in:path is:open"
+      if ($PullRequestsItems = $PullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($NewPackageVersion))(\s|$)" -and (-not (Test-Path -Path 'Env:\GITHUB_ACTIONS') -or $_.user.login -ne $Script:GitHubActionsBotUsername) }) {
+        throw "Found existing pull requests:`n$($PullRequestsItems | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
+      }
+    }
+    #endregion
 
-  $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $PackageIdentifier $PackageVersion) -ItemType Directory -Force).FullName
-  #endregion
+    #region Generate manifests
+    # Map the release date to the installer entries
+    if ($Task.CurrentState['ReleaseTime']) {
+      $ReleaseDate = $Task.CurrentState.ReleaseTime -is [datetime] -or $Task.CurrentState.ReleaseTime -is [System.DateTimeOffset] ? $Task.CurrentState.ReleaseTime.ToUniversalTime().ToString('yyyy-MM-dd') : ($Task.CurrentState.ReleaseTime | Get-Date -Format 'yyyy-MM-dd')
+      $Task.CurrentState.Installer | ForEach-Object -Process { $_.ReleaseDate = $_.Contains('ReleaseDate') ? $_ -is [datetime] -or $_ -is [System.DateTimeOffset] ? $_.ToUniversalTime().ToString('yyyy-MM-dd') : ($_ | Get-Date -Format 'yyyy-MM-dd') : $ReleaseDate }
+    }
+    # Read the manifests
+    $RefManifestsObject = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath 'manifests' | Convert-WinGetManifestsFromYaml
+    # Update the manifests
+    $NewManifestsObject = Update-WinGetManifests -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -VersionManifest $RefManifestsObject.Version -InstallerManifest $RefManifestsObject.Installer -LocaleManifests $RefManifestsObject.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -Logger $Task.Log
+    $NewManifests = $NewManifestsObject | Convert-WinGetManifestsToYaml
+    #endregion
 
-  #region Parameters for publishing
-  $NewBranchName = "${PackageIdentifier}-${PackageVersion}-$(Get-Random)" -replace '[\~,\^,\:,\\,\?,\@\{,\*,\[,\s]{1,}|[.lock|/|\.]*$|^\.{1,}|\.\.', ''
-  $NewCommitType = if ($Global:DumplingsPreference['NewCommitType']) {
-    $Global:DumplingsPreference.NewCommitType
-  } else {
-    switch (([Versioning]$PackageVersion).CompareTo([Versioning]$PackageLastVersion)) {
-      { $_ -gt 0 } { 'New version'; continue }
-      0 { 'Update'; continue }
-      { $_ -lt 0 } { 'Add version'; continue }
+    # Validate manifests using WinGet client
+    $null = $NewManifests | Add-WinGetLocalManifests -PackageIdentifier $NewPackageIdentifier -Path $NewManifestsPath
+    Test-WinGetManifest -Path $NewManifestsPath
+
+    # Do not upload manifests in dry mode
+    if ($Global:DumplingsPreference['Dry']) {
+      $Task.Log('Running in dry mode. Exiting...', 'Info')
+      return
+    }
+
+    # Create a new branch in the origin repo
+    # The new branch is based on the default branch of the origin repo instead of the one of the upstream repo
+    # This is to mitigate the occasional and weird issue of "ref not found" when creating a branch based on the upstream default branch
+    # The origin repo should be synced as early as possible to avoid conflicts with other commits
+    $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch
+
+    # Upload new manifests
+    $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath 'manifests' -Manifest $NewManifests -CommitMessage $NewCommitName
+
+    #region Remove old manifests
+    # Remove old manifests, if
+    # 1. The task is configured to remove the last version, or
+    # 2. No installer URL is changed compared with the last state while the version is updated
+    $RemoveLastVersionReason = $null
+    if ($Task.Config.Contains('RemoveLastVersion')) {
+      if ($Task.Config.RemoveLastVersion) { $RemoveLastVersionReason = 'This task is configured to remove the last version' }
+      # If RemoveLastVersion is set to 'false', do not remove the last version
+    } elseif (-not $Task.Status.Contains('New') -and ($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and (Compare-Object -ReferenceObject $RefManifestsObject -DifferenceObject $NewManifestsObject -Property { $_.Installer.Installers.InstallerUrl } -ExcludeDifferent -IncludeEqual)) {
+      $RemoveLastVersionReason = 'At least one of the installer URLs is unchanged compared with the old manifests while the version is updated'
+    }
+    if ($RemoveLastVersionReason) {
+      if ($RefPackageVersion -cne $NewPackageVersion) {
+        $Task.Log("Removing the manifests of the last version ${RefPackageVersion}: ${RemoveLastVersionReason}", 'Info')
+        $CommitMessage = "Remove version: ${RefPackageIdentifier} version ${RefPackageVersion}"
+        $NewCommitSha = Remove-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewCommitSha -RootPath 'manifests' -CommitMessage $CommitMessage
+      } else {
+        $Task.Log("Overriding the manifests of the last version ${RefPackageVersion}: ${RemoveLastVersionReason}", 'Info')
+      }
+    }
+    #endregion
+
+    # Create a pull request in the upstream repo
+    $NewPullRequestBody = (Test-Path -Path 'Env:\GITHUB_ACTIONS') ? `
+      "Automated by [🥟 ${Env:GITHUB_REPOSITORY_OWNER}/Dumplings](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings) in workflow run [#${Env:GITHUB_RUN_NUMBER}](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings/actions/runs/${Env:GITHUB_RUN_ID})." : `
+      "Created by [🥟 Dumplings](https://github.com/${OriginRepoOwner}/Dumplings)."
+    $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
+    $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
+
+    # Close the old pull requests created by the bot user
+    if ($PullRequests) {
+      $PullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($NewPackageVersion))(\s|$)" -and $_.user.login -eq $Script:GitHubActionsBotUsername } | ForEach-Object -Process {
+        Close-WinGetGitHubPullRequest -PullRequestNumber $_.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
+        $Task.Log("Closed old pull request: $($_.title) - $($_.html_url)", 'Info')
+      }
     }
   }
-  $NewCommitName = "${NewCommitType}: ${PackageIdentifier} version ${PackageVersion}"
-  if ($Task.CurrentState.Contains('RealVersion')) { $NewCommitName += " ($($Task.CurrentState.Version))" }
-  #endregion
-
-  #region Check existing pull requests in the upstream repo
-  if ($Global:DumplingsPreference['Force']) {
-    $Task.Log('Skip checking pull requests in the upstream repo in force mode', 'Info')
-  } elseif ($Global:DumplingsPreference['Dry']) {
-    $Task.Log('Skip checking pull requests in the upstream repo in dry mode', 'Info')
-  } elseif ($Task.Config['IgnorePRCheck']) {
-    $Task.Log('Skip checking pull requests in the upstream repo as the task is set to do so', 'Info')
-  } elseif (-not $Task.Status.Contains('New') -and $Task.LastState.Contains('RealVersion') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and ($Task.LastState.RealVersion -ceq $Task.CurrentState.RealVersion)) {
-    $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
-    $OldPullRequests = Find-WinGetGitHubPullRequest -Query "$($PackageIdentifier.Replace('.', '/'))/$($Task.CurrentState.RealVersion) in:path" -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
-    if ($OldPullRequestsItems = $OldPullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($PackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($Task.CurrentState.RealVersion))(\s|$)" -and $_.title -match "(\s|\(|^)$([regex]::Escape($Task.CurrentState.Version))(\s|\)|$)" }) {
-      throw "Found existing pull requests:`n$($OldPullRequestsItems | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
-    }
-  } else {
-    $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
-    $OldPullRequests = Find-WinGetGitHubPullRequest -Query "$($PackageIdentifier.Replace('.', '/'))/${PackageVersion} in:path" -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
-    if ($OldPullRequestsItems = $OldPullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($PackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($PackageVersion))(\s|$)" }) {
-      throw "Found existing pull requests:`n$($OldPullRequestsItems | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
-    }
-  }
-  #endregion
-
-  #region Generate manifests
-  # Map the release date to the installer entries
-  if ($Task.CurrentState['ReleaseTime']) {
-    $ReleaseDate = $Task.CurrentState.ReleaseTime -is [datetime] -or $Task.CurrentState.ReleaseTime -is [System.DateTimeOffset] ? $Task.CurrentState.ReleaseTime.ToUniversalTime().ToString('yyyy-MM-dd') : ($Task.CurrentState.ReleaseTime | Get-Date -Format 'yyyy-MM-dd')
-    $Task.CurrentState.Installer | ForEach-Object -Process { if (-not $_.Contains('ReleaseDate')) { $_.ReleaseDate = $ReleaseDate } }
-  }
-
-  # Read the old manifests
-  $OldManifests = Read-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $PackageLastVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath 'manifests' | Convert-WinGetManifestsFromYaml
-  # If the old manifests exist, make sure to use the same casing as the existing package identifier
-  $PackageIdentifier = $OldManifests.Version.PackageIdentifier
-  # Update the manifests
-  $NewManifests = Update-WinGetManifests -PackageVersion $PackageVersion -VersionManifest $OldManifests.Version -InstallerManifest $OldManifests.Installer -LocaleManifests $OldManifests.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -Logger $Task.Log | Convert-WinGetManifestsToYaml
-  #endregion
-
-  # Validate manifests using WinGet client
-  $null = $NewManifests | Add-WinGetLocalManifests -PackageIdentifier $PackageIdentifier -Path $NewManifestsPath
-  Test-WinGetManifest -Path $NewManifestsPath
-
-  # Do not upload manifests in dry mode
-  if ($Global:DumplingsPreference['Dry']) {
-    $Task.Log('Running in dry mode. Exiting...', 'Info')
-    return
-  }
-
-  # Create a new branch in the origin repo
-  # The new branch is based on the default branch of the origin repo instead of the one of the upstream repo
-  # This is to mitigate the occasional and weird issue of "ref not found" when creating a branch based on the upstream default branch
-  # The origin repo should be synced as early as possible to avoid conflicts with other commits
-  $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch
-
-  # Upload new manifests
-  $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath 'manifests' -Manifest $NewManifests -CommitMessage $NewCommitName
-
-  #region Remove old manifests
-  # Remove old manifests, if
-  # 1. The task is configured to remove the last version, or
-  # 2. No installer URL is changed compared with the last state while the version is updated
-  $RemoveLastVersionReason = $null
-  if ($Task.Config.Contains('RemoveLastVersion')) {
-    if ($Task.Config.RemoveLastVersion) {
-      $RemoveLastVersionReason = 'This task is configured to remove the last version'
-    }
-  } elseif (-not $Task.Status.Contains('New') -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and -not (Compare-Object -ReferenceObject $Task.LastState -DifferenceObject $Task.CurrentState -Property { $_.Installer.InstallerUrl })) {
-    $RemoveLastVersionReason = 'No installer URL is changed compared with the last state while the version is updated'
-  }
-  if ($RemoveLastVersionReason) {
-    if ($PackageLastVersion -cne $PackageVersion) {
-      $Task.Log("Removing the manifests of the last version ${PackageLastVersion}: ${RemoveLastVersionReason}", 'Info')
-      $CommitMessage = "Remove version: ${PackageIdentifier} version ${PackageLastVersion}"
-      $NewCommitSha = Remove-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $PackageLastVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewCommitSha -RootPath 'manifests' -CommitMessage $CommitMessage
-    } else {
-      $Task.Log("Overriding the manifests of the last version ${PackageLastVersion}: ${RemoveLastVersionReason}", 'Info')
-    }
-  }
-  #endregion
-
-  # Create a pull request in the upstream repo
-  $NewPullRequestBody = (Test-Path -Path 'Env:\GITHUB_ACTIONS') ? `
-    "Automated by [🥟 ${Env:GITHUB_REPOSITORY_OWNER}/Dumplings](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings) in workflow run [#${Env:GITHUB_RUN_NUMBER}](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings/actions/runs/${Env:GITHUB_RUN_ID})." : `
-    "Created by [🥟 Dumplings](https://github.com/${OriginRepoOwner}/Dumplings)."
-  $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
-  $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 }
 
 Export-ModuleMember -Function '*'
