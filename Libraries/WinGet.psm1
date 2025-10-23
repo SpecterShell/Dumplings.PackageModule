@@ -5,6 +5,36 @@ $ErrorActionPreference = 'Stop'
 # Force stop on undefined variables or properties
 Set-StrictMode -Version 3
 
+function Get-WinGetLocalRepoPath {
+  <#
+  .SYNOPSIS
+    Get the location of local winget-pkgs repo
+  .PARAMETER RepoName
+    The name of the repo
+  .PARAMETER RootPath
+    The path to the folder containing the manifests
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, HelpMessage = 'The name of the repo')]
+    [string]$RepoName = 'winget-pkgs',
+    [Parameter(HelpMessage = 'The path to the folder containing the manifests')]
+    [string]$RootPath
+  )
+
+  if ((Test-Path -Path 'Variable:\DumplingsPreference') -and -not [string]::IsNullOrWhiteSpace($Global:DumplingsPreference['LocalRepoPath']) -and (Test-Path -Path ($Path = Join-Path $Global:DumplingsPreference.LocalRepoPath $RootPath))) {
+    return Resolve-Path -Path $Path
+  } elseif ((Test-Path -Path 'Env:\GITHUB_WORKSPACE') -and (Test-Path -Path ($Path = Join-Path $Env:GITHUB_WORKSPACE $RepoName $RootPath))) {
+    return Resolve-Path -Path $Path
+  } elseif ((Test-Path -Path 'Variable:\DumplingsRoot') -and (Test-Path -Path ($Path = Join-Path $Global:DumplingsRoot '..' $RepoName $RootPath))) {
+    return Resolve-Path -Path $Path
+  } elseif (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' '..' '..' '..' $RepoName $RootPath)) {
+    return Resolve-Path -Path $Path
+  } else {
+    throw 'Could not locate local winget-pkgs repo'
+  }
+}
+
 function Test-WinGetManifest {
   <#
   .SYNOPSIS
@@ -80,6 +110,7 @@ function Send-WinGetManifest {
     [string]$OriginRepoName = $Task.Config['WinGetOriginRepoName'] ?? $Global:DumplingsPreference['WinGetOriginRepoName'] ?? 'winget-pkgs'
     [string]$OriginRepoBranch = $Task.Config['WinGetOriginRepoBranch'] ?? $Global:DumplingsPreference['WinGetOriginRepoBranch'] ?? 'master'
     [string]$RootPath = $Task.Config['WinGetRootPath'] ?? $Global:DumplingsPreference['WinGetRootPath'] ?? 'manifests'
+    $LocalRepoPath = Get-WinGetLocalRepoPath -RepoName $OriginRepoName -RootPath $RootPath -ErrorAction 'SilentlyContinue'
 
     [string]$RefPackageIdentifier = $Task.Config['WinGetPackageIdentifier'] ?? $Task.Config.WinGetIdentifier
     try { $null = Test-YamlObject -InputObject $RefPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier -WarningAction Stop } catch { throw "The PackageIdentifier `"${RefPackageIdentifier}`" is invalid: ${_}" }
@@ -127,7 +158,12 @@ function Send-WinGetManifest {
       $Task.CurrentState.Installer | ForEach-Object -Process { $_.ReleaseDate = $_.Contains('ReleaseDate') ? $_ -is [datetime] -or $_ -is [System.DateTimeOffset] ? $_.ToUniversalTime().ToString('yyyy-MM-dd') : ($_ | Get-Date -Format 'yyyy-MM-dd') : $ReleaseDate }
     }
     # Read the manifests
-    $RefManifestsObject = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | Convert-WinGetManifestsFromYaml
+    if ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath)) {
+      $Task.Log("Reading existing manifests from local repo at $LocalRepoPath", 'Verbose')
+      $RefManifestsObject = Read-WinGetLocalManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RootPath $LocalRepoPath | Convert-WinGetManifestsFromYaml
+    } else {
+      $RefManifestsObject = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | Convert-WinGetManifestsFromYaml
+    }
     # Update the manifests
     $NewManifestsObject = Update-WinGetManifests -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -VersionManifest $RefManifestsObject.Version -InstallerManifest $RefManifestsObject.Installer -LocaleManifests $RefManifestsObject.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -Logger $Task.Log
     $NewManifests = $NewManifestsObject | Convert-WinGetManifestsToYaml
