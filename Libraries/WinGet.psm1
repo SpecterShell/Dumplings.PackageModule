@@ -158,7 +158,10 @@ function Send-WinGetManifest {
         $PullRequestsMessage += "`nPull requests created by other users:`n$($OtherPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
       }
       if ($PullRequests) {
-        if ($Global:DumplingsPreference['IgnorePRCheck'] -or $Task.Config['IgnorePRCheck']) {
+        if ($Global:DumplingsPreference['Force']) {
+          $PullRequestsMessage += "`nThe existing pull requests will be ignored in force mode"
+          $Task.Log($PullRequestsMessage, 'Warning')
+        } elseif ($Global:DumplingsPreference['IgnorePRCheck'] -or $Task.Config['IgnorePRCheck']) {
           $PullRequestsMessage += "`nThe existing pull requests will be ignored as configured"
           $Task.Log($PullRequestsMessage, 'Warning')
         } else {
