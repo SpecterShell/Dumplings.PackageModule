@@ -79,7 +79,7 @@ function Test-WinGetManifest {
   }
 }
 
-$GitHubActionsBotUsername = $null
+$GitHubTokenUsername = $null
 
 function Send-WinGetManifest {
   <#
@@ -123,8 +123,8 @@ function Send-WinGetManifest {
 
     $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName
     $NewBranchName = "${NewPackageIdentifier}-${NewPackageVersion}-$(Get-Random)" -replace '[\~,\^,\:,\\,\?,\@\{,\*,\[,\s]{1,}|[.lock|/|\.]*$|^\.{1,}|\.\.', ''
-    $NewCommitType = if ($NewPackageIdentifier -cne $RefPackageIdentifier) { 'New package' }
-    elseif ($Global:DumplingsPreference['NewCommitType']) { $Global:DumplingsPreference.NewCommitType }
+    $NewCommitType = if ($Global:DumplingsPreference['NewCommitType']) { $Global:DumplingsPreference.NewCommitType }
+    elseif ($NewPackageIdentifier -cne $RefPackageIdentifier) { 'New package' }
     else {
       switch (([Versioning]$NewPackageVersion).CompareTo([Versioning]$RefPackageVersion)) {
         { $_ -gt 0 } { 'New version'; continue }
@@ -134,19 +134,37 @@ function Send-WinGetManifest {
     }
     $NewCommitName = "${NewCommitType}: ${NewPackageIdentifier} version ${NewPackageVersion}$($Task.CurrentState.Contains('RealVersion') ? " ($($Task.CurrentState.Version))" : '')"
 
-    if (Test-Path -Path 'Env:\GITHUB_ACTIONS') { $Script:GitHubActionsBotUsername ??= (Get-WinGetGitHubApiTokenUser).login }
+    $Script:GitHubTokenUsername ??= (Get-WinGetGitHubApiTokenUser).login
     #endregion
 
     #region Check existing pull requests in the upstream repo
     $PullRequests = $null
-    if ($Global:DumplingsPreference['Force']) { $Task.Log('Skip checking pull requests in the upstream repo in force mode', 'Info') }
+    $SelfPullRequests = $null
+    $OtherPullRequests = $null
+    if ($Global:DumplingsPreference['SkipPRCheck'] -or $Task.Config['SkipPRCheck']) { $Task.Log('Skip checking pull requests in the upstream repo as configured', 'Info') }
     elseif ($Global:DumplingsPreference['Dry']) { $Task.Log('Skip checking pull requests in the upstream repo in dry mode', 'Info') }
-    elseif ($Task.Config['IgnorePRCheck']) { $Task.Log('Skip checking pull requests in the upstream repo as the task is set to do so', 'Info') }
     else {
       $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
-      $PullRequests = Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/'))/${NewPackageVersion} in:path is:open"
-      if ($PullRequestsItems = $PullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($NewPackageVersion))(\s|$)" -and (-not (Test-Path -Path 'Env:\GITHUB_ACTIONS') -or $_.user.login -ne $Script:GitHubActionsBotUsername) }) {
-        throw "Found existing pull requests:`n$($PullRequestsItems | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
+      try {
+        $PullRequests = (Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/'))/${NewPackageVersion} in:path is:open").items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($NewPackageVersion))(\s|$)" }
+      } catch {
+        $Task.Log("Failed to check existing pull requests in the upstream repo: ${_}", 'Warning')
+      }
+      $PullRequestsMessage = "Found existing pull requests in the upstream repo ${UpstreamRepoOwner}/${UpstreamRepoName}."
+      if ($Script:GitHubTokenUsername -and ($SelfPullRequests = $PullRequests | Where-Object -FilterScript { $_.user.login -eq $Script:GitHubTokenUsername })) {
+        $PullRequestsMessage += "`nPull requests created by the user (${Script:GitHubTokenUsername}):`n$($SelfPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
+      }
+      if ($OtherPullRequests = $PullRequests | Where-Object -FilterScript { -not ($Script:GitHubTokenUsername) -or $_.user.login -ne $Script:GitHubTokenUsername }) {
+        $PullRequestsMessage += "`nPull requests created by other users:`n$($OtherPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
+      }
+      if ($PullRequests) {
+        if ($Global:DumplingsPreference['IgnorePRCheck'] -or $Task.Config['IgnorePRCheck']) {
+          $PullRequestsMessage += "`nThe existing pull requests will be ignored as configured"
+          $Task.Log($PullRequestsMessage, 'Warning')
+        } else {
+          $PullRequestsMessage += "`nThe process will be terminated"
+          throw $PullRequestsMessage
+        }
       }
     }
     #endregion
@@ -218,8 +236,8 @@ function Send-WinGetManifest {
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 
     # Close the old pull requests created by the bot user
-    if ($PullRequests) {
-      $PullRequests.items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($NewPackageVersion))(\s|$)" -and $_.user.login -eq $Script:GitHubActionsBotUsername } | ForEach-Object -Process {
+    if ($SelfPullRequests -and -not ($Global:DumplingsPreference['KeepOldPRs'] -or $Task.Config['KeepOldPRs'])) {
+      $SelfPullRequests | ForEach-Object -Process {
         Close-WinGetGitHubPullRequest -PullRequestNumber $_.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
         $Task.Log("Closed old pull request: $($_.title) - $($_.html_url)", 'Info')
       }
