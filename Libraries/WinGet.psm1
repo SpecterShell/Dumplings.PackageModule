@@ -150,23 +150,26 @@ function Send-WinGetManifest {
       } catch {
         $Task.Log("Failed to check existing pull requests in the upstream repo: ${_}", 'Warning')
       }
-      $PullRequestsMessage = "Found existing pull requests in the upstream repo ${UpstreamRepoOwner}/${UpstreamRepoName}."
-      if ($Script:GitHubTokenUsername -and ($SelfPullRequests = $PullRequests | Where-Object -FilterScript { $_.user.login -eq $Script:GitHubTokenUsername })) {
-        $PullRequestsMessage += "`nPull requests created by the user (${Script:GitHubTokenUsername}):`n$($SelfPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
-      }
-      if ($OtherPullRequests = $PullRequests | Where-Object -FilterScript { -not ($Script:GitHubTokenUsername) -or $_.user.login -ne $Script:GitHubTokenUsername }) {
-        $PullRequestsMessage += "`nPull requests created by other users:`n$($OtherPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
-      }
       if ($PullRequests) {
+        $PullRequestsMessage = "Found existing pull requests in the upstream repo ${UpstreamRepoOwner}/${UpstreamRepoName}."
+        if ($Script:GitHubTokenUsername -and ($SelfPullRequests = $PullRequests | Where-Object -FilterScript { $_.user.login -eq $Script:GitHubTokenUsername })) {
+          $PullRequestsMessage += "`nPull requests created by the user (${Script:GitHubTokenUsername}):`n$($SelfPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
+        }
+        if ($OtherPullRequests = $PullRequests | Where-Object -FilterScript { -not ($Script:GitHubTokenUsername) -or $_.user.login -ne $Script:GitHubTokenUsername }) {
+          $PullRequestsMessage += "`nPull requests created by other users:`n$($OtherPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
+        }
         if ($Global:DumplingsPreference['Force']) {
           $PullRequestsMessage += "`nThe existing pull requests will be ignored in force mode"
           $Task.Log($PullRequestsMessage, 'Warning')
         } elseif ($Global:DumplingsPreference['IgnorePRCheck'] -or $Task.Config['IgnorePRCheck']) {
           $PullRequestsMessage += "`nThe existing pull requests will be ignored as configured"
           $Task.Log($PullRequestsMessage, 'Warning')
-        } else {
+        } elseif ($OtherPullRequests) {
           $PullRequestsMessage += "`nThe process will be terminated"
           throw $PullRequestsMessage
+        } else {
+          $PullRequestsMessage += "`nThe existing pull requests created by the user will be closed"
+          $Task.Log($PullRequestsMessage, 'Info')
         }
       }
     }
