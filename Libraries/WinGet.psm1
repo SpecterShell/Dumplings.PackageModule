@@ -220,7 +220,7 @@ function Send-WinGetManifest {
     if ($Task.Config.Contains('RemoveLastVersion')) {
       if ($Task.Config.RemoveLastVersion) { $RemoveLastVersionReason = 'This task is configured to remove the last version' }
       # If RemoveLastVersion is set to 'false', do not remove the last version
-    } elseif (-not $Task.Status.Contains('New') -and ($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($Task.LastState.Version -cne $Task.CurrentState.Version) -and (Compare-Object -ReferenceObject $RefManifestsObject -DifferenceObject $NewManifestsObject -Property { $_.Installer.Installers.InstallerUrl } -ExcludeDifferent -IncludeEqual)) {
+    } elseif (($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($RefPackageVersion -cne $NewPackageVersion) -and (Compare-Object -ReferenceObject $RefManifestsObject -DifferenceObject $NewManifestsObject -Property { $_.Installer.Installers.InstallerUrl } -ExcludeDifferent -IncludeEqual)) {
       $RemoveLastVersionReason = 'At least one of the installer URLs is unchanged compared with the old manifests while the version is updated'
     }
     if ($RemoveLastVersionReason) {
