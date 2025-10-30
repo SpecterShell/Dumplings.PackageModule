@@ -152,10 +152,10 @@ function Send-WinGetManifest {
       }
       if ($PullRequests) {
         $PullRequestsMessage = "Found existing pull requests in the upstream repo ${UpstreamRepoOwner}/${UpstreamRepoName}."
-        if ($Script:GitHubTokenUsername -and ($SelfPullRequests = $PullRequests | Where-Object -FilterScript { $_.user.login -eq $Script:GitHubTokenUsername })) {
+        if ($Script:GitHubTokenUsername -and ($SelfPullRequests = $PullRequests | Where-Object -FilterScript { $_.user.login -ceq $Script:GitHubTokenUsername })) {
           $PullRequestsMessage += "`nPull requests created by the user (${Script:GitHubTokenUsername}):`n$($SelfPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
         }
-        if ($OtherPullRequests = $PullRequests | Where-Object -FilterScript { -not ($Script:GitHubTokenUsername) -or $_.user.login -ne $Script:GitHubTokenUsername }) {
+        if ($OtherPullRequests = $PullRequests | Where-Object -FilterScript { -not ($Script:GitHubTokenUsername) -or $_.user.login -cne $Script:GitHubTokenUsername }) {
           $PullRequestsMessage += "`nPull requests created by other users:`n$($OtherPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
         }
         if ($Global:DumplingsPreference['Force']) {
