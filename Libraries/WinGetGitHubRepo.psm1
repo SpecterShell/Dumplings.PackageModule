@@ -695,6 +695,29 @@ function Close-WinGetGitHubPullRequest {
   return (Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}" -Method Patch -Body @{ state = 'closed' })
 }
 
+function Open-WinGetGitHubPullRequest {
+  <#
+  .SYNOPSIS
+    Open a pull request in a GitHub repository
+  .PARAMETER PullRequestNumber
+    The number of the pull request to open
+  .PARAMETER RepoOwner
+    The owner of the repository
+  .PARAMETER RepoName
+    The name of the repository
+  #>
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The number of the pull request to open')]
+    [int]$PullRequestNumber,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName
+  )
+
+  return (Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}" -Method Patch -Body @{ state = 'open' })
+}
+
 function Get-WinGetGitHubApiTokenUser {
   <#
   .SYNOPSIS
