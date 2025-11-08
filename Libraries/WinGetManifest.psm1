@@ -427,12 +427,12 @@ function Update-WinGetInstallerManifestInstallers {
       } elseif (-not $MatchingInstallerEntry.Contains('Query') -and $Key -cin @('InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope')) {
         # Skip the entries used for matching if Query is not present
         continue
-      } elseif ($Key -cnotin (Get-WinGetManifestSchema -ManifestType installer).definitions.Installer.properties.Keys) {
+      } elseif ($Key -cnotin (Get-WinGetManifestSchema -ManifestType 'installer').definitions.Installer.properties.Keys) {
         # Check if the key is a valid installer property
         throw "The installer entry has an invalid key: ${Key}"
       } else {
         try {
-          $null = Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType installer).properties.Installers.items.properties.$Key -WarningAction Stop
+          $null = Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType 'installer').properties.Installers.items.properties.$Key -WarningAction Stop
           $Installer.$Key = $MatchingInstallerEntry.$Key
         } catch {
           $Logger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
@@ -533,12 +533,12 @@ function Set-WinGetInstallerManifestInstallers {
       if ($Key -ceq 'Query') {
         # Skip the entries used for matching
         continue
-      } elseif ($Key -cnotin (Get-WinGetManifestSchema -ManifestType installer).definitions.Installer.properties.Keys) {
+      } elseif ($Key -cnotin (Get-WinGetManifestSchema -ManifestType 'installer').definitions.Installer.properties.Keys) {
         # Check if the key is a valid installer property
         throw "The installer entry has an invalid key: ${Key}"
       } else {
         try {
-          $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType installer).properties.Installers.items.properties.$Key -WarningAction Stop
+          $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType 'installer').properties.Installers.items.properties.$Key -WarningAction Stop
           $Installer.$Key = $InstallerEntry.$Key
         } catch {
           $Logger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
@@ -582,7 +582,7 @@ function Update-WinGetVersionManifest {
   # Deep copy the old version manifest
   $VersionManifest = $OldVersionManifest | Copy-Object
 
-  return ConvertTo-SortedYamlObject -InputObject $VersionManifest -Schema (Get-WinGetManifestSchema -ManifestType version) -Culture $Script:Culture
+  return ConvertTo-SortedYamlObject -InputObject $VersionManifest -Schema (Get-WinGetManifestSchema -ManifestType 'version') -Culture $Script:Culture
 }
 
 function Update-WinGetInstallerManifest {
@@ -620,7 +620,7 @@ function Update-WinGetInstallerManifest {
   $InstallerManifest = $OldInstallerManifest | Copy-Object
 
   # Move Manifest Level Keys to installer Level
-  $InstallerSchema = Get-WinGetManifestSchema -ManifestType installer
+  $InstallerSchema = Get-WinGetManifestSchema -ManifestType 'installer'
   Move-KeysToInstallerLevel -Manifest $InstallerManifest -Installers $InstallerManifest.Installers -Property $InstallerSchema.definitions.Installer.properties.Keys.Where({ $_ -cin $InstallerSchema.properties.Keys })
   # Update installer entries
   if (-not $Replace) {
@@ -629,7 +629,7 @@ function Update-WinGetInstallerManifest {
     $InstallerManifest.Installers = Set-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger
   }
   # Move Installer Level Keys to Manifest Level
-  $InstallerSchema = Get-WinGetManifestSchema -ManifestType installer
+  $InstallerSchema = Get-WinGetManifestSchema -ManifestType 'installer'
   Move-KeysToManifestLevel -Installers $InstallerManifest.Installers -Manifest $InstallerManifest -Property $InstallerSchema.definitions.Installer.properties.Keys.Where({ $_ -cin $InstallerSchema.properties.Keys })
 
   return ConvertTo-SortedYamlObject -InputObject $InstallerManifest -Schema $InstallerSchema -Culture $Script:Culture
@@ -676,15 +676,15 @@ function Update-WinGetLocaleManifest {
         if (-not $LocaleEntry.Contains('Key') -or -not $LocaleEntry.Contains('Value') -or [string]::IsNullOrWhiteSpace($LocaleEntry.Key)) {
           # Check if the locale entry contains the required properties
           throw 'The locale entry does not contain the required properties'
-        } elseif ($LocaleEntry.Key -cnotin (Get-WinGetManifestSchema -ManifestType locale).properties.Keys) {
-          # Check if the key property is a valid locale property
-          throw "The locale entry has an invalid key `"$($LocaleEntry.Key)`""
-        } elseif ($LocaleEntry.Contains('Locale') -and $LocaleEntry.Locale -notmatch (Get-WinGetManifestSchema -ManifestType locale).properties.PackageLocale.pattern) {
+        } elseif ($LocaleEntry.Contains('Locale') -and $LocaleEntry.Locale -notmatch (Get-WinGetManifestSchema -ManifestType $LocaleManifest.ManifestType).properties.PackageLocale.pattern) {
           # Check if the locale property is a valid locale
           throw "The locale entry has an invalid locale `"$($LocaleEntry.Locale)`" contains an invalid locale"
         } elseif ($LocaleEntry.Contains('Locale') -and $LocaleEntry.Locale -notcontains $LocaleManifest.PackageLocale) {
           # If the locale entry contains a locale property, only match the locale manifests with these locales
           continue
+        } elseif ($LocaleEntry.Key -cnotin (Get-WinGetManifestSchema -ManifestType $LocaleManifest.ManifestType).properties.Keys) {
+          # Check if the key property is a valid locale property
+          throw "The locale entry has an invalid key `"$($LocaleEntry.Key)`""
         } elseif ($null -ceq $LocaleEntry.Value) {
           # If the value is null, remove the key from the locale manifest
           $LocaleManifest.Remove($LocaleEntry.Key)
@@ -692,7 +692,7 @@ function Update-WinGetLocaleManifest {
           $LocaleManifest[$LocaleEntry.Key] = $LocaleManifest[$LocaleEntry.Key] | ForEach-Object -Process $LocaleEntry.Value
         } else {
           try {
-            if (Test-YamlObject -InputObject $LocaleEntry.Value -Schema (Get-WinGetManifestSchema -ManifestType locale).properties[$LocaleEntry.Key] -WarningAction Stop) {
+            if (Test-YamlObject -InputObject $LocaleEntry.Value -Schema (Get-WinGetManifestSchema -ManifestType $LocaleManifest.ManifestType).properties[$LocaleEntry.Key] -WarningAction Stop) {
               $LocaleManifest[$LocaleEntry.Key] = $LocaleEntry.Value
             } else {
               $Logger.Invoke("The locale entry `"$($LocaleEntry.Key)`" has an invalid value and thus discarded", 'Warning')
@@ -712,10 +712,8 @@ function Update-WinGetLocaleManifest {
         $LocaleManifest.Remove('Moniker')
       }
     }
-    # Remove ReleaseNotes if too long
-    if ($LocaleManifest.Contains('ReleaseNotes') -and $LocaleManifest.ReleaseNotes.Length -gt (Get-WinGetManifestSchema -ManifestType locale).properties.ReleaseNotes.maxLength) { $LocaleManifest.Remove('ReleaseNotes') }
 
-    $Schema = $LocaleManifest.ManifestType -ceq 'defaultLocale' ? (Get-WinGetManifestSchema -ManifestType defaultLocale) : (Get-WinGetManifestSchema -ManifestType locale)
+    $Schema = Get-WinGetManifestSchema -ManifestType $LocaleManifest.ManifestType
     $LocaleManifests += ConvertTo-SortedYamlObject -InputObject $LocaleManifest -Schema $Schema -Culture $Script:Culture
   }
 
@@ -889,20 +887,20 @@ function Convert-WinGetManifestsFromYaml {
       $SingletonManifest = $MainManifest
       # Parse version keys to version manifest
       $VersionManifest = [ordered]@{}
-      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType version).properties.Keys })) {
+      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType 'version').properties.Keys })) {
         $VersionManifest[$Key] = $SingletonManifest.$Key
       }
       $VersionManifest['DefaultLocale'] = $PackageLocale
       $VersionManifest['ManifestType'] = 'version'
       # Parse installer keys to installer manifest
       $InstallerManifest = [ordered]@{}
-      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType installer).properties.Keys })) {
+      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType 'installer').properties.Keys })) {
         $InstallerManifest[$Key] = $SingletonManifest.$Key
       }
       $InstallerManifest['ManifestType'] = 'installer'
       # Parse default locale keys to default locale manifest
       $DefaultLocaleManifest = [ordered]@{}
-      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType locale).properties.Keys })) {
+      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType 'defaultLocale').properties.Keys })) {
         $DefaultLocaleManifest[$Key] = $SingletonManifest.$Key
       }
       $DefaultLocaleManifest['ManifestType'] = 'defaultLocale'
