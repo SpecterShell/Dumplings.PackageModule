@@ -667,7 +667,10 @@ function Update-WinGetLocaleManifest {
     # Update Copyright
     if ($LocaleManifest.Contains('Copyright')) {
       $Match = [regex]::Matches($LocaleManifest.Copyright, '20\d{2}')
-      if ($Match.Count -gt 0) { $LocaleManifest.Copyright = $LocaleManifest.Copyright.Remove($Match[-1].Index, $Match[-1].Length).Insert($Match[-1].Index, (Get-Date).Year.ToString()) }
+      if ($Match.Count -gt 0) {
+        $LatestYear = $Match.Value | Sort-Object -Bottom 1
+        $Match.Where({ $_.Value -eq $LatestYear }).ForEach({ $LocaleManifest.Copyright = $LocaleManifest.Copyright.Remove($_.Index, $_.Length).Insert($_.Index, (Get-Date).Year.ToString()) })
+      }
     }
 
     # Apply inputs
