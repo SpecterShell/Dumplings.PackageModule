@@ -245,7 +245,14 @@ function Send-WinGetManifest {
     if ($SelfPullRequests -and -not ($Global:DumplingsPreference['KeepOldPRs'] -or $Task.Config['KeepOldPRs'])) {
       $SelfPullRequests | ForEach-Object -Process {
         Close-WinGetGitHubPullRequest -PullRequestNumber $_.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
-        $Task.Log("Closed old pull request: $($_.title) - $($_.html_url)", 'Info')
+        $Task.Log("Closed old pull request of the same version: $($_.title) - $($_.html_url)", 'Info')
+      }
+    }
+
+    if ($RemoveLastVersionReason -and $Script:GitHubTokenUsername -and ($SelfPackagePullRequests = (Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/')) in:path is:open author:${Script:GitHubTokenUsername}").items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" })) {
+      $SelfPackagePullRequests | ForEach-Object -Process {
+        Close-WinGetGitHubPullRequest -PullRequestNumber $_.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
+        $Task.Log("Closed old pull request of the same package: $($_.title) - $($_.html_url)", 'Info')
       }
     }
   }
