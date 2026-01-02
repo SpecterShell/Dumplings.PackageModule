@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 # Force stop on undefined variables or properties
 Set-StrictMode -Version 3
 
-$ManifestVersion = '1.10.0'
+$ManifestVersion = '1.12.0'
 $ManifestSchemaUrl = @{
   version       = "https://aka.ms/winget-manifest.version.${ManifestVersion}.schema.json"
   installer     = "https://aka.ms/winget-manifest.installer.${ManifestVersion}.schema.json"
