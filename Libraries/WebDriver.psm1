@@ -77,6 +77,9 @@ function New-EdgeDriver {
   # Run Edge in headless mode if specified
   if ($Headless) { $EdgeOptions.AddArgument('--headless=new') }
 
+  # Disable the "Chrome is being controlled by automated test software" infobar
+  $EdgeOptions.AddArgument('--disable-blink-features=AutomationControlled')
+
   # Block image content to speed up page loading and reduce resource consumption
   $EdgeOptions.AddUserProfilePreference('profile.managed_default_content_settings.images', 2)
 
@@ -176,6 +179,9 @@ function New-FirefoxDriver {
 
   # Resize the window to 1920x1080 to ensure the page is not rendered in mobile layout
   $FirefoxDriver.Manage().Window.Size = [System.Drawing.Size]::new(1920, 1080)
+
+  # Prevent detection of automation
+  $null = $FirefoxDriver.InstallAddOnFromDirectory((Join-Path $PSScriptRoot '..' 'Assets' 'webdriver-firefox-stealth' -Resolve), $true)
 
   return $FirefoxDriver
 }

@@ -1,0 +1,16 @@
+{
+  "manifest_version": 2,
+  "name": "webdriver-firefox-stealth",
+  "version": "1.0",
+  "content_scripts": [
+    {
+      "run_at": "document_start",
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "main.js"
+      ]
+    }
+  ]
+}

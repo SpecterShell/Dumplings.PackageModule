@@ -1,0 +1,1 @@
+delete window.navigator.wrappedJSObject.__proto__.webdriver;
