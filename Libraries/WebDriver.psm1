@@ -180,9 +180,6 @@ function New-FirefoxDriver {
   # Resize the window to 1920x1080 to ensure the page is not rendered in mobile layout
   $FirefoxDriver.Manage().Window.Size = [System.Drawing.Size]::new(1920, 1080)
 
-  # Prevent detection of automation
-  $null = $FirefoxDriver.InstallAddOnFromDirectory((Join-Path $PSScriptRoot '..' 'Assets' 'webdriver-firefox-stealth' -Resolve), $true)
-
   return $FirefoxDriver
 }
 
