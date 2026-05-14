@@ -351,7 +351,7 @@ function Get-BurnBootstrapperApplicationData {
     $Reader = (Get-BurnUXPayload @PSBoundParameters -Name 'BootstrapperApplicationData.xml').OpenText()
     try {
       $Reader.ReadToEnd() | ConvertFrom-Xml
-    } catch {
+    } finally {
       $Reader.Close()
     }
   }
