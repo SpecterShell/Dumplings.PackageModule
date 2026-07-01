@@ -371,7 +371,19 @@ function Read-ProductCodeFromBurn {
   )
 
   process {
-    return "{$((Get-BurnInfo -Path $Path).BundleCode)}"
+    try {
+      $BootstrapperApplicationData = Get-BurnBootstrapperApplicationData -Path $Path
+      Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.Id
+    } catch {
+      Write-Host -Object 'Failed to read the BootstrapperApplicationData file. Fallbacking to the manifest file'
+      $Manifest = Get-BurnManifest -Path $Path
+      if ($Manifest.BurnManifest.Registration.HasAttribute('Code')) {
+        # WiX v6+
+        Write-Output -InputObject $Manifest.BurnManifest.Registration.Code
+      } else {
+        Write-Output -InputObject $Manifest.BurnManifest.Registration.Id
+      }
+    }
   }
 }
 
