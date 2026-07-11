@@ -1,23 +1,11 @@
+# SPDX-License-Identifier: MIT
+# This module only bridges to the independently licensed InstallerParsers CLI.
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 # Force stop on error
 $ErrorActionPreference = 'Stop'
-
-if (-not (Get-Command -Name 'Invoke-InstallerBridgeCommand' -ErrorAction 'SilentlyContinue')) {
-  Import-Module (Join-Path $PSScriptRoot 'InstallerBridge.psm1') -Force
-}
-
-function Import-AdvancedInstallerMsiModule {
-  <#
-  .SYNOPSIS
-    Load the MSI helper module required to read embedded MSI metadata
-  #>
-
-  if (-not (Get-Command -Name 'Read-ProductVersionFromMsi' -ErrorAction 'SilentlyContinue')) {
-    Import-Module (Join-Path $PSScriptRoot 'MSI.psm1') -Force
-  }
-}
 
 function Resolve-AdvancedInstallerMatch {
   <#
@@ -46,19 +34,6 @@ function Resolve-AdvancedInstallerMatch {
   if ($ExactMatch) { return $ExactMatch[0] }
 
   return $Match[0]
-}
-
-function New-AdvancedInstallerTempFolder {
-  <#
-  .SYNOPSIS
-    Create a temporary folder for static Advanced Installer extraction
-  #>
-  [OutputType([string])]
-  param ()
-
-  $Path = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString('N'))
-  $null = New-Item -Path $Path -ItemType Directory -Force
-  return $Path
 }
 
 function Get-AdvancedInstallerInfo {
@@ -142,27 +117,31 @@ function Get-AdvancedInstallerMsiInfo {
   )
 
   process {
-    Import-AdvancedInstallerMsiModule
-
     $Installer = switch ($PSCmdlet.ParameterSetName) {
       'Path' { Get-AdvancedInstallerInfo -Path $Path }
       'Installer' { $Installer }
       default { throw 'Invalid parameter set.' }
     }
 
-    $ExpandedPath = New-AdvancedInstallerTempFolder
+    $ExpandedPath = New-TempFolder
 
     try {
       Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath | Out-Null
       $MsiFiles = @(Get-ChildItem -Path $ExpandedPath -Filter '*.msi' -Recurse -File)
       $MsiFile = Resolve-AdvancedInstallerMatch -Item $MsiFiles -Pattern $Name
+      $MsiInfo = Get-MsiInstallerInfo -Path $MsiFile.FullName
 
       return [pscustomobject]@{
-        Name           = $MsiFile.Name
-        Path           = $MsiFile.FullName
-        ProductVersion = $MsiFile.FullName | Read-ProductVersionFromMsi
-        ProductCode    = $MsiFile.FullName | Read-ProductCodeFromMsi
-        UpgradeCode    = $MsiFile.FullName | Read-UpgradeCodeFromMsi
+        Name                         = $MsiFile.Name
+        Path                         = $MsiFile.FullName
+        ProductVersion               = $MsiInfo.ProductVersion
+        ProductCode                  = $MsiInfo.ProductCode
+        UpgradeCode                  = $MsiInfo.UpgradeCode
+        InstallerBuilder             = $MsiInfo.InstallerBuilder
+        InstallLocationProperty      = $MsiInfo.InstallLocationProperty
+        InstallLocationSwitch        = $MsiInfo.InstallLocationSwitch
+        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
+        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
       }
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction 'Continue' -ProgressAction 'SilentlyContinue'

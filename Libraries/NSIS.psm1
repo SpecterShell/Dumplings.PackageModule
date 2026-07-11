@@ -1,12 +1,11 @@
+# SPDX-License-Identifier: MIT
+# This module only bridges to the independently licensed InstallerParsers CLI.
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 # Force stop on error
 $ErrorActionPreference = 'Stop'
-
-if (-not (Get-Command -Name 'Invoke-InstallerBridgeCommand' -ErrorAction 'SilentlyContinue')) {
-  Import-Module (Join-Path $PSScriptRoot 'InstallerBridge.psm1') -Force
-}
 
 function Get-NSISInfo {
   <#
@@ -26,6 +25,147 @@ function Get-NSISInfo {
       Path = (Get-Item -Path $Path -Force).FullName
     }
   }
+}
+
+function Get-ElectronBuilderNSISInfo {
+  <#
+  .SYNOPSIS
+    Get static electron-builder traits from a Nullsoft installer through the separate GPL parser module
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetElectronBuilderInfo' -Argument @{
+      Path = (Get-Item -Path $Path -Force).FullName
+    }
+  }
+}
+
+function Test-ElectronBuilder {
+  <#
+  .SYNOPSIS
+    Test whether a Nullsoft installer was built by electron-builder through the separate GPL parser module
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.TestElectronBuilder' -Argument @{
+      Path = (Get-Item -Path $Path -Force).FullName
+    }
+  }
+}
+
+function Get-NSISInstallerSwitchInfo {
+  <#
+  .SYNOPSIS
+    Extract command-line switch evidence from a Nullsoft installer through the separate GPL parser module
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetInstallerSwitchInfo' -Argument @{
+      Path = (Get-Item -Path $Path -Force).FullName
+    }
+  }
+}
+
+function ConvertFrom-ElectronBuilderUpdateFeed {
+  <#
+  .SYNOPSIS
+    Convert electron-builder latest.yml content into update feed metadata
+  .PARAMETER Content
+    The already-fetched electron-builder latest.yml feed string
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName, Mandatory, HelpMessage = 'The already-fetched electron-builder latest.yml feed string')]
+    [string]$Content
+  )
+
+  process {
+    if (-not (Get-Command -Name 'ConvertFrom-Yaml' -ErrorAction 'SilentlyContinue')) {
+      throw 'ConvertFrom-ElectronBuilderUpdateFeed requires ConvertFrom-Yaml to parse the provided feed content'
+    }
+
+    # Only parse the provided string. Some update endpoints need custom request
+    # headers or query parameters, so fetching remains the caller's responsibility.
+    $Feed = $Content | ConvertFrom-Yaml
+    if ($null -eq $Feed) { throw 'The electron-builder update feed is empty or invalid' }
+
+    $Files = @($Feed.files | ForEach-Object -Process {
+        [pscustomobject]@{
+          Url    = $_.url
+          Sha512 = $_.sha512
+          Size   = $_.size
+          BlockMapSize = $_.blockMapSize
+        }
+      })
+
+    [pscustomobject]@{
+      Version           = $Feed.version
+      Path              = $Feed.path
+      Sha512            = $Feed.sha512
+      Files             = $Files
+      ReleaseDate       = $Feed.releaseDate
+      StagingPercentage = $Feed.stagingPercentage
+    }
+  }
+}
+
+function ConvertFrom-ElectronBuilderLatestYaml {
+  <#
+  .SYNOPSIS
+    Convert electron-builder latest.yml content into update feed metadata
+  .PARAMETER Content
+    The already-fetched electron-builder latest.yml feed string
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName, Mandatory, HelpMessage = 'The already-fetched electron-builder latest.yml feed string')]
+    [string]$Content
+  )
+
+  process {
+    ConvertFrom-ElectronBuilderUpdateFeed -Content $Content
+  }
+}
+
+function Read-ProtocolsFromNSIS {
+  <#
+  .SYNOPSIS
+    Read literal URL protocol names written by an NSIS installer
+  #>
+  [OutputType([string[]])]
+  param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
+  process { (Get-NSISInfo -Path $Path).Protocols }
+}
+
+function Read-FileExtensionsFromNSIS {
+  <#
+  .SYNOPSIS
+    Read literal file extensions written by an NSIS installer
+  #>
+  [OutputType([string[]])]
+  param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
+  process { (Get-NSISInfo -Path $Path).FileExtensions }
 }
 
 function Read-ProductVersionFromNSIS {
@@ -108,4 +248,22 @@ function Read-ProductCodeFromNSIS {
   }
 }
 
-Export-ModuleMember -Function Get-NSISInfo, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS
+function Read-AdditionalInstallerSwitchesFromNSIS {
+  <#
+  .SYNOPSIS
+    Read non-default command-line switch candidates from a Nullsoft installer
+  .PARAMETER Path
+    The path to the NSIS installer
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path
+  )
+
+  process {
+    (Get-NSISInstallerSwitchInfo -Path $Path).AdditionalSwitches
+  }
+}
+
+Export-ModuleMember -Function Get-NSISInfo, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, ConvertFrom-ElectronBuilderUpdateFeed, ConvertFrom-ElectronBuilderLatestYaml, Read-ProtocolsFromNSIS, Read-FileExtensionsFromNSIS, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS

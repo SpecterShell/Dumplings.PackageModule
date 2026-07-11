@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: MIT
+# Diagnostic benchmark only. It records evidence and enforces no CI threshold.
+
+[CmdletBinding()]
+param (
+  [string]$NSISPath,
+  [string]$NSISBaselineModulePath,
+  [string]$ChromiumPath,
+  [string]$QtInstallerFrameworkPath,
+  [string]$Install4jPath,
+  [string]$OutputPath
+)
+
+$RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+
+function Invoke-InstallerParserBenchmark {
+  <#
+  .SYNOPSIS
+    Run one parser in an isolated PowerShell process and record time and peak working set
+  #>
+  param (
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$Expression
+  )
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+  $ResolvedPath = (Get-Item -LiteralPath $Path -Force).FullName
+  $ScriptText = @"
+`$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath '$($RepositoryRoot.Replace("'", "''"))'
+`$InstallerPath = '$($ResolvedPath.Replace("'", "''"))'
+$Expression | Out-Null
+"@
+  $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ScriptText))
+  $StandardOutput = Join-Path ([IO.Path]::GetTempPath()) "Dumplings-Benchmark-$([guid]::NewGuid().ToString('N')).out"
+  $StandardError = "$StandardOutput.err"
+  $Stopwatch = [Diagnostics.Stopwatch]::StartNew()
+  $Process = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList '-NoLogo', '-NoProfile', '-EncodedCommand', $EncodedCommand -WindowStyle Hidden -PassThru -RedirectStandardOutput $StandardOutput -RedirectStandardError $StandardError
+  $PeakWorkingSetBytes = 0L
+  while (-not $Process.HasExited) {
+    try { $Process.Refresh(); $PeakWorkingSetBytes = [Math]::Max($PeakWorkingSetBytes, $Process.WorkingSet64) } catch { }
+    Start-Sleep -Milliseconds 50
+  }
+  $Process.WaitForExit()
+  $Stopwatch.Stop()
+  try {
+    [pscustomobject]@{
+      Name                = $Name
+      Path                = $ResolvedPath
+      Length              = (Get-Item -LiteralPath $ResolvedPath).Length
+      ElapsedMilliseconds = $Stopwatch.ElapsedMilliseconds
+      PeakWorkingSetBytes = $PeakWorkingSetBytes
+      ExitCode            = $Process.ExitCode
+      Error               = if ($Process.ExitCode -ne 0) { Get-Content -LiteralPath $StandardError -Raw } else { $null }
+    }
+  } finally {
+    Remove-Item -LiteralPath $StandardOutput, $StandardError -Force -ErrorAction SilentlyContinue
+  }
+}
+
+$Results = @(
+  if ($NSISPath) {
+    if ($NSISBaselineModulePath -and (Test-Path -LiteralPath $NSISBaselineModulePath)) {
+      $BaselineModule = (Get-Item -LiteralPath $NSISBaselineModulePath -Force).FullName.Replace("'", "''")
+      Invoke-InstallerParserBenchmark -Name NSISBaseline -Path $NSISPath -Expression "if (-not `$env:windir) { `$env:windir = 'C:\Windows' }; Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module '$BaselineModule' -Force; Get-NSISInfo -Path `$InstallerPath"
+    }
+    Invoke-InstallerParserBenchmark -Name NSIS -Path $NSISPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\NSIS.psm1 -Force; Get-NSISInfo -Path `$InstallerPath"
+  }
+  if ($ChromiumPath) {
+    Invoke-InstallerParserBenchmark -Name Chromium -Path $ChromiumPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-ChromiumSetupInfo -Path `$InstallerPath"
+  }
+  if ($QtInstallerFrameworkPath) {
+    Invoke-InstallerParserBenchmark -Name QtInstallerFramework -Path $QtInstallerFrameworkPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-QtInstallerFrameworkInfo -Path `$InstallerPath"
+  }
+  if ($Install4jPath) {
+    Invoke-InstallerParserBenchmark -Name Install4j -Path $Install4jPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-Install4jInfo -Path `$InstallerPath"
+  }
+) | Where-Object { $null -ne $_ }
+
+$Report = [pscustomobject]@{
+  RecordedAt = [DateTimeOffset]::Now
+  PowerShell = $PSVersionTable.PSVersion.ToString()
+  Results    = $Results
+}
+if ($OutputPath) {
+  $Parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($OutputPath))
+  if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
+  $Report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutputPath -Encoding utf8NoBOM
+}
+$Report

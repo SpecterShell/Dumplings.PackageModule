@@ -1,8 +1,143 @@
+# SPDX-License-Identifier: MIT
+# Format sources: https://github.com/microsoft/msix-packaging
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 # Force stop on error
 $ErrorActionPreference = 'Stop'
+
+$Script:MSIXAllowedDependencyPackagePatterns = @(
+  'Microsoft.VCLibs.Desktop.14',
+  'Microsoft.VCLibs.14',
+  'Microsoft.WindowsAppRuntime.*.*',
+  'Microsoft.UI.Xaml.*.*'
+)
+
+function Get-MSIXZipArchive {
+  <#
+  .SYNOPSIS
+    Open the MSIX/AppX package ZIP archive
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([System.IO.Compression.ZipArchive])]
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
+}
+
+function Read-MSIXZipEntryText {
+  <#
+  .SYNOPSIS
+    Read a text entry from an opened ZIP archive
+  .PARAMETER Archive
+    The ZIP archive to inspect
+  .PARAMETER Name
+    The entry name to read
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The ZIP archive to inspect')]
+    [System.IO.Compression.ZipArchive]$Archive,
+
+    [Parameter(Mandatory, HelpMessage = 'The entry name to read')]
+    [string]$Name
+  )
+
+  $Entry = $Archive.GetEntry($Name)
+  if (-not $Entry) { return $null }
+
+  $Stream = $Entry.Open()
+  $Reader = [System.IO.StreamReader]::new($Stream)
+  try {
+    $Reader.ReadToEnd()
+  } finally {
+    $Reader.Dispose()
+    $Stream.Dispose()
+  }
+}
+
+function Get-MSIXManifestXmlList {
+  <#
+  .SYNOPSIS
+    Read package manifests from a direct MSIX/AppX package or bundle
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([xml[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process {
+    $Archive = Get-MSIXZipArchive -Path $Path
+
+    try {
+      $ManifestText = Read-MSIXZipEntryText -Archive $Archive -Name 'AppxManifest.xml'
+      if ($ManifestText) {
+        [xml]$ManifestText
+        return
+      }
+
+      $BundleManifestText = Read-MSIXZipEntryText -Archive $Archive -Name 'AppxMetadata/AppxBundleManifest.xml'
+      if ($BundleManifestText) { [xml]$BundleManifestText }
+
+      # Bundles store real package metadata in nested appx/msix payloads.
+      foreach ($Entry in $Archive.Entries | Where-Object { $_.FullName -match '\.(appx|msix)$' }) {
+        $EntryStream = $Entry.Open()
+        $SeekableContext = $null
+        try {
+          $SeekableContext = New-InstallerSeekableStream -SourceStream $EntryStream -MaximumBytes 4294967296
+          $NestedArchive = [System.IO.Compression.ZipArchive]::new($SeekableContext.Stream, [System.IO.Compression.ZipArchiveMode]::Read, $true)
+          try {
+            $NestedManifestText = Read-MSIXZipEntryText -Archive $NestedArchive -Name 'AppxManifest.xml'
+            if ($NestedManifestText) { [xml]$NestedManifestText }
+          } finally {
+            $NestedArchive.Dispose()
+          }
+        } finally {
+          if ($SeekableContext) { $SeekableContext.Dispose() }
+          $EntryStream.Dispose()
+        }
+      }
+    } finally {
+      $Archive.Dispose()
+    }
+  }
+}
+
+function Get-MSIXInstallerType {
+  <#
+  .SYNOPSIS
+    Get the WinGet installer type from an AppX/MSIX package extension
+  .PARAMETER Path
+    The package path or URI
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The package path or URI')]
+    [string]$Path
+  )
+
+  process {
+    $PathForExtension = if ([uri]::IsWellFormedUriString($Path, [System.UriKind]::Absolute)) { ([uri]$Path).AbsolutePath } else { $Path }
+    $Extension = [System.IO.Path]::GetExtension($PathForExtension).ToLowerInvariant()
+
+    switch ($Extension) {
+      '.appx' { 'appx'; break }
+      '.appxbundle' { 'appxbundle'; break }
+      '.msix' { 'msix'; break }
+      '.msixbundle' { 'msixbundle'; break }
+      default { throw "Unsupported AppX/MSIX installer extension: $Extension" }
+    }
+  }
+}
 
 function Get-MSIXManifest {
   <#
@@ -18,18 +153,15 @@ function Get-MSIXManifest {
   )
 
   process {
-    $ZipFile = [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
+    $ZipFile = Get-MSIXZipArchive -Path $Path
 
-    $ManifestEntry = $ZipFile.GetEntry('AppxManifest.xml') ?? $ZipFile.GetEntry('AppxMetadata/AppxBundleManifest.xml')
-    if (-not $ManifestEntry) { throw 'The AppxManifest.xml or AppxBundleManifest.xml file does not exist in the package' }
-
-    $ManifestStream = $ManifestEntry.Open()
-    $ManifestStreamReader = [System.IO.StreamReader]::new($ManifestStream)
-    Write-Output -InputObject ($ManifestStreamReader.ReadToEnd())
-    $ManifestStreamReader.Dispose()
-    $ManifestStream.Dispose()
-
-    $ZipFile.Dispose()
+    try {
+      $ManifestText = (Read-MSIXZipEntryText -Archive $ZipFile -Name 'AppxManifest.xml') ?? (Read-MSIXZipEntryText -Archive $ZipFile -Name 'AppxMetadata/AppxBundleManifest.xml')
+      if (-not $ManifestText) { throw 'The AppxManifest.xml or AppxBundleManifest.xml file does not exist in the package' }
+      Write-Output -InputObject $ManifestText
+    } finally {
+      $ZipFile.Dispose()
+    }
   }
 }
 
@@ -80,9 +212,7 @@ function Read-FamilyNameFromMSIX {
   )
 
   process {
-    $Manifest = Get-MSIXManifest @PSBoundParameters | ConvertFrom-Xml
-    $Identity = $Manifest.GetElementsByTagName('Identity')[0]
-    Write-Output -InputObject "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
+    (Get-MSIXInfo -Path $Path).PackageFamilyName
   }
 }
 
@@ -100,8 +230,7 @@ function Read-ProductVersionFromMSIX {
   )
 
   process {
-    $Manifest = Get-MSIXManifest @PSBoundParameters | ConvertFrom-Xml
-    Write-Output -InputObject $Manifest.GetElementsByTagName('Identity')[0].Version
+    (Get-MSIXInfo -Path $Path).Version
   }
 }
 
@@ -119,15 +248,480 @@ function Get-MSIXSignatureHash {
   )
 
   process {
-    $ZipFile = [System.IO.Compression.ZipFile]::OpenRead((Get-Item -Path $Path -Force).FullName)
+    $ZipFile = Get-MSIXZipArchive -Path $Path
 
-    $SignatureEntry = $ZipFile.GetEntry('AppxSignature.p7x')
-    if (-not $SignatureEntry) { throw 'The AppxSignature.p7x file does not exist in the package' }
+    try {
+      $SignatureEntry = $ZipFile.GetEntry('AppxSignature.p7x')
+      if (-not $SignatureEntry) { throw 'The AppxSignature.p7x file does not exist in the package' }
 
-    $SignatureStream = $SignatureEntry.Open()
-    Write-Output -InputObject ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($SignatureStream)) -replace '-', '')
-    $SignatureStream.Dispose()
-
-    $ZipFile.Dispose()
+      $SignatureStream = $SignatureEntry.Open()
+      try {
+        Write-Output -InputObject ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($SignatureStream)) -replace '-', '')
+      } finally {
+        $SignatureStream.Dispose()
+      }
+    } finally {
+      $ZipFile.Dispose()
+    }
   }
 }
+
+# Keep the manifest-field name available without duplicating the implementation.
+Set-Alias -Name 'Read-SignatureSha256FromMSIX' -Value 'Get-MSIXSignatureHash'
+
+
+function Test-MSIXAllowedDependencyPackage {
+  <#
+  .SYNOPSIS
+    Test whether an MSIX/AppX dependency package should be written to a WinGet manifest
+  .PARAMETER PackageIdentifier
+    The dependency package identity name
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The dependency package identity name')]
+    [string]$PackageIdentifier
+  )
+
+  process {
+    foreach ($Pattern in $Script:MSIXAllowedDependencyPackagePatterns) {
+      if ($PackageIdentifier -clike $Pattern) { return $true }
+    }
+
+    return $false
+  }
+}
+
+function Compare-MSIXDependencyMinimumVersion {
+  param (
+    [Parameter()]
+    [string]$Left,
+
+    [Parameter()]
+    [string]$Right
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Left)) { return -1 }
+  if ([string]::IsNullOrWhiteSpace($Right)) { return 1 }
+
+  try {
+    return ([version]$Left).CompareTo([version]$Right)
+  } catch {
+    return [string]::CompareOrdinal($Left, $Right)
+  }
+}
+
+function ConvertTo-MSIXManifestDependencyInfo {
+  <#
+  .SYNOPSIS
+    Filter MSIX/AppX package dependencies for WinGet manifest authoring
+  .DESCRIPTION
+    Include only framework dependencies accepted by the Dumplings MSIX/AppX workflow, and report unknown dependencies as warnings for manual review.
+  .PARAMETER PackageDependencies
+    Raw dependency entries read from AppxManifest.xml files
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'Raw dependency entries read from AppxManifest.xml files')]
+    [AllowEmptyCollection()]
+    [psobject[]]$PackageDependencies
+  )
+
+  $AllowedById = [ordered]@{}
+  $UnknownById = [ordered]@{}
+
+  foreach ($Dependency in $PackageDependencies) {
+    if ([string]::IsNullOrWhiteSpace($Dependency.PackageIdentifier)) { continue }
+
+    $PackageIdentifier = [string]$Dependency.PackageIdentifier
+    $MinimumVersion = [string]$Dependency.MinimumVersion
+    $Publisher = [string]$Dependency.Publisher
+    $Target = (Test-MSIXAllowedDependencyPackage -PackageIdentifier $PackageIdentifier) ? $AllowedById : $UnknownById
+
+    if (-not $Target.Contains($PackageIdentifier)) {
+      $Target[$PackageIdentifier] = [pscustomobject]@{
+        PackageIdentifier = $PackageIdentifier
+        MinimumVersion    = $MinimumVersion
+        Publisher         = $Publisher
+      }
+      continue
+    }
+
+    # Preserve the highest minimum version when bundles contain duplicate dependency entries.
+    if ((Compare-MSIXDependencyMinimumVersion -Left $MinimumVersion -Right $Target[$PackageIdentifier].MinimumVersion) -gt 0) {
+      $Target[$PackageIdentifier].MinimumVersion = $MinimumVersion
+    }
+    if ([string]::IsNullOrWhiteSpace($Target[$PackageIdentifier].Publisher) -and -not [string]::IsNullOrWhiteSpace($Publisher)) {
+      $Target[$PackageIdentifier].Publisher = $Publisher
+    }
+  }
+
+  $Allowed = @($AllowedById.Values | Sort-Object -Property PackageIdentifier | ForEach-Object -Process {
+      $Entry = [ordered]@{
+        PackageIdentifier = $_.PackageIdentifier
+      }
+      if (-not [string]::IsNullOrWhiteSpace($_.MinimumVersion)) { $Entry.MinimumVersion = $_.MinimumVersion }
+      [pscustomobject]$Entry
+    })
+
+  $Unknown = @($UnknownById.Values | Sort-Object -Property PackageIdentifier)
+  $Warnings = @($Unknown | ForEach-Object -Process {
+      "Unknown MSIX/AppX package dependency '$($_.PackageIdentifier)' was found and was not included in manifest Dependencies."
+    })
+
+  [pscustomobject]@{
+    Dependencies                = [pscustomobject]@{
+      PackageDependencies = $Allowed
+    }
+    UnknownPackageDependencies = $Unknown
+    Warnings                   = $Warnings
+  }
+}
+
+function ConvertTo-MSIXManifestAssociationInfo {
+  <#
+  .SYNOPSIS
+    Extract protocol and file-extension declarations from AppX/MSIX manifests
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][xml[]]$Manifest)
+
+  $Protocols = [System.Collections.Generic.List[object]]::new()
+  $FileExtensions = [System.Collections.Generic.List[object]]::new()
+  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $SeenProtocols = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $SeenExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+  foreach ($Item in $Manifest) {
+    foreach ($Extension in @($Item.GetElementsByTagName('*') | Where-Object { $_.LocalName -eq 'Extension' })) {
+      $Category = [string]$Extension.GetAttribute('Category')
+      if ($Category -eq 'windows.protocol') {
+        foreach ($ProtocolNode in @($Extension.SelectNodes('.//*[local-name()="Protocol"]'))) {
+          $Name = [string]$ProtocolNode.GetAttribute('Name')
+          if ($Name -notmatch '^[A-Za-z][A-Za-z0-9+.-]{0,254}$') {
+            if (-not [string]::IsNullOrWhiteSpace($Name)) { $Warnings.Add("Ignored non-literal MSIX protocol '$Name'.") }
+            continue
+          }
+          if (-not $SeenProtocols.Add($Name)) { continue }
+          $Protocols.Add([pscustomobject]@{
+              Protocol    = $Name.ToLowerInvariant()
+              Executable  = if ($Extension.HasAttribute('Executable')) { [string]$Extension.GetAttribute('Executable') } else { $null }
+              EntryPoint  = if ($Extension.HasAttribute('EntryPoint')) { [string]$Extension.GetAttribute('EntryPoint') } else { $null }
+              Source      = 'AppxManifest.xml windows.protocol extension'
+              Declaration = $ProtocolNode.OuterXml
+            })
+        }
+      } elseif ($Category -eq 'windows.fileTypeAssociation') {
+        foreach ($AssociationNode in @($Extension.SelectNodes('.//*[local-name()="FileTypeAssociation"]'))) {
+          $AssociationName = [string]$AssociationNode.GetAttribute('Name')
+          foreach ($FileTypeNode in @($AssociationNode.SelectNodes('.//*[local-name()="FileType"]'))) {
+            $ExtensionValue = ([string]$FileTypeNode.InnerText).Trim()
+            if ($ExtensionValue -notmatch '^\.[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$') {
+              if (-not [string]::IsNullOrWhiteSpace($ExtensionValue)) { $Warnings.Add("Ignored non-literal MSIX file extension '$ExtensionValue'.") }
+              continue
+            }
+            if (-not $SeenExtensions.Add($ExtensionValue)) { continue }
+            $FileExtensions.Add([pscustomobject]@{
+                FileExtension  = $ExtensionValue.TrimStart('.').ToLowerInvariant()
+                Extension      = $ExtensionValue.ToLowerInvariant()
+                AssociationName = $AssociationName
+                Executable      = if ($Extension.HasAttribute('Executable')) { [string]$Extension.GetAttribute('Executable') } else { $null }
+                EntryPoint      = if ($Extension.HasAttribute('EntryPoint')) { [string]$Extension.GetAttribute('EntryPoint') } else { $null }
+                Source          = 'AppxManifest.xml windows.fileTypeAssociation extension'
+                Declaration     = $AssociationNode.OuterXml
+              })
+          }
+        }
+      }
+    }
+  }
+
+  [pscustomobject]@{
+    Protocols                 = @($Protocols | Select-Object -ExpandProperty Protocol -Unique | Sort-Object)
+    FileExtensions            = @($FileExtensions | Select-Object -ExpandProperty FileExtension -Unique | Sort-Object)
+    ProtocolAssociations      = @($Protocols)
+    FileExtensionAssociations = @($FileExtensions)
+    Warnings                  = @($Warnings | Select-Object -Unique)
+  }
+}
+
+function Get-MSIXAssociationInfo {
+  <#
+  .SYNOPSIS
+    Read declared protocol and file-extension associations from an MSIX/AppX package
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  process { ConvertTo-MSIXManifestAssociationInfo -Manifest @(Get-MSIXManifestXmlList -Path $Path) }
+}
+
+
+function Get-MSIXInfo {
+  <#
+  .SYNOPSIS
+    Read WinGet manifest metadata from an MSIX/AppX package
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process {
+    $File = Get-Item -Path $Path -Force
+    $Manifests = @(Get-MSIXManifestXmlList -Path $File.FullName)
+    if ($Manifests.Count -eq 0) { throw 'No AppX/MSIX manifest could be read from the package' }
+
+    $Identity = $Manifests | ForEach-Object { $_.GetElementsByTagName('Identity')[0] } | Where-Object { $_ -and $_.Name -and $_.Publisher } | Select-Object -First 1
+    if (-not $Identity) { throw 'No package identity could be read from the AppX/MSIX manifest' }
+
+    $TargetDeviceFamilies = foreach ($Manifest in $Manifests) {
+      foreach ($Element in $Manifest.GetElementsByTagName('TargetDeviceFamily')) {
+        [pscustomobject]@{
+          Name       = [string]$Element.Name
+          MinVersion = [string]$Element.MinVersion
+        }
+      }
+    }
+
+    $PackageDependencies = foreach ($Manifest in $Manifests) {
+      foreach ($Element in $Manifest.GetElementsByTagName('PackageDependency')) {
+        [pscustomobject]@{
+          PackageIdentifier = [string]$Element.Name
+          MinimumVersion    = [string]$Element.MinVersion
+          Publisher         = [string]$Element.Publisher
+        }
+      }
+    }
+    $DependencyInfo = ConvertTo-MSIXManifestDependencyInfo -PackageDependencies @($PackageDependencies)
+    $AssociationInfo = ConvertTo-MSIXManifestAssociationInfo -Manifest $Manifests
+
+    $Capabilities = foreach ($Manifest in $Manifests) {
+      foreach ($Element in $Manifest.GetElementsByTagName('*')) {
+        if ($Element.LocalName -notin @('Capability', 'DeviceCapability')) { continue }
+        if ($Element.Prefix -eq 'rescap') { continue }
+        if (-not [string]::IsNullOrWhiteSpace($Element.Name)) { [string]$Element.Name }
+      }
+    }
+
+    $RestrictedCapabilities = foreach ($Manifest in $Manifests) {
+      foreach ($Element in $Manifest.GetElementsByTagName('*')) {
+        if ($Element.LocalName -ne 'Capability' -or $Element.Prefix -ne 'rescap') { continue }
+        if (-not [string]::IsNullOrWhiteSpace($Element.Name)) { [string]$Element.Name }
+      }
+    }
+
+    $DisplayName = ($Manifests | ForEach-Object { $_.GetElementsByTagName('DisplayName')[0] } | Where-Object { $_ } | Select-Object -First 1).'#text'
+    $PublisherDisplayName = ($Manifests | ForEach-Object { $_.GetElementsByTagName('PublisherDisplayName')[0] } | Where-Object { $_ } | Select-Object -First 1).'#text'
+    $MinimumOSVersion = ($TargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.MinVersion) } | Sort-Object -Property { [System.Version]$_.MinVersion } | Select-Object -First 1).MinVersion
+
+    [pscustomobject]@{
+      Path                    = $File.FullName
+      InstallerType           = Get-MSIXInstallerType -Path $File.FullName
+      Name                    = [string]$Identity.Name
+      Publisher               = [string]$Identity.Publisher
+      Version                 = [string]$Identity.Version
+      Architecture            = [string]$Identity.ProcessorArchitecture
+      DisplayName             = [string]$DisplayName
+      PublisherDisplayName    = [string]$PublisherDisplayName
+      PackageFamilyName       = "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
+      Platform                = @($TargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Name) } | Select-Object -ExpandProperty Name -Unique)
+      MinimumOSVersion        = $MinimumOSVersion
+      Dependencies               = $DependencyInfo.Dependencies
+      UnknownPackageDependencies = $DependencyInfo.UnknownPackageDependencies
+       Warnings                   = @($DependencyInfo.Warnings + $AssociationInfo.Warnings)
+       Protocols                  = $AssociationInfo.Protocols
+       FileExtensions             = $AssociationInfo.FileExtensions
+       RegistryAssociationInfo    = $AssociationInfo
+      Capabilities               = @($Capabilities | Sort-Object -Unique)
+      RestrictedCapabilities     = @($RestrictedCapabilities | Sort-Object -Unique)
+      SignatureSha256            = Read-SignatureSha256FromMSIX -Path $File.FullName
+      AppsAndFeaturesEntries     = @([pscustomobject]@{
+          DisplayName    = [string]$DisplayName
+          Publisher      = [string]$PublisherDisplayName
+          DisplayVersion = [string]$Identity.Version
+        })
+    }
+  }
+}
+
+function Read-ProtocolsFromMSIX {
+  <#
+  .SYNOPSIS
+    Read declared URL protocol names from an MSIX/AppX package
+  #>
+  [OutputType([string[]])]
+  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  process { (Get-MSIXAssociationInfo -Path $Path).Protocols }
+}
+
+function Read-FileExtensionsFromMSIX {
+  <#
+  .SYNOPSIS
+    Read declared file extensions from an MSIX/AppX package
+  #>
+  [OutputType([string[]])]
+  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  process { (Get-MSIXAssociationInfo -Path $Path).FileExtensions }
+}
+
+function Read-PlatformFromMSIX {
+  <#
+  .SYNOPSIS
+    Read Platform values from the MSIX/AppX package
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process { (Get-MSIXInfo -Path $Path).Platform }
+}
+
+function Read-MinimumOSVersionFromMSIX {
+  <#
+  .SYNOPSIS
+    Read the MinimumOSVersion value from the MSIX/AppX package
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process { (Get-MSIXInfo -Path $Path).MinimumOSVersion }
+}
+
+function Read-DependenciesFromMSIX {
+  <#
+  .SYNOPSIS
+    Read Dependencies values from the MSIX/AppX package
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process { (Get-MSIXInfo -Path $Path).Dependencies }
+}
+
+function Read-CapabilitiesFromMSIX {
+  <#
+  .SYNOPSIS
+    Read Capabilities values from the MSIX/AppX package
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process { (Get-MSIXInfo -Path $Path).Capabilities }
+}
+
+function Read-RestrictedCapabilitiesFromMSIX {
+  <#
+  .SYNOPSIS
+    Read RestrictedCapabilities values from the MSIX/AppX package
+  .PARAMETER Path
+    The path to the MSIX/AppX package
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
+    [string]$Path
+  )
+
+  process { (Get-MSIXInfo -Path $Path).RestrictedCapabilities }
+}
+
+function Get-AppInstallerInfo {
+  <#
+  .SYNOPSIS
+    Read the real AppX/MSIX package URL from an .appinstaller file
+  .PARAMETER Uri
+    The URI to the .appinstaller file
+  .PARAMETER Path
+    The path to the .appinstaller file
+  .PARAMETER Content
+    The .appinstaller XML content
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(ParameterSetName = 'Uri', Position = 0, Mandatory, HelpMessage = 'The URI to the .appinstaller file')]
+    [uri]$Uri,
+
+    [Parameter(ParameterSetName = 'Path', Position = 0, Mandatory, HelpMessage = 'The path to the .appinstaller file')]
+    [string]$Path,
+
+    [Parameter(ParameterSetName = 'Content', Position = 0, Mandatory, ValueFromPipeline, HelpMessage = 'The .appinstaller XML content')]
+    [string]$Content
+  )
+
+  process {
+    $BaseUri = $null
+    $XmlContent = switch ($PSCmdlet.ParameterSetName) {
+      'Uri' {
+        $BaseUri = $Uri
+        $Response = Invoke-WebRequest -Uri $Uri
+        if ($Response.RawContentStream) {
+          $Response.RawContentStream.Position = 0
+          $Reader = [System.IO.StreamReader]::new($Response.RawContentStream)
+          try {
+            $Reader.ReadToEnd()
+          } finally {
+            $Reader.Dispose()
+          }
+        } elseif ($Response.Content -is [byte[]]) {
+          [System.Text.Encoding]::UTF8.GetString($Response.Content)
+        } else {
+          [string]$Response.Content
+        }
+      }
+      'Path' {
+        $ContentPath = Get-Item -Path $Path -Force
+        $BaseUri = [uri]$ContentPath.FullName
+        Get-Content -Path $ContentPath.FullName -Raw
+      }
+      'Content' { $Content }
+      default { throw 'Invalid parameter set.' }
+    }
+
+    [xml]$Xml = $XmlContent
+    $AppInstaller = $Xml.GetElementsByTagName('AppInstaller')[0]
+    if (-not $AppInstaller) { throw 'The AppInstaller element does not exist in the .appinstaller file' }
+
+    $MainElement = ($Xml.GetElementsByTagName('MainPackage') | Select-Object -First 1) ?? ($Xml.GetElementsByTagName('MainBundle') | Select-Object -First 1)
+    if (-not $MainElement) { throw 'The .appinstaller file does not contain MainPackage or MainBundle' }
+
+    $InstallerUri = if ($BaseUri -and -not [uri]::IsWellFormedUriString($MainElement.Uri, [System.UriKind]::Absolute)) {
+      [uri]::new($BaseUri, [string]$MainElement.Uri).AbsoluteUri
+    } else {
+      [string]$MainElement.Uri
+    }
+
+    [pscustomobject]@{
+      Version       = [string]($AppInstaller.Version ?? $MainElement.Version)
+      MainKind      = $MainElement.LocalName
+      InstallerUrl  = $InstallerUri
+      InstallerType = Get-MSIXInstallerType -Path $InstallerUri
+      Name          = [string]$MainElement.Name
+      Publisher     = [string]$MainElement.Publisher
+      Architecture  = [string]$MainElement.ProcessorArchitecture
+    }
+  }
+}
+
+Export-ModuleMember -Function * -Alias Read-SignatureSha256FromMSIX

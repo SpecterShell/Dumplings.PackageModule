@@ -17,7 +17,15 @@ $TypeAccelerators = $TypeAcceleratorsClass::Get
 # Import libraries
 $Private:LibraryPath = Join-Path $PSScriptRoot 'Libraries'
 if (Test-Path -Path $LibraryPath) {
-  $Private:LibraryPath | Get-ChildItem -Include '*.psm1' -Recurse -File | Import-Module -Force
+  # Mechanical infrastructure has deterministic dependencies and must be
+  # available before independently authored installer-format modules load.
+  $Private:InfrastructureModules = @('Runtime.psm1', 'Binary.psm1', 'Compression.psm1', 'Archive.psm1', 'PE.psm1', 'RegistryAssociations.psm1')
+  foreach ($InfrastructureModule in $InfrastructureModules) {
+    Import-Module (Join-Path $LibraryPath $InfrastructureModule) -Force
+  }
+  Get-ChildItem -LiteralPath $LibraryPath -Filter '*.psm1' -Recurse -File |
+    Where-Object Name -NotIn $InfrastructureModules |
+    Import-Module -Force
 }
 
 # Import models

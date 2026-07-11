@@ -1,12 +1,11 @@
+# SPDX-License-Identifier: MIT
+# This module only bridges to the independently licensed InstallerParsers CLI.
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 # Force stop on error
 $ErrorActionPreference = 'Stop'
-
-if (-not (Get-Command -Name 'Invoke-InstallerBridgeCommand' -ErrorAction 'SilentlyContinue')) {
-  Import-Module (Join-Path $PSScriptRoot 'InstallerBridge.psm1') -Force
-}
 
 function Get-InnoInfo {
   <#
@@ -112,6 +111,102 @@ function Read-ProductCodeFromInno {
   }
 }
 
+function Test-InnoDualScope {
+  <#
+  .SYNOPSIS
+    Test whether an Inno Setup installer supports both user and machine scope via command-line switches
+  .PARAMETER Path
+    The path to the Inno Setup installer
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path
+  )
+
+  process {
+    (Get-InnoInfo -Path $Path).SupportsDualScope
+  }
+}
+
+function Read-SupportedScopesFromInno {
+  <#
+  .SYNOPSIS
+    Read the install scopes supported by an Inno Setup installer
+  .PARAMETER Path
+    The path to the Inno Setup installer
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path
+  )
+
+  process {
+    (Get-InnoInfo -Path $Path).SupportedScopes
+  }
+}
+
+function Read-UnsupportedArchitecturesFromInno {
+  <#
+  .SYNOPSIS
+    Read Windows architectures that an Inno Setup installer does not support
+  .PARAMETER Path
+    The path to the Inno Setup installer
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path
+  )
+
+  process {
+    (Get-InnoInfo -Path $Path).UnsupportedArchitectures
+  }
+}
+
+function Test-InnoUnsupportedArchitecture {
+  <#
+  .SYNOPSIS
+    Test whether an Inno Setup installer does not support a Windows architecture
+  .PARAMETER Path
+    The path to the Inno Setup installer
+  .PARAMETER Architecture
+    The Windows architecture to test
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path,
+
+    [Parameter(Mandatory, HelpMessage = 'The Windows architecture to test')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
+  )
+
+  process {
+    (Get-InnoInfo -Path $Path).UnsupportedArchitectures -contains $Architecture
+  }
+}
+
+function Test-InnoAppsAndFeaturesEntry {
+  <#
+  .SYNOPSIS
+    Test whether an Inno Setup installer writes its own Apps & Features registry entry
+  .PARAMETER Path
+    The path to the Inno Setup installer
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path
+  )
+
+  process {
+    (Get-InnoInfo -Path $Path).WritesAppsAndFeaturesEntry
+  }
+}
+
 function Expand-InnoInstaller {
   <#
   .SYNOPSIS
@@ -152,4 +247,4 @@ function Expand-InnoInstaller {
   }
 }
 
-Export-ModuleMember -Function Get-InnoInfo, Read-ProductVersionFromInno, Read-ProductNameFromInno, Read-PublisherFromInno, Read-ProductCodeFromInno, Expand-InnoInstaller
+Export-ModuleMember -Function Get-InnoInfo, Read-ProductVersionFromInno, Read-ProductNameFromInno, Read-PublisherFromInno, Read-ProductCodeFromInno, Test-InnoDualScope, Read-SupportedScopesFromInno, Read-UnsupportedArchitecturesFromInno, Test-InnoUnsupportedArchitecture, Test-InnoAppsAndFeaturesEntry, Expand-InnoInstaller
