@@ -110,6 +110,58 @@ BeforeAll {
     return $FixturePath
   }
 
+  function New-Install4jLauncherConfigFixture {
+    param(
+      [Parameter(Mandatory)]
+      [string]$Name,
+
+      [Parameter(Mandatory)]
+      [string]$Content,
+
+      [switch]$CorruptCrc32
+    )
+
+    $FixturePath = Join-Path $Script:FixtureDirectory $Name
+    $EntryNameBytes = [Text.Encoding]::UTF8.GetBytes('i4jparams.conf')
+    $ContentBytes = [Text.Encoding]::UTF8.GetBytes($Content)
+    for ($Index = 0; $Index -lt $ContentBytes.Length; $Index++) { $ContentBytes[$Index] = $ContentBytes[$Index] -bxor 0x88 }
+
+    $DataStream = [IO.MemoryStream]::new()
+    $DataWriter = [IO.BinaryWriter]::new($DataStream, [Text.Encoding]::UTF8, $true)
+    try {
+      $DataWriter.Write([int]1)
+      $DataWriter.Write([int]2003)
+      $DataWriter.Write([int]$EntryNameBytes.Length)
+      $DataWriter.Write($EntryNameBytes)
+      $DataWriter.Write([int]0)
+      $DataWriter.Write([int]0)
+      $DataWriter.Write([long]$ContentBytes.Length)
+      $DataWriter.Write($ContentBytes)
+      $DataWriter.Flush()
+      $Data = $DataStream.ToArray()
+    } finally {
+      $DataWriter.Dispose()
+      $DataStream.Dispose()
+    }
+
+    $Crc32 = Get-BinaryCrc32 -Bytes $Data
+    if ($CorruptCrc32) { $Crc32 = $Crc32 -bxor 1 }
+    $OutputStream = [IO.File]::Open($FixturePath, 'Create', 'Write', 'None')
+    $OutputWriter = [IO.BinaryWriter]::new($OutputStream, [Text.Encoding]::UTF8, $true)
+    try {
+      $OutputWriter.Write([byte[]]::new(512))
+      $OutputWriter.Write([byte[]](0xD5, 0x13, 0xE4, 0xE8))
+      $OutputWriter.Write([uint32]1)
+      $OutputWriter.Write([uint32]$Crc32)
+      $OutputWriter.Write([long]$Data.Length)
+      $OutputWriter.Write($Data)
+    } finally {
+      $OutputWriter.Dispose()
+      $OutputStream.Dispose()
+    }
+    return $FixturePath
+  }
+
   $Script:SyntheticConfig = @'
 <?xml version="1.0" encoding="UTF-8"?>
 <config install4jVersion="9.0.7" install4jBuild="9184" type="windows" archive="false" bitness="64">
@@ -144,6 +196,31 @@ BeforeAll {
 }
 
 Describe 'install4j parser' {
+  It 'Should decode and CRC-check a synthetic launcher startup file' {
+    $Fixture = New-Install4jLauncherConfigFixture -Name 'synthetic-install4j-launcher.exe' -Content $Script:SyntheticConfig
+
+    InModuleScope Install4j -Parameters @{ FixturePath = $Fixture; ExpectedContent = $Script:SyntheticConfig } {
+      param($FixturePath, $ExpectedContent)
+      Mock Get-PEOverlayOffset { 512 }
+      $Launcher = Get-Install4jLauncherConfiguration -Path $FixturePath
+      $Bytes = Read-Install4jLauncherFile -Path $FixturePath -Entry $Launcher.Entries[0]
+
+      $Launcher.IsCrc32Valid | Should -BeTrue
+      $Launcher.Entries[0].Name | Should -Be 'i4jparams.conf'
+      [Text.Encoding]::UTF8.GetString($Bytes) | Should -Be $ExpectedContent
+    }
+  }
+
+  It 'Should reject a launcher configuration with a bad CRC32' {
+    $Fixture = New-Install4jLauncherConfigFixture -Name 'synthetic-install4j-bad-crc.exe' -Content $Script:SyntheticConfig -CorruptCrc32
+
+    InModuleScope Install4j -Parameters @{ FixturePath = $Fixture } {
+      param($FixturePath)
+      Mock Get-PEOverlayOffset { 512 }
+      { Get-Install4jLauncherConfiguration -Path $FixturePath } | Should -Throw '*CRC32 is invalid*'
+    }
+  }
+
   It 'Should parse ProductCode, ARP fields, and dual-scope evidence from i4jparams.conf' {
     $Fixture = New-Install4jConfigFixture -Name 'i4jparams.conf' -Content $Script:SyntheticConfig
     $Info = Get-Install4jInfo -Path $Fixture
@@ -239,7 +316,28 @@ Describe 'install4j parser' {
     $Info.Architecture | Should -Be 'x64'
     $Info.EmbeddedFiles | Should -Contain 'i4jparams.conf'
     $Info.EmbeddedFileTables[0].Entries[0].Name | Should -Be '0.dat'
-    $Info.Warnings[0] | Should -BeLike '*0.dat*'
+    $Info.Config.Source | Should -Be 'LauncherStartupFile'
+    $Info.LauncherConfiguration.IsCrc32Valid | Should -BeTrue
+    $Info.LauncherConfiguration.Entries.Name | Should -Contain 'i4jparams.conf'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.SupportedScopes | Should -Be @('user', 'machine')
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should decode the real launcher i4jparams.conf startup file' {
+    $Fixture = Get-Install4jInstallerFixture -Name 'install4j_windows-x64_9_0_7.exe' -Url 'https://download.ej-technologies.com/install4j/install4j_windows-x64_9_0_7.exe'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'install4j-real-config-expanded'
+    Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Result = Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'i4jparams.conf'
+      $ConfigText = Get-Content -LiteralPath (Join-Path $Result 'i4jparams.conf') -Raw
+
+      $ConfigText | Should -BeLike '*applicationId="8611-7263-0882-4541"*'
+      $ConfigText | Should -BeLike '*applicationVersion="9.0.7"*'
+    } finally {
+      Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 
   It 'Should decode and selectively expand the real install4j LZMA content archive' {

@@ -222,6 +222,21 @@ Describe 'CreateInstall static parser' {
 }
 
 Describe 'InstallMate static parser' {
+  It 'Should map documented PE execution levels to InstallMate scope behavior' {
+    InModuleScope InstallMate {
+      $Required = Get-InstallMateScopeInfo -RequestedExecutionLevel requireAdministrator
+      $Highest = Get-InstallMateScopeInfo -RequestedExecutionLevel highestAvailable
+      $Invoker = Get-InstallMateScopeInfo -RequestedExecutionLevel asInvoker
+
+      $Required.Scope | Should -Be 'machine'
+      $Required.SupportedScopes | Should -Be @('machine')
+      $Highest.SupportedScopes | Should -Be @('user', 'machine')
+      $Highest.SupportsDualScope | Should -BeTrue
+      $Invoker.DefaultScope | Should -Be 'user'
+      $Invoker.SupportedScopes | Should -Be @('user', 'machine')
+    }
+  }
+
   It 'Should validate a bounded tiz3 header and reject unsupported expansion' {
     $Bytes = [byte[]]::new(2048)
     [Text.Encoding]::ASCII.GetBytes('tiz3').CopyTo($Bytes, 1024)
@@ -244,6 +259,10 @@ Describe 'InstallMate static parser' {
       $Info.ProductCode | Should -Be '{11111111-2222-3333-4444-555555555555}'
       $Info.ProductCodeEvidence | Should -BeLike '*StringFileInfo.ProductCode*'
       $Info.PackageCode | Should -Be '{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}'
+      $Info.Scope | Should -BeNullOrEmpty
+      $Info.SupportedScopes | Should -Be @('user', 'machine')
+      $Info.SupportsDualScope | Should -BeTrue
+      $Info.ScopeConfidence | Should -Be 'conditional'
       $Info.CanExpand | Should -BeFalse
       { Expand-InstallMateInstaller -Path $FixturePath } | Should -Throw '*extraction is not implemented*'
     }

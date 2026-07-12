@@ -188,6 +188,18 @@ Describe 'Bounded binary streams' {
     try { { Copy-BoundedStream -Source $Source -Destination $Destination -MaximumBytes 2 } | Should -Throw }
     finally { $Destination.Dispose(); $Source.Dispose() }
   }
+
+  It 'copies and decodes a bounded fixed-XOR stream' {
+    $Source = [IO.MemoryStream]::new([byte[]](0xC0, 0xED, 0xE4, 0xE4, 0xE7))
+    $Destination = [IO.MemoryStream]::new()
+    try {
+      Copy-BinaryXorStream -Source $Source -Destination $Destination -Key 0x88 -ExpectedBytes 5 | Should -Be 5
+      [Text.Encoding]::ASCII.GetString($Destination.ToArray()) | Should -Be 'Hello'
+    } finally {
+      $Destination.Dispose()
+      $Source.Dispose()
+    }
+  }
 }
 
 Describe 'Test-ExtractionPattern' {

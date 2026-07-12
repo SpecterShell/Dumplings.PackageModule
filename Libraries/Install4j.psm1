@@ -13,6 +13,10 @@ $Script:Install4jMaximumConfigBytes = 33554432
 $Script:Install4jMaximumDictionaryBytes = 536870912
 $Script:Install4jMaximumExpandedBytes = 8589934592
 $Script:Install4jMaximumArchiveEntries = 100000
+$Script:Install4jLauncherMagic = [byte[]](0xD5, 0x13, 0xE4, 0xE8)
+$Script:Install4jLauncherTransformKey = [byte]0x88
+$Script:Install4jMaximumParameterCount = 4096
+$Script:Install4jMaximumParameterBytes = 8388608
 
 function Import-Install4jSharpCompress {
   <#
@@ -474,6 +478,185 @@ function Get-Install4jAssociationInfo {
   }
 }
 
+function Read-Install4jLauncherInteger {
+  <#
+  .SYNOPSIS
+    Read a little-endian integer from the current launcher stream position
+  #>
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateSet(4, 8)][int]$Size,
+    [switch]$Unsigned
+  )
+
+  $Offset = $Stream.Position
+  $Value = Read-BinaryInteger -Stream $Stream -Offset $Offset -Size $Size -Signed:(-not $Unsigned)
+  $Stream.Position = $Offset + $Size
+  return $Value
+}
+
+function Read-Install4jLauncherString {
+  <#
+  .SYNOPSIS
+    Read one bounded length-prefixed launcher parameter string
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][System.Text.Encoding]$Encoding,
+    [Parameter(Mandatory)][long]$DataEnd
+  )
+
+  $Length = Read-Install4jLauncherInteger -Stream $Stream -Size 4
+  if ($Length -lt 0 -or $Length -gt $Script:Install4jMaximumParameterBytes -or $Stream.Position + $Length -gt $DataEnd) {
+    throw "Invalid install4j launcher string length: $Length"
+  }
+  if ($Length -eq 0) { return '' }
+  $Bytes = Read-BinaryBytes -Stream $Stream -Offset $Stream.Position -Count ([int]$Length)
+  $Stream.Position += $Length
+  return $Encoding.GetString($Bytes)
+}
+
+function Read-Install4jLauncherParameterMap {
+  <#
+  .SYNOPSIS
+    Read a bounded install4j launcher parameter map
+  #>
+  [OutputType([hashtable])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][System.Text.Encoding]$Encoding,
+    [Parameter(Mandatory)][long]$DataEnd
+  )
+
+  $Count = Read-Install4jLauncherInteger -Stream $Stream -Size 4
+  if ($Count -lt 0 -or $Count -gt $Script:Install4jMaximumParameterCount) {
+    throw "Invalid install4j launcher parameter count: $Count"
+  }
+  $Result = @{}
+  for ($Index = 0; $Index -lt $Count; $Index++) {
+    $Key = Read-Install4jLauncherInteger -Stream $Stream -Size 4
+    $Result[$Key] = Read-Install4jLauncherString -Stream $Stream -Encoding $Encoding -DataEnd $DataEnd
+  }
+  return $Result
+}
+
+function Get-Install4jLauncherConfiguration {
+  <#
+  .SYNOPSIS
+    Read the install4j launcher parameter block and transformed startup files
+  .DESCRIPTION
+    install4j writes this block at the PE overlay start. The block is bounded by
+    a declared byte count and CRC32. Parameter 2003 lists startup files in the
+    same order as their following length-prefixed payloads.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $File = Get-Item -LiteralPath $Path -Force
+  $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  try {
+    $OverlayOffset = Get-PEOverlayOffset -Stream $Stream
+    if ($OverlayOffset -le 0 -or $OverlayOffset + 24 -gt $Stream.Length) { throw 'The install4j launcher has no configuration overlay' }
+    $Magic = Read-BinaryBytes -Stream $Stream -Offset $OverlayOffset -Count 4
+    if (-not (Test-BinarySequence -Left $Magic -Right $Script:Install4jLauncherMagic)) {
+      throw 'The PE overlay does not start with an install4j launcher configuration block'
+    }
+
+    $Stream.Position = $OverlayOffset + 4
+    $Flags = Read-Install4jLauncherInteger -Stream $Stream -Size 4 -Unsigned
+    $ExpectedCrc32 = Read-Install4jLauncherInteger -Stream $Stream -Size 4 -Unsigned
+    $DataLength = Read-Install4jLauncherInteger -Stream $Stream -Size 8
+    $DataStart = $Stream.Position
+    if ($DataLength -le 0 -or $DataLength -gt $Script:Install4jMaximumExpandedBytes -or $DataStart + $DataLength -gt $Stream.Length) {
+      throw "Invalid install4j launcher configuration length: $DataLength"
+    }
+    $DataEnd = $DataStart + $DataLength
+
+    $AnsiParameters = Read-Install4jLauncherParameterMap -Stream $Stream -Encoding ([System.Text.Encoding]::UTF8) -DataEnd $DataEnd
+    $LocalizedParameters = Read-Install4jLauncherParameterMap -Stream $Stream -Encoding ([System.Text.Encoding]::Unicode) -DataEnd $DataEnd
+    $NestedCount = Read-Install4jLauncherInteger -Stream $Stream -Size 4
+    if ($NestedCount -lt 0 -or $NestedCount -gt $Script:Install4jMaximumParameterCount) {
+      throw "Invalid install4j nested parameter-map count: $NestedCount"
+    }
+    $NestedParameters = @{}
+    for ($Index = 0; $Index -lt $NestedCount; $Index++) {
+      $Name = Read-Install4jLauncherString -Stream $Stream -Encoding ([System.Text.Encoding]::UTF8) -DataEnd $DataEnd
+      $NestedParameters[$Name] = Read-Install4jLauncherParameterMap -Stream $Stream -Encoding ([System.Text.Encoding]::Unicode) -DataEnd $DataEnd
+    }
+
+    $Names = @(([string]$AnsiParameters[2003]).Split(';', [System.StringSplitOptions]::RemoveEmptyEntries))
+    if ($Names.Count -le 0 -or $Names.Count -gt $Script:Install4jMaximumParameterCount) {
+      throw 'The install4j launcher does not declare a bounded startup-file list'
+    }
+    $Entries = [System.Collections.Generic.List[psobject]]::new()
+    foreach ($Name in $Names) {
+      if ($Stream.Position + 8 -gt $DataEnd) { throw 'The install4j startup-file table is truncated' }
+      $Length = Read-Install4jLauncherInteger -Stream $Stream -Size 8
+      if ($Length -lt 0 -or $Length -gt $Script:Install4jMaximumExpandedBytes -or $Stream.Position + $Length -gt $DataEnd) {
+        throw "Invalid install4j startup-file length for '$Name': $Length"
+      }
+      $Entries.Add([pscustomobject]@{
+          Name        = $Name
+          Offset      = [long]$Stream.Position
+          Length      = [long]$Length
+          Transform   = 'Xor88'
+          TransformKey = $Script:Install4jLauncherTransformKey
+        })
+      $Stream.Position += $Length
+    }
+
+    $CrcStream = New-BoundedReadStream -Stream $Stream -Offset $DataStart -Length $DataLength -LeaveOpen
+    try { $ActualCrc32 = Get-BinaryCrc32 -Stream $CrcStream -MaximumBytes $DataLength } finally { $CrcStream.Dispose() }
+    if ($ActualCrc32 -ne $ExpectedCrc32) {
+      throw ('The install4j launcher configuration CRC32 is invalid: expected {0:X8}, got {1:X8}' -f $ExpectedCrc32, $ActualCrc32)
+    }
+
+    return [pscustomobject]@{
+      Offset              = [long]$OverlayOffset
+      Flags               = [uint32]$Flags
+      DataStart           = [long]$DataStart
+      DataLength          = [long]$DataLength
+      DataEnd             = [long]$DataEnd
+      ExpectedCrc32       = [uint32]$ExpectedCrc32
+      ActualCrc32         = [uint32]$ActualCrc32
+      IsCrc32Valid        = $true
+      AnsiParameters      = $AnsiParameters
+      LocalizedParameters = $LocalizedParameters
+      NestedParameters    = $NestedParameters
+      Entries             = @($Entries)
+      RemainingDataBytes  = [long]($DataEnd - $Stream.Position)
+    }
+  } finally {
+    $Stream.Dispose()
+  }
+}
+
+function Read-Install4jLauncherFile {
+  <#
+  .SYNOPSIS
+    Read and decode a bounded install4j launcher startup file
+  #>
+  [OutputType([byte[]])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][psobject]$Entry,
+    [ValidateRange(1, [int]::MaxValue)][int]$MaximumBytes = $Script:Install4jMaximumConfigBytes
+  )
+
+  if ($Entry.Length -gt $MaximumBytes) { throw "The install4j startup file '$($Entry.Name)' is too large to read safely" }
+  $Source = [System.IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, 'Open', 'Read', 'ReadWrite')
+  $Destination = [System.IO.MemoryStream]::new([int]$Entry.Length)
+  try {
+    $Source.Position = $Entry.Offset
+    $null = Copy-BinaryXorStream -Source $Source -Destination $Destination -Key ([byte]$Entry.TransformKey) -ExpectedBytes $Entry.Length
+    return $Destination.ToArray()
+  } finally {
+    $Destination.Dispose()
+    $Source.Dispose()
+  }
+}
+
 function Get-Install4jEmbeddedFileTable {
   <#
   .SYNOPSIS
@@ -905,7 +1088,11 @@ function Get-Install4jInfo {
     $VersionInfo = Get-Install4jVersionInfo -File $File
     $ScanText = Get-Install4jScanText -File $File
     $EmbeddedFileTables = @(Get-Install4jEmbeddedFileTable -Path $File.FullName)
+    $LauncherConfiguration = try { Get-Install4jLauncherConfiguration -Path $File.FullName } catch { $null }
     $EmbeddedFiles = @(Get-Install4jEmbeddedFilesFromText -Text $ScanText)
+    foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $null -ne $_ })) {
+      if ($EmbeddedFiles -notcontains $Entry.Name) { $EmbeddedFiles += $Entry.Name }
+    }
     foreach ($Entry in @($EmbeddedFileTables.Entries | Select-Object -ExpandProperty Name -ErrorAction SilentlyContinue)) {
       if ($EmbeddedFiles -notcontains $Entry) { $EmbeddedFiles += $Entry }
     }
@@ -919,6 +1106,18 @@ function Get-Install4jInfo {
     if ($ConfigXml) {
       $Config = ConvertFrom-Install4jConfigXml -Content $ConfigXml -Source 'PlainXml'
     } else {
+      foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $_.Name -ieq 'i4jparams.conf' })) {
+        try {
+          $Bytes = Read-Install4jLauncherFile -Path $File.FullName -Entry $Entry
+          $EmbeddedConfigText = [System.Text.Encoding]::UTF8.GetString($Bytes)
+          $Config = ConvertFrom-Install4jConfigXml -Content $EmbeddedConfigText -Source 'LauncherStartupFile'
+          break
+        } catch {
+          $Warnings.Add("Failed to parse launcher i4jparams.conf: $($_.Exception.Message)")
+        }
+      }
+    }
+    if (-not $Config) {
       foreach ($Entry in @($EmbeddedFileTables.Entries | Where-Object { $_.Name -ieq 'i4jparams.conf' })) {
         try {
           $Bytes = Read-Install4jEmbeddedFile -Path $File.FullName -Entry $Entry
@@ -990,6 +1189,8 @@ function Get-Install4jInfo {
       MsiProductId                  = $Config.MsiProductId
       EmbeddedFiles                 = @($EmbeddedFiles)
       EmbeddedFileTables            = @($EmbeddedFileTables)
+      LauncherConfiguration         = $LauncherConfiguration
+      CanExpand                     = [bool]($LauncherConfiguration -or $EmbeddedFileTables.Count -gt 0)
        RegistryWrites                = @()
        RegistryAssociationInfo       = $AssociationInfo
        Protocols                     = $AssociationInfo.Protocols
@@ -999,8 +1200,8 @@ function Get-Install4jInfo {
       Warnings                      = @($Warnings)
       ParserVersionInfo             = [pscustomobject]@{
         Parser      = 'Dumplings.PackageModule.Install4j'
-        ParserMajor = 1
-        Sources     = @('install4j i4jparams.conf XML', 'install4j ContentCollector unextracted-file table', 'PE version resource')
+        ParserMajor = 2
+        Sources     = @('install4j launcher parameter block and startup-file table', 'install4j i4jparams.conf XML', 'install4j ContentCollector unextracted-file table', 'PE version resource')
       }
     }
     $Info.RegistryWrites = @(Get-Install4jRegistryWrite -Info $Info)
@@ -1040,13 +1241,37 @@ function Expand-Install4jInstaller {
   process {
     $InstallerPath = (Get-Item -Path $Path -Force).FullName
     $EmbeddedFileTables = @(Get-Install4jEmbeddedFileTable -Path $InstallerPath)
-    if (-not $EmbeddedFileTables) { throw 'The install4j installer does not contain a supported embedded-file table' }
+    $LauncherConfiguration = try { Get-Install4jLauncherConfiguration -Path $InstallerPath } catch { $null }
+    if (-not $EmbeddedFileTables -and -not $LauncherConfiguration) {
+      throw 'The install4j installer does not contain a supported launcher or embedded-file table'
+    }
 
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = New-TempFolder }
     $DestinationPath = (New-Item -Path $DestinationPath -ItemType Directory -Force).FullName
 
     $ExtractedFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $WrittenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $null -ne $_ })) {
+      if (-not (Test-Install4jExtractionMatch -Path $Entry.Name -Name $Name)) { continue }
+      if ($Entry.Length -gt $MaximumExpandedBytes) {
+        throw "The install4j startup file '$($Entry.Name)' exceeds the $MaximumExpandedBytes-byte limit"
+      }
+
+      $OutputPath = Resolve-Install4jExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.Name
+      if (-not $WrittenPaths.Add($OutputPath)) { throw "The install4j installer contains a duplicate output path: $($Entry.Name)" }
+      $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
+      $SourceStream = [System.IO.File]::Open($InstallerPath, 'Open', 'Read', 'ReadWrite')
+      $OutputStream = [System.IO.File]::Open($OutputPath, 'Create', 'Write', 'Read')
+      try {
+        $SourceStream.Position = $Entry.Offset
+        $null = Copy-BinaryXorStream -Source $SourceStream -Destination $OutputStream -Key ([byte]$Entry.TransformKey) -ExpectedBytes $Entry.Length
+      } finally {
+        $OutputStream.Dispose()
+        $SourceStream.Dispose()
+      }
+      $ExtractedFiles.Add((Get-Item -LiteralPath $OutputPath -Force))
+    }
+
     foreach ($Entry in @($EmbeddedFileTables.Entries)) {
       if ($Entry.Name -ieq '0.dat') {
         foreach ($ExtractedFile in Expand-Install4jLzmaZipEntry -Path $InstallerPath -Entry $Entry -DestinationPath $DestinationPath -Name $Name -MaximumExpandedBytes $MaximumExpandedBytes) {

@@ -9,6 +9,42 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 $Script:InstallMateMaximumHeaderScanBytes = 67108864
 $Script:InstallMateMinimumHeaderBytes = 32
 
+function Get-InstallMateScopeInfo {
+  <#
+  .SYNOPSIS
+    Interpret documented InstallMate install-level behavior from the PE execution level
+  #>
+  [OutputType([pscustomobject])]
+  param ([AllowNull()][string]$RequestedExecutionLevel)
+
+  switch -Regex ($RequestedExecutionLevel) {
+    '^(?i:requireAdministrator)$' {
+      return [pscustomobject]@{
+        Scope = 'machine'; DefaultScope = 'machine'; SupportedScopes = @('machine'); SupportsDualScope = $false
+        Confidence = 'high'; Evidence = @('The PE requests requireAdministrator; InstallMate documents this mode as an all-users installation.')
+      }
+    }
+    '^(?i:highestAvailable)$' {
+      return [pscustomobject]@{
+        Scope = $null; DefaultScope = $null; SupportedScopes = @('user', 'machine'); SupportsDualScope = $true
+        Confidence = 'conditional'; Evidence = @('InstallMate highestAvailable installs for all users when elevated and for the current user otherwise.')
+      }
+    }
+    '^(?i:asInvoker)$' {
+      return [pscustomobject]@{
+        Scope = $null; DefaultScope = 'user'; SupportedScopes = @('user', 'machine'); SupportsDualScope = $true
+        Confidence = 'conditional'; Evidence = @('InstallMate asInvoker defaults to the current user, but an explicitly elevated launch can install for all users.')
+      }
+    }
+    default {
+      return [pscustomobject]@{
+        Scope = $null; DefaultScope = $null; SupportedScopes = @(); SupportsDualScope = $false
+        Confidence = 'unknown'; Evidence = @('The InstallMate requested execution level could not be read.')
+      }
+    }
+  }
+}
+
 function Get-InstallMateArchiveInfo {
   <#
   .SYNOPSIS
@@ -86,14 +122,14 @@ function Get-InstallMateInfo {
     $PackageCode = ([string]$VersionStrings.PackageCode).Trim()
     if ([string]::IsNullOrWhiteSpace($PackageCode)) { $PackageCode = $null }
     $ExecutionLevel = Get-PERequestedExecutionLevel -Path $File.FullName
+    $ScopeInfo = Get-InstallMateScopeInfo -RequestedExecutionLevel $ExecutionLevel
     $DisplayName = ([string]$VersionInfo.ProductName).Trim()
     if ([string]::IsNullOrWhiteSpace($DisplayName)) { $DisplayName = ([string]$VersionInfo.FileDescription).Trim() }
-    $SupportedScopes = if ($ExecutionLevel -ieq 'requireAdministrator') { [string[]]@('machine') } else { [string[]]@() }
     $RegistryWrites = @()
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
     $Warnings = [System.Collections.Generic.List[string]]::new()
     $Warnings.Add('InstallMate PE version resources identify the package, but the proprietary compressed setup database has not been decoded. Visible ARP fields, associations, and scope require VM validation.')
-    if ($ExecutionLevel -ieq 'requireAdministrator') { $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest.') }
+    foreach ($Evidence in $ScopeInfo.Evidence) { $Warnings.Add($Evidence) }
 
     [pscustomobject]@{
       InstallerType              = 'InstallMate'
@@ -106,8 +142,12 @@ function Get-InstallMateInfo {
       DisplayVersion             = ([string]$VersionInfo.ProductVersion).Trim()
       Publisher                  = ([string]$VersionInfo.CompanyName).Trim()
       FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-      Scope                      = if ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
-      SupportedScopes            = $SupportedScopes
+      Scope                      = $ScopeInfo.Scope
+      DefaultScope               = $ScopeInfo.DefaultScope
+      SupportedScopes            = $ScopeInfo.SupportedScopes
+      SupportsDualScope          = $ScopeInfo.SupportsDualScope
+      ScopeConfidence            = $ScopeInfo.Confidence
+      ScopeEvidence              = $ScopeInfo.Evidence
       RequestedExecutionLevel    = $ExecutionLevel
       RegistryWrites             = $RegistryWrites
       RegistryAssociationInfo    = $RegistryAssociationInfo
@@ -117,7 +157,7 @@ function Get-InstallMateInfo {
       ArchiveInfo                = $ArchiveInfo
       CanExpand                  = $false
       Warnings                   = @($Warnings)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallMate'; ParserMajor = 1; Sources = @('PE StringFileInfo version resource', 'PE application manifest', 'bounded TIZ archive header') }
+      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallMate'; ParserMajor = 2; Sources = @('PE StringFileInfo version resource', 'PE application manifest', 'bounded TIZ archive header', 'InstallMate documented install-level behavior') }
     }
   }
 }

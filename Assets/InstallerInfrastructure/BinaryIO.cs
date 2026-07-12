@@ -197,6 +197,26 @@ namespace Dumplings.InstallerInfrastructure
             return total;
         }
 
+        public static long CopyXor(Stream source, Stream destination, byte key, long expectedBytes)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (destination == null) throw new ArgumentNullException(nameof(destination));
+            if (!source.CanRead || !destination.CanWrite) throw new ArgumentException("Source must be readable and destination must be writable.");
+            if (expectedBytes < 0) throw new ArgumentOutOfRangeException(nameof(expectedBytes));
+            byte[] buffer = new byte[1024 * 1024];
+            long total = 0;
+            while (total < expectedBytes)
+            {
+                int request = (int)Math.Min(buffer.Length, expectedBytes - total);
+                int read = source.Read(buffer, 0, request);
+                if (read <= 0) throw new EndOfStreamException($"The stream ended after {total} bytes; expected {expectedBytes}.");
+                for (int i = 0; i < read; i++) buffer[i] ^= key;
+                destination.Write(buffer, 0, read);
+                total += read;
+            }
+            return total;
+        }
+
         public static bool SequenceEqual(byte[] left, byte[] right)
         {
             if (ReferenceEquals(left, right)) return true;

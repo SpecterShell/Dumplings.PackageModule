@@ -163,6 +163,22 @@ function Copy-BinaryStreamRange {
   finally { $Range.Dispose() }
 }
 
+function Copy-BinaryXorStream {
+  <#
+  .SYNOPSIS
+    Copy an exact sequential stream range while applying a fixed XOR byte
+  #>
+  [OutputType([long])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Source,
+    [Parameter(Mandatory)][System.IO.Stream]$Destination,
+    [Parameter(Mandatory)][byte]$Key,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$ExpectedBytes
+  )
+  Assert-InstallerInfrastructureLoaded
+  return [Dumplings.InstallerInfrastructure.BinaryIO]::CopyXor($Source, $Destination, $Key, $ExpectedBytes)
+}
+
 function Get-BinaryCrc32 {
   <#
   .SYNOPSIS
@@ -235,4 +251,4 @@ function Test-ExtractionPattern {
   return $NormalizedPath -like $NormalizedPattern -or [IO.Path]::GetFileName($NormalizedPath) -like $NormalizedPattern
 }
 
-Export-ModuleMember -Function Import-BinaryPatternSearch, New-BoundedReadStream, New-InstallerSeekableStream, Read-BinaryBytes, Read-BinaryInteger, Find-BinaryPattern, Copy-BoundedStream, Copy-BinaryStreamRange, Get-BinaryCrc32, Test-BinarySequence, Resolve-SafeExtractionPath, Test-ExtractionPattern
+Export-ModuleMember -Function Import-BinaryPatternSearch, New-BoundedReadStream, New-InstallerSeekableStream, Read-BinaryBytes, Read-BinaryInteger, Find-BinaryPattern, Copy-BoundedStream, Copy-BinaryStreamRange, Copy-BinaryXorStream, Get-BinaryCrc32, Test-BinarySequence, Resolve-SafeExtractionPath, Test-ExtractionPattern
