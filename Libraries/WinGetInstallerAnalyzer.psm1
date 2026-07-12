@@ -504,8 +504,29 @@ function Get-WinGetInstallerExeFamilyDefault {
         Scope               = 'machine'
         InstallModes        = @('interactive', 'silent', 'silentWithProgress')
         InstallerSwitches   = [ordered]@{ Silent = '/exenoui /quiet /norestart'; SilentWithProgress = '/exenoui /passive /norestart'; InstallLocation = 'APPDIR="<INSTALLPATH>"'; Log = '/log "<LOGPATH>"' }
-        ExpectedReturnCodes = @([ordered]@{ InstallerReturnCode = 3010; ReturnResponse = 'rebootRequiredToFinish' }, [ordered]@{ InstallerReturnCode = 1641; ReturnResponse = 'rebootInitiated' })
-        Notes               = @('Decide AppsAndFeaturesEntries.InstallerType from the visible ARP entry, not just the embedded MSI.', 'Some packages use EXE ARP and hide MSI ARP with SystemComponent.')
+        ExpectedReturnCodes = @(
+          [ordered]@{ InstallerReturnCode = -1; ReturnResponse = 'cancelledByUser' },
+          [ordered]@{ InstallerReturnCode = 1; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 87; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 1601; ReturnResponse = 'contactSupport' },
+          [ordered]@{ InstallerReturnCode = 1602; ReturnResponse = 'cancelledByUser' },
+          [ordered]@{ InstallerReturnCode = 1618; ReturnResponse = 'installInProgress' },
+          [ordered]@{ InstallerReturnCode = 1623; ReturnResponse = 'systemNotSupported' },
+          [ordered]@{ InstallerReturnCode = 1625; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1628; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 1633; ReturnResponse = 'systemNotSupported' },
+          [ordered]@{ InstallerReturnCode = 1638; ReturnResponse = 'alreadyInstalled' },
+          [ordered]@{ InstallerReturnCode = 1639; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 1640; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1641; ReturnResponse = 'rebootInitiated' },
+          [ordered]@{ InstallerReturnCode = 1643; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1644; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1649; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1650; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 1654; ReturnResponse = 'systemNotSupported' },
+          [ordered]@{ InstallerReturnCode = 3010; ReturnResponse = 'rebootRequiredToFinish' }
+        )
+        Notes               = @('The documented Advanced Installer bootstrapper return codes are included; verify customized launchers and payload-specific codes in a VM.', 'Decide AppsAndFeaturesEntries.InstallerType from the visible ARP entry, not just the embedded MSI.', 'Some packages use EXE ARP and hide MSI ARP with SystemComponent.')
       }
     }
     'InstallShield' {
@@ -514,8 +535,38 @@ function Get-WinGetInstallerExeFamilyDefault {
         Scope               = 'machine'
         InstallModes        = @('interactive', 'silent', 'silentWithProgress')
         InstallerSwitches   = [ordered]@{ Silent = '/S /V/quiet /V/norestart'; SilentWithProgress = '/S /V/passive /V/norestart'; InstallLocation = '/V"INSTALLDIR=""<INSTALLPATH>"""'; Log = '/V"/log ""<LOGPATH>"""' }
-        ExpectedReturnCodes = @([ordered]@{ InstallerReturnCode = 3010; ReturnResponse = 'rebootRequiredToFinish' }, [ordered]@{ InstallerReturnCode = 1641; ReturnResponse = 'rebootInitiated' })
-        Notes               = @('Use these switches only for Basic MSI or InstallScript MSI variants.', 'Block InstallScript-only installers that require setup.iss response files.')
+        ExpectedReturnCodes = @()
+        Notes               = @('Use these switches only for Basic MSI or InstallScript MSI variants.', 'If VM validation proves setup.exe propagates nested MSI exit codes, add the MSI mappings explicitly because the outer type is generic exe.', 'Block InstallScript-only installers that require setup.iss response files.')
+      }
+    }
+    'InstallShield Advanced UI' {
+      [pscustomobject]@{
+        InstallerType       = 'exe # InstallShield Advanced UI'
+        Scope               = 'machine'
+        InstallModes        = @('interactive', 'silent', 'silentWithProgress')
+        InstallerSwitches   = [ordered]@{ Silent = '/silent'; SilentWithProgress = '/passive'; InstallLocation = '/INSTALLDIR="<INSTALLPATH>"' }
+        ExpectedReturnCodes = @(
+          [ordered]@{ InstallerReturnCode = 0x8004070b; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 0x80040711; ReturnResponse = 'installInProgress' },
+          [ordered]@{ InstallerReturnCode = 1601; ReturnResponse = 'contactSupport' },
+          [ordered]@{ InstallerReturnCode = 1602; ReturnResponse = 'cancelledByUser' },
+          [ordered]@{ InstallerReturnCode = 1618; ReturnResponse = 'installInProgress' },
+          [ordered]@{ InstallerReturnCode = 1623; ReturnResponse = 'systemNotSupported' },
+          [ordered]@{ InstallerReturnCode = 1625; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1628; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 1633; ReturnResponse = 'systemNotSupported' },
+          [ordered]@{ InstallerReturnCode = 1638; ReturnResponse = 'alreadyInstalled' },
+          [ordered]@{ InstallerReturnCode = 1639; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 1640; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1641; ReturnResponse = 'rebootInitiated' },
+          [ordered]@{ InstallerReturnCode = 1643; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1644; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1649; ReturnResponse = 'blockedByPolicy' },
+          [ordered]@{ InstallerReturnCode = 1650; ReturnResponse = 'invalidParameter' },
+          [ordered]@{ InstallerReturnCode = 1654; ReturnResponse = 'systemNotSupported' },
+          [ordered]@{ InstallerReturnCode = 3010; ReturnResponse = 'rebootRequiredToFinish' }
+        )
+        Notes               = @('Use only after the package is independently identified as InstallShield Advanced UI.', 'Do not apply these switches to Basic MSI, InstallScript MSI, or InstallScript-only installers.')
       }
     }
     'Squirrel' {
@@ -543,7 +594,6 @@ function Get-WinGetInstallerExeFamilyDefault {
     'Setup Factory' {
       [pscustomobject]@{
         InstallerType       = 'exe # Setup Factory'
-        Scope               = 'machine'
         InstallModes        = @('interactive', 'silent')
         InstallerSwitches   = [ordered]@{ Silent = '/S'; SilentWithProgress = '/S' }
         ExpectedReturnCodes = @()
@@ -553,7 +603,6 @@ function Get-WinGetInstallerExeFamilyDefault {
     'InstallAnywhere' {
       [pscustomobject]@{
         InstallerType       = 'exe # InstallAnywhere'
-        Scope               = 'machine'
         InstallModes        = @('interactive', 'silent')
         InstallerSwitches   = [ordered]@{ Silent = '-i silent'; SilentWithProgress = '-i silent'; InstallLocation = '-DUSER_INSTALL_DIR="<INSTALLPATH>"' }
         ExpectedReturnCodes = @()
@@ -575,24 +624,8 @@ function Get-WinGetInstallerExeFamilyDefault {
         InstallerType       = 'exe # Actual Installer'
         InstallModes        = @('interactive', 'silent', 'silentWithProgress')
         InstallerSwitches   = [ordered]@{ Silent = '/S /L'; SilentWithProgress = '/S /L'; Interactive = '/L'; InstallLocation = '/D "<INSTALLPATH>"' }
-        ExpectedReturnCodes = @(
-          [ordered]@{ InstallerReturnCode = 5; ReturnResponse = 'missingDependency' },
-          [ordered]@{ InstallerReturnCode = 6; ReturnResponse = 'diskFull' },
-          [ordered]@{ InstallerReturnCode = 7; ReturnResponse = 'noNetwork' },
-          [ordered]@{ InstallerReturnCode = 8; ReturnResponse = 'cancelledByUser' },
-          [ordered]@{ InstallerReturnCode = 11; ReturnResponse = 'cancelledByUser' },
-          [ordered]@{ InstallerReturnCode = 14; ReturnResponse = 'systemNotSupported' },
-          [ordered]@{ InstallerReturnCode = 17; ReturnResponse = 'alreadyInstalled' },
-          [ordered]@{ InstallerReturnCode = 19; ReturnResponse = 'cancelledByUser' },
-          [ordered]@{ InstallerReturnCode = 21; ReturnResponse = 'blockedByPolicy' },
-          [ordered]@{ InstallerReturnCode = 22; ReturnResponse = 'blockedByPolicy' },
-          [ordered]@{ InstallerReturnCode = 23; ReturnResponse = 'blockedByPolicy' },
-          [ordered]@{ InstallerReturnCode = 24; ReturnResponse = 'systemNotSupported' },
-          [ordered]@{ InstallerReturnCode = 25; ReturnResponse = 'systemNotSupported' },
-          [ordered]@{ InstallerReturnCode = 26; ReturnResponse = 'systemNotSupported' },
-          [ordered]@{ InstallerReturnCode = 27; ReturnResponse = 'systemNotSupported' },
-          [ordered]@{ InstallerReturnCode = 100; ReturnResponse = 'blockedByPolicy' }
-        )
+        ExpectedReturnCodes = @()
+        ScopeSwitches       = [pscustomobject]@{ User = '/CU'; Machine = '/RUNAS /ALL' }
         Notes               = @('Actual Installer can use /CU for current-user scope and /RUNAS /ALL for machine scope.', 'Verify package-specific ARP data and whether the setup permits both scopes.')
       }
     }
@@ -626,7 +659,6 @@ function Get-WinGetInstallerExeFamilyDefault {
     'InstallMate' {
       [pscustomobject]@{
         InstallerType       = 'exe # InstallMate'
-        Scope               = 'machine'
         InstallModes        = @('interactive', 'silent', 'silentWithProgress')
         InstallerSwitches   = [ordered]@{ Silent = '/q2 /b0'; SilentWithProgress = '/q1 /b0'; InstallLocation = '"INSTALLDIR=<INSTALLPATH>"'; Log = '/log:"<LOGPATH>"' }
         ExpectedReturnCodes = @(
@@ -645,8 +677,7 @@ function Get-WinGetInstallerExeFamilyDefault {
     'QSetup' {
       [pscustomobject]@{
         InstallerType       = 'exe # QSetup'
-        Scope               = 'machine'
-        InstallModes        = @()
+        InstallModes        = @('interactive', 'silent', 'silentWithProgress')
         InstallerSwitches   = [ordered]@{ Silent = '/hide'; SilentWithProgress = '/silent'; InstallLocation = '/InstallDir="<INSTALLPATH>"' }
         ExpectedReturnCodes = @()
         Notes               = @('Verify switches and ARP data in a VM.')
@@ -682,10 +713,11 @@ function Get-WinGetInstallerExeFamilyDefault {
     'Wise' {
       [pscustomobject]@{
         InstallerType       = 'exe # Wise MSI'
+        Scope               = 'machine'
         InstallModes        = @('interactive', 'silent', 'silentWithProgress')
-        InstallerSwitches   = [ordered]@{ Silent = '/quiet /norestart'; SilentWithProgress = '/passive /norestart'; Log = '/log "<LOGPATH>"' }
-        ExpectedReturnCodes = @([ordered]@{ InstallerReturnCode = 3010; ReturnResponse = 'rebootRequiredToFinish' }, [ordered]@{ InstallerReturnCode = 1641; ReturnResponse = 'rebootInitiated' })
-        Notes               = @('These defaults apply to the Wise-for-Windows-Installer MSI wrapper parsed by Get-WiseInfo, not every Wise generation.', 'Use the nested MSI for ProductCode, UpgradeCode, install-location property, associations, scope evidence, and AppsAndFeaturesEntries.InstallerType.')
+        InstallerSwitches   = [ordered]@{ Silent = '/quiet /norestart'; SilentWithProgress = '/passive /norestart'; InstallLocation = 'INSTALLDIR="<INSTALLPATH>"'; Log = '/log "<LOGPATH>"' }
+        ExpectedReturnCodes = @()
+        Notes               = @('These defaults apply to the Wise-for-Windows-Installer MSI wrapper parsed by Get-WiseInfo, not every Wise generation.', 'If VM validation proves the Wise wrapper propagates nested MSI exit codes, add the MSI mappings explicitly because the outer type is generic exe.', 'Use the nested MSI for ProductCode, UpgradeCode, install-location property, associations, scope evidence, and AppsAndFeaturesEntries.InstallerType.')
       }
     }
     'Chromium Setup' {
@@ -709,12 +741,9 @@ function Get-WinGetInstallerExeFamilyDefault {
     'Paquet Builder' {
       [pscustomobject]@{
         InstallerType       = 'exe # Paquet Builder'
-        Scope               = 'machine'
         InstallModes        = @('interactive', 'silent')
         InstallerSwitches   = [ordered]@{ Silent = '/s'; SilentWithProgress = '/s' }
-        ExpectedReturnCodes = @(
-          [ordered]@{ InstallerReturnCode = 2; ReturnResponse = 'cancelledByUser' }
-        )
+        ExpectedReturnCodes = @()
         Notes               = @('Paquet Builder 2026.1 and later recognize /s and /silent natively when the project keeps that option enabled.', 'Older or customized packages may require project-defined command-line parsing; verify the exact package.')
       }
     }
@@ -744,6 +773,7 @@ function Get-WinGetInstallerExeFamilyDefault {
         InstallModes        = @('interactive', 'silentWithProgress')
         InstallerSwitches   = [ordered]@{ Silent = 'install --root "<INSTALLPATH>" --accept-licenses --default-answer --confirm-command'; SilentWithProgress = 'install --root "<INSTALLPATH>" --accept-licenses --default-answer --confirm-command' }
         ExpectedReturnCodes = @()
+        UpgradeBehavior     = 'uninstallPrevious'
         Notes               = @('Use these switches only when Get-QtInstallerFrameworkInfo reports InterfaceVariant=CLI and SupportsSilentInstallation=true.', 'Keep --root in Silent and SilentWithProgress only when RequiresExplicitInstallLocation=true; otherwise expose it as InstallLocation.', 'Qt IFW writes HKLM ARP only when the AllUsers variable is true; otherwise it writes HKCU ARP.', 'Use AllUsers=true or AllUsers=false as a custom switch only when parser evidence confirms the CLI path.')
       }
     }
@@ -958,7 +988,7 @@ function Invoke-WinGetInstallerMsiAnalysis {
     RegistryAssociationInfo = $MsiInfo.RegistryAssociationInfo
     AllUsers                = $AllUsers
     ScopeRecommendation     = $ScopeRecommendation
-    SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msi'; Scope = $ScopeRecommendation.Scope; AppsAndFeaturesEntries = @('UpgradeCode when needed; omit AppsAndFeaturesEntries.ProductCode for new packages unless project policy says otherwise.') }
+    SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msi'; Scope = $ScopeRecommendation.Scope }
   }
 }
 
@@ -1007,7 +1037,7 @@ function Invoke-WinGetInstallerMsixAnalysis {
     SignatureEvidence       = $SignatureEvidence
     Rejected                = -not $SignatureEvidence.IsTrusted
     RejectionReason         = $SignatureEvidence.RequiredAction
-    SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msix/appx/appxbundle/msixbundle'; InstallModes = @('silent'); Dependencies = $DependencyInfo.Dependencies }
+    SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msix/appx/appxbundle/msixbundle'; Dependencies = $DependencyInfo.Dependencies }
   }
 }
 
@@ -1345,7 +1375,7 @@ function Invoke-WinGetInstallerExeParser {
     $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Chromium Setup'
     if ($Info.Variant -eq 'ChromiumMiniInstaller') {
       $SuggestedManifestFields.InstallModes = @('silent')
-      $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Log = '--verbose-logging --log-file="<LOGPATH>"' }
+      $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Custom = '--do-not-launch-chrome'; Log = '--verbose-logging --log-file="<LOGPATH>"' }
       $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = $null; Machine = '--system-level' }) -Force
     } elseif ($Info.Variant -eq 'ChromiumUpdater' -and -not $Info.IsOnlineBootstrapper) {
       $SuggestedManifestFields.InstallModes = @('interactive', 'silent')

@@ -832,6 +832,7 @@ function Get-MsiInstallerInfo {
         ProductName                    = $Properties['ProductName']
         ProductVersion                 = $Properties['ProductVersion']
         UpgradeCode                    = $Properties['UpgradeCode']
+        AllUsers                       = $Properties['ALLUSERS']
         InstallerBuilder               = Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo
         InstallLocationProperty        = $InstallLocationInfo.Property
         InstallLocationSwitch          = $InstallLocationInfo.Switch

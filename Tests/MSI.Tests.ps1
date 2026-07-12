@@ -80,6 +80,7 @@ Describe 'MSI builder and install-location parser' {
     $Info = Get-MsiInstallerInfo -Path $Fixture
 
     $Info.InstallerBuilder | Should -Be 'AdvancedInstaller'
+    $Info.AllUsers | Should -Be '1'
     $Info.InstallLocationProperty | Should -Be 'APPDIR'
     $Info.InstallLocationSwitch | Should -Be 'APPDIR="<INSTALLPATH>"'
     $Info.AppsAndFeaturesInstallerType | Should -Be 'exe'
@@ -124,6 +125,7 @@ Describe 'MSI builder and install-location parser' {
     $DrawInfo = Get-MsiInstallerInfo -Path $Draw
 
     $FigmaInfo.InstallerBuilder | Should -Be 'WiX'
+    $FigmaInfo.AllUsers | Should -Be '2'
     $FigmaInfo.InstallLocationProperty | Should -Be 'APPLICATIONROOTDIRECTORY'
     $FigmaInfo.AppsAndFeaturesInstallerType | Should -Be 'msi'
     $DrawInfo.InstallerBuilder | Should -Be 'WiX'

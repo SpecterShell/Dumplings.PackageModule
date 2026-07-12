@@ -89,6 +89,54 @@ install4j i4jruntime.jar.pack;i4jparams.conf;user.jar.pack allinstdirs1234-5678-
   }
 }
 
+Describe 'Installer manifest behavior defaults' {
+  It 'Should mirror documented Advanced Installer modes and return codes' {
+    InModuleScope WinGetInstallerAnalyzer {
+      $Defaults = Get-WinGetInstallerExeFamilyDefault -Family 'Advanced Installer'
+
+      $Defaults.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
+      $Defaults.ExpectedReturnCodes.Count | Should -Be 20
+      ($Defaults.ExpectedReturnCodes | Where-Object InstallerReturnCode -eq 3010).ReturnResponse | Should -Be 'rebootRequiredToFinish'
+    }
+  }
+
+  It 'Should limit generic EXE families without progress mode support' {
+    InModuleScope WinGetInstallerAnalyzer {
+      (Get-WinGetInstallerExeFamilyDefault -Family 'Squirrel').InstallModes | Should -Be @('interactive', 'silent')
+    }
+  }
+
+  It 'Should mirror the documented InstallShield Advanced UI snippet' {
+    InModuleScope WinGetInstallerAnalyzer {
+      $Defaults = Get-WinGetInstallerExeFamilyDefault -Family 'InstallShield Advanced UI'
+
+      $Defaults.InstallerSwitches.Silent | Should -Be '/silent'
+      $Defaults.InstallerSwitches.SilentWithProgress | Should -Be '/passive'
+      $Defaults.ExpectedReturnCodes.Count | Should -Be 19
+      ($Defaults.ExpectedReturnCodes | Where-Object InstallerReturnCode -eq 0x80040711).ReturnResponse | Should -Be 'installInProgress'
+    }
+  }
+
+  It 'Should not invent scope where the documented generic-family snippet omits it' {
+    InModuleScope WinGetInstallerAnalyzer {
+      foreach ($Family in @('Setup Factory', 'InstallAnywhere', 'InstallMate', 'QSetup', 'Paquet Builder')) {
+        (Get-WinGetInstallerExeFamilyDefault -Family $Family).PSObject.Properties.Name | Should -Not -Contain 'Scope'
+      }
+    }
+  }
+
+  It 'Should mirror documented Wise and Qt IFW installer-level fields' {
+    InModuleScope WinGetInstallerAnalyzer {
+      $Wise = Get-WinGetInstallerExeFamilyDefault -Family 'Wise'
+      $Qt = Get-WinGetInstallerExeFamilyDefault -Family 'Qt Installer Framework'
+
+      $Wise.Scope | Should -Be 'machine'
+      $Wise.InstallerSwitches.InstallLocation | Should -Be 'INSTALLDIR="<INSTALLPATH>"'
+      $Qt.UpgradeBehavior | Should -Be 'uninstallPrevious'
+    }
+  }
+}
+
 Describe 'WinGet installer analyzer content detection' {
   It 'Should classify MSI by CFB root CLSID even when the extension is wrong' {
     $Msi = Get-AnalyzerInstallerFixture -Name 'draw.io-30.2.6.msi' -Url 'https://github.com/jgraph/drawio-desktop/releases/download/v30.2.6/draw.io-30.2.6.msi'
@@ -195,6 +243,8 @@ Describe 'WinGet installer analyzer content detection' {
 
     $Defaults.InstallerSwitches.Silent | Should -Be '/S /L'
     $Defaults.InstallerSwitches.InstallLocation | Should -Be '/D "<INSTALLPATH>"'
+    $Defaults.ScopeSwitches.User | Should -Be '/CU'
+    $Defaults.ScopeSwitches.Machine | Should -Be '/RUNAS /ALL'
     $Defaults.Notes | Should -Contain 'Actual Installer can use /CU for current-user scope and /RUNAS /ALL for machine scope.'
   }
 
@@ -210,7 +260,7 @@ Describe 'WinGet installer analyzer content detection' {
     } $FixturePath
 
     $Candidate.Family | Should -Be 'Paquet Builder'
-    $Candidate.SuggestedManifestFields.Scope | Should -Be 'machine'
+    $Candidate.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'Scope'
     $Candidate.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/s'
   }
 
@@ -258,6 +308,7 @@ Describe 'WinGet installer analyzer content detection' {
       $QSetup.Result.ProductName | Should -Be 'Analyzer QSetup Product'
       $QSetup.Result.ProductVersion | Should -Be '1.2.3'
       $QSetup.Result.SuggestedManifestFields.Scope | Should -Be 'machine'
+      $QSetup.Result.SuggestedManifestFields.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
       Should -Invoke -CommandName Get-SevenZipSfxInfo -Times 0 -Exactly
     }
   }
