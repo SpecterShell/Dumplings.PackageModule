@@ -2,7 +2,7 @@
 
 BeforeAll {
   $Script:RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
-  $Script:ValidationLogScript = Join-Path $Script:RepositoryRoot '.agent\skills\author-winget-manifest\scripts\Get-WinGetPRValidationLog.ps1'
+  $Script:ValidationLogScript = Join-Path $Script:RepositoryRoot '.agents\skills\author-winget-manifest\scripts\Get-WinGetPRValidationLog.ps1'
 
   function Get-TestAzureArtifactPage {
     param([int]$ArtifactId = 42)

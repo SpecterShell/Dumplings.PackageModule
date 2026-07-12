@@ -2,7 +2,7 @@
 
 BeforeAll {
   $Script:RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
-  $Script:SkillRoot = Join-Path $Script:RepositoryRoot '.agent\skills'
+  $Script:SkillRoot = Join-Path $Script:RepositoryRoot '.agents\skills'
   $Script:AnalyzeSkillRoot = Join-Path $Script:SkillRoot 'analyze-winget-installer'
   $Script:AnalyzeReferenceRoot = Join-Path $Script:AnalyzeSkillRoot 'references'
   $Script:AuthorSkillRoot = Join-Path $Script:SkillRoot 'author-winget-manifest'

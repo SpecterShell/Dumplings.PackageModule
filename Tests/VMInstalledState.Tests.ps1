@@ -2,8 +2,8 @@
 
 BeforeAll {
   $Script:RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
-  $Script:GuestScript = Join-Path $Script:RepositoryRoot '.agent\skills\analyze-winget-installer\scripts\Get-WinGetVMInstalledState.ps1'
-  $Script:HostScript = Join-Path $Script:RepositoryRoot '.agent\skills\analyze-winget-installer\scripts\Invoke-WinGetVMInstalledState.ps1'
+  $Script:GuestScript = Join-Path $Script:RepositoryRoot '.agents\skills\analyze-winget-installer\scripts\Get-WinGetVMInstalledState.ps1'
+  $Script:HostScript = Join-Path $Script:RepositoryRoot '.agents\skills\analyze-winget-installer\scripts\Invoke-WinGetVMInstalledState.ps1'
 
   function Get-VM {}
   function Get-VMIntegrationService {}
