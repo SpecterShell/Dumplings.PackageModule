@@ -64,10 +64,11 @@ Describe 'WinGet skill documentation' {
     Test-Path -LiteralPath (Join-Path $Script:AnalyzeReferenceRoot 'parser-api-reference.md') | Should -BeFalse
   }
 
-  It 'documents the PowerShell Core Hyper-V compatibility import exactly' {
+  It 'documents native Hyper-V import and the inherited module-path repair' {
     $Text = Get-Content -LiteralPath (Join-Path $Script:AnalyzeReferenceRoot 'vm-validation-workflow.md') -Raw
-    $Text | Should -Match ([regex]::Escape("`$env:PSModulePath += ';C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules'"))
-    $Text | Should -Match ([regex]::Escape('Import-Module Hyper-V -UseWindowsPowerShell -PassThru'))
+    $Text | Should -Match ([regex]::Escape('Import-Module Hyper-V -PassThru'))
+    $Text | Should -Match ([regex]::Escape('WindowsPowerShell\v1.0\Modules'))
+    $Text | Should -Match ([regex]::Escape('Do not add `-UseWindowsPowerShell` when native import succeeds'))
   }
 
   It 'documents verbatim desktop release-note selection and conversion' {
