@@ -11,6 +11,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Dumplings.WinGetDownload
 {
@@ -38,16 +39,108 @@ namespace Dumplings.WinGetDownload
         public string DeliveryOptimizationState { get; set; }
         public int DeliveryOptimizationExtendedError { get; set; }
         public bool IsFatalDeliveryOptimizationError { get; set; }
+        public int AttemptCount { get; set; }
+        public bool Cancelled { get; set; }
+        public bool TimedOut { get; set; }
+    }
+
+    public sealed class DownloadProgressSnapshot
+    {
+        public long BytesDownloaded { get; internal set; }
+        public long? ContentLength { get; internal set; }
+        public string State { get; internal set; }
+    }
+
+    public sealed class DownloadOperation : IDisposable
+    {
+        private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
+        private readonly object sync = new object();
+        private Task<DownloadResult> task;
+        private Action cancellationAction;
+        private long bytesDownloaded;
+        private long? contentLength;
+        private string state = "Starting";
+
+        private DownloadOperation() { }
+
+        internal static DownloadOperation Start(Func<DownloadOperation, DownloadResult> callback)
+        {
+            DownloadOperation operation = new DownloadOperation();
+            operation.task = Task.Run(() => callback(operation));
+            return operation;
+        }
+
+        public bool IsCompleted { get { return task.IsCompleted; } }
+        public DownloadResult Result { get { return task.GetAwaiter().GetResult(); } }
+        public bool Wait(int milliseconds) { return task.Wait(milliseconds); }
+
+        public DownloadProgressSnapshot GetProgress()
+        {
+            lock (sync)
+            {
+                return new DownloadProgressSnapshot
+                {
+                    BytesDownloaded = bytesDownloaded,
+                    ContentLength = contentLength,
+                    State = state,
+                };
+            }
+        }
+
+        public void Cancel()
+        {
+            if (!cancellation.IsCancellationRequested) cancellation.Cancel();
+            Action action;
+            lock (sync) action = cancellationAction;
+            if (action != null)
+            {
+                try { action(); }
+                catch { }
+            }
+        }
+
+        internal void ThrowIfCancellationRequested() { cancellation.Token.ThrowIfCancellationRequested(); }
+
+        internal void UpdateProgress(long bytes, long? total, string currentState)
+        {
+            lock (sync)
+            {
+                bytesDownloaded = bytes;
+                contentLength = total;
+                state = currentState;
+            }
+        }
+
+        internal void SetCancellationAction(Action action)
+        {
+            lock (sync) cancellationAction = action;
+            if (cancellation.IsCancellationRequested && action != null) action();
+        }
+
+        internal void ClearCancellationAction()
+        {
+            lock (sync) cancellationAction = null;
+        }
+
+        public void Dispose() { if (!IsCompleted) Cancel(); }
     }
 
     internal static class Hashing
     {
-        internal static void Populate(DownloadResult result)
+        internal static void Populate(DownloadResult result, DownloadOperation operation)
         {
             using (FileStream stream = new FileStream(result.DestinationPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            using (SHA256 sha256 = SHA256.Create())
+            using (IncrementalHash sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
             {
-                byte[] hash = sha256.ComputeHash(stream);
+                operation.UpdateProgress(stream.Length, stream.Length, "Hashing");
+                byte[] buffer = new byte[1024 * 1024];
+                int count;
+                while ((count = stream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    operation.ThrowIfCancellationRequested();
+                    sha256.AppendData(buffer, 0, count);
+                }
+                byte[] hash = sha256.GetHashAndReset();
                 result.BytesDownloaded = stream.Length;
                 result.Sha256 = BitConverter.ToString(hash).Replace("-", string.Empty);
             }
@@ -59,6 +152,9 @@ namespace Dumplings.WinGetDownload
         private const uint INTERNET_OPEN_TYPE_PRECONFIG = 0;
         private const uint INTERNET_OPEN_TYPE_PROXY = 3;
         private const uint INTERNET_FLAG_IGNORE_REDIRECT_TO_HTTPS = 0x00004000;
+        private const uint INTERNET_OPTION_CONNECT_TIMEOUT = 2;
+        private const uint INTERNET_OPTION_SEND_TIMEOUT = 5;
+        private const uint INTERNET_OPTION_RECEIVE_TIMEOUT = 6;
         private const uint HTTP_QUERY_CONTENT_TYPE = 1;
         private const uint HTTP_QUERY_CONTENT_LENGTH = 5;
         private const uint HTTP_QUERY_STATUS_CODE = 19;
@@ -66,6 +162,8 @@ namespace Dumplings.WinGetDownload
         private const uint HTTP_QUERY_FLAG_NUMBER = 0x20000000;
         private const uint INTERNET_OPTION_URL = 34;
         private const int ERROR_INSUFFICIENT_BUFFER = 122;
+        private const int ERROR_CANCELLED = 1223;
+        private const int ERROR_INTERNET_OPERATION_CANCELLED = 12017;
 
         [DllImport("wininet.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr InternetOpenW(string agent, uint accessType, string proxy, string proxyBypass, uint flags);
@@ -87,6 +185,10 @@ namespace Dumplings.WinGetDownload
 
         [DllImport("wininet.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InternetSetOptionW(IntPtr internet, uint option, IntPtr buffer, uint bufferLength);
+
+        [DllImport("wininet.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool InternetCloseHandle(IntPtr internet);
 
         private static int HResultFromWin32(int error)
@@ -97,6 +199,47 @@ namespace Dumplings.WinGetDownload
         private static int HttpHResult(int status)
         {
             return unchecked((int)(0x80190000u | ((uint)status & 0xFFFFu)));
+        }
+
+        private static void SetTimeout(IntPtr handle, uint option, int seconds)
+        {
+            if (seconds < 0) return;
+            int milliseconds = seconds == 0 || seconds >= int.MaxValue / 1000 ? int.MaxValue : seconds * 1000;
+            IntPtr value = Marshal.AllocHGlobal(sizeof(int));
+            try
+            {
+                Marshal.WriteInt32(value, milliseconds);
+                if (!InternetSetOptionW(handle, option, value, sizeof(int)))
+                {
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "InternetSetOptionW failed.");
+                }
+            }
+            finally { Marshal.FreeHGlobal(value); }
+        }
+
+        private sealed class NativeHandleState
+        {
+            private readonly object sync = new object();
+            private IntPtr session;
+            private IntPtr request;
+
+            internal void SetSession(IntPtr value) { lock (sync) session = value; }
+            internal void SetRequest(IntPtr value) { lock (sync) request = value; }
+
+            internal void Close()
+            {
+                IntPtr requestToClose;
+                IntPtr sessionToClose;
+                lock (sync)
+                {
+                    requestToClose = request;
+                    sessionToClose = session;
+                    request = IntPtr.Zero;
+                    session = IntPtr.Zero;
+                }
+                if (requestToClose != IntPtr.Zero) InternetCloseHandle(requestToClose);
+                if (sessionToClose != IntPtr.Zero) InternetCloseHandle(sessionToClose);
+            }
         }
 
         private static string QueryString(IntPtr request, uint query)
@@ -127,7 +270,17 @@ namespace Dumplings.WinGetDownload
             finally { Marshal.FreeHGlobal(buffer); }
         }
 
+        public static DownloadOperation StartDownload(string uri, string destinationPath, string userAgent, IDictionary<string, string> requestHeaders, string proxy, bool responseOnly, int connectionTimeoutSeconds, int operationTimeoutSeconds)
+        {
+            return DownloadOperation.Start(operation => DownloadCore(uri, destinationPath, userAgent, requestHeaders, proxy, responseOnly, connectionTimeoutSeconds, operationTimeoutSeconds, operation));
+        }
+
         public static DownloadResult Download(string uri, string destinationPath, string userAgent, IDictionary<string, string> requestHeaders, string proxy, bool responseOnly)
+        {
+            using (DownloadOperation operation = StartDownload(uri, destinationPath, userAgent, requestHeaders, proxy, responseOnly, 0, 0)) return operation.Result;
+        }
+
+        private static DownloadResult DownloadCore(string uri, string destinationPath, string userAgent, IDictionary<string, string> requestHeaders, string proxy, bool responseOnly, int connectionTimeoutSeconds, int operationTimeoutSeconds, DownloadOperation operation)
         {
             DownloadResult result = new DownloadResult
             {
@@ -137,13 +290,21 @@ namespace Dumplings.WinGetDownload
                 UserAgent = userAgent,
             };
 
-            IntPtr session = IntPtr.Zero;
-            IntPtr request = IntPtr.Zero;
+            NativeHandleState handles = new NativeHandleState();
+            string stage = "OpenSession";
             try
             {
+                operation.UpdateProgress(0, null, "Connecting");
+                operation.SetCancellationAction(handles.Close);
+                operation.ThrowIfCancellationRequested();
                 uint accessType = string.IsNullOrEmpty(proxy) ? INTERNET_OPEN_TYPE_PRECONFIG : INTERNET_OPEN_TYPE_PROXY;
-                session = InternetOpenW(userAgent, accessType, string.IsNullOrEmpty(proxy) ? null : proxy, null, 0);
+                IntPtr session = InternetOpenW(userAgent, accessType, string.IsNullOrEmpty(proxy) ? null : proxy, null, 0);
                 if (session == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "InternetOpenW failed.");
+                handles.SetSession(session);
+                operation.ThrowIfCancellationRequested();
+                SetTimeout(session, INTERNET_OPTION_CONNECT_TIMEOUT, connectionTimeoutSeconds);
+                SetTimeout(session, INTERNET_OPTION_SEND_TIMEOUT, operationTimeoutSeconds);
+                SetTimeout(session, INTERNET_OPTION_RECEIVE_TIMEOUT, operationTimeoutSeconds);
 
                 StringBuilder headerBuilder = new StringBuilder();
                 if (requestHeaders != null)
@@ -154,9 +315,15 @@ namespace Dumplings.WinGetDownload
                     }
                 }
                 string headers = headerBuilder.ToString();
-                request = InternetOpenUrlW(session, uri, headers.Length == 0 ? null : headers, checked((uint)headers.Length), INTERNET_FLAG_IGNORE_REDIRECT_TO_HTTPS, UIntPtr.Zero);
+                stage = "OpenRequest";
+                operation.ThrowIfCancellationRequested();
+                IntPtr request = InternetOpenUrlW(session, uri, headers.Length == 0 ? null : headers, checked((uint)headers.Length), INTERNET_FLAG_IGNORE_REDIRECT_TO_HTTPS, UIntPtr.Zero);
                 if (request == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "InternetOpenUrlW failed.");
+                handles.SetRequest(request);
+                operation.ThrowIfCancellationRequested();
+                SetTimeout(request, INTERNET_OPTION_RECEIVE_TIMEOUT, operationTimeoutSeconds);
 
+                stage = "ReadResponseHeaders";
                 string statusText = QueryString(request, HTTP_QUERY_STATUS_CODE);
                 int status;
                 if (!int.TryParse(statusText, out status)) throw new InvalidOperationException("WinINet did not return an HTTP status code.");
@@ -166,6 +333,7 @@ namespace Dumplings.WinGetDownload
                 result.ResponseHeaders = QueryString(request, HTTP_QUERY_RAW_HEADERS_CRLF);
                 long contentLength;
                 if (long.TryParse(QueryString(request, HTTP_QUERY_CONTENT_LENGTH), out contentLength)) result.ContentLength = contentLength;
+                operation.UpdateProgress(0, result.ContentLength, "ResponseReceived");
 
                 if (status != 200)
                 {
@@ -176,23 +344,28 @@ namespace Dumplings.WinGetDownload
                 result.ResponseAccepted = true;
                 if (responseOnly) return result;
 
+                stage = "Download";
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(destinationPath)));
                 using (FileStream output = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.Read))
                 {
                     byte[] buffer = new byte[1024 * 1024];
                     while (true)
                     {
+                        operation.ThrowIfCancellationRequested();
                         uint bytesRead;
                         if (!InternetReadFile(request, buffer, checked((uint)buffer.Length), out bytesRead))
                         {
+                            operation.ThrowIfCancellationRequested();
                             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "InternetReadFile failed.");
                         }
                         if (bytesRead == 0) break;
                         output.Write(buffer, 0, checked((int)bytesRead));
+                        operation.UpdateProgress(output.Length, result.ContentLength, "Downloading");
                     }
                 }
 
-                Hashing.Populate(result);
+                stage = "HashDownload";
+                Hashing.Populate(result, operation);
                 if (result.ContentLength.HasValue && result.ContentLength.Value > 0 && result.BytesDownloaded != result.ContentLength.Value)
                 {
                     result.HResult = unchecked((int)0x8A150044);
@@ -203,17 +376,36 @@ namespace Dumplings.WinGetDownload
                 result.Completed = true;
                 return result;
             }
+            catch (OperationCanceledException)
+            {
+                result.HResult = HResultFromWin32(ERROR_CANCELLED);
+                result.NativeErrorCode = ERROR_CANCELLED;
+                result.FailureStage = stage;
+                result.ErrorMessage = "The WinINet download was cancelled.";
+                result.Cancelled = true;
+                operation.UpdateProgress(result.BytesDownloaded, result.ContentLength, "Cancelled");
+                return result;
+            }
             catch (Exception exception)
             {
+                int nativeError = exception is System.ComponentModel.Win32Exception ? ((System.ComponentModel.Win32Exception)exception).NativeErrorCode : 0;
+                if (nativeError == ERROR_CANCELLED || nativeError == ERROR_INTERNET_OPERATION_CANCELLED)
+                {
+                    result.Cancelled = true;
+                    result.ErrorMessage = "The WinINet download was cancelled.";
+                    operation.UpdateProgress(result.BytesDownloaded, result.ContentLength, "Cancelled");
+                }
                 result.HResult = exception.HResult;
-                result.NativeErrorCode = exception is System.ComponentModel.Win32Exception ? ((System.ComponentModel.Win32Exception)exception).NativeErrorCode : 0;
-                result.ErrorMessage = exception.Message;
+                result.NativeErrorCode = nativeError;
+                result.FailureStage = stage;
+                if (!result.Cancelled) result.ErrorMessage = exception.Message;
+                result.TimedOut = exception is TimeoutException;
                 return result;
             }
             finally
             {
-                if (request != IntPtr.Zero) InternetCloseHandle(request);
-                if (session != IntPtr.Zero) InternetCloseHandle(session);
+                operation.ClearCancellationAction();
+                handles.Close();
             }
         }
     }
@@ -410,7 +602,33 @@ namespace Dumplings.WinGetDownload
             catch { return null; }
         }
 
+        private static void PopulateResponseInfo(IDODownload download, DownloadResult result)
+        {
+            if (download == null) return;
+            result.ResponseHeaders = GetProperty(download, DODownloadProperty.HttpResponseHeaders) as string;
+            result.FinalUri = GetProperty(download, DODownloadProperty.HttpRedirectionTarget) as string;
+            result.ServerIPAddress = GetProperty(download, DODownloadProperty.HttpServerIPAddress) as string;
+            result.HttpStatusCode = ConvertStatusCode(GetProperty(download, DODownloadProperty.HttpStatusCode));
+            if (!string.IsNullOrEmpty(result.ResponseHeaders))
+            {
+                foreach (string line in result.ResponseHeaders.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (line.StartsWith("content-type:", StringComparison.OrdinalIgnoreCase)) result.ContentType = line.Substring(13).Trim();
+                }
+            }
+        }
+
+        public static DownloadOperation StartDownload(string uri, string destinationPath, string displayName, string contentId, IDictionary<string, string> requestHeaders, int noProgressTimeoutSeconds, int maximumDurationSeconds, bool responseOnly, int connectionTimeoutSeconds, int operationTimeoutSeconds)
+        {
+            return DownloadOperation.Start(operation => DownloadCore(uri, destinationPath, displayName, contentId, requestHeaders, noProgressTimeoutSeconds, maximumDurationSeconds, responseOnly, connectionTimeoutSeconds, operationTimeoutSeconds, operation));
+        }
+
         public static DownloadResult Download(string uri, string destinationPath, string displayName, string contentId, IDictionary<string, string> requestHeaders, int noProgressTimeoutSeconds, int maximumDurationSeconds, bool responseOnly)
+        {
+            using (DownloadOperation operation = StartDownload(uri, destinationPath, displayName, contentId, requestHeaders, noProgressTimeoutSeconds, maximumDurationSeconds, responseOnly, 0, 0)) return operation.Result;
+        }
+
+        private static DownloadResult DownloadCore(string uri, string destinationPath, string displayName, string contentId, IDictionary<string, string> requestHeaders, int noProgressTimeoutSeconds, int maximumDurationSeconds, bool responseOnly, int connectionTimeoutSeconds, int operationTimeoutSeconds, DownloadOperation operation)
         {
             DownloadResult result = new DownloadResult
             {
@@ -426,6 +644,8 @@ namespace Dumplings.WinGetDownload
             string stage = "CreateManager";
             try
             {
+                operation.UpdateProgress(0, null, "Connecting");
+                operation.ThrowIfCancellationRequested();
                 if (File.Exists(destinationPath)) File.Delete(destinationPath);
                 Type managerType = Type.GetTypeFromCLSID(DeliveryOptimizationClass, true);
                 manager = (IDOManager)Activator.CreateInstance(managerType);
@@ -474,27 +694,37 @@ namespace Dumplings.WinGetDownload
                 finally { Marshal.FreeCoTaskMem(ranges); }
 
                 DateTime started = DateTime.UtcNow;
-                DateTime progressDeadline = started.AddSeconds(noProgressTimeoutSeconds);
-                ulong initialTransferred = ulong.MaxValue;
-                bool madeProgress = false;
+                DateTime lastProgress = started;
+                ulong lastTransferred = 0;
+                bool responseStarted = false;
                 while (true)
                 {
                     stage = "WaitForStatus";
-                    callback.Wait(1000);
+                    operation.ThrowIfCancellationRequested();
+                    callback.Wait(250);
+                    operation.ThrowIfCancellationRequested();
                     DO_DOWNLOAD_STATUS status;
                     ThrowForHR(download.GetStatus(out status));
                     result.DeliveryOptimizationState = status.State.ToString();
                     result.DeliveryOptimizationExtendedError = status.ExtendedError;
                     if (Failed(status.Error)) Marshal.ThrowExceptionForHR(status.Error);
+                    long transferred = status.BytesTransferred > long.MaxValue ? long.MaxValue : (long)status.BytesTransferred;
+                    long? total = status.BytesTotal > 0 && status.BytesTotal <= long.MaxValue ? (long?)status.BytesTotal : null;
+                    operation.UpdateProgress(transferred, total, status.State.ToString());
+                    result.BytesDownloaded = transferred;
+                    result.ContentLength = total;
+                    if (status.BytesTransferred != lastTransferred)
+                    {
+                        lastTransferred = status.BytesTransferred;
+                        lastProgress = DateTime.UtcNow;
+                    }
 
                     if (status.State == DODownloadState.Transferring)
                     {
+                        responseStarted = true;
                         if (responseOnly)
                         {
-                            result.ResponseHeaders = GetProperty(download, DODownloadProperty.HttpResponseHeaders) as string;
-                            result.FinalUri = GetProperty(download, DODownloadProperty.HttpRedirectionTarget) as string;
-                            result.ServerIPAddress = GetProperty(download, DODownloadProperty.HttpServerIPAddress) as string;
-                            result.HttpStatusCode = ConvertStatusCode(GetProperty(download, DODownloadProperty.HttpStatusCode));
+                            PopulateResponseInfo(download, result);
                             if ((result.HttpStatusCode >= 200 && result.HttpStatusCode < 300) || status.BytesTransferred > 0)
                             {
                                 result.ResponseAccepted = true;
@@ -503,29 +733,18 @@ namespace Dumplings.WinGetDownload
                                 return result;
                             }
                         }
-                        if (initialTransferred == ulong.MaxValue) initialTransferred = status.BytesTransferred;
-                        else if (status.BytesTransferred != initialTransferred) madeProgress = true;
                     }
                     else if (status.State == DODownloadState.Transferred || status.State == DODownloadState.Finalized)
                     {
+                        responseStarted = true;
                         stage = "ReadResponseProperties";
-                        result.ResponseHeaders = GetProperty(download, DODownloadProperty.HttpResponseHeaders) as string;
-                        result.FinalUri = GetProperty(download, DODownloadProperty.HttpRedirectionTarget) as string;
-                        result.ServerIPAddress = GetProperty(download, DODownloadProperty.HttpServerIPAddress) as string;
-                        result.HttpStatusCode = ConvertStatusCode(GetProperty(download, DODownloadProperty.HttpStatusCode));
+                        PopulateResponseInfo(download, result);
                         result.ResponseAccepted = !result.HttpStatusCode.HasValue || (result.HttpStatusCode.Value >= 200 && result.HttpStatusCode.Value < 300);
                         if (status.State == DODownloadState.Transferred) ThrowForHR(download.FinalizeDownload());
                         completed = true;
                         stage = "HashDownload";
-                        Hashing.Populate(result);
-                        result.ContentLength = status.BytesTotal > 0 ? (long?)checked((long)status.BytesTotal) : null;
-                        if (!string.IsNullOrEmpty(result.ResponseHeaders))
-                        {
-                            foreach (string line in result.ResponseHeaders.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
-                            {
-                                if (line.StartsWith("content-type:", StringComparison.OrdinalIgnoreCase)) result.ContentType = line.Substring(13).Trim();
-                            }
-                        }
+                        Hashing.Populate(result, operation);
+                        result.ContentLength = total;
                         result.Success = true;
                         result.Completed = true;
                         return result;
@@ -535,16 +754,39 @@ namespace Dumplings.WinGetDownload
                         throw new COMException("Delivery Optimization aborted the download.", status.Error);
                     }
 
-                    if (!madeProgress && DateTime.UtcNow >= progressDeadline) throw new COMException("Delivery Optimization made no progress before the WinGet timeout.", DO_E_DOWNLOAD_NO_PROGRESS);
+                    if (connectionTimeoutSeconds > 0 && !responseStarted && DateTime.UtcNow >= started.AddSeconds(connectionTimeoutSeconds))
+                    {
+                        throw new TimeoutException("Delivery Optimization exceeded the connection timeout before receiving a response.");
+                    }
+                    if (operationTimeoutSeconds > 0 && responseStarted && DateTime.UtcNow >= lastProgress.AddSeconds(operationTimeoutSeconds))
+                    {
+                        throw new TimeoutException("Delivery Optimization exceeded the per-operation timeout without receiving more data.");
+                    }
+                    if (noProgressTimeoutSeconds > 0 && DateTime.UtcNow >= lastProgress.AddSeconds(noProgressTimeoutSeconds))
+                    {
+                        throw new COMException("Delivery Optimization made no progress before the WinGet timeout.", DO_E_DOWNLOAD_NO_PROGRESS);
+                    }
                     if (maximumDurationSeconds > 0 && DateTime.UtcNow >= started.AddSeconds(maximumDurationSeconds)) throw new TimeoutException("Delivery Optimization exceeded the probe duration limit.");
                 }
             }
+            catch (OperationCanceledException exception)
+            {
+                result.HResult = exception.HResult;
+                result.FailureStage = stage;
+                result.ErrorMessage = "The Delivery Optimization download was cancelled.";
+                result.Cancelled = true;
+                operation.UpdateProgress(result.BytesDownloaded, result.ContentLength, "Cancelled");
+                return result;
+            }
             catch (Exception exception)
             {
+                try { PopulateResponseInfo(download, result); }
+                catch { }
                 result.HResult = exception.HResult;
                 result.FailureStage = stage;
                 result.ErrorMessage = exception.Message;
                 result.IsFatalDeliveryOptimizationError = IsFatal(exception.HResult);
+                result.TimedOut = exception is TimeoutException || exception.HResult == DO_E_DOWNLOAD_NO_PROGRESS;
                 return result;
             }
             finally

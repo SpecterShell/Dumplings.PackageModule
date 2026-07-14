@@ -40,6 +40,168 @@ function ConvertTo-WinGetDownloadHeaderDictionary {
   return $Result
 }
 
+function ConvertTo-WinGetDownloadSize {
+  <#
+  .SYNOPSIS
+    Format native byte progress for Write-Progress
+  #>
+  param ([Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Bytes)
+
+  if ($Bytes -ge 1TB) { return '{0:N2} TB' -f ($Bytes / 1TB) }
+  if ($Bytes -ge 1GB) { return '{0:N2} GB' -f ($Bytes / 1GB) }
+  if ($Bytes -ge 1MB) { return '{0:N2} MB' -f ($Bytes / 1MB) }
+  if ($Bytes -ge 1KB) { return '{0:N2} KB' -f ($Bytes / 1KB) }
+  return "$Bytes B"
+}
+
+function Test-WinGetDownloadRetryStatus {
+  <#
+  .SYNOPSIS
+    Apply Invoke-WebRequest's retryable HTTP status range
+  #>
+  [OutputType([bool])]
+  param ([AllowNull()][Nullable[int]]$StatusCode)
+
+  return $null -ne $StatusCode -and ($StatusCode -eq 304 -or ($StatusCode -ge 400 -and $StatusCode -le 599))
+}
+
+function Get-WinGetDownloadRetryInterval {
+  <#
+  .SYNOPSIS
+    Read an integer Retry-After value for HTTP 429 responses
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory)]$Result,
+    [Parameter(Mandatory)][ValidateRange(1, [int]::MaxValue)][int]$DefaultSeconds
+  )
+
+  if ($Result.HttpStatusCode -eq 429 -and -not [string]::IsNullOrWhiteSpace($Result.ResponseHeaders)) {
+    $Match = [regex]::Match([string]$Result.ResponseHeaders, '(?im)^Retry-After\s*:\s*(?<Seconds>\d+)\s*$')
+    $RetryAfter = 0
+    if ($Match.Success -and [int]::TryParse($Match.Groups['Seconds'].Value, [ref]$RetryAfter) -and $RetryAfter -gt 0) { return $RetryAfter }
+  }
+  return $DefaultSeconds
+}
+
+function Invoke-WinGetDownloadOperation {
+  <#
+  .SYNOPSIS
+    Poll one native download operation with progress, cancellation, and retries
+  .DESCRIPTION
+    PowerShell remains on the pipeline thread while the native transport runs
+    in the background. A pipeline stop therefore enters finally and cancels the
+    active WinINet handles or Delivery Optimization transfer.
+  #>
+  param (
+    [Parameter(Mandatory)][scriptblock]$StartOperation,
+    [Parameter(Mandatory)][hashtable]$OperationArgument,
+    [Parameter(Mandatory)][string]$Activity,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 0,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 5,
+    [ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 0,
+    [ValidateRange(1, [int]::MaxValue)][int]$ProgressId = 174593042
+  )
+
+  $MaximumAttempts = $MaximumRetryCount + 1
+  for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++) {
+    $Operation = & $StartOperation $Attempt $OperationArgument
+    if ($null -eq $Operation) { throw 'The native downloader did not return an operation.' }
+    $WroteProgress = $false
+    $NextProgress = [DateTime]::UtcNow.AddSeconds(1)
+    $Started = [DateTime]::UtcNow
+    $LastActivity = $Started
+    $LastBytes = -1L
+    $ResponseStarted = $false
+    try {
+      while (-not $Operation.Wait(200)) {
+        $Progress = $Operation.GetProgress()
+        $Now = [DateTime]::UtcNow
+        if ($Progress.BytesDownloaded -ne $LastBytes) {
+          $LastBytes = [long]$Progress.BytesDownloaded
+          $LastActivity = $Now
+        }
+        if (-not $ResponseStarted -and $Progress.State -in @('ResponseReceived', 'Downloading', 'Transferring', 'Transferred', 'Finalized', 'Hashing')) {
+          $ResponseStarted = $true
+          $LastActivity = $Now
+        }
+        if ($ConnectionTimeoutSeconds -gt 0 -and -not $ResponseStarted -and $Now -ge $Started.AddSeconds($ConnectionTimeoutSeconds)) {
+          $Operation.Cancel()
+          throw [TimeoutException]::new("$Activity exceeded the $ConnectionTimeoutSeconds-second connection timeout.")
+        }
+        if ($OperationTimeoutSeconds -gt 0 -and $ResponseStarted -and $Now -ge $LastActivity.AddSeconds($OperationTimeoutSeconds)) {
+          $Operation.Cancel()
+          throw [TimeoutException]::new("$Activity exceeded the $OperationTimeoutSeconds-second operation timeout without receiving more data.")
+        }
+        if ($Now -lt $NextProgress) { continue }
+        $Downloaded = ConvertTo-WinGetDownloadSize -Bytes ([Math]::Max(0L, [long]$Progress.BytesDownloaded))
+        $Total = if ($null -ne $Progress.ContentLength -and $Progress.ContentLength -gt 0) { ConvertTo-WinGetDownloadSize -Bytes ([long]$Progress.ContentLength) } else { '???' }
+        $Percent = if ($null -ne $Progress.ContentLength -and $Progress.ContentLength -gt 0) {
+          [Math]::Min(100, [int]([decimal]$Progress.BytesDownloaded * 100 / [decimal]$Progress.ContentLength))
+        } else { -1 }
+        Write-Progress -Id $ProgressId -Activity $Activity -Status "$($Progress.State): $Downloaded of $Total" -PercentComplete $Percent
+        $WroteProgress = $true
+        $NextProgress = $Now.AddSeconds(1)
+      }
+      $Result = $Operation.Result
+      $Result.AttemptCount = $Attempt
+    } finally {
+      if (-not $Operation.IsCompleted) { $Operation.Cancel() }
+      $Operation.Dispose()
+      if ($WroteProgress) { Write-Progress -Id $ProgressId -Activity $Activity -Completed }
+    }
+
+    if ($Attempt -ge $MaximumAttempts -or -not (Test-WinGetDownloadRetryStatus -StatusCode $Result.HttpStatusCode)) { return $Result }
+    $Delay = Get-WinGetDownloadRetryInterval -Result $Result -DefaultSeconds $RetryIntervalSec
+    Write-Verbose "Retrying $Activity in $Delay second(s) after HTTP status $($Result.HttpStatusCode); attempt $($Attempt + 1) of $MaximumAttempts."
+    Start-Sleep -Seconds $Delay
+  }
+}
+
+function Open-WinGetWinINetDownloadOperation {
+  <#
+  .SYNOPSIS
+    Start one cancellable native WinINet operation
+  #>
+  param (
+    [Parameter(Mandatory)][uri]$Uri,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [Parameter(Mandatory)][string]$UserAgent,
+    [Parameter(Mandatory)][Collections.Generic.IDictionary[string, string]]$Header,
+    [AllowEmptyString()][string]$Proxy,
+    [bool]$ResponseOnly,
+    [int]$ConnectionTimeoutSeconds,
+    [int]$OperationTimeoutSeconds
+  )
+
+  return [Dumplings.WinGetDownload.WinInetDownloader]::StartDownload(
+    $Uri.AbsoluteUri, $DestinationPath, $UserAgent, $Header, $Proxy, $ResponseOnly, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds)
+}
+
+function Open-WinGetDeliveryOptimizationDownloadOperation {
+  <#
+  .SYNOPSIS
+    Start one cancellable native Delivery Optimization operation
+  #>
+  param (
+    [Parameter(Mandatory)][uri]$Uri,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [Parameter(Mandatory)][string]$DisplayName,
+    [AllowEmptyString()][string]$ExpectedSha256,
+    [Parameter(Mandatory)][Collections.Generic.IDictionary[string, string]]$Header,
+    [int]$NoProgressTimeoutSeconds,
+    [int]$MaximumDurationSeconds,
+    [bool]$ResponseOnly,
+    [int]$ConnectionTimeoutSeconds,
+    [int]$OperationTimeoutSeconds
+  )
+
+  return [Dumplings.WinGetDownload.DeliveryOptimizationDownloader]::StartDownload(
+    $Uri.AbsoluteUri, $DestinationPath, $DisplayName, $ExpectedSha256, $Header,
+    $NoProgressTimeoutSeconds, $MaximumDurationSeconds, $ResponseOnly, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds)
+}
+
 function Invoke-WinGetWinINetDownload {
   <#
   .SYNOPSIS
@@ -52,6 +214,14 @@ function Invoke-WinGetWinINetDownload {
     Optional manifest authentication headers
   .PARAMETER Proxy
     Optional explicit proxy URI; WinGet forces WinINet when a proxy is configured
+  .PARAMETER ConnectionTimeoutSeconds
+    Maximum time for request connection and response headers; TimeoutSec is an alias
+  .PARAMETER OperationTimeoutSeconds
+    Maximum time for each response-body read operation
+  .PARAMETER MaximumRetryCount
+    Number of retries for HTTP 304 and 400 through 599 responses
+  .PARAMETER RetryIntervalSec
+    Delay between retries; HTTP 429 Retry-After takes precedence
   #>
   [OutputType([Dumplings.WinGetDownload.DownloadResult])]
   param (
@@ -60,11 +230,30 @@ function Invoke-WinGetWinINetDownload {
     [Collections.IDictionary]$Header,
     [string]$Proxy,
     [string]$UserAgent = (Get-WinGetDownloadUserAgent),
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 0,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 5,
     [switch]$ResponseOnly
   )
 
   $Headers = ConvertTo-WinGetDownloadHeaderDictionary -Header $Header
-  return [Dumplings.WinGetDownload.WinInetDownloader]::Download($Uri.AbsoluteUri, $DestinationPath, $UserAgent, $Headers, $Proxy, $ResponseOnly.IsPresent)
+  $OperationArgument = @{
+    Uri                      = $Uri
+    DestinationPath          = $DestinationPath
+    UserAgent                = $UserAgent
+    Header                   = $Headers
+    Proxy                    = $Proxy
+    ResponseOnly             = $ResponseOnly.IsPresent
+    ConnectionTimeoutSeconds = $ConnectionTimeoutSeconds
+    OperationTimeoutSeconds  = $OperationTimeoutSeconds
+  }
+  return Invoke-WinGetDownloadOperation -StartOperation {
+    param($Attempt, $Argument)
+    $null = $Attempt
+    Open-WinGetWinINetDownloadOperation @Argument
+  } -OperationArgument $OperationArgument -Activity 'Downloading installer with WinINet' -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
+    -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
 }
 
 function Invoke-WinGetDeliveryOptimizationDownload {
@@ -81,6 +270,14 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     Optional manifest authentication headers
   .PARAMETER NoProgressTimeoutSeconds
     WinGet's default no-progress timeout is 60 seconds
+  .PARAMETER ConnectionTimeoutSeconds
+    Maximum time for the transfer to receive an HTTP response; TimeoutSec is an alias
+  .PARAMETER OperationTimeoutSeconds
+    Maximum time between response-body progress updates
+  .PARAMETER MaximumRetryCount
+    Number of retries for HTTP 304 and 400 through 599 responses
+  .PARAMETER RetryIntervalSec
+    Delay between retries; HTTP 429 Retry-After takes precedence
   #>
   [OutputType([Dumplings.WinGetDownload.DownloadResult])]
   param (
@@ -91,19 +288,32 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     [ValidateRange(1, 3600)][int]$NoProgressTimeoutSeconds = 60,
     [ValidateRange(0, 86400)][int]$MaximumDurationSeconds = 3600,
     [string]$DisplayName = 'Windows Package Manager',
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 0,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 5,
     [switch]$ResponseOnly
   )
 
   $Headers = ConvertTo-WinGetDownloadHeaderDictionary -Header $Header
-  return [Dumplings.WinGetDownload.DeliveryOptimizationDownloader]::Download(
-    $Uri.AbsoluteUri,
-    $DestinationPath,
-    $DisplayName,
-    $ExpectedSha256,
-    $Headers,
-    $NoProgressTimeoutSeconds,
-    $MaximumDurationSeconds,
-    $ResponseOnly.IsPresent)
+  $OperationArgument = @{
+    Uri                      = $Uri
+    DestinationPath          = $DestinationPath
+    DisplayName              = $DisplayName
+    ExpectedSha256           = $ExpectedSha256
+    Header                   = $Headers
+    NoProgressTimeoutSeconds = $NoProgressTimeoutSeconds
+    MaximumDurationSeconds   = $MaximumDurationSeconds
+    ResponseOnly             = $ResponseOnly.IsPresent
+    ConnectionTimeoutSeconds = $ConnectionTimeoutSeconds
+    OperationTimeoutSeconds  = $OperationTimeoutSeconds
+  }
+  return Invoke-WinGetDownloadOperation -StartOperation {
+    param($Attempt, $Argument)
+    $null = $Attempt
+    Open-WinGetDeliveryOptimizationDownloadOperation @Argument
+  } -OperationArgument $OperationArgument -Activity 'Downloading installer with Delivery Optimization' -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
+    -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
 }
 
 function Add-WinGetDownloadProbeEvidence {
@@ -154,6 +364,10 @@ function Test-WinGetInstallerDownload {
     [string]$Proxy,
     [ValidateRange(1, 3600)][int]$NoProgressTimeoutSeconds = 60,
     [ValidateRange(0, 86400)][int]$MaximumDurationSeconds = 3600,
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 0,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 5,
     [string]$DestinationDirectory,
     [switch]$KeepDownloads,
     [switch]$ResponseOnly
@@ -167,6 +381,12 @@ function Test-WinGetInstallerDownload {
     $UserAgent = Get-WinGetDownloadUserAgent
     $FallbackOccurred = $false
     $EffectiveMethod = $null
+    $DownloadControl = @{
+      ConnectionTimeoutSeconds = $ConnectionTimeoutSeconds
+      OperationTimeoutSeconds  = $OperationTimeoutSeconds
+      MaximumRetryCount        = $MaximumRetryCount
+      RetryIntervalSec         = $RetryIntervalSec
+    }
 
     try {
       $InvokeDO = {
@@ -180,6 +400,7 @@ function Test-WinGetInstallerDownload {
           MaximumDurationSeconds   = $ProbeMaximumDurationSeconds
           ResponseOnly             = $ResponseOnly
         }
+        foreach ($Entry in $DownloadControl.GetEnumerator()) { $DOParams[$Entry.Key] = $Entry.Value }
         if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) { $DOParams['ExpectedSha256'] = $ExpectedSha256 }
         $NativeResult = Invoke-WinGetDeliveryOptimizationDownload @DOParams
         $Result = Add-WinGetDownloadProbeEvidence -Result $NativeResult -ExpectedSha256 $ExpectedSha256 -KeepDownload $KeepDownloads.IsPresent
@@ -189,7 +410,11 @@ function Test-WinGetInstallerDownload {
       $InvokeWinINet = {
         param ($ProbeHeader)
         $Path = Join-Path $DestinationDirectory 'WinINet.download'
-        $NativeResult = Invoke-WinGetWinINetDownload -Uri $Uri -DestinationPath $Path -Header $ProbeHeader -Proxy $Proxy -UserAgent $UserAgent -ResponseOnly:$ResponseOnly
+        $WinINetParams = @{
+          Uri = $Uri; DestinationPath = $Path; Header = $ProbeHeader; Proxy = $Proxy; UserAgent = $UserAgent; ResponseOnly = $ResponseOnly
+        }
+        foreach ($Entry in $DownloadControl.GetEnumerator()) { $WinINetParams[$Entry.Key] = $Entry.Value }
+        $NativeResult = Invoke-WinGetWinINetDownload @WinINetParams
         $Result = Add-WinGetDownloadProbeEvidence -Result $NativeResult -ExpectedSha256 $ExpectedSha256 -KeepDownload $KeepDownloads.IsPresent
         $Results.Add($Result)
         return $Result
