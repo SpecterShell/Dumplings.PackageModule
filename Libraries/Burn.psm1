@@ -604,13 +604,13 @@ function Get-BurnScopeInfo {
     }
 
     [PSCustomObject]@{
-      DefaultScope                  = $DefaultScope
-      SupportedScopes               = $SupportedScopes
-      SupportsDualScope             = $SupportsDualScope
-      BundlePerMachine              = $BundlePerMachine
-      PackageScopes                 = $PackageScopes
-      ScopeVariables                = @($VariableNames | Where-Object { $_ -match '(?i)(InstallAllUsers|InstallPerMachine|PerMachine|AllUsers)' })
-      OverridableScopeVariables     = @($OverridableVariables | Where-Object { $_ -match '(?i)(InstallAllUsers|InstallPerMachine|PerMachine|AllUsers)' })
+      DefaultScope              = $DefaultScope
+      SupportedScopes           = $SupportedScopes
+      SupportsDualScope         = $SupportsDualScope
+      BundlePerMachine          = $BundlePerMachine
+      PackageScopes             = $PackageScopes
+      ScopeVariables            = @($VariableNames | Where-Object { $_ -match '(?i)(InstallAllUsers|InstallPerMachine|PerMachine|AllUsers)' })
+      OverridableScopeVariables = @($OverridableVariables | Where-Object { $_ -match '(?i)(InstallAllUsers|InstallPerMachine|PerMachine|AllUsers)' })
     }
   }
 }
@@ -727,7 +727,12 @@ function Read-ProductCodeFromBurn {
   process {
     try {
       $BootstrapperApplicationData = Get-BurnBootstrapperApplicationData -Path $Path
-      Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.Id
+      if ($BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.HasAttribute('Code')) {
+        # WiX v6+
+        Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.Code
+      } else {
+        Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.Id
+      }
     } catch {
       Write-Host -Object 'Failed to read the BootstrapperApplicationData file. Fallbacking to the manifest file'
       $Manifest = Get-BurnManifest -Path $Path
