@@ -310,8 +310,11 @@ function Update-WinGetInstallerManifestInstallerMetadata {
 
     # Update SignatureSha256 and PackageFamilyName if the installer is msix or appx
     if ($Installer.InstallerType -cin @('msix', 'appx')) {
+      # Cached installer paths are extensionless, so preserve the manifest's known package family.
+      $MSIXInfo = Get-MSIXInfo -Path $InstallerPath -InstallerTypeHint $Installer.InstallerType
+
       # SignatureSha256
-      $SignatureSha256 = $InstallerPath | Get-MSIXSignatureHash
+      $SignatureSha256 = $MSIXInfo.SignatureSha256
       if (-not [string]::IsNullOrWhiteSpace($SignatureSha256)) {
         $Installer.SignatureSha256 = $SignatureSha256
       } elseif ($Installer.Contains('SignatureSha256')) {
@@ -319,7 +322,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       }
 
       # PackageFamilyName
-      $PackageFamilyName = $InstallerPath | Read-FamilyNameFromMSIX
+      $PackageFamilyName = $MSIXInfo.PackageFamilyName
       if (-not [string]::IsNullOrWhiteSpace($PackageFamilyName)) {
         $Installer.PackageFamilyName = $PackageFamilyName
       } elseif ($Installer.Contains('PackageFamilyName')) {

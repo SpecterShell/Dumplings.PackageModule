@@ -1006,6 +1006,7 @@ function Invoke-WinGetInstallerMsixAnalysis {
   )
 
   $AnalyzerInstallerPath = $InstallerPath
+  $PackageTypeInfo = Get-MSIXPackageTypeInfo -Path $InstallerPath
   $Manifests = @(Get-MSIXManifestXmlList -Path $InstallerPath -ErrorAction SilentlyContinue)
   $Identity = @($Manifests | ForEach-Object { $_.Package.Identity } | Where-Object { $_ } | Select-Object -First 1)[0]
   $SignatureEvidence = Get-WinGetInstallerPackageSignatureEvidence -Path $InstallerPath
@@ -1024,12 +1025,15 @@ function Invoke-WinGetInstallerMsixAnalysis {
   [pscustomobject]@{
     Family                  = 'MSIX/AppX'
     Confidence              = 'high'
-    InstallerType           = 'msix/appx family'
+    InstallerType           = $PackageTypeInfo.InstallerType
+    PackageKind             = $PackageTypeInfo.PackageKind
+    InstallerTypeEvidence   = $PackageTypeInfo.Evidence
+    InstallerTypeAmbiguous  = $PackageTypeInfo.IsAmbiguous
     ProductVersion          = if ($Identity) { $Identity.Version } else { Read-ProductVersionFromMSIX -Path $AnalyzerInstallerPath -ErrorAction SilentlyContinue }
     PackageFamilyName       = if ($Identity) { "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)" } else { Read-FamilyNameFromMSIX -Path $AnalyzerInstallerPath -ErrorAction SilentlyContinue }
     Dependencies            = $DependencyInfo.Dependencies
     UnknownPackageDependencies = $DependencyInfo.UnknownPackageDependencies
-    Warnings                = @($DependencyInfo.Warnings + $AssociationInfo.Warnings)
+    Warnings                = @($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings)
     Protocols               = $AssociationInfo.Protocols
     FileExtensions          = $AssociationInfo.FileExtensions
     RegistryAssociationInfo = $AssociationInfo
@@ -1037,7 +1041,7 @@ function Invoke-WinGetInstallerMsixAnalysis {
     SignatureEvidence       = $SignatureEvidence
     Rejected                = -not $SignatureEvidence.IsTrusted
     RejectionReason         = $SignatureEvidence.RequiredAction
-    SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msix/appx/appxbundle/msixbundle'; Dependencies = $DependencyInfo.Dependencies }
+    SuggestedManifestFields = [pscustomobject]@{ InstallerType = $PackageTypeInfo.InstallerType; Dependencies = $DependencyInfo.Dependencies }
   }
 }
 

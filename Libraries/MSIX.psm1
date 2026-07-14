@@ -112,31 +112,210 @@ function Get-MSIXManifestXmlList {
   }
 }
 
-function Get-MSIXInstallerType {
+function Get-MSIXPackageLayout {
   <#
   .SYNOPSIS
-    Get the WinGet installer type from an AppX/MSIX package extension
+    Detect an AppX/MSIX package or bundle from its archive contents
   .PARAMETER Path
-    The package path or URI
+    The local package path
   #>
-  [OutputType([string])]
+  [OutputType([pscustomobject])]
   param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The package path or URI')]
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The local package path')]
     [string]$Path
   )
 
   process {
-    $PathForExtension = if ([uri]::IsWellFormedUriString($Path, [System.UriKind]::Absolute)) { ([uri]$Path).AbsolutePath } else { $Path }
-    $Extension = [System.IO.Path]::GetExtension($PathForExtension).ToLowerInvariant()
+    $Archive = Get-MSIXZipArchive -Path $Path
+    try {
+      $EntryNames = @($Archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/').TrimStart('/') })
+      $HasPackageManifest = @($EntryNames | Where-Object { $_ -ieq 'AppxManifest.xml' }).Count -gt 0
+      $HasBundleManifest = @($EntryNames | Where-Object { $_ -ieq 'AppxMetadata/AppxBundleManifest.xml' }).Count -gt 0
 
-    switch ($Extension) {
-      '.appx' { 'appx'; break }
-      '.appxbundle' { 'appxbundle'; break }
-      '.msix' { 'msix'; break }
-      '.msixbundle' { 'msixbundle'; break }
-      default { throw "Unsupported AppX/MSIX installer extension: $Extension" }
+      if ($HasPackageManifest -eq $HasBundleManifest) {
+        if ($HasPackageManifest) { throw 'The archive contains both package and bundle manifests' }
+        throw 'The archive does not contain an AppxManifest.xml or AppxBundleManifest.xml file'
+      }
+
+      $Warnings = [System.Collections.Generic.List[string]]::new()
+      $PayloadInstallerTypes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      if ($HasBundleManifest) {
+        $BundleManifestText = Read-MSIXZipEntryText -Archive $Archive -Name 'AppxMetadata/AppxBundleManifest.xml'
+        try {
+          [xml]$BundleManifest = $BundleManifestText
+          foreach ($Package in $BundleManifest.GetElementsByTagName('Package')) {
+            switch ([System.IO.Path]::GetExtension([string]$Package.FileName).ToLowerInvariant()) {
+              '.appx' { $null = $PayloadInstallerTypes.Add('appx') }
+              '.msix' { $null = $PayloadInstallerTypes.Add('msix') }
+            }
+          }
+        } catch {
+          $Warnings.Add("The AppX/MSIX bundle manifest could not be parsed: $($_.Exception.Message)")
+        }
+
+        # Retain root archive names as secondary evidence when bundle XML omits a payload filename.
+        foreach ($EntryName in $EntryNames) {
+          switch ([System.IO.Path]::GetExtension($EntryName).ToLowerInvariant()) {
+            '.appx' { $null = $PayloadInstallerTypes.Add('appx') }
+            '.msix' { $null = $PayloadInstallerTypes.Add('msix') }
+          }
+        }
+      }
+
+      [pscustomobject]@{
+        PackageKind        = $HasBundleManifest ? 'Bundle' : 'Package'
+        HasContentTypes    = @($EntryNames | Where-Object { $_ -ieq '[Content_Types].xml' }).Count -gt 0
+        HasBlockMap        = @($EntryNames | Where-Object { $_ -ieq 'AppxBlockMap.xml' }).Count -gt 0
+        HasSignature       = @($EntryNames | Where-Object { $_ -ieq 'AppxSignature.p7x' }).Count -gt 0
+        ManifestPath       = $HasBundleManifest ? 'AppxMetadata/AppxBundleManifest.xml' : 'AppxManifest.xml'
+        BundlePayloadTypes = @($PayloadInstallerTypes | Sort-Object)
+        Warnings           = @($Warnings)
+      }
+    } finally {
+      $Archive.Dispose()
     }
   }
+}
+
+function Get-MSIXPackageKind {
+  <#
+  .SYNOPSIS
+    Read whether an AppX/MSIX archive is a direct package or bundle
+  .PARAMETER Path
+    The local package path
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The local package path')]
+    [string]$Path
+  )
+
+  process { (Get-MSIXPackageLayout -Path $Path).PackageKind }
+}
+
+function Get-MSIXPackageTypeInfo {
+  <#
+  .SYNOPSIS
+    Resolve the WinGet installer type and package kind from authoritative hints and package contents
+  .PARAMETER Path
+    The package path or URI
+  .PARAMETER InstallerTypeHint
+    The known WinGet installer type, such as the type retained from an existing manifest
+  .PARAMETER ContentType
+    The package HTTP Content-Type value
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The package path or URI')]
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The known WinGet installer type')]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [ValidateScript({ [string]::IsNullOrWhiteSpace($_) -or $_ -in @('appx', 'msix') })]
+    [string]$InstallerTypeHint,
+
+    [Parameter(HelpMessage = 'The package HTTP Content-Type value')]
+    [string]$ContentType
+  )
+
+  process {
+    $Warnings = [System.Collections.Generic.List[string]]::new()
+    $Layout = if (Test-Path -LiteralPath $Path -PathType Leaf) { Get-MSIXPackageLayout -Path $Path } else { $null }
+    if ($Layout) { foreach ($Warning in $Layout.Warnings) { $Warnings.Add($Warning) } }
+
+    $PathForExtension = if ([uri]::IsWellFormedUriString($Path, [System.UriKind]::Absolute)) { ([uri]$Path).AbsolutePath } else { $Path }
+    $Extension = [System.IO.Path]::GetExtension($PathForExtension).ToLowerInvariant()
+    $ExtensionInstallerType = switch ($Extension) {
+      { $_ -in @('.appx', '.appxbundle') } { 'appx'; break }
+      { $_ -in @('.msix', '.msixbundle') } { 'msix'; break }
+    }
+    $ExtensionPackageKind = switch ($Extension) {
+      { $_ -in @('.appxbundle', '.msixbundle') } { 'Bundle'; break }
+      { $_ -in @('.appx', '.msix') } { 'Package'; break }
+    }
+
+    $NormalizedContentType = if ([string]::IsNullOrWhiteSpace($ContentType)) { '' } else { $ContentType.Split(';', 2)[0].Trim().ToLowerInvariant() }
+    $ContentTypeInstallerType = switch ($NormalizedContentType) {
+      { $_ -in @('application/vnd.ms-appx', 'application/vnd.ms-appx.bundle', 'application/vns.ms-appx') } { 'appx'; break }
+      { $_ -in @('application/msix', 'application/msixbundle') } { 'msix'; break }
+    }
+    $ContentTypePackageKind = switch ($NormalizedContentType) {
+      { $_ -in @('application/vnd.ms-appx.bundle', 'application/msixbundle') } { 'Bundle'; break }
+      { $_ -in @('application/vnd.ms-appx', 'application/msix') } { 'Package'; break }
+    }
+
+    $InstallerType = $null
+    $Evidence = $null
+    $IsAmbiguous = $false
+    if ($ExtensionInstallerType) {
+      $InstallerType = $ExtensionInstallerType
+      $Evidence = 'PathExtension'
+    } elseif (-not [string]::IsNullOrWhiteSpace($InstallerTypeHint)) {
+      $InstallerType = $InstallerTypeHint
+      $Evidence = 'InstallerTypeHint'
+    } elseif ($ContentTypeInstallerType) {
+      $InstallerType = $ContentTypeInstallerType
+      $Evidence = 'HttpContentType'
+    } elseif ($Layout -and $Layout.PackageKind -eq 'Bundle' -and $Layout.BundlePayloadTypes.Count -eq 1) {
+      $InstallerType = $Layout.BundlePayloadTypes[0]
+      $Evidence = 'BundlePayloadFileName'
+    } elseif ($Layout) {
+      # AppX and MSIX direct packages share the same package structures and WinGet execution path.
+      $InstallerType = 'msix'
+      $Evidence = 'WinGetCompatibleFallback'
+      $IsAmbiguous = $true
+      $Warnings.Add('The archive is an AppX/MSIX package, but AppX and MSIX cannot be distinguished from package content alone. Using the WinGet-compatible msix fallback.')
+    } else {
+      throw "Unsupported AppX/MSIX installer extension: $Extension. Supply a local package, InstallerTypeHint, or ContentType."
+    }
+
+    if ($Layout -and $ExtensionPackageKind -and $Layout.PackageKind -ne $ExtensionPackageKind) {
+      $Warnings.Add("The extension indicates an AppX/MSIX $ExtensionPackageKind, but package content identifies a $($Layout.PackageKind).")
+    }
+    if ($Layout -and $ContentTypePackageKind -and $Layout.PackageKind -ne $ContentTypePackageKind) {
+      $Warnings.Add("The HTTP content type indicates an AppX/MSIX $ContentTypePackageKind, but package content identifies a $($Layout.PackageKind).")
+    }
+    if ($ExtensionInstallerType -and $InstallerTypeHint -and $ExtensionInstallerType -ne $InstallerTypeHint) {
+      $Warnings.Add("The path extension indicates installer type '$ExtensionInstallerType', but the supplied hint is '$InstallerTypeHint'. The path extension was preferred.")
+    }
+
+    [pscustomobject]@{
+      InstallerType   = $InstallerType
+      PackageKind     = $Layout ? $Layout.PackageKind : ($ExtensionPackageKind ?? $ContentTypePackageKind)
+      Evidence        = $Evidence
+      IsAmbiguous     = $IsAmbiguous
+      ContentEvidence = $Layout
+      Warnings        = @($Warnings | Select-Object -Unique)
+    }
+  }
+}
+
+function Get-MSIXInstallerType {
+  <#
+  .SYNOPSIS
+    Get the WinGet installer type from AppX/MSIX package evidence
+  .PARAMETER Path
+    The package path or URI
+  .PARAMETER InstallerTypeHint
+    The known WinGet installer type when the local package path has no meaningful extension
+  .PARAMETER ContentType
+    The package HTTP Content-Type value
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The package path or URI')]
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The known WinGet installer type')]
+    [ValidateSet('appx', 'msix')]
+    [string]$InstallerTypeHint,
+
+    [Parameter(HelpMessage = 'The package HTTP Content-Type value')]
+    [string]$ContentType
+  )
+
+  process { (Get-MSIXPackageTypeInfo -Path $Path -InstallerTypeHint $InstallerTypeHint -ContentType $ContentType).InstallerType }
 }
 
 function Get-MSIXManifest {
@@ -462,15 +641,22 @@ function Get-MSIXInfo {
     Read WinGet manifest metadata from an MSIX/AppX package
   .PARAMETER Path
     The path to the MSIX/AppX package
+  .PARAMETER InstallerTypeHint
+    The known WinGet installer type when the local package path has no meaningful extension
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSIX/AppX package')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The known WinGet installer type')]
+    [ValidateSet('appx', 'msix')]
+    [string]$InstallerTypeHint
   )
 
   process {
     $File = Get-Item -Path $Path -Force
+    $PackageTypeInfo = Get-MSIXPackageTypeInfo -Path $File.FullName -InstallerTypeHint $InstallerTypeHint
     $Manifests = @(Get-MSIXManifestXmlList -Path $File.FullName)
     if ($Manifests.Count -eq 0) { throw 'No AppX/MSIX manifest could be read from the package' }
 
@@ -519,7 +705,10 @@ function Get-MSIXInfo {
 
     [pscustomobject]@{
       Path                    = $File.FullName
-      InstallerType           = Get-MSIXInstallerType -Path $File.FullName
+      InstallerType           = $PackageTypeInfo.InstallerType
+      PackageKind             = $PackageTypeInfo.PackageKind
+      InstallerTypeEvidence   = $PackageTypeInfo.Evidence
+      InstallerTypeAmbiguous  = $PackageTypeInfo.IsAmbiguous
       Name                    = [string]$Identity.Name
       Publisher               = [string]$Identity.Publisher
       Version                 = [string]$Identity.Version
@@ -531,7 +720,7 @@ function Get-MSIXInfo {
       MinimumOSVersion        = $MinimumOSVersion
       Dependencies               = $DependencyInfo.Dependencies
       UnknownPackageDependencies = $DependencyInfo.UnknownPackageDependencies
-       Warnings                   = @($DependencyInfo.Warnings + $AssociationInfo.Warnings)
+       Warnings                   = @($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings)
        Protocols                  = $AssociationInfo.Protocols
        FileExtensions             = $AssociationInfo.FileExtensions
        RegistryAssociationInfo    = $AssociationInfo

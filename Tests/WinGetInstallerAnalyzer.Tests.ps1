@@ -168,6 +168,8 @@ Describe 'WinGet installer analyzer content detection' {
     $Analysis = Get-WinGetInstallerAnalysis -Path $UnsignedMsix
 
     $Analysis.DetectedFileType.Type | Should -Be 'MSIXAppX'
+    $Analysis.ParserResults[0].Result.InstallerType | Should -Be 'msix'
+    $Analysis.ParserResults[0].Result.PackageKind | Should -Be 'Bundle'
     $Analysis.ParserResults[0].Result.SignatureEvidence.Status | Should -Be 'NotSigned'
     $Analysis.ParserResults[0].Result.SignatureEvidence.IsSigned | Should -BeFalse
     $Analysis.ParserResults[0].Result.SignatureEvidence.IsTrusted | Should -BeFalse
@@ -181,6 +183,8 @@ Describe 'WinGet installer analyzer content detection' {
     $Analysis = Get-WinGetInstallerAnalysis -Path $UntrustedMsix
 
     $Analysis.DetectedFileType.Type | Should -Be 'MSIXAppX'
+    $Analysis.ParserResults[0].Result.InstallerType | Should -Be 'msix'
+    $Analysis.ParserResults[0].Result.PackageKind | Should -Be 'Package'
     $Analysis.ParserResults[0].Result.SignatureEvidence.IsSigned | Should -BeTrue
     $Analysis.ParserResults[0].Result.SignatureEvidence.IsTrusted | Should -BeFalse
     $Analysis.ParserResults[0].Result.SignatureSha256 | Should -Not -BeNullOrEmpty
