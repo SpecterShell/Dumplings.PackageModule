@@ -153,6 +153,52 @@ stagingPercentage: 25
     $MsiInfo.ProductCode | Should -Be '{6C5AC088-3136-4043-8985-8B0772A9580E}'
   }
 
+  It 'Should reproduce Advanced Installer mixed-platform payload selection' {
+    $Archive = Get-InstallerFixture -Name 'AccountResetInstaller.zip' -Url 'https://cjwdev.com/Software/AccountReset/AccountResetInstaller.zip'
+    $ExpandedPath = Expand-TempArchive -Path $Archive -RelativeFilePath 'AccountResetInstaller.exe'
+
+    try {
+      $InstallerPath = Join-Path $ExpandedPath 'AccountResetInstaller.exe'
+      $Info = Get-AdvancedInstallerInfo -Path $InstallerPath
+      $X86Info = Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x86
+      $X64Info = Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x64
+
+      $Info.ConfigurationEntry | Should -Be 'AccountResetInstaller.ini'
+      $Info.GeneralOptions.AllPlatforms | Should -Be 'true'
+      $Info.Files.Where({ $_.Name -eq 'AccountResetInstaller.msi' })[0].SelectorType | Should -Be 1
+      $Info.Files.Where({ $_.Name -eq 'AccountResetInstaller.msi' })[0].SelectorGroup | Should -Be 0
+      $Info.MsiPayloadSelection.SourceEntryName | Should -Be 'AccountResetInstaller.msi'
+      $Info.MsiPayloadSelection.BaseMsiPath | Should -Be 'AccountResetInstaller.msi'
+      $Info.MsiPayloadSelection.X64MsiPath | Should -Be 'AccountResetInstaller.x64.msi'
+      $X86Info.Name | Should -Be 'AccountResetInstaller.msi'
+      $X86Info.SelectedMsiPath | Should -Be 'AccountResetInstaller.msi'
+      $X86Info.SelectionMethod | Should -Be 'PayloadTable'
+      $X86Info.PackageArchitecture | Should -Be 'x86'
+      $X86Info.Template | Should -Be ';2057'
+      $X64Info.Name | Should -Be 'AccountResetInstaller.x64.msi'
+      $X64Info.SelectedMsiPath | Should -Be 'AccountResetInstaller.x64.msi'
+      $X64Info.SelectionMethod | Should -Be 'PayloadTable'
+      $X64Info.PackageArchitecture | Should -Be 'x64'
+      $X64Info.Template | Should -Be 'x64;2057'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should read a fixed-path Advanced Installer ARM64 payload through the bridge' {
+    $AdvancedInstallerFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\AdvancedInstaller'
+    $Fixture = Get-DumplingsTestFixture -Directory $AdvancedInstallerFixtureDirectory -Name 'fxsound_setup.arm64-1.2.10.0.exe' -Uri 'https://raw.githubusercontent.com/fxsound2/fxsound-app/refs/tags/v1.2.10.0/release/arm64/fxsound_setup.arm64.exe'
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture arm64
+
+    $Info.MsiPayloadSelection.ArchitectureSelectionMode | Should -Be 'FixedPath'
+    $Info.MsiPayloadSelection.Arm64MsiPath | Should -Be 'fxsound.arm64.msi'
+    $MsiInfo.SelectedMsiPath | Should -Be 'fxsound.arm64.msi'
+    $MsiInfo.ArchitectureSelectionMode | Should -Be 'FixedPath'
+    $MsiInfo.PackageArchitecture | Should -Be 'arm64'
+    $MsiInfo.ProductCode | Should -Be '{AFD6D03F-AE41-4BB2-9E4D-26E8A9E970B0}'
+  }
+
   It 'Should call the InstallerParsers Qt Installer Framework parser through the MIT wrapper' {
     $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-bridge.exe' -InstallerXml @'
 <Installer>

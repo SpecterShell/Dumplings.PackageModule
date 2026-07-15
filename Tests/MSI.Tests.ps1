@@ -134,12 +134,30 @@ Describe 'MSI builder and install-location parser' {
   }
 }
 
+Describe 'MSI package architecture parser' {
+  InModuleScope MSI {
+    It 'Should map an omitted Summary Information platform to x86' {
+      Convert-MsiTemplatePlatformToPackageArchitecture -Template ';1033' | Should -Be 'x86'
+    }
+
+    It 'Should map explicit Summary Information platforms' -ForEach @(
+      @{ Template = 'Intel;1033'; Expected = 'x86' }
+      @{ Template = 'x64;1033'; Expected = 'x64' }
+      @{ Template = 'Intel64;1033'; Expected = 'x64' }
+      @{ Template = 'Arm64;1033'; Expected = 'arm64' }
+    ) {
+      Convert-MsiTemplatePlatformToPackageArchitecture -Template $Template | Should -Be $Expected
+    }
+  }
+}
+
 Describe 'MSI unsupported architecture parser' {
   It 'Should detect x64 MSI packages that do not support x86' {
     $Fixture = Get-InstallerFixture -Name 'Talkdesk-3.1.0.msi' -Url 'https://td-infra-prd-us-east-1-s3-atlaselectron.s3.amazonaws.com/talkdesk-3.1.0.msi'
     $Info = Get-MsiInstallerInfo -Path $Fixture
 
     $Info.Template | Should -Be 'x64;1033'
+    $Info.PackageArchitecture | Should -Be 'x64'
     $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
     $Info.UnsupportedArchitectures | Should -Be @('x86')
     Read-UnsupportedArchitecturesFromMsi -Path $Fixture | Should -Be @('x86')
@@ -152,6 +170,7 @@ Describe 'MSI unsupported architecture parser' {
     $Info = Get-MsiInstallerInfo -Path $Fixture
 
     $Info.Template | Should -Be 'Arm64;1033'
+    $Info.PackageArchitecture | Should -Be 'arm64'
     $Info.SupportedArchitectures | Should -Be @('arm64')
     $Info.UnsupportedArchitectures | Should -Be @('x86', 'x64')
     Test-MsiUnsupportedArchitecture -Path $Fixture -Architecture x86 | Should -BeTrue

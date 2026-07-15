@@ -567,19 +567,54 @@ function Expand-TempArchive {
     Extract files from the given ZIP archive to a temporary folder and return the path of the destination folder
   .PARAMETER Path
     The path of the ZIP archive to be extracted
+  .PARAMETER RelativeFilePath
+    The exact relative path of one archive entry to extract. If omitted, all entries are extracted.
   .OUTPUTS
     The path of the destination folder
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the ZIP archive')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The exact relative path of one archive entry to extract')]
+    [string]$RelativeFilePath
   )
 
   process {
     $TempFolderPath = New-TempFolder
-    Expand-Archive -Path $Path -DestinationPath $TempFolderPath
-    return $TempFolderPath
+    try {
+      $ArchivePath = (Get-Item -LiteralPath $Path -Force).FullName
+      if ([string]::IsNullOrWhiteSpace($RelativeFilePath)) {
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $TempFolderPath)
+      } else {
+        $NormalizedRelativeFilePath = $RelativeFilePath.Replace('\', '/').TrimStart('/')
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+        try {
+          $MatchingEntry = $Archive.GetEntry($NormalizedRelativeFilePath)
+          if (-not $MatchingEntry) {
+            $MatchingEntries = @($Archive.Entries | Where-Object {
+                -not [string]::IsNullOrEmpty($_.Name) -and
+                $_.FullName.Replace('\', '/').TrimStart('/').Equals($NormalizedRelativeFilePath, [StringComparison]::OrdinalIgnoreCase)
+              })
+            if ($MatchingEntries.Count -eq 0) { throw "The ZIP archive does not contain the requested entry: $RelativeFilePath" }
+            if ($MatchingEntries.Count -gt 1) { throw "The ZIP archive contains multiple entries matching: $RelativeFilePath" }
+            $MatchingEntry = $MatchingEntries[0]
+          }
+
+          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $TempFolderPath -RelativePath $RelativeFilePath
+          $OutputDirectory = [IO.Path]::GetDirectoryName($OutputPath)
+          if ($OutputDirectory) { $null = New-Item -Path $OutputDirectory -ItemType Directory -Force }
+          [System.IO.Compression.ZipFileExtensions]::ExtractToFile($MatchingEntry, $OutputPath, $false)
+        } finally {
+          $Archive.Dispose()
+        }
+      }
+      return $TempFolderPath
+    } catch {
+      Remove-Item -LiteralPath $TempFolderPath -Recurse -Force -ErrorAction SilentlyContinue
+      throw
+    }
   }
 }
 

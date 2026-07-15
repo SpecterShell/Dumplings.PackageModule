@@ -369,6 +369,30 @@ function Convert-MsiTemplatePlatformToSupportedArchitecture {
   return @('x86', 'x64', 'arm64') | Where-Object { $Architectures.Contains($_) }
 }
 
+function Convert-MsiTemplatePlatformToPackageArchitecture {
+  <#
+  .SYNOPSIS
+    Convert an MSI Summary Information template platform to its package architecture
+  .PARAMETER Template
+    The Summary Information Template value
+  #>
+  [OutputType([string])]
+  param (
+    [AllowNull()]
+    [string]$Template
+  )
+
+  $Platform = ([string]($Template -split ';' | Select-Object -First 1)).Trim()
+  # Windows Installer treats an omitted Template platform as the 32-bit Intel platform.
+  if ([string]::IsNullOrWhiteSpace($Platform)) { return 'x86' }
+  switch -Regex ($Platform) {
+    '(?i)^(x64|AMD64|Intel64)$' { return 'x64' }
+    '(?i)^Arm64$' { return 'arm64' }
+    '(?i)^Intel$' { return 'x86' }
+    default { return $null }
+  }
+}
+
 function Test-MsiArchitectureCondition {
   <#
   .SYNOPSIS
@@ -831,6 +855,7 @@ function Get-MsiInstallerInfo {
         ProductCode                    = $Properties['ProductCode']
         ProductName                    = $Properties['ProductName']
         ProductVersion                 = $Properties['ProductVersion']
+        Publisher                      = $Properties['Manufacturer']
         UpgradeCode                    = $Properties['UpgradeCode']
         AllUsers                       = $Properties['ALLUSERS']
         InstallerBuilder               = Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo
@@ -842,6 +867,7 @@ function Get-MsiInstallerInfo {
         HasCustomAppsAndFeaturesEntry  = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry
         HidesMsiAppsAndFeaturesEntry   = $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
         Template                       = $ArchitectureInfo.Template
+        PackageArchitecture            = Convert-MsiTemplatePlatformToPackageArchitecture -Template $ArchitectureInfo.Template
         SupportedArchitectures         = $ArchitectureInfo.SupportedArchitectures
         UnsupportedArchitectures       = $ArchitectureInfo.UnsupportedArchitectures
         Protocols                      = $AssociationInfo.Protocols
