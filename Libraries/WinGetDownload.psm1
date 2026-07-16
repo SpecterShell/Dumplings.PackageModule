@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: MIT
-# Native WinGet installer download compatibility probes. These functions do not
-# execute installers and delete downloaded probe files unless asked to keep them.
+# Native WinGet-compatible installer downloads and compatibility probes. These
+# functions never execute installers; probe files are deleted unless retained.
+
+# Apply Dumplings defaults when the module is loaded independently or by PackageModule.
+if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 if (-not ([System.Management.Automation.PSTypeName]'Dumplings.WinGetDownload.WinInetDownloader').Type) {
   Add-Type -Path (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'WinGetDownloadProbe.cs')
@@ -97,10 +100,10 @@ function Invoke-WinGetDownloadOperation {
     [Parameter(Mandatory)][scriptblock]$StartOperation,
     [Parameter(Mandatory)][hashtable]$OperationArgument,
     [Parameter(Mandatory)][string]$Activity,
-    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 0,
-    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 5,
-    [ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 0,
-    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
     [ValidateRange(1, [int]::MaxValue)][int]$ProgressId = 174593042
   )
 
@@ -230,10 +233,10 @@ function Invoke-WinGetWinINetDownload {
     [Collections.IDictionary]$Header,
     [string]$Proxy,
     [string]$UserAgent = (Get-WinGetDownloadUserAgent),
-    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 0,
-    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 0,
-    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 0,
-    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 5,
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
     [switch]$ResponseOnly
   )
 
@@ -288,10 +291,10 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     [ValidateRange(1, 3600)][int]$NoProgressTimeoutSeconds = 60,
     [ValidateRange(0, 86400)][int]$MaximumDurationSeconds = 3600,
     [string]$DisplayName = 'Windows Package Manager',
-    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 0,
-    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 0,
-    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 0,
-    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 5,
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
     [switch]$ResponseOnly
   )
 
@@ -314,6 +317,143 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     Open-WinGetDeliveryOptimizationDownloadOperation @Argument
   } -OperationArgument $OperationArgument -Activity 'Downloading installer with Delivery Optimization' -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
     -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
+}
+
+function Test-WinGetDownloadCancellation {
+  <#
+  .SYNOPSIS
+    Test whether a native download failure represents pipeline cancellation
+  #>
+  [OutputType([bool])]
+  param ([Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord)
+
+  $Exception = $ErrorRecord.Exception
+  while ($Exception) {
+    if ($Exception -is [Management.Automation.PipelineStoppedException] -or $Exception -is [OperationCanceledException]) { return $true }
+    $Exception = $Exception.InnerException
+  }
+  return $false
+}
+
+function Format-WinGetDownloadFailure {
+  <#
+  .SYNOPSIS
+    Format structured native download failure evidence
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][string]$Method,
+    [Dumplings.WinGetDownload.DownloadResult]$Result,
+    [Management.Automation.ErrorRecord]$ErrorRecord
+  )
+
+  return [Dumplings.WinGetDownload.DownloadFailureFormatter]::Format(
+    $Method,
+    $Result,
+    ($ErrorRecord ? $ErrorRecord.Exception : $null)
+  )
+}
+
+function Invoke-WinGetInstallerDownload {
+  <#
+  .SYNOPSIS
+    Download an installer using WinGet's native transport order
+  .DESCRIPTION
+    Use Delivery Optimization first unless an explicit proxy forces WinINet.
+    Nonfatal Delivery Optimization failures fall back to WinINet. Fatal policy
+    failures, cancellation, and combined transport failures clean partial files
+    and throw with structured native diagnostics.
+  .PARAMETER Uri
+    The installer URL
+  .PARAMETER DestinationPath
+    The output file path
+  .PARAMETER Header
+    Optional manifest authentication headers
+  .PARAMETER Proxy
+    Optional explicit proxy URI; WinGet forces WinINet when configured
+  .PARAMETER UserAgent
+    Optional WinINet user agent override
+  #>
+  [OutputType([Dumplings.WinGetDownload.DownloadResult])]
+  param (
+    [Parameter(Mandatory)][uri]$Uri,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [Collections.IDictionary]$Header,
+    [string]$Proxy,
+    [string]$UserAgent
+  )
+
+  Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+  $WinINetArguments = @{ Uri = $Uri; DestinationPath = $DestinationPath }
+  if ($Header) { $WinINetArguments.Header = $Header }
+  if ($PSBoundParameters.ContainsKey('Proxy')) { $WinINetArguments.Proxy = $Proxy }
+  if ($PSBoundParameters.ContainsKey('UserAgent')) { $WinINetArguments.UserAgent = $UserAgent }
+
+  if (-not [string]::IsNullOrWhiteSpace($Proxy)) {
+    $WinINetResult = $null
+    $WinINetError = $null
+    try {
+      $WinINetResult = Invoke-WinGetWinINetDownload @WinINetArguments
+    } catch {
+      if (Test-WinGetDownloadCancellation -ErrorRecord $_) {
+        Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+        throw
+      }
+      $WinINetError = $_
+    }
+    if ($WinINetResult -and $WinINetResult.Success -and (Test-Path -LiteralPath $DestinationPath -PathType Leaf)) { return $WinINetResult }
+    $WinINetFailure = Format-WinGetDownloadFailure -Method 'WinINet' -Result $WinINetResult -ErrorRecord $WinINetError
+    Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+    throw [IO.IOException]::new("Installer download failed. ${WinINetFailure}")
+  }
+
+  $DeliveryOptimizationResult = $null
+  $DeliveryOptimizationError = $null
+  try {
+    $DeliveryOptimizationArguments = @{ Uri = $Uri; DestinationPath = $DestinationPath }
+    if ($Header) { $DeliveryOptimizationArguments.Header = $Header }
+    $DeliveryOptimizationResult = Invoke-WinGetDeliveryOptimizationDownload @DeliveryOptimizationArguments
+  } catch {
+    if (Test-WinGetDownloadCancellation -ErrorRecord $_) {
+      Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+      throw
+    }
+    $DeliveryOptimizationError = $_
+  }
+
+  if ($DeliveryOptimizationResult -and $DeliveryOptimizationResult.Success -and (Test-Path -LiteralPath $DestinationPath -PathType Leaf)) {
+    return $DeliveryOptimizationResult
+  }
+
+  $DeliveryOptimizationFailure = Format-WinGetDownloadFailure -Method 'Delivery Optimization' -Result $DeliveryOptimizationResult -ErrorRecord $DeliveryOptimizationError
+  if ($DeliveryOptimizationResult -and $DeliveryOptimizationResult.IsFatalDeliveryOptimizationError) {
+    Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+    throw [IO.IOException]::new("Installer download failed with a fatal Delivery Optimization error. ${DeliveryOptimizationFailure}")
+  }
+
+  Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+  Write-Warning "${DeliveryOptimizationFailure}. Trying WinINet..."
+  $WinINetResult = $null
+  $WinINetError = $null
+  try {
+    $WinINetResult = Invoke-WinGetWinINetDownload @WinINetArguments
+  } catch {
+    if (Test-WinGetDownloadCancellation -ErrorRecord $_) {
+      Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+      throw
+    }
+    $WinINetError = $_
+  }
+
+  if ($WinINetResult -and $WinINetResult.Success -and (Test-Path -LiteralPath $DestinationPath -PathType Leaf)) {
+    $WinINetResult.FallbackOccurred = $true
+    $WinINetResult.PreviousFailure = $DeliveryOptimizationFailure
+    return $WinINetResult
+  }
+
+  $WinINetFailure = Format-WinGetDownloadFailure -Method 'WinINet' -Result $WinINetResult -ErrorRecord $WinINetError
+  Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+  throw [IO.IOException]::new("Installer download failed. ${DeliveryOptimizationFailure}. ${WinINetFailure}")
 }
 
 function Add-WinGetDownloadProbeEvidence {
@@ -364,10 +504,10 @@ function Test-WinGetInstallerDownload {
     [string]$Proxy,
     [ValidateRange(1, 3600)][int]$NoProgressTimeoutSeconds = 60,
     [ValidateRange(0, 86400)][int]$MaximumDurationSeconds = 3600,
-    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 0,
-    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 0,
-    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 0,
-    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 5,
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
     [string]$DestinationDirectory,
     [switch]$KeepDownloads,
     [switch]$ResponseOnly
@@ -478,4 +618,4 @@ function Test-WinGetInstallerDownload {
   }
 }
 
-Export-ModuleMember -Function Get-WinGetDownloadUserAgent, Invoke-WinGetWinINetDownload, Invoke-WinGetDeliveryOptimizationDownload, Test-WinGetInstallerDownload
+Export-ModuleMember -Function Get-WinGetDownloadUserAgent, Invoke-WinGetWinINetDownload, Invoke-WinGetDeliveryOptimizationDownload, Invoke-WinGetInstallerDownload, Test-WinGetInstallerDownload

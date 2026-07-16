@@ -626,12 +626,9 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       $InstallerPath = $Script:WinGetInstallerFiles[$OriginalInstallerUrl]
     } else {
       $Logger.Invoke("Downloading $($Installer.InstallerUrl)", 'Verbose')
-      try {
-        $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetUserAgent
-      } catch {
-        $Logger.Invoke('Failed to download with the Delivery-Optimization User Agent. Try again with the WinINet User Agent...', 'Warning')
-        $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = Get-TempFile -Uri $Installer.InstallerUrl -UserAgent $Script:WinGetBackupUserAgent
-      }
+      $InstallerPath = New-TempFile
+      $DownloadResult = Invoke-WinGetInstallerDownload -Uri $Installer.InstallerUrl -DestinationPath $InstallerPath
+      $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl] = $InstallerPath = $DownloadResult.DestinationPath
     }
 
     $Logger.Invoke('Processing installer data...', 'Verbose')

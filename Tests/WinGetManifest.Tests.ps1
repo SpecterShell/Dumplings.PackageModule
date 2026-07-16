@@ -12,6 +12,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\ChromiumSetup.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetInstallerAnalyzer.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetDownload.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifest.psm1') -Force
 }
 

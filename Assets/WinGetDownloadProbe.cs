@@ -42,6 +42,26 @@ namespace Dumplings.WinGetDownload
         public int AttemptCount { get; set; }
         public bool Cancelled { get; set; }
         public bool TimedOut { get; set; }
+        public bool FallbackOccurred { get; set; }
+        public string PreviousFailure { get; set; }
+    }
+
+    public static class DownloadFailureFormatter
+    {
+        public static string Format(string method, DownloadResult result, Exception exception)
+        {
+            string prefix = string.IsNullOrWhiteSpace(method) ? "Download" : method;
+            if (exception != null) return prefix + ": " + exception.Message;
+            if (result == null) return prefix + ": the download did not complete successfully";
+
+            List<string> details = new List<string>();
+            if (result.HttpStatusCode.HasValue) details.Add("HTTP " + result.HttpStatusCode.Value);
+            if (!string.IsNullOrWhiteSpace(result.ErrorMessage)) details.Add(result.ErrorMessage);
+            if (!string.IsNullOrWhiteSpace(result.FailureStage)) details.Add("stage " + result.FailureStage);
+            if (result.HResult != 0) details.Add("HRESULT 0x" + unchecked((uint)result.HResult).ToString("X8"));
+            if (result.NativeErrorCode != 0) details.Add("native error " + result.NativeErrorCode);
+            return details.Count == 0 ? prefix + ": the download did not complete successfully" : prefix + ": " + string.Join("; ", details);
+        }
     }
 
     public sealed class DownloadProgressSnapshot

@@ -14,6 +14,134 @@ Describe 'WinGet native download compatibility probe' {
     }
   }
 
+  It 'Uses bounded timeout and retry defaults internally' {
+    InModuleScope WinGetDownload {
+      Mock Invoke-WinGetDownloadOperation {
+        [pscustomobject]@{ Success = $true }
+      }
+
+      $null = Invoke-WinGetWinINetDownload -Uri 'https://example.com/installer.exe' -DestinationPath $TestDrive -UserAgent 'Dumplings-Test'
+      $null = Invoke-WinGetDeliveryOptimizationDownload -Uri 'https://example.com/installer.exe' -DestinationPath $TestDrive
+
+      Should -Invoke Invoke-WinGetDownloadOperation -Exactly 1 -ParameterFilter {
+        $Activity -eq 'Downloading installer with WinINet' -and
+        $ConnectionTimeoutSeconds -eq 15 -and $OperationTimeoutSeconds -eq 15 -and
+        $MaximumRetryCount -eq 3 -and $RetryIntervalSec -eq 3
+      }
+      Should -Invoke Invoke-WinGetDownloadOperation -Exactly 1 -ParameterFilter {
+        $Activity -eq 'Downloading installer with Delivery Optimization' -and
+        $ConnectionTimeoutSeconds -eq 15 -and $OperationTimeoutSeconds -eq 15 -and
+        $MaximumRetryCount -eq 3 -and $RetryIntervalSec -eq 3
+      }
+    }
+  }
+
+  It 'Formats structured native failure evidence in the C# result layer' {
+    $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+    $Result.HttpStatusCode = 503
+    $Result.ErrorMessage = 'Synthetic transport failure'
+    $Result.FailureStage = 'Finalize'
+    $Result.HResult = -2147024891
+    $Result.NativeErrorCode = 5
+
+    [Dumplings.WinGetDownload.DownloadFailureFormatter]::Format('WinINet', $Result, $null) |
+      Should -BeExactly 'WinINet: HTTP 503; Synthetic transport failure; stage Finalize; HRESULT 0x80070005; native error 5'
+  }
+
+  It 'Downloads an installer through Delivery Optimization without invoking WinINet' {
+    InModuleScope WinGetDownload {
+      $DestinationPath = Join-Path $TestDrive 'delivery-optimization.download'
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        [IO.File]::WriteAllBytes($DestinationPath, [byte[]](1, 2, 3, 4))
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'DeliveryOptimization'
+        $Result.Success = $true
+        $Result.DestinationPath = $DestinationPath
+        $Result
+      }
+      Mock Invoke-WinGetWinINetDownload { throw 'WinINet should not be called' }
+
+      $Result = Invoke-WinGetInstallerDownload -Uri 'https://example.com/installer.exe' -DestinationPath $DestinationPath
+
+      $Result.DestinationPath | Should -BeExactly $DestinationPath
+      $Result.FallbackOccurred | Should -BeFalse
+      (Get-Item -LiteralPath $Result.DestinationPath).Length | Should -Be 4
+      Should -Invoke Invoke-WinGetDeliveryOptimizationDownload -Exactly 1
+      Should -Invoke Invoke-WinGetWinINetDownload -Exactly 0
+    }
+  }
+
+  It 'Falls back to WinINet after a nonfatal Delivery Optimization failure' {
+    InModuleScope WinGetDownload {
+      $DestinationPath = Join-Path $TestDrive 'wininet.download'
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        [IO.File]::WriteAllBytes($DestinationPath, [byte[]](9, 9))
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'DeliveryOptimization'
+        $Result.ErrorMessage = 'Synthetic nonfatal failure'
+        $Result.DestinationPath = $DestinationPath
+        $Result
+      }
+      Mock Invoke-WinGetWinINetDownload {
+        Test-Path -LiteralPath $DestinationPath | Should -BeFalse
+        [IO.File]::WriteAllBytes($DestinationPath, [byte[]](4, 3, 2, 1))
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'WinINet'
+        $Result.Success = $true
+        $Result.DestinationPath = $DestinationPath
+        $Result
+      }
+
+      $FallbackWarnings = $null
+      $Result = Invoke-WinGetInstallerDownload -Uri 'https://example.com/installer.exe' -DestinationPath $DestinationPath -WarningVariable FallbackWarnings -WarningAction SilentlyContinue
+
+      $Result.DestinationPath | Should -BeExactly $DestinationPath
+      $Result.FallbackOccurred | Should -BeTrue
+      $Result.PreviousFailure | Should -BeLike '*Synthetic nonfatal failure*'
+      (Get-Item -LiteralPath $Result.DestinationPath).Length | Should -Be 4
+      [string]$FallbackWarnings | Should -BeLike '*Synthetic nonfatal failure*Trying WinINet*'
+      Should -Invoke Invoke-WinGetDeliveryOptimizationDownload -Exactly 1
+      Should -Invoke Invoke-WinGetWinINetDownload -Exactly 1
+    }
+  }
+
+  It 'Does not bypass a fatal Delivery Optimization policy failure' {
+    InModuleScope WinGetDownload {
+      $DestinationPath = Join-Path $TestDrive 'fatal-delivery-optimization.download'
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        [IO.File]::WriteAllBytes($DestinationPath, [byte[]](9, 9))
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'DeliveryOptimization'
+        $Result.ErrorMessage = 'Synthetic fatal policy failure'
+        $Result.IsFatalDeliveryOptimizationError = $true
+        $Result.DestinationPath = $DestinationPath
+        $Result
+      }
+      Mock Invoke-WinGetWinINetDownload { throw 'WinINet must not bypass a fatal Delivery Optimization error' }
+
+      { Invoke-WinGetInstallerDownload -Uri 'https://example.com/installer.exe' -DestinationPath $DestinationPath } | Should -Throw '*fatal Delivery Optimization error*'
+
+      Test-Path -LiteralPath $DestinationPath | Should -BeFalse
+      Should -Invoke Invoke-WinGetWinINetDownload -Exactly 0
+    }
+  }
+
+  It 'Cleans a partial installer when a native download is cancelled' {
+    InModuleScope WinGetDownload {
+      $DestinationPath = Join-Path $TestDrive 'cancelled.download'
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        [IO.File]::WriteAllBytes($DestinationPath, [byte[]](9, 9))
+        throw [OperationCanceledException]::new('Synthetic cancellation')
+      }
+      Mock Invoke-WinGetWinINetDownload { throw 'A cancelled pipeline must not start a fallback download' }
+
+      { Invoke-WinGetInstallerDownload -Uri 'https://example.com/installer.exe' -DestinationPath $DestinationPath } | Should -Throw '*Synthetic cancellation*'
+
+      Test-Path -LiteralPath $DestinationPath | Should -BeFalse
+      Should -Invoke Invoke-WinGetWinINetDownload -Exactly 0
+    }
+  }
+
   It 'Builds the installed WinGet WinINet user agent' {
     $UserAgent = Get-WinGetDownloadUserAgent
     $UserAgent | Should -Match '^winget-cli WindowsPackageManager/\d+(?:\.\d+)+ DesktopAppInstaller/Microsoft\.DesktopAppInstaller v\d+(?:\.\d+){3}$'
