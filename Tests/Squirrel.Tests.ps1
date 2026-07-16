@@ -154,4 +154,15 @@ Describe 'Squirrel parser' {
     $Info.Scope | Should -Be 'user'
     $Info.NupkgPath | Should -Be 'Discord-1.0.9244-full.nupkg'
   }
+
+  It 'Should keep the Tower Velopack EXE identity separate from its MSI ARP prefix' {
+    $Fixture = Get-InstallerFixture -Name 'Tower-13.1.576.exe' -Url 'https://www.git-tower.com/apps/tower3-win/576-01812649/Tower-13.1.576.exe'
+    $Info = Get-SquirrelInfo -Path $Fixture
+
+    $Info.Family | Should -Be 'Velopack/Squirrel nupkg'
+    $Info.ProductCode | Should -Be 'Tower'
+    $Info.DisplayName | Should -Be 'Tower'
+    $Info.DisplayVersion | Should -Be '13.1.576'
+    $Info.Publisher | Should -Be 'saas.group'
+  }
 }

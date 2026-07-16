@@ -542,6 +542,15 @@ function Set-WinGetInstallerManifestMetadata {
     InstallerType  = 'AppsAndFeaturesInstallerType'
   }
   foreach ($Entry in $MatchingEntries) {
+    # Materialize a parser-proven ARP type when the entry would otherwise
+    # inherit an incompatible outer installer type (for example, Velopack MSI
+    # packages that hide the MSI entry and expose an EXE-style MSI:<id> key).
+    if (-not $Entry.Contains('InstallerType') -and $Metadata.Contains('AppsAndFeaturesInstallerType') -and (& $HasScalarValue $Metadata.AppsAndFeaturesInstallerType)) {
+      $InheritedInstallerType = [string]$Installer['InstallerType']
+      if ($Metadata.AppsAndFeaturesInstallerType -cne $InheritedInstallerType) {
+        $Entry['InstallerType'] = $Metadata.AppsAndFeaturesInstallerType
+      }
+    }
     foreach ($Field in $AppsAndFeaturesMap.Keys) {
       if (-not $Entry.Contains($Field)) { continue }
       $MetadataField = $AppsAndFeaturesMap[$Field]

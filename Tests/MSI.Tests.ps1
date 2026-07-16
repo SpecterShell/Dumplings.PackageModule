@@ -4,6 +4,7 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'MSI.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\MSI'
+  $Script:SquirrelFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Squirrel'
 
   function Get-InstallerFixture {
     param(
@@ -19,6 +20,20 @@ BeforeAll {
 }
 
 Describe 'MSI Apps & Features parser' {
+  It 'Should distinguish the Tower Velopack MSI code from its visible EXE-style ARP key' {
+    $Fixture = Get-DumplingsTestFixture -Directory $Script:SquirrelFixtureDirectory -Name 'Tower-13.1.576.msi' -Uri 'https://www.git-tower.com/apps/tower3-win/576-01812649/Tower-13.1.576.msi'
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.ProductCode | Should -Be '{4CA4189D-43E0-43C0-B1C5-6252F565CE71}'
+    $Info.UpgradeCode | Should -Be '{871FD9D0-41D3-52BE-AF69-12F8B08740C0}'
+    $Info.InstallerBuilder | Should -Be 'WiX'
+    $Info.HidesMsiAppsAndFeaturesEntry | Should -BeTrue
+    $Info.HasCustomAppsAndFeaturesEntry | Should -BeTrue
+    $Info.AppsAndFeaturesInstallerType | Should -Be 'exe'
+    $Info.AppsAndFeaturesProductCode | Should -Be 'MSI:Tower'
+    $Info.AppsAndFeaturesEntries.CustomAppsAndFeaturesRegistryKey | Should -Be 'Software\Microsoft\Windows\CurrentVersion\Uninstall\MSI:Tower'
+  }
+
   It 'Should detect Figma MSI writing a hidden native ARP entry and visible .msq ARP entry' {
     $Fixture = Get-InstallerFixture -Name 'Figma-125.8.5.msi' -Url 'https://desktop.figma.com/win/build/Figma-125.8.5.msi'
     $Info = Get-MsiAppsAndFeaturesInfo -Path $Fixture

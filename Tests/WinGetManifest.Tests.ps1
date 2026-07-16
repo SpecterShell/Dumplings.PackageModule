@@ -209,6 +209,42 @@ Describe 'WinGet installer manifest metadata updates' {
       Should -Invoke Get-MsiInstallerInfo -Exactly 1
     }
 
+    It 'Materializes an EXE ARP type for a Velopack MSI custom uninstall key' {
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                   = '{NEW-TOWER-MSI}'
+          ProductName                   = 'Tower'
+          ProductVersion                = '13.1.576.0'
+          Publisher                     = 'saas.group'
+          UpgradeCode                   = '{TOWER-UPGRADE}'
+          AllUsers                      = '2'
+          InstallerBuilder              = 'WiX'
+          AppsAndFeaturesProductCode    = 'MSI:Tower'
+          AppsAndFeaturesInstallerType  = 'exe'
+          HasCustomAppsAndFeaturesEntry = $true
+          HidesMsiAppsAndFeaturesEntry  = $true
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'wix'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = '{OLD-TOWER-MSI}'
+        AppsAndFeaturesEntries = @([ordered]@{
+            DisplayName = 'Tower Deployment Tool'
+            ProductCode = '{OLD-TOWER-MSI}'
+            UpgradeCode = '{TOWER-UPGRADE}'
+          })
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'MSI:Tower'
+      $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'MSI:Tower'
+      $Result.AppsAndFeaturesEntries[0].InstallerType | Should -Be 'exe'
+      $Result.AppsAndFeaturesEntries[0].UpgradeCode | Should -Be '{TOWER-UPGRADE}'
+    }
+
     It 'Throws when a manifest-declared WiX installer is built by another MSI tool' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
