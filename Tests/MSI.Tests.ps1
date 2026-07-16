@@ -45,6 +45,8 @@ Describe 'MSI Apps & Features parser' {
     $Info.MsqAppsAndFeaturesRegistryKey | Should -Be 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{837EEE3D-E993-4C41-AD65-5FBAF82B9159}.msq'
     $Info.MsqAppsAndFeaturesRegistryRows.Name | Should -Contain 'DisplayName'
     $Info.MsqAppsAndFeaturesRegistryRows.Name | Should -Contain 'UninstallString'
+    $Info.AppsAndFeaturesInstallerType | Should -Be 'exe'
+    $Info.AppsAndFeaturesWindowsInstaller | Should -BeFalse
     Test-MsiMsqAppsAndFeaturesEntry -Path $Fixture | Should -BeTrue
     Read-AppsAndFeaturesProductCodeFromMsi -Path $Fixture | Should -Be '{837EEE3D-E993-4C41-AD65-5FBAF82B9159}.msq'
   }
@@ -69,7 +71,10 @@ Describe 'MSI Apps & Features parser' {
     $Info = Get-MsiAppsAndFeaturesInfo -Path $Fixture
 
     $Info.ProductCode | Should -Be '{0D35F535-BFC3-482E-96D2-5B8FCE0A4E10}'
+    $Info.InstallerType | Should -Be 'wix'
     $Info.AppsAndFeaturesProductCode | Should -Be '{0D35F535-BFC3-482E-96D2-5B8FCE0A4E10}'
+    $Info.InstallerBuilder | Should -Be 'WiX'
+    $Info.AppsAndFeaturesInstallerType | Should -Be 'wix'
     $Info.HasMsqAppsAndFeaturesEntry | Should -BeFalse
     $Info.HidesMsiAppsAndFeaturesEntry | Should -BeFalse
     $Info.MsqAppsAndFeaturesRegistryKey | Should -BeNullOrEmpty
@@ -95,6 +100,7 @@ Describe 'MSI builder and install-location parser' {
     $Info = Get-MsiInstallerInfo -Path $Fixture
 
     $Info.InstallerBuilder | Should -Be 'AdvancedInstaller'
+    $Info.InstallerType | Should -Be 'msi'
     $Info.AllUsers | Should -Be '1'
     $Info.InstallLocationProperty | Should -Be 'APPDIR'
     $Info.InstallLocationSwitch | Should -Be 'APPDIR="<INSTALLPATH>"'
@@ -140,9 +146,10 @@ Describe 'MSI builder and install-location parser' {
     $DrawInfo = Get-MsiInstallerInfo -Path $Draw
 
     $FigmaInfo.InstallerBuilder | Should -Be 'WiX'
+    $FigmaInfo.InstallerType | Should -Be 'wix'
     $FigmaInfo.AllUsers | Should -Be '2'
     $FigmaInfo.InstallLocationProperty | Should -Be 'APPLICATIONROOTDIRECTORY'
-    $FigmaInfo.AppsAndFeaturesInstallerType | Should -Be 'msi'
+    $FigmaInfo.AppsAndFeaturesInstallerType | Should -Be 'exe'
     $DrawInfo.InstallerBuilder | Should -Be 'WiX'
     $DrawInfo.InstallLocationProperty | Should -Be 'APPLICATIONFOLDER'
     $DrawInfo.InstallLocationSource | Should -Be 'WIXUI_INSTALLDIR'

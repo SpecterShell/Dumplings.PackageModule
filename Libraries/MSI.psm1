@@ -661,14 +661,36 @@ function Get-MsiAppsAndFeaturesInfo {
       } else {
         $ProductCode
       }
-      $AppsAndFeaturesInstallerType = if ($CustomAppsAndFeaturesProductCode) { 'exe' } else { 'msi' }
+      $InstallerBuilder = Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $VisibleAppsAndFeaturesRegistryRows = if ($CustomAppsAndFeaturesProductCode) {
+        $CustomAppsAndFeaturesRegistryRows
+      } elseif ($HasMsqAppsAndFeaturesEntry) {
+        $MsqRegistryRows
+      } else {
+        @()
+      }
+      $AppsAndFeaturesWindowsInstaller = if ($VisibleAppsAndFeaturesRegistryRows.Count -gt 0) {
+        [bool]($VisibleAppsAndFeaturesRegistryRows | Where-Object { $_.Name -eq 'WindowsInstaller' -and $_.Value -match '^(#)?1$' })
+      } else {
+        $true
+      }
+      $AppsAndFeaturesInstallerType = if (-not $AppsAndFeaturesWindowsInstaller) {
+        'exe'
+      } elseif ($InstallerBuilder -eq 'WiX') {
+        'wix'
+      } else {
+        'msi'
+      }
 
       [PSCustomObject]@{
+        InstallerType                       = $InstallerBuilder -eq 'WiX' ? 'wix' : 'msi'
         ProductCode                         = $ProductCode
         ProductName                         = $Properties['ProductName']
         ProductVersion                      = $Properties['ProductVersion']
         UpgradeCode                         = $Properties['UpgradeCode']
+        InstallerBuilder                    = $InstallerBuilder
         AppsAndFeaturesInstallerType        = $AppsAndFeaturesInstallerType
+        AppsAndFeaturesWindowsInstaller     = $AppsAndFeaturesWindowsInstaller
         AppsAndFeaturesProductCode          = $AppsAndFeaturesProductCode
         HasCustomAppsAndFeaturesEntry       = [bool]$CustomAppsAndFeaturesProductCode
         HasMsqAppsAndFeaturesEntry          = $HasMsqAppsAndFeaturesEntry
@@ -852,28 +874,30 @@ function Get-MsiInstallerInfo {
       $AssociationInfo = Get-MsiAssociationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
 
       [PSCustomObject]@{
-        ProductCode                    = $Properties['ProductCode']
-        ProductName                    = $Properties['ProductName']
-        ProductVersion                 = $Properties['ProductVersion']
-        Publisher                      = $Properties['Manufacturer']
-        UpgradeCode                    = $Properties['UpgradeCode']
-        AllUsers                       = $Properties['ALLUSERS']
-        InstallerBuilder               = Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo
-        InstallLocationProperty        = $InstallLocationInfo.Property
-        InstallLocationSwitch          = $InstallLocationInfo.Switch
-        InstallLocationSource          = $InstallLocationInfo.Source
-        AppsAndFeaturesInstallerType   = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
-        AppsAndFeaturesProductCode     = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
-        HasCustomAppsAndFeaturesEntry  = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry
-        HidesMsiAppsAndFeaturesEntry   = $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
-        Template                       = $ArchitectureInfo.Template
-        PackageArchitecture            = Convert-MsiTemplatePlatformToPackageArchitecture -Template $ArchitectureInfo.Template
-        SupportedArchitectures         = $ArchitectureInfo.SupportedArchitectures
-        UnsupportedArchitectures       = $ArchitectureInfo.UnsupportedArchitectures
-        Protocols                      = $AssociationInfo.Protocols
-        FileExtensions                 = $AssociationInfo.FileExtensions
-        RegistryAssociationInfo        = $AssociationInfo
-        AppsAndFeaturesEntries         = $AppsAndFeaturesInfo
+        InstallerType                   = $AppsAndFeaturesInfo.InstallerType
+        ProductCode                     = $Properties['ProductCode']
+        ProductName                     = $Properties['ProductName']
+        ProductVersion                  = $Properties['ProductVersion']
+        Publisher                       = $Properties['Manufacturer']
+        UpgradeCode                     = $Properties['UpgradeCode']
+        AllUsers                        = $Properties['ALLUSERS']
+        InstallerBuilder                = $AppsAndFeaturesInfo.InstallerBuilder
+        InstallLocationProperty         = $InstallLocationInfo.Property
+        InstallLocationSwitch           = $InstallLocationInfo.Switch
+        InstallLocationSource           = $InstallLocationInfo.Source
+        AppsAndFeaturesInstallerType    = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
+        AppsAndFeaturesWindowsInstaller = $AppsAndFeaturesInfo.AppsAndFeaturesWindowsInstaller
+        AppsAndFeaturesProductCode      = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
+        HasCustomAppsAndFeaturesEntry   = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry
+        HidesMsiAppsAndFeaturesEntry    = $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
+        Template                        = $ArchitectureInfo.Template
+        PackageArchitecture             = Convert-MsiTemplatePlatformToPackageArchitecture -Template $ArchitectureInfo.Template
+        SupportedArchitectures          = $ArchitectureInfo.SupportedArchitectures
+        UnsupportedArchitectures        = $ArchitectureInfo.UnsupportedArchitectures
+        Protocols                       = $AssociationInfo.Protocols
+        FileExtensions                  = $AssociationInfo.FileExtensions
+        RegistryAssociationInfo         = $AssociationInfo
+        AppsAndFeaturesEntries          = $AppsAndFeaturesInfo
       }
     } finally {
       switch ($PSCmdlet.ParameterSetName) {

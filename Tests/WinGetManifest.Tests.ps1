@@ -270,6 +270,91 @@ Describe 'WinGet installer manifest metadata updates' {
       Should -Invoke Get-MsiInstallerInfo -Exactly 1
     }
 
+    It 'Does not materialize an AppsAndFeaturesEntries type for a matching WiX installer' {
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                  = '{NEW-WIX-PRODUCT}'
+          ProductName                  = 'WiX Product'
+          ProductVersion               = '2.0.0'
+          Publisher                    = 'WiX Publisher'
+          UpgradeCode                  = '{WIX-UPGRADE}'
+          AllUsers                     = '1'
+          InstallerBuilder             = 'WiX'
+          AppsAndFeaturesProductCode   = '{NEW-WIX-PRODUCT}'
+          AppsAndFeaturesInstallerType = 'wix'
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'wix'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = '{OLD-WIX-PRODUCT}'
+        AppsAndFeaturesEntries = @([ordered]@{ UpgradeCode = '{WIX-UPGRADE}'; InstallerType = 'msi' })
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.AppsAndFeaturesEntries[0].Contains('InstallerType') | Should -BeFalse
+    }
+
+    It 'Uses NestedInstallerType when deciding whether to materialize an AppsAndFeaturesEntries type' {
+      Mock Expand-TempArchive { $TestDrive }
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                  = '{NEW-NESTED-WIX-PRODUCT}'
+          ProductName                  = 'Nested WiX Product'
+          ProductVersion               = '2.0.0'
+          Publisher                    = 'WiX Publisher'
+          UpgradeCode                  = '{NESTED-WIX-UPGRADE}'
+          AllUsers                     = '1'
+          InstallerBuilder             = 'WiX'
+          AppsAndFeaturesProductCode   = '{NEW-NESTED-WIX-PRODUCT}'
+          AppsAndFeaturesInstallerType = 'wix'
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x86'
+        InstallerType          = 'zip'
+        NestedInstallerType    = 'wix'
+        NestedInstallerFiles   = @([ordered]@{ RelativeFilePath = 'nested.msi' })
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = '{OLD-NESTED-WIX-PRODUCT}'
+        AppsAndFeaturesEntries = @([ordered]@{ UpgradeCode = '{NESTED-WIX-UPGRADE}' })
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.AppsAndFeaturesEntries[0].Contains('InstallerType') | Should -BeFalse
+    }
+
+    It 'Preserves DefaultInstallLocation when a known installer parser cannot derive it' {
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                  = '{DRAW-PRODUCT}'
+          ProductName                  = 'draw.io'
+          ProductVersion               = '30.3.6'
+          Publisher                    = 'JGraph'
+          UpgradeCode                  = '{DRAW-UPGRADE}'
+          AllUsers                     = '1'
+          InstallerBuilder             = 'WiX'
+          AppsAndFeaturesProductCode   = '{DRAW-PRODUCT}'
+          AppsAndFeaturesInstallerType = 'wix'
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture         = 'x64'
+        InstallerType        = 'wix'
+        InstallerUrl         = $Script:InstallerUrl
+        ProductCode          = '{DRAW-PRODUCT}'
+        InstallationMetadata = [ordered]@{ DefaultInstallLocation = '%ProgramFiles%/draw.io' }
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.InstallationMetadata.DefaultInstallLocation | Should -Be '%ProgramFiles%/draw.io'
+      $Script:LogMessages.Message | Should -Not -Contain "Windows Installer did not return a value for existing installer field 'InstallationMetadata.DefaultInstallLocation'"
+    }
+
     It 'Materializes an EXE ARP type for a Velopack MSI custom uninstall key' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
@@ -379,7 +464,7 @@ Describe 'WinGet installer manifest metadata updates' {
 
       $Result.ProductCode | Should -Be 'Advanced.Product.x64'
       $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'New Advanced Product x64'
-      $Result.AppsAndFeaturesEntries[0].InstallerType | Should -Be 'exe'
+      $Result.AppsAndFeaturesEntries[0].Contains('InstallerType') | Should -BeFalse
 
       $X86Installer = [ordered]@{
         Architecture           = 'x86'

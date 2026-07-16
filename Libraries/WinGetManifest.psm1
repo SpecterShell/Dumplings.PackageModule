@@ -513,7 +513,7 @@ function Set-WinGetInstallerManifestMetadata {
   if ($Installer.Contains('InstallationMetadata') -and $Installer.InstallationMetadata -is [System.Collections.IDictionary] -and $Installer.InstallationMetadata.Contains('DefaultInstallLocation') -and -not $TaskOverridesDefaultInstallLocation) {
     if ($Metadata.Contains('DefaultInstallLocation') -and (& $HasScalarValue $Metadata.DefaultInstallLocation)) {
       $Installer.InstallationMetadata.DefaultInstallLocation = $Metadata.DefaultInstallLocation
-    } else {
+    } elseif (-not $Strict) {
       & $ReportFailure 'InstallationMetadata.DefaultInstallLocation'
     }
   }
@@ -542,12 +542,13 @@ function Set-WinGetInstallerManifestMetadata {
     InstallerType  = 'AppsAndFeaturesInstallerType'
   }
   foreach ($Entry in $MatchingEntries) {
-    # Materialize a parser-proven ARP type when the entry would otherwise
-    # inherit an incompatible outer installer type (for example, Velopack MSI
-    # packages that hide the MSI entry and expose an EXE-style MSI:<id> key).
-    if (-not $Entry.Contains('InstallerType') -and $Metadata.Contains('AppsAndFeaturesInstallerType') -and (& $HasScalarValue $Metadata.AppsAndFeaturesInstallerType)) {
-      $InheritedInstallerType = [string]$Installer['InstallerType']
-      if ($Metadata.AppsAndFeaturesInstallerType -cne $InheritedInstallerType) {
+    if ($Metadata.Contains('AppsAndFeaturesInstallerType') -and (& $HasScalarValue $Metadata.AppsAndFeaturesInstallerType)) {
+      $InheritedInstallerType = [string]($Installer.Contains('NestedInstallerType') ? $Installer['NestedInstallerType'] : $Installer['InstallerType'])
+      if ($Metadata.AppsAndFeaturesInstallerType -ceq $InheritedInstallerType) {
+        # The ARP entry inherits the effective installer type; remove redundant values left by earlier updates.
+        if ($Entry.Contains('InstallerType')) { $Entry.Remove('InstallerType') }
+      } elseif (-not $Entry.Contains('InstallerType')) {
+        # Materialize an incompatible ARP type, such as a WiX MSI exposing an EXE-style custom uninstall key.
         $Entry['InstallerType'] = $Metadata.AppsAndFeaturesInstallerType
       }
     }
