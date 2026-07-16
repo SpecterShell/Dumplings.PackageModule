@@ -97,6 +97,29 @@ Describe 'Chromium resource classification' {
       $Info.Warnings[0] | Should -BeLike '*not an ARP ProductCode*'
     }
   }
+
+  It 'Should resolve Google Chrome ARP keys from channel switches' {
+    $Info = [pscustomobject]@{
+      Variant     = 'ChromiumMiniInstaller'
+      Publisher   = 'Google LLC'
+      ProductName = 'Google Chrome Installer'
+    }
+
+    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--chrome-sxs --do-not-launch-chrome' }) | Should -Be 'Google Chrome SxS'
+    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--do-not-launch-chrome --chrome-beta' }) | Should -Be 'Google Chrome Beta'
+    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--chrome-dev --do-not-launch-chrome' }) | Should -Be 'Google Chrome Dev'
+    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--do-not-launch-chrome' }) | Should -Be 'Google Chrome'
+  }
+
+  It 'Should not infer a ProductCode for non-Google Chromium installers' {
+    $Info = [pscustomobject]@{
+      Variant     = 'ChromiumMiniInstaller'
+      Publisher   = 'Example Publisher'
+      ProductName = 'Example Browser Installer'
+    }
+
+    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--chrome-sxs' }) | Should -BeNullOrEmpty
+  }
 }
 
 Describe 'Wise MSI wrapper parser' {

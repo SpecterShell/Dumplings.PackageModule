@@ -350,6 +350,8 @@ function Get-WinGetGenericInstallerManifestInfo {
     The installer path
   .PARAMETER Architecture
     The architecture of the installer entry
+  .PARAMETER InstallerSwitches
+    The installer switches used to resolve command-line-selected identities
   .PARAMETER Logger
     The scriptblock or method used for warnings
   #>
@@ -361,6 +363,9 @@ function Get-WinGetGenericInstallerManifestInfo {
     [Parameter(HelpMessage = 'The architecture of the installer entry')]
     [ValidateSet('x86', 'x64', 'arm64', 'neutral')]
     [string]$Architecture,
+
+    [Parameter(HelpMessage = 'The installer switches used by the manifest')]
+    [System.Collections.IDictionary]$InstallerSwitches,
 
     [Parameter(Mandatory, HelpMessage = 'The scriptblock or method used for warnings')]
     $Logger
@@ -390,7 +395,14 @@ function Get-WinGetGenericInstallerManifestInfo {
     } else {
       $MsiInfo = $SuccessfulParser.Result.PSObject.Properties.Name -contains 'MsiInfo' ? $SuccessfulParser.Result.MsiInfo : $null
     }
-    $ParserOutputs = @($MsiInfo, $Metadata, $SuccessfulParser.Result) | Where-Object { $null -ne $_ }
+    $CommandLineMetadata = $null
+    if ($SuccessfulParser.Name -ceq 'Chromium Setup' -and $InstallerSwitches) {
+      $ProductCode = Resolve-ChromiumSetupProductCode -Info $SuccessfulParser.Result -InstallerSwitches $InstallerSwitches
+      if (-not [string]::IsNullOrWhiteSpace($ProductCode)) {
+        $CommandLineMetadata = [pscustomobject]@{ ProductCode = $ProductCode }
+      }
+    }
+    $ParserOutputs = @($MsiInfo, $CommandLineMetadata, $Metadata, $SuccessfulParser.Result) | Where-Object { $null -ne $_ }
     $WarningsProperty = $null -eq $Metadata ? $null : $Metadata.PSObject.Properties['Warnings']
     return [pscustomobject]@{
       ParserName       = $SuccessfulParser.Name
@@ -641,7 +653,15 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     } elseif ($EffectiveInstallerType -ceq 'exe') {
       # Generic EXE families are best effort because static detection can be ambiguous or unsupported.
       try {
-        $ParserInfo = Get-WinGetGenericInstallerManifestInfo -Path $EffectiveInstallerPath -Architecture $Installer.Architecture -Logger $Logger
+        $ParserInfoArguments = @{
+          Path         = $EffectiveInstallerPath
+          Architecture = $Installer.Architecture
+          Logger       = $Logger
+        }
+        if ($Installer.Contains('InstallerSwitches') -and $Installer.InstallerSwitches -is [System.Collections.IDictionary]) {
+          $ParserInfoArguments.InstallerSwitches = $Installer.InstallerSwitches
+        }
+        $ParserInfo = Get-WinGetGenericInstallerManifestInfo @ParserInfoArguments
         if ($ParserInfo) {
           $WarningsProperty = $ParserInfo.PSObject.Properties['Warnings']
           $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)

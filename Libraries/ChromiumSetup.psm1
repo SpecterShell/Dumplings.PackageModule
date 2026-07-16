@@ -242,6 +242,43 @@ function Get-ChromiumSetupInfo {
   }
 }
 
+function Resolve-ChromiumSetupProductCode {
+  <#
+  .SYNOPSIS
+    Resolve the Google Chrome ARP key selected by mini-installer switches
+  .DESCRIPTION
+    Google uses the same Chromium mini-installer layout for multiple Chrome
+    channels. The channel switches select the product-specific uninstall key,
+    so the installer bytes alone are insufficient to determine ProductCode.
+  .PARAMETER Info
+    The result returned by Get-ChromiumSetupInfo
+  .PARAMETER InstallerSwitches
+    The WinGet InstallerSwitches dictionary applied to the installer
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][psobject]$Info,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$InstallerSwitches
+  )
+
+  if ($Info.Variant -cne 'ChromiumMiniInstaller' -or $Info.Publisher -cne 'Google LLC' -or $Info.ProductName -cne 'Google Chrome Installer') {
+    return $null
+  }
+
+  $CommandLine = @($InstallerSwitches.Values | Where-Object { $_ -is [string] }) -join ' '
+  $Channels = @(
+    [pscustomobject]@{ Switch = '--chrome-sxs'; ProductCode = 'Google Chrome SxS' }
+    [pscustomobject]@{ Switch = '--chrome-beta'; ProductCode = 'Google Chrome Beta' }
+    [pscustomobject]@{ Switch = '--chrome-dev'; ProductCode = 'Google Chrome Dev' }
+  )
+  $SelectedChannels = @($Channels | Where-Object { $CommandLine -match "(?i)(?<!\S)$([regex]::Escape($_.Switch))(?!\S)" })
+  if ($SelectedChannels.Count -gt 1) { return $null }
+  if ($SelectedChannels.Count -eq 1) { return $SelectedChannels[0].ProductCode }
+
+  # An unqualified Google Chrome mini-installer selects the stable channel.
+  return 'Google Chrome'
+}
+
 function Expand-ChromiumOmahaPayload {
   <#
   .SYNOPSIS
@@ -559,4 +596,4 @@ function Read-FileExtensionsFromChromiumSetup {
   process { (Get-ChromiumSetupInfo -Path $Path).FileExtensions }
 }
 
-Export-ModuleMember -Function ConvertFrom-ChromiumUpdaterTagData, Read-ChromiumInstallerTag, Get-ChromiumSetupInfo, Expand-ChromiumSetupInstaller, Test-ChromiumSetup, Test-ChromiumMiniInstaller, Test-ChromiumUpdater, Test-OmahaInstaller, Read-ProductVersionFromChromiumSetup, Read-ProductNameFromChromiumSetup, Read-PublisherFromChromiumSetup, Read-ProductCodeFromChromiumSetup, Read-ScopeFromChromiumSetup, Read-SupportedScopesFromChromiumSetup, Read-ProtocolsFromChromiumSetup, Read-FileExtensionsFromChromiumSetup
+Export-ModuleMember -Function ConvertFrom-ChromiumUpdaterTagData, Read-ChromiumInstallerTag, Get-ChromiumSetupInfo, Resolve-ChromiumSetupProductCode, Expand-ChromiumSetupInstaller, Test-ChromiumSetup, Test-ChromiumMiniInstaller, Test-ChromiumUpdater, Test-OmahaInstaller, Read-ProductVersionFromChromiumSetup, Read-ProductNameFromChromiumSetup, Read-PublisherFromChromiumSetup, Read-ProductCodeFromChromiumSetup, Read-ScopeFromChromiumSetup, Read-SupportedScopesFromChromiumSetup, Read-ProtocolsFromChromiumSetup, Read-FileExtensionsFromChromiumSetup

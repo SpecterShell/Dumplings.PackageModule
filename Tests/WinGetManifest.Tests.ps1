@@ -448,6 +448,38 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New Squirrel Publisher'
     }
 
+    It 'Resolves a Chromium Setup ProductCode from the manifest channel switch' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults = @([pscustomobject]@{
+              Name    = 'Chromium Setup'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Variant        = 'ChromiumMiniInstaller'
+                Publisher      = 'Google LLC'
+                ProductName    = 'Google Chrome Installer'
+                ProductCode    = $null
+                DisplayName    = 'Google Chrome Installer'
+                DisplayVersion = '152.0.7953.0'
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture      = 'x64'
+        InstallerType     = 'exe'
+        InstallerUrl      = $Script:InstallerUrl
+        InstallerSwitches = [ordered]@{ Custom = '--chrome-sxs --do-not-launch-chrome' }
+        ProductCode       = 'Google Chrome SxS'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Google Chrome SxS'
+      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
+    }
+
     It 'Uses InstallShield marker evidence before parsing an embedded MSI' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
