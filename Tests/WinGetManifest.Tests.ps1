@@ -2,12 +2,15 @@ BeforeDiscovery {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\YamlSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetSchema.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerBridge.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\MSI.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\NSIS.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Inno.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\AdvancedInstaller.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\ChromiumSetup.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetInstallerAnalyzer.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifest.psm1') -Force
 }
@@ -206,6 +209,63 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'New MSI Product'
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New MSI Publisher'
       $Result.AppsAndFeaturesEntries[0].InstallerType | Should -Be 'exe'
+      Should -Invoke Get-MsiInstallerInfo -Exactly 1
+    }
+
+    It 'Updates retained MSI metadata when the task only supplies the installer URL' {
+      Mock Get-WinGetManifestSchema {
+        [ordered]@{
+          definitions = [ordered]@{
+            Installer = [ordered]@{ properties = [ordered]@{ InstallerUrl = [ordered]@{} } }
+          }
+          properties  = [ordered]@{
+            Installers = [ordered]@{
+              items = [ordered]@{ properties = [ordered]@{ InstallerUrl = [ordered]@{} } }
+            }
+          }
+        }
+      }
+      Mock Test-YamlObject {}
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                  = '{NEW-PRODUCT}'
+          ProductName                  = 'New MSI Product'
+          ProductVersion               = '2.0.0'
+          Publisher                    = 'New MSI Publisher'
+          UpgradeCode                  = '{NEW-UPGRADE}'
+          AllUsers                     = '1'
+          InstallerBuilder             = 'MSI'
+          AppsAndFeaturesInstallerType = 'msi'
+        }
+      }
+      $OldInstaller = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'msi'
+        InstallerUrl           = 'https://example.test/old-installer.msi'
+        InstallerSha256        = 'OLD-HASH'
+        ProductCode            = '{OLD-PRODUCT}'
+        AppsAndFeaturesEntries = @([ordered]@{
+            DisplayName    = 'Old MSI Product'
+            DisplayVersion = '1.0.0'
+            Publisher      = 'Old MSI Publisher'
+            ProductCode    = '{OLD-PRODUCT}'
+            UpgradeCode    = '{OLD-UPGRADE}'
+            InstallerType  = 'msi'
+          })
+      }
+      $InstallerEntry = [ordered]@{
+        Architecture = 'x64'
+        InstallerUrl = $Script:InstallerUrl
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallers -OldInstallers @($OldInstaller) -InstallerEntries @($InstallerEntry) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be '{NEW-PRODUCT}'
+      $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'New MSI Product'
+      $Result.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '2.0.0'
+      $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New MSI Publisher'
+      $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be '{NEW-PRODUCT}'
+      $Result.AppsAndFeaturesEntries[0].UpgradeCode | Should -Be '{NEW-UPGRADE}'
       Should -Invoke Get-MsiInstallerInfo -Exactly 1
     }
 
