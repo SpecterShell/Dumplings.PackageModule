@@ -372,12 +372,12 @@ Describe 'Bridge regressions' {
     $TaskPieces = @(Get-ChildItem -Path $TaskRoot -Filter '*.ps1' -Recurse -File)
     $NsisTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match '\bGet-NSISInfo\b' } | Select-Object -ExpandProperty DirectoryName -Unique)
     $InnoTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match '\bGet-InnoInfo\b|\bExpand-InnoInstaller\b' } | Select-Object -ExpandProperty DirectoryName -Unique)
-    $AdvancedInstallerTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match '\bExpand-AdvancedInstaller\b' } | Select-Object -ExpandProperty DirectoryName -Unique)
+    $RawBootstrapperExtractionTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match '\bExpand-(?:AdvancedInstaller|InstallShield)\b' } | Select-Object -ExpandProperty DirectoryName -Unique)
     $DirectCliTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match 'InstallerParsers\\GPL|InstallerParsers\.GPL|Cli\.ps1' })
 
     $NsisTasks.Count | Should -Be 71
     $InnoTasks.Count | Should -Be 3
-    $AdvancedInstallerTasks.Count | Should -Be 35
+    $RawBootstrapperExtractionTasks.Count | Should -Be 0
     $DirectCliTasks.Count | Should -Be 0
   }
 

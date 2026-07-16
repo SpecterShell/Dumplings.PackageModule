@@ -91,10 +91,9 @@ Describe 'InstallAware static parser' {
       param($FixturePath)
       Mock Get-PEOverlayOffset { 512 }
       $ArchiveData = Get-InstallAwareArchiveData -Path $FixturePath
-      try {
-        $ArchiveData.Range.Offset | Should -Be 1024
-        $ArchiveData.Entries.FullName | Should -Contain 'Example_Setup.exe'
-      } finally { Remove-Item -LiteralPath $ArchiveData.ArchivePath -Force -ErrorAction SilentlyContinue }
+      $ArchiveData.Range.Offset | Should -Be 1024
+      $ArchiveData.Entries.FullName | Should -Contain 'Example_Setup.exe'
+      $ArchiveData.SourcePath | Should -Be (Get-Item -LiteralPath $FixturePath).FullName
     }
   }
 }
@@ -110,14 +109,11 @@ Describe 'Paquet Builder static parser' {
       param($FixturePath)
       Mock Get-PEOverlayOffset { 512 }
       $ArchiveData = Get-PaquetBuilderArchiveData -Path $FixturePath
-      try {
-        $ArchiveData.Payload.Entries.FullName | Should -Be @('app.exe')
-        $ArchiveData.Runtime.Entries.FullName | Should -Contain 'pbfprop.dat'
-        $ArchiveData.Runtime.Entries.FullName | Should -Contain 'PBCore64.dll'
-      } finally {
-        Remove-Item -LiteralPath $ArchiveData.Payload.ArchivePath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $ArchiveData.Runtime.ArchivePath -Force -ErrorAction SilentlyContinue
-      }
+      $ArchiveData.Payload.Entries.FullName | Should -Be @('app.exe')
+      $ArchiveData.Runtime.Entries.FullName | Should -Contain 'pbfprop.dat'
+      $ArchiveData.Runtime.Entries.FullName | Should -Contain 'PBCore64.dll'
+      $ArchiveData.Payload.SourcePath | Should -Be (Get-Item -LiteralPath $FixturePath).FullName
+      $ArchiveData.Runtime.SourcePath | Should -Be (Get-Item -LiteralPath $FixturePath).FullName
     }
   }
 }

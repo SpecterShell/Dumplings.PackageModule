@@ -127,25 +127,22 @@ function Get-InstallForgePayloadArchiveData {
   foreach ($Range in @(Get-EmbeddedSevenZipArchiveRange -Path $File.FullName -StartOffset $OverlayOffset -MaximumArchives 16 -MaximumArchiveBytes $Script:InstallForgeMaximumArchiveBytes)) {
     $Offset = $Range.Offset
     $Length = $Range.Length
-    $TemporaryPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallForge-Payload-$([guid]::NewGuid().ToString('N')).7z")
-    $Archive = $null
+    $Context = $null
     try {
-      $null = Export-InstallerArchiveRange -Path $File.FullName -Offset $Offset -Length $Length -DestinationPath $TemporaryPath
-      $Archive = Get-InstallerArchive -Path $TemporaryPath
-      $Entries = @(Get-InstallerArchiveEntry -Archive $Archive | ForEach-Object {
+      $Context = Open-InstallerArchiveRange -Path $File.FullName -Range $Range
+      $Entries = @(Get-InstallerArchiveEntry -Archive $Context.Archive | ForEach-Object {
           [pscustomobject]@{
             EncodedName = $_.FullName
             FullName    = ConvertFrom-InstallForgeEncodedPath -Path $_.FullName
             Length      = $_.Length
-            NativeEntry = $_.NativeEntry
           }
-        })
+      })
       if ($Entries.Count -eq 0 -or -not ($Entries | Where-Object { $_.EncodedName -ne $_.FullName } | Select-Object -First 1)) { continue }
-      return [pscustomobject]@{ ArchivePath = $TemporaryPath; Entries = $Entries; Offset = [long]$Offset; Length = [long]$Length }
+      return [pscustomobject]@{ SourcePath = $File.FullName; Range = $Range; Entries = $Entries; Offset = [long]$Offset; Length = [long]$Length }
     } catch {
-      Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
+      continue
     } finally {
-      if ($Archive) { $Archive.Dispose() }
+      if ($Context) { Close-InstallerArchiveRange -Context $Context }
     }
   }
   throw 'The PE overlay does not contain a validated InstallForge payload archive'
@@ -248,7 +245,6 @@ function Get-InstallForgeInfo {
       }
     } finally {
       Remove-Item -LiteralPath $ConfigurationData.ArchivePath -Force -ErrorAction SilentlyContinue
-      if ($PayloadData) { Remove-Item -LiteralPath $PayloadData.ArchivePath -Force -ErrorAction SilentlyContinue }
     }
   }
 }
@@ -268,26 +264,25 @@ function Expand-InstallForgeInstaller {
 
   process {
     $ArchiveData = Get-InstallForgePayloadArchiveData -Path $Path
+    $Context = Open-InstallerArchiveRange -Path $ArchiveData.SourcePath -Range $ArchiveData.Range
     try {
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallForge-$([guid]::NewGuid().ToString('N'))") }
       $null = New-Item -Path $DestinationPath -ItemType Directory -Force
-      $Archive = Get-InstallerArchive -Path $ArchiveData.ArchivePath
+      $Archive = $Context.Archive
       $Written = 0L
       $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-      try {
-        foreach ($EntryData in $ArchiveData.Entries) {
-          if ([IO.Path]::GetFileName($EntryData.FullName) -ieq 'empty.empty' -or -not (Test-ExtractionPattern -Path $EntryData.FullName -Pattern $Name)) { continue }
-          $Written += $EntryData.Length
-          if ($Written -gt $MaximumExpandedBytes) { throw 'InstallForge extraction exceeds the configured output limit' }
-          $Entry = Get-InstallerArchiveEntry -Archive $Archive | Where-Object { $_.FullName -ieq $EntryData.EncodedName } | Select-Object -First 1
-          if (-not $Entry) { throw "The InstallForge payload entry '$($EntryData.FullName)' could not be reopened" }
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $EntryData.FullName
-          $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
-        }
-      } finally { $Archive.Dispose() }
+      foreach ($EntryData in $ArchiveData.Entries) {
+        if ([IO.Path]::GetFileName($EntryData.FullName) -ieq 'empty.empty' -or -not (Test-ExtractionPattern -Path $EntryData.FullName -Pattern $Name)) { continue }
+        $Written += $EntryData.Length
+        if ($Written -gt $MaximumExpandedBytes) { throw 'InstallForge extraction exceeds the configured output limit' }
+        $Entry = Get-InstallerArchiveEntry -Archive $Archive | Where-Object { $_.FullName -ieq $EntryData.EncodedName } | Select-Object -First 1
+        if (-not $Entry) { throw "The InstallForge payload entry '$($EntryData.FullName)' could not be reopened" }
+        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $EntryData.FullName
+        $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
+      }
       if ($Result.Count -eq 0) { throw "No InstallForge payload files matched '$Name'" }
       return $Result.ToArray()
-    } finally { Remove-Item -LiteralPath $ArchiveData.ArchivePath -Force -ErrorAction SilentlyContinue }
+    } finally { Close-InstallerArchiveRange -Context $Context }
   }
 }
 

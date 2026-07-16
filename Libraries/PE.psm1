@@ -8,7 +8,7 @@ function Read-PEFileBytes {
   #>
   [OutputType([byte[]])]
   param ([Parameter(Mandatory)][IO.Stream]$Stream, [Parameter(Mandatory)][long]$Offset, [Parameter(Mandatory)][int]$Count)
-  Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count
+  return ,(Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count)
 }
 
 function Read-PEUInt16 {
@@ -215,9 +215,9 @@ function Read-PEResourceData {
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][psobject]$Resource, [ValidateRange(1, 1073741824)][long]$MaximumBytes = 134217728)
   process {
     if ($Resource.Size -lt 0 -or $Resource.Size -gt $MaximumBytes -or $Resource.Size -gt [int]::MaxValue) { throw "The PE resource exceeds the $MaximumBytes-byte read limit." }
-    if ($Resource.SourceStream) { return Read-BinaryBytes -Stream $Resource.SourceStream -Offset $Resource.Offset -Count ([int]$Resource.Size) }
+    if ($Resource.SourceStream) { return ,(Read-BinaryBytes -Stream $Resource.SourceStream -Offset $Resource.Offset -Count ([int]$Resource.Size)) }
     $Stream = [IO.File]::Open($Resource.Path, 'Open', 'Read', 'ReadWrite')
-    try { Read-BinaryBytes -Stream $Stream -Offset $Resource.Offset -Count ([int]$Resource.Size) } finally { $Stream.Dispose() }
+    try { return ,(Read-BinaryBytes -Stream $Stream -Offset $Resource.Offset -Count ([int]$Resource.Size)) } finally { $Stream.Dispose() }
   }
 }
 

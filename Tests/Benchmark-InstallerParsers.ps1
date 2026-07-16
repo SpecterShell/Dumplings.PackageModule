@@ -6,8 +6,15 @@ param (
   [string]$NSISPath,
   [string]$NSISBaselineModulePath,
   [string]$ChromiumPath,
+  [string]$InnoPath,
+  [string]$SetupFactoryPath,
+  [string]$AdvancedInstallerPath,
   [string]$QtInstallerFrameworkPath,
   [string]$Install4jPath,
+  [string]$InstallBuilderPath,
+  [string]$SquirrelPath,
+  [string]$BurnPath,
+  [string]$MsiPath,
   [string]$OutputPath
 )
 
@@ -30,7 +37,9 @@ function Invoke-InstallerParserBenchmark {
 `$ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath '$($RepositoryRoot.Replace("'", "''"))'
 `$InstallerPath = '$($ResolvedPath.Replace("'", "''"))'
-$Expression | Out-Null
+& {
+$Expression
+} | Out-Null
 "@
   $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ScriptText))
   $StandardOutput = Join-Path ([IO.Path]::GetTempPath()) "Dumplings-Benchmark-$([guid]::NewGuid().ToString('N')).out"
@@ -70,11 +79,32 @@ $Results = @(
   if ($ChromiumPath) {
     Invoke-InstallerParserBenchmark -Name Chromium -Path $ChromiumPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-ChromiumSetupInfo -Path `$InstallerPath"
   }
+  if ($InnoPath) {
+    Invoke-InstallerParserBenchmark -Name Inno -Path $InnoPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Inno.psm1 -Force; Get-InnoInfo -Path `$InstallerPath"
+  }
+  if ($SetupFactoryPath) {
+    Invoke-InstallerParserBenchmark -Name SetupFactory -Path $SetupFactoryPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\SetupFactory.psm1 -Force; Get-SetupFactoryInfo -Path `$InstallerPath"
+  }
+  if ($AdvancedInstallerPath) {
+    Invoke-InstallerParserBenchmark -Name AdvancedInstaller -Path $AdvancedInstallerPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\AdvancedInstaller.psm1 -Force; Get-AdvancedInstallerInfo -Path `$InstallerPath"
+  }
   if ($QtInstallerFrameworkPath) {
-    Invoke-InstallerParserBenchmark -Name QtInstallerFramework -Path $QtInstallerFrameworkPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-QtInstallerFrameworkInfo -Path `$InstallerPath"
+    Invoke-InstallerParserBenchmark -Name QtInstallerFramework -Path $QtInstallerFrameworkPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\QtInstallerFramework.psm1 -Force; Get-QtInstallerFrameworkInfo -Path `$InstallerPath"
   }
   if ($Install4jPath) {
     Invoke-InstallerParserBenchmark -Name Install4j -Path $Install4jPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-Install4jInfo -Path `$InstallerPath"
+  }
+  if ($InstallBuilderPath) {
+    Invoke-InstallerParserBenchmark -Name InstallBuilder -Path $InstallBuilderPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-InstallBuilderInfo -Path `$InstallerPath"
+  }
+  if ($SquirrelPath) {
+    Invoke-InstallerParserBenchmark -Name Squirrel -Path $SquirrelPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-SquirrelInfo -Path `$InstallerPath"
+  }
+  if ($BurnPath) {
+    Invoke-InstallerParserBenchmark -Name Burn -Path $BurnPath -Expression ". .\Modules\PackageModule\Index.ps1; `$Info = Get-BurnInfo -Path `$InstallerPath; `$Stub = Get-BurnStub -Path `$InstallerPath; try { Get-BurnManifest -StubPath `$Stub } finally { Remove-Item -LiteralPath `$Stub -Force -ErrorAction SilentlyContinue }"
+  }
+  if ($MsiPath) {
+    Invoke-InstallerParserBenchmark -Name MSI -Path $MsiPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-MsiInstallerInfo -Path `$InstallerPath"
   }
 ) | Where-Object { $null -ne $_ }
 

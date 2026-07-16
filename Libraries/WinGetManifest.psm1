@@ -411,9 +411,6 @@ function Get-WinGetGenericInstallerManifestInfo {
         throw "The InstallShield '$($Info.Variant)' payload does not contain an MSI selected by the bootstrapper"
       }
       $MsiInfo = Get-InstallShieldMsiInfo -Installer $Info
-      if ($Architecture -cin @('x86', 'x64', 'arm64') -and $MsiInfo.PackageArchitecture -cin @('x86', 'x64', 'arm64') -and $MsiInfo.PackageArchitecture -cne $Architecture) {
-        throw "InstallShield selects '$($MsiInfo.SelectedMsiPath)' for the manifest '$Architecture' entry, but the MSI package architecture is '$($MsiInfo.PackageArchitecture)'"
-      }
       return [pscustomobject]@{
         ParserName      = 'InstallShield'
         InputObject     = @($MsiInfo, $Info)
@@ -582,7 +579,8 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   $Installer.InstallerUrl = $Installer.InstallerUrl.Replace(' ', '%20')
 
   # Update the installer using the matching installer
-  $MatchingInstaller = $Installers | Where-Object -FilterScript { $_.InstallerUrl -ceq $Installer.InstallerUrl } | Select-Object -First 1
+  # The same bootstrapper URL can select different nested payloads by host architecture.
+  $MatchingInstaller = $Installers | Where-Object -FilterScript { $_.InstallerUrl -ceq $Installer.InstallerUrl -and $_.Architecture -ceq $Installer.Architecture } | Select-Object -First 1
   if ($MatchingInstaller -and ($Installer.Contains('NestedInstallerFiles') ? ((ConvertTo-Json -InputObject $Installer.NestedInstallerFiles -Depth 10 -Compress) -ceq (ConvertTo-Json -InputObject $MatchingInstaller.NestedInstallerFiles -Depth 10 -Compress)) : $true)) {
     foreach ($Key in @('InstallerSha256', 'SignatureSha256', 'PackageFamilyName', 'ProductCode', 'ReleaseDate', 'AppsAndFeaturesEntries')) {
       if ($MatchingInstaller.Contains($Key) -and -not $InstallerEntry.Contains($Key)) {
@@ -593,9 +591,9 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     }
   }
 
-  # Download and analyze the installer file
-  # Skip if there is matching installer, or the "InstallerSha256" is explicitly specified
-  if (-not $Installer.Contains('InstallerSha256')) {
+  # Analyze cached installer files even when the task supplied a hash for update detection.
+  $HasCachedInstallerFile = $InstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $InstallerFiles[$OriginalInstallerUrl])
+  if (-not $Installer.Contains('InstallerSha256') -or $HasCachedInstallerFile) {
     if ($Script:WinGetTempInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl])) {
       # Skip downloading if the installer file is already downloaded
       $InstallerPath = $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl]
@@ -633,6 +631,11 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     if ($EffectiveInstallerType -cin $KnownInstallerTypes) {
       # Known WinGet types are authoritative: family validation, parsing, and field updates must all succeed.
       $ParserInfo = Get-WinGetKnownInstallerManifestInfo -Path $EffectiveInstallerPath -InstallerType $EffectiveInstallerType
+      $WarningsProperty = $ParserInfo.PSObject.Properties['Warnings']
+      $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
+      foreach ($Warning in @($ParserWarnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
+        $Logger.Invoke("$($ParserInfo.ParserName): $Warning", 'Warning')
+      }
       $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
       Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -Strict -Logger $Logger
     } elseif ($EffectiveInstallerType -ceq 'exe') {
@@ -640,7 +643,9 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       try {
         $ParserInfo = Get-WinGetGenericInstallerManifestInfo -Path $EffectiveInstallerPath -Architecture $Installer.Architecture -Logger $Logger
         if ($ParserInfo) {
-          foreach ($Warning in @($ParserInfo.Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
+          $WarningsProperty = $ParserInfo.PSObject.Properties['Warnings']
+          $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
+          foreach ($Warning in @($ParserWarnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
             $Logger.Invoke("$($ParserInfo.ParserName): $Warning", 'Warning')
           }
           if (-not [string]::IsNullOrWhiteSpace([string]$ParserInfo.SelectedMsiPath)) {

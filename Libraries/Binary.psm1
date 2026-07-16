@@ -70,7 +70,8 @@ function Read-BinaryBytes {
   if (-not $Stream.CanSeek) { throw 'Random-access binary reads require a seekable stream.' }
   if ($Offset -lt 0 -or $Offset -gt $Stream.Length) { throw "Binary read offset is outside the stream: $Offset" }
   $ActualCount = if ($AllowPartial) { [int][Math]::Min($Count, $Stream.Length - $Offset) } else { $Count }
-  return [Dumplings.InstallerInfrastructure.BinaryIO]::ReadExactly($Stream, $Offset, $ActualCount, $true)
+  # Prevent PowerShell from expanding byte arrays into boxed pipeline objects.
+  return ,([Dumplings.InstallerInfrastructure.BinaryIO]::ReadExactly($Stream, $Offset, $ActualCount, $true))
 }
 
 function Read-BinaryInteger {

@@ -110,6 +110,7 @@ Describe 'Find-BinaryPattern' {
     [IO.File]::WriteAllBytes($Path, $Bytes)
     @(Find-BinaryPattern -Path $Path -Pattern ([Text.Encoding]::ASCII.GetBytes('PATTERN'))) | Should -Be @(10, 1048573)
     @(Find-BinaryPattern -Path $Path -Pattern ([Text.Encoding]::ASCII.GetBytes('PATTERN')) -Reverse) | Should -Be @(1048573, 10)
+    @(Find-BinaryPattern -Path $Path -Pattern ([Text.Encoding]::ASCII.GetBytes('PATTERN')) -Reverse -Maximum 1) | Should -Be @(1048573)
   }
 
   It 'rejects malformed scan ranges' {
@@ -127,6 +128,17 @@ Describe 'Find-BinaryPattern' {
 }
 
 Describe 'Bounded binary streams' {
+  It 'returns byte arrays without pipeline boxing and restores random-access positions' {
+    $Source = [IO.MemoryStream]::new([byte[]](0, 1, 2, 3, 4))
+    $Source.Position = 4
+    try {
+      $Bytes = Read-BinaryBytes -Stream $Source -Offset 1 -Count 3
+      $Bytes.GetType() | Should -Be ([byte[]])
+      $Bytes | Should -Be ([byte[]](1, 2, 3))
+      $Source.Position | Should -Be 4
+    } finally { $Source.Dispose() }
+  }
+
   It 'limits a substream and leaves caller-owned streams open' {
     $Source = [IO.MemoryStream]::new([byte[]](0, 1, 2, 3, 4, 5))
     $Range = New-BoundedReadStream -Stream $Source -Offset 2 -Length 3 -LeaveOpen
@@ -266,6 +278,27 @@ Describe 'Shared archive helpers' {
     } finally {
       $Archive.Dispose()
     }
+  }
+
+  It 'opens an embedded archive range without materializing it' {
+    $ZipPath = Join-Path $Script:TemporaryRoot 'range-source.zip'
+    $SourcePath = Join-Path $Script:TemporaryRoot 'range-source.txt'
+    $EmbeddedPath = Join-Path $Script:TemporaryRoot 'embedded-range.bin'
+    [IO.File]::WriteAllText($SourcePath, 'bounded range archive')
+    Compress-Archive -LiteralPath $SourcePath -DestinationPath $ZipPath -Force
+    $Prefix = [byte[]]::new(257)
+    $ZipBytes = [IO.File]::ReadAllBytes($ZipPath)
+    [IO.File]::WriteAllBytes($EmbeddedPath, $Prefix + $ZipBytes + [byte[]]::new(31))
+
+    $Context = Open-InstallerArchiveRange -Path $EmbeddedPath -Offset $Prefix.Length -Length $ZipBytes.Length
+    try {
+      $Entry = @(Get-InstallerArchiveEntry -Archive $Context.Archive)[0]
+      Read-InstallerArchiveEntryText -Entry $Entry -MaximumBytes 1024 | Should -Be 'bounded range archive'
+    } finally {
+      Close-InstallerArchiveRange -Context $Context
+    }
+
+    { Remove-Item -LiteralPath $EmbeddedPath -Force } | Should -Not -Throw
   }
 
   It 'rejects traversal and output-limit violations' {

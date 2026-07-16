@@ -43,9 +43,9 @@ function Read-Install4jFileByteRange {
     [int]$Count
   )
 
-  if ($Offset -lt 0 -or $Offset -ge $Stream.Length -or $Count -le 0) { return [byte[]]::new(0) }
+  if ($Offset -lt 0 -or $Offset -ge $Stream.Length -or $Count -le 0) { return ,([byte[]]::new(0)) }
 
-  return Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count -AllowPartial
+  return ,(Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count -AllowPartial)
 }
 
 function Read-Install4jInt32BigEndian {
@@ -650,7 +650,7 @@ function Read-Install4jLauncherFile {
   try {
     $Source.Position = $Entry.Offset
     $null = Copy-BinaryXorStream -Source $Source -Destination $Destination -Key ([byte]$Entry.TransformKey) -ExpectedBytes $Entry.Length
-    return $Destination.ToArray()
+    return ,($Destination.ToArray())
   } finally {
     $Destination.Dispose()
     $Source.Dispose()
@@ -739,7 +739,7 @@ function Read-Install4jEmbeddedFile {
 
   $Stream = [System.IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   try {
-    Read-Install4jFileByteRange -Stream $Stream -Offset $Entry.Offset -Count ([int]$Entry.Length)
+    return ,(Read-Install4jFileByteRange -Stream $Stream -Offset $Entry.Offset -Count ([int]$Entry.Length))
   } finally {
     $Stream.Dispose()
   }
@@ -1086,10 +1086,9 @@ function Get-Install4jInfo {
     $File = Get-Item -LiteralPath $Path -Force
     $Warnings = [System.Collections.Generic.List[string]]::new()
     $VersionInfo = Get-Install4jVersionInfo -File $File
-    $ScanText = Get-Install4jScanText -File $File
     $EmbeddedFileTables = @(Get-Install4jEmbeddedFileTable -Path $File.FullName)
     $LauncherConfiguration = try { Get-Install4jLauncherConfiguration -Path $File.FullName } catch { $null }
-    $EmbeddedFiles = @(Get-Install4jEmbeddedFilesFromText -Text $ScanText)
+    $EmbeddedFiles = @()
     foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $null -ne $_ })) {
       if ($EmbeddedFiles -notcontains $Entry.Name) { $EmbeddedFiles += $Entry.Name }
     }
@@ -1098,23 +1097,14 @@ function Get-Install4jInfo {
     }
 
     $Config = $null
-    $ConfigXml = Get-Install4jConfigXmlText -Text $ScanText
-    if (-not $ConfigXml -and $File.Length -le $Script:Install4jMaximumConfigBytes) {
-      $Content = Get-Content -LiteralPath $File.FullName -Raw -ErrorAction SilentlyContinue
-      if ($Content) { $ConfigXml = Get-Install4jConfigXmlText -Text $Content }
-    }
-    if ($ConfigXml) {
-      $Config = ConvertFrom-Install4jConfigXml -Content $ConfigXml -Source 'PlainXml'
-    } else {
-      foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $_.Name -ieq 'i4jparams.conf' })) {
-        try {
-          $Bytes = Read-Install4jLauncherFile -Path $File.FullName -Entry $Entry
-          $EmbeddedConfigText = [System.Text.Encoding]::UTF8.GetString($Bytes)
-          $Config = ConvertFrom-Install4jConfigXml -Content $EmbeddedConfigText -Source 'LauncherStartupFile'
-          break
-        } catch {
-          $Warnings.Add("Failed to parse launcher i4jparams.conf: $($_.Exception.Message)")
-        }
+    foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $_.Name -ieq 'i4jparams.conf' })) {
+      try {
+        $Bytes = Read-Install4jLauncherFile -Path $File.FullName -Entry $Entry
+        $EmbeddedConfigText = [System.Text.Encoding]::UTF8.GetString($Bytes)
+        $Config = ConvertFrom-Install4jConfigXml -Content $EmbeddedConfigText -Source 'LauncherStartupFile'
+        break
+      } catch {
+        $Warnings.Add("Failed to parse launcher i4jparams.conf: $($_.Exception.Message)")
       }
     }
     if (-not $Config) {
@@ -1130,10 +1120,26 @@ function Get-Install4jInfo {
       }
     }
 
-    $HasInstall4jMarkers = (
+    # Large launcher scans are a fallback only. Current install4j launchers
+    # expose i4jparams.conf through one of the structured file tables above.
+    $ScanText = $null
+    if (-not $Config) {
+      $ScanText = Get-Install4jScanText -File $File
+      foreach ($Entry in @(Get-Install4jEmbeddedFilesFromText -Text $ScanText)) {
+        if ($EmbeddedFiles -notcontains $Entry) { $EmbeddedFiles += $Entry }
+      }
+      $ConfigXml = Get-Install4jConfigXmlText -Text $ScanText
+      if (-not $ConfigXml -and $File.Length -le $Script:Install4jMaximumConfigBytes) {
+        $Content = Get-Content -LiteralPath $File.FullName -Raw -ErrorAction SilentlyContinue
+        if ($Content) { $ConfigXml = Get-Install4jConfigXmlText -Text $Content }
+      }
+      if ($ConfigXml) { $Config = ConvertFrom-Install4jConfigXml -Content $ConfigXml -Source 'PlainXml' }
+    }
+
+    $HasInstall4jMarkers = if ($ScanText) {
       $ScanText.IndexOf('install4j', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
       ($ScanText.IndexOf('i4jparams.conf', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $ScanText.IndexOf('i4jruntime.jar', [StringComparison]::OrdinalIgnoreCase) -ge 0)
-    )
+    } else { $true }
     $ApplicationId = if ($Config) { $Config.General.ApplicationId } else { Get-Install4jApplicationIdFromText -Text $ScanText }
     if (-not $Config -and ($EmbeddedFiles -contains '0.dat')) {
       $Warnings.Add('The install4j content archive is packed as 0.dat, commonly LZMA-compressed; the pure PowerShell parser used launcher metadata and could not confirm XML-only action fields.')

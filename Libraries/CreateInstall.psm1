@@ -62,7 +62,7 @@ function Read-CreateInstallArchiveLogicalRange {
 
   if ($Offset -lt 0 -or $Offset + $Count -gt $Layout.SummarySize) { throw 'The requested GEA logical range is outside the compressed data stream' }
   $Result = [byte[]]::new($Count)
-  if ($Count -eq 0) { return $Result }
+  if ($Count -eq 0) { return ,$Result }
   $Stream = [IO.File]::Open($Layout.Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
     $Remaining = $Count
@@ -86,7 +86,7 @@ function Read-CreateInstallArchiveLogicalRange {
       $LogicalOffset += $ReadCount
     }
   } finally { $Stream.Dispose() }
-  return $Result
+  return ,$Result
 }
 
 function ConvertFrom-CreateInstallFileTable {

@@ -84,6 +84,8 @@ function Invoke-InstallerBridgeCommand {
     The CLI action to invoke
   .PARAMETER Argument
     The CLI arguments to forward
+  .PARAMETER TimeoutSeconds
+    Maximum runtime before the parser process and its descendants are terminated
   #>
   param (
     [Parameter(Mandatory, HelpMessage = 'The parser module directory name under Modules')]
@@ -94,7 +96,11 @@ function Invoke-InstallerBridgeCommand {
     [string]$Action,
 
     [Parameter(HelpMessage = 'The CLI arguments to forward')]
-    [hashtable]$Argument = @{}
+    [hashtable]$Argument = @{},
+
+    [Parameter(HelpMessage = 'Maximum parser runtime in seconds')]
+    [ValidateRange(1, 3600)]
+    [int]$TimeoutSeconds = 300
   )
 
   $PowerShellPath = (Get-InstallerBridgePowerShell).FullName
@@ -125,9 +131,17 @@ function Invoke-InstallerBridgeCommand {
 
   try {
     $null = $Process.Start()
-    $StandardOutput = $Process.StandardOutput.ReadToEnd()
-    $StandardError = $Process.StandardError.ReadToEnd()
+    # Drain both redirected streams concurrently so a verbose parser cannot
+    # deadlock while its sibling pipe is waiting to be read.
+    $StandardOutputTask = $Process.StandardOutput.ReadToEndAsync()
+    $StandardErrorTask = $Process.StandardError.ReadToEndAsync()
+    if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
+      try { $Process.Kill($true) } catch { }
+      throw "The installer parser CLI '$Action' exceeded the $TimeoutSeconds-second timeout"
+    }
     $Process.WaitForExit()
+    $StandardOutput = $StandardOutputTask.GetAwaiter().GetResult()
+    $StandardError = $StandardErrorTask.GetAwaiter().GetResult()
 
     if ($Process.ExitCode -ne 0) {
       $Message = if ([string]::IsNullOrWhiteSpace($StandardError)) {
@@ -141,6 +155,7 @@ function Invoke-InstallerBridgeCommand {
     if ([string]::IsNullOrWhiteSpace($StandardOutput)) { return $null }
     return $StandardOutput | ConvertFrom-Json -Depth 100
   } finally {
+    try { if (-not $Process.HasExited) { $Process.Kill($true) } } catch { }
     $Process.Dispose()
   }
 }

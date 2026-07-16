@@ -21,22 +21,22 @@ function Get-InstallAwareArchiveData {
   if ($OverlayOffset -le 0 -or $OverlayOffset -ge $File.Length) { throw 'The InstallAware PE has no project overlay' }
 
   foreach ($Range in @(Get-EmbeddedSevenZipArchiveRange -Path $File.FullName -StartOffset $OverlayOffset -MaximumArchives 16 -MaximumArchiveBytes $Script:InstallAwareMaximumArchiveBytes)) {
-    $TemporaryPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallAware-$([guid]::NewGuid().ToString('N')).7z")
-    $Archive = $null
+    $Context = $null
     try {
-      $null = Export-InstallerArchiveRange -Path $File.FullName -Offset $Range.Offset -Length $Range.Length -DestinationPath $TemporaryPath
-      $Archive = Get-InstallerArchive -Path $TemporaryPath
-      $Entries = @(Get-InstallerArchiveEntry -Archive $Archive)
+      $Context = Open-InstallerArchiveRange -Path $File.FullName -Range $Range
+      $Entries = @(Get-InstallerArchiveEntry -Archive $Context.Archive | ForEach-Object {
+          [pscustomobject]@{ FullName = $_.FullName; Length = $_.Length }
+        })
       $HasProjectEvidence = $Entries | Where-Object {
         $_.FullName -ieq 'mia.lib' -or $_.FullName -match '(?i)\.mia(?:/|$)' -or
         $_.FullName -match '(?i)_setup\.(?:exe|res)$' -or $_.FullName -match '(?i)^data[/\\]'
       } | Select-Object -First 1
       if (-not $HasProjectEvidence) { continue }
-      return [pscustomobject]@{ ArchivePath = $TemporaryPath; Range = $Range; Entries = $Entries }
+      return [pscustomobject]@{ SourcePath = $File.FullName; Range = $Range; Entries = $Entries }
     } catch {
-      Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
+      continue
     } finally {
-      if ($Archive) { $Archive.Dispose() }
+      if ($Context) { Close-InstallerArchiveRange -Context $Context }
     }
   }
   throw 'The PE overlay does not contain a validated InstallAware project archive'
@@ -53,52 +53,50 @@ function Get-InstallAwareInfo {
   process {
     $File = Get-Item -LiteralPath $Path -Force
     $ArchiveData = Get-InstallAwareArchiveData -Path $File.FullName
-    try {
-      $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
-      $DisplayName = ([string]$VersionInfo.ProductName).Trim()
-      $DisplayVersion = ([string]$VersionInfo.ProductVersion).Trim()
-      $Publisher = ([string]$VersionInfo.CompanyName).Trim()
-      $ExecutionLevel = Get-PERequestedExecutionLevel -Path $File.FullName
-      $Scope = if ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
-      $NestedInstallers = @($ArchiveData.Entries | Where-Object { $_.FullName -match '(?i)\.(?:exe|msi|msp|msix|appx)$' } | Select-Object -ExpandProperty FullName)
-      $MsiPayloads = @($NestedInstallers | Where-Object { $_ -match '(?i)\.(?:msi|msp)$' })
-      $RegistryWrites = @()
-      $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
-      $Warnings = [System.Collections.Generic.List[string]]::new()
-      $Warnings.Add('InstallAware PE version resources identify the package but do not prove the visible uninstall key. Validate ProductCode and ARP type in a VM.')
-      if ($ExecutionLevel -ieq 'requireAdministrator') {
-        $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest; verify packages that delegate installation to a nested payload.')
-      } elseif (-not $ExecutionLevel) {
-        $Warnings.Add('The InstallAware application manifest does not expose a requested execution level; scope requires VM validation.')
-      }
-      if ($MsiPayloads.Count -gt 0) { $Warnings.Add('The InstallAware archive contains MSI/MSP payloads. Analyze the nested database and determine whether the visible ARP entry is MSI or EXE.') }
+    $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
+    $DisplayName = ([string]$VersionInfo.ProductName).Trim()
+    $DisplayVersion = ([string]$VersionInfo.ProductVersion).Trim()
+    $Publisher = ([string]$VersionInfo.CompanyName).Trim()
+    $ExecutionLevel = Get-PERequestedExecutionLevel -Path $File.FullName
+    $Scope = if ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
+    $NestedInstallers = @($ArchiveData.Entries | Where-Object { $_.FullName -match '(?i)\.(?:exe|msi|msp|msix|appx)$' } | Select-Object -ExpandProperty FullName)
+    $MsiPayloads = @($NestedInstallers | Where-Object { $_ -match '(?i)\.(?:msi|msp)$' })
+    $RegistryWrites = @()
+    $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
+    $Warnings = [System.Collections.Generic.List[string]]::new()
+    $Warnings.Add('InstallAware PE version resources identify the package but do not prove the visible uninstall key. Validate ProductCode and ARP type in a VM.')
+    if ($ExecutionLevel -ieq 'requireAdministrator') {
+      $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest; verify packages that delegate installation to a nested payload.')
+    } elseif (-not $ExecutionLevel) {
+      $Warnings.Add('The InstallAware application manifest does not expose a requested execution level; scope requires VM validation.')
+    }
+    if ($MsiPayloads.Count -gt 0) { $Warnings.Add('The InstallAware archive contains MSI/MSP payloads. Analyze the nested database and determine whether the visible ARP entry is MSI or EXE.') }
 
-      [pscustomobject]@{
-        InstallerType              = 'InstallAware'
-        ProductCode                = $null
-        PackageName                = $DisplayName
-        DisplayName                = $DisplayName
-        ProductName                = $DisplayName
-        DisplayVersion             = $DisplayVersion
-        Publisher                  = $Publisher
-        FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-        Scope                      = $Scope
-        SupportedScopes            = if ($Scope) { @($Scope) } else { @() }
-        RequestedExecutionLevel    = $ExecutionLevel
-        RegistryWrites             = $RegistryWrites
-        RegistryAssociationInfo    = $RegistryAssociationInfo
-        Protocols                  = $RegistryAssociationInfo.Protocols
-        FileExtensions             = $RegistryAssociationInfo.FileExtensions
-        WritesAppsAndFeaturesEntry = $null
-        ExtractedFiles             = @($ArchiveData.Entries.FullName)
-        NestedInstallerFiles       = $NestedInstallers
-        MsiPayloads                = $MsiPayloads
-        ArchiveOffset              = $ArchiveData.Range.Offset
-        ArchiveLength              = $ArchiveData.Range.Length
-        Warnings                   = @($Warnings)
-        ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallAware'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'validated embedded 7z project archive') }
-      }
-    } finally { Remove-Item -LiteralPath $ArchiveData.ArchivePath -Force -ErrorAction SilentlyContinue }
+    [pscustomobject]@{
+      InstallerType              = 'InstallAware'
+      ProductCode                = $null
+      PackageName                = $DisplayName
+      DisplayName                = $DisplayName
+      ProductName                = $DisplayName
+      DisplayVersion             = $DisplayVersion
+      Publisher                  = $Publisher
+      FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
+      Scope                      = $Scope
+      SupportedScopes            = if ($Scope) { @($Scope) } else { @() }
+      RequestedExecutionLevel    = $ExecutionLevel
+      RegistryWrites             = $RegistryWrites
+      RegistryAssociationInfo    = $RegistryAssociationInfo
+      Protocols                  = $RegistryAssociationInfo.Protocols
+      FileExtensions             = $RegistryAssociationInfo.FileExtensions
+      WritesAppsAndFeaturesEntry = $null
+      ExtractedFiles             = @($ArchiveData.Entries.FullName)
+      NestedInstallerFiles       = $NestedInstallers
+      MsiPayloads                = $MsiPayloads
+      ArchiveOffset              = $ArchiveData.Range.Offset
+      ArchiveLength              = $ArchiveData.Range.Length
+      Warnings                   = @($Warnings)
+      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallAware'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'validated embedded 7z project archive') }
+    }
   }
 }
 
@@ -117,24 +115,23 @@ function Expand-InstallAwareInstaller {
 
   process {
     $ArchiveData = Get-InstallAwareArchiveData -Path $Path
+    $Context = Open-InstallerArchiveRange -Path $ArchiveData.SourcePath -Range $ArchiveData.Range
     try {
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallAware-$([guid]::NewGuid().ToString('N'))") }
       $null = New-Item -Path $DestinationPath -ItemType Directory -Force
-      $Archive = Get-InstallerArchive -Path $ArchiveData.ArchivePath
+      $Archive = $Context.Archive
       $Written = 0L
       $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-      try {
-        foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
-          if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
-          $Written += $Entry.Length
-          if ($Written -gt $MaximumExpandedBytes) { throw 'InstallAware extraction exceeds the configured output limit' }
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
-          $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
-        }
-      } finally { $Archive.Dispose() }
+      foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
+        if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
+        $Written += $Entry.Length
+        if ($Written -gt $MaximumExpandedBytes) { throw 'InstallAware extraction exceeds the configured output limit' }
+        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
+        $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
+      }
       if ($Result.Count -eq 0) { throw "No InstallAware project files matched '$Name'" }
       return $Result.ToArray()
-    } finally { Remove-Item -LiteralPath $ArchiveData.ArchivePath -Force -ErrorAction SilentlyContinue }
+    } finally { Close-InstallerArchiveRange -Context $Context }
   }
 }
 

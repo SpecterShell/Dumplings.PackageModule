@@ -77,70 +77,21 @@ function Join-InstallShieldSafePath {
   Resolve-SafeExtractionPath -DestinationPath $Root -RelativePath $RelativePath
 }
 
-function ConvertFrom-InstallShieldBuffer {
+function Test-InstallShieldZlibStream {
   <#
   .SYNOPSIS
-    Decode an InstallShield encoded payload buffer in place
+    Test the decoded payload prefix for a structurally valid zlib header
   #>
+  [OutputType([bool])]
   param (
     [Parameter(Mandatory)]
-    [byte[]]$Data,
-
-    [Parameter(Mandatory)]
-    [int]$Start,
-
-    [Parameter(Mandatory)]
-    [int]$Length,
-
-    [Parameter(Mandatory)]
-    [int]$Offset,
-
-    [Parameter(Mandatory)]
-    [byte[]]$Seed
+    [System.IO.Stream]$Stream
   )
 
-  Import-BinaryPatternSearch
-  return ,([Dumplings.InstallerInfrastructure.InstallShieldTransform]::DecodeRange($Data, $Start, $Length, $Offset, $Seed, $Script:InstallShieldMagic))
-}
-
-function ConvertFrom-InstallShieldBlocks {
-  [OutputType([byte[]])]
-  param (
-    [Parameter(Mandatory)]
-    [byte[]]$Data,
-
-    [Parameter(Mandatory)]
-    [int]$BlockSize,
-
-    [Parameter(Mandatory)]
-    [byte[]]$Seed,
-
-    [Parameter()]
-    [switch]$StreamMode
-  )
-
-  Import-BinaryPatternSearch
-  return ,([Dumplings.InstallerInfrastructure.InstallShieldTransform]::Decode($Data, $BlockSize, $Seed, $Script:InstallShieldMagic, $StreamMode.IsPresent))
-}
-
-function Expand-InstallShieldZlibBuffer {
-  [OutputType([byte[]])]
-  param (
-    [Parameter(Mandatory)]
-    [byte[]]$Data
-  )
-
-  $InputStream = [System.IO.MemoryStream]::new($Data)
-  $OutputStream = [System.IO.MemoryStream]::new()
-  try {
-    $null = Expand-InstallerCompressedStream -Algorithm Zlib -Stream $InputStream -Destination $OutputStream -MaximumBytes 1073741824
-    return ,$OutputStream.ToArray()
-  } catch {
-    return ,$Data
-  } finally {
-    $OutputStream.Dispose()
-    $InputStream.Dispose()
-  }
+  if (-not $Stream.CanSeek -or $Stream.Length -lt 2) { return $false }
+  $Header = Read-BinaryBytes -Stream $Stream -Offset 0 -Count 2
+  $Value = ([int]$Header[0] -shl 8) -bor $Header[1]
+  return ($Header[0] -band 0x0F) -eq 8 -and ($Header[0] -shr 4) -le 7 -and $Value % 31 -eq 0
 }
 
 function Get-InstallShieldHeader {
@@ -288,27 +239,46 @@ function Export-InstallShieldDecodedFile {
     [switch]$StreamMode
   )
 
-  $Data = Read-PEFileBytes -Stream $Stream -Offset $Attribute.DataOffset -Count ([int]$Attribute.FileLength)
   $HasType2Or4 = ($Attribute.EncodedFlags -band 6) -ne 0
   $HasType4 = ($Attribute.EncodedFlags -band 4) -ne 0
-
-  if ($HasType4 -and $HasType2Or4) {
-    # ISSetupStream still decodes flagged payloads in 1024-byte units; only the
-    # outer read buffer differs in the reference extractor.
-    $Data = ConvertFrom-InstallShieldBlocks -Data $Data -BlockSize 1024 -Seed $Attribute.Seed -StreamMode:$StreamMode
-  } elseif ($HasType2Or4) {
-    $Data = ConvertFrom-InstallShieldBuffer -Data $Data -Start 0 -Length $Data.Length -Offset 0 -Seed $Attribute.Seed
-  }
-
-  if ($Attribute.IsUnicodeLauncher -ne 0) {
-    $Data = Expand-InstallShieldZlibBuffer -Data $Data
-  }
-
   $OutputPath = Join-InstallShieldSafePath -Root $DestinationPath -RelativePath $Attribute.FileName
   $Parent = Split-Path -Path $OutputPath -Parent
   if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
-  [System.IO.File]::WriteAllBytes($OutputPath, $Data)
-  return $OutputPath
+
+  $Range = New-BoundedReadStream -Stream $Stream -Offset $Attribute.DataOffset -Length $Attribute.FileLength -LeaveOpen
+  $PayloadStream = $Range
+  $Output = $null
+  $Succeeded = $false
+  try {
+    if ($HasType2Or4) {
+      Import-BinaryPatternSearch
+      # Type 4 uses 1024-byte encoded blocks. Type 2 applies one transform over
+      # the complete payload, matching the reference extractor's second pass.
+      $BlockSize = $HasType4 ? 1024L : [long]$Attribute.FileLength
+      $PayloadStream = [Dumplings.InstallerInfrastructure.InstallShieldDecodedStream]::new(
+        $Range,
+        $BlockSize,
+        $Attribute.Seed,
+        $Script:InstallShieldMagic,
+        $StreamMode.IsPresent,
+        $true
+      )
+    }
+
+    $Output = [System.IO.File]::Open($OutputPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    if ($Attribute.IsUnicodeLauncher -ne 0 -and (Test-InstallShieldZlibStream -Stream $PayloadStream)) {
+      $null = Expand-InstallerCompressedStream -Algorithm Zlib -Stream $PayloadStream -Destination $Output -MaximumBytes 1073741824
+    } else {
+      $null = Copy-BoundedStream -Source $PayloadStream -Destination $Output -MaximumBytes $Attribute.FileLength -ExpectedBytes $Attribute.FileLength
+    }
+    $Succeeded = $true
+    return $OutputPath
+  } finally {
+    if ($Output) { $Output.Dispose() }
+    if (-not [object]::ReferenceEquals($PayloadStream, $Range)) { $PayloadStream.Dispose() }
+    $Range.Dispose()
+    if (-not $Succeeded) { Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue }
+  }
 }
 
 function Expand-InstallShieldEncryptedPayload {
@@ -578,7 +548,12 @@ function Read-InstallShieldIniConfiguration {
   $File = Get-Item -LiteralPath $Path -Force
   if ($File.Length -gt 4194304) { throw 'The extracted InstallShield Setup.ini exceeds the 4 MiB metadata limit' }
 
-  $Bytes = [System.IO.File]::ReadAllBytes($File.FullName)
+  $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  try {
+    $Bytes = Read-BinaryBytes -Stream $Stream -Offset 0 -Count ([int]$File.Length)
+  } finally {
+    $Stream.Dispose()
+  }
   $Text = if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
     [System.Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
   } elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {

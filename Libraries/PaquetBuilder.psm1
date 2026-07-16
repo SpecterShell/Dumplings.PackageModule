@@ -21,37 +21,27 @@ function Get-PaquetBuilderArchiveData {
   if ($OverlayOffset -le 0 -or $OverlayOffset -ge $File.Length) { throw 'The Paquet Builder PE has no package overlay' }
 
   $Candidates = [System.Collections.Generic.List[object]]::new()
-  try {
-    foreach ($Range in @(Get-EmbeddedSevenZipArchiveRange -Path $File.FullName -StartOffset $OverlayOffset -MaximumArchives 16 -MaximumArchiveBytes $Script:PaquetBuilderMaximumArchiveBytes)) {
-      $TemporaryPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-PaquetBuilder-$([guid]::NewGuid().ToString('N')).7z")
-      $Archive = $null
-      try {
-        $null = Export-InstallerArchiveRange -Path $File.FullName -Offset $Range.Offset -Length $Range.Length -DestinationPath $TemporaryPath
-        $Archive = Get-InstallerArchive -Path $TemporaryPath
-        $Entries = @(Get-InstallerArchiveEntry -Archive $Archive)
-        if ($Entries.Count -eq 0) { continue }
-        $IsRuntimeArchive = [bool]($Entries | Where-Object { $_.FullName -ieq 'pbfprop.dat' -or $_.FullName -ieq 'PBCore64.dll' -or $_.FullName -ieq 'PBCore.dll' } | Select-Object -First 1)
-        $Candidates.Add([pscustomobject]@{ ArchivePath = $TemporaryPath; Range = $Range; Entries = $Entries; Kind = if ($IsRuntimeArchive) { 'Runtime' } else { 'Payload' } })
-        $TemporaryPath = $null
-      } catch {
-        continue
-      } finally {
-        if ($Archive) { $Archive.Dispose() }
-        if ($TemporaryPath) { Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue }
-      }
+  foreach ($Range in @(Get-EmbeddedSevenZipArchiveRange -Path $File.FullName -StartOffset $OverlayOffset -MaximumArchives 16 -MaximumArchiveBytes $Script:PaquetBuilderMaximumArchiveBytes)) {
+    $Context = $null
+    try {
+      $Context = Open-InstallerArchiveRange -Path $File.FullName -Range $Range
+      $Entries = @(Get-InstallerArchiveEntry -Archive $Context.Archive | ForEach-Object {
+          [pscustomobject]@{ FullName = $_.FullName; Length = $_.Length }
+        })
+      if ($Entries.Count -eq 0) { continue }
+      $IsRuntimeArchive = [bool]($Entries | Where-Object { $_.FullName -ieq 'pbfprop.dat' -or $_.FullName -ieq 'PBCore64.dll' -or $_.FullName -ieq 'PBCore.dll' } | Select-Object -First 1)
+      $Candidates.Add([pscustomobject]@{ SourcePath = $File.FullName; Range = $Range; Entries = $Entries; Kind = if ($IsRuntimeArchive) { 'Runtime' } else { 'Payload' } })
+    } catch {
+      continue
+    } finally {
+      if ($Context) { Close-InstallerArchiveRange -Context $Context }
     }
-
-    $Runtime = $Candidates | Where-Object Kind -eq 'Runtime' | Select-Object -First 1
-    $Payload = $Candidates | Where-Object Kind -eq 'Payload' | Sort-Object { $_.Range.Length } -Descending | Select-Object -First 1
-    if (-not $Runtime -or -not $Payload) { throw 'The PE overlay does not contain both Paquet Builder payload and runtime archives' }
-    foreach ($Candidate in $Candidates) {
-      if ($Candidate -ne $Runtime -and $Candidate -ne $Payload) { Remove-Item -LiteralPath $Candidate.ArchivePath -Force -ErrorAction SilentlyContinue }
-    }
-    return [pscustomobject]@{ Payload = $Payload; Runtime = $Runtime }
-  } catch {
-    foreach ($Candidate in $Candidates) { Remove-Item -LiteralPath $Candidate.ArchivePath -Force -ErrorAction SilentlyContinue }
-    throw
   }
+
+  $Runtime = $Candidates | Where-Object Kind -eq 'Runtime' | Select-Object -First 1
+  $Payload = $Candidates | Where-Object Kind -eq 'Payload' | Sort-Object { $_.Range.Length } -Descending | Select-Object -First 1
+  if (-not $Runtime -or -not $Payload) { throw 'The PE overlay does not contain both Paquet Builder payload and runtime archives' }
+  return [pscustomobject]@{ Payload = $Payload; Runtime = $Runtime }
 }
 
 function Get-PaquetBuilderInfo {
@@ -65,51 +55,46 @@ function Get-PaquetBuilderInfo {
   process {
     $File = Get-Item -LiteralPath $Path -Force
     $ArchiveData = Get-PaquetBuilderArchiveData -Path $File.FullName
-    try {
-      $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
-      $ExecutionLevel = Get-PERequestedExecutionLevel -Path $File.FullName
-      $Scope = if ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
-      $NestedInstallers = @($ArchiveData.Payload.Entries | Where-Object { $_.FullName -match '(?i)\.(?:exe|msi|msp|msix|appx)$' } | Select-Object -ExpandProperty FullName)
-      $RegistryWrites = @()
-      $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
-      $Warnings = [System.Collections.Generic.List[string]]::new()
-      $Warnings.Add('Paquet Builder PE version resources identify the package but do not prove the visible uninstall key. Validate ProductCode and ARP fields in a VM.')
-      if ($ExecutionLevel -ieq 'requireAdministrator') {
-        $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest.')
-      } else {
-        $Warnings.Add('Paquet Builder scope could not be resolved from explicit elevation evidence; validate it in a VM.')
-      }
-      $Warnings.Add('Built-in /s and /silent handling depends on the Paquet Builder version and project settings. Verify the exact package before authoring InstallerSwitches.')
+    $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
+    $ExecutionLevel = Get-PERequestedExecutionLevel -Path $File.FullName
+    $Scope = if ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
+    $NestedInstallers = @($ArchiveData.Payload.Entries | Where-Object { $_.FullName -match '(?i)\.(?:exe|msi|msp|msix|appx)$' } | Select-Object -ExpandProperty FullName)
+    $RegistryWrites = @()
+    $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
+    $Warnings = [System.Collections.Generic.List[string]]::new()
+    $Warnings.Add('Paquet Builder PE version resources identify the package but do not prove the visible uninstall key. Validate ProductCode and ARP fields in a VM.')
+    if ($ExecutionLevel -ieq 'requireAdministrator') {
+      $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest.')
+    } else {
+      $Warnings.Add('Paquet Builder scope could not be resolved from explicit elevation evidence; validate it in a VM.')
+    }
+    $Warnings.Add('Built-in /s and /silent handling depends on the Paquet Builder version and project settings. Verify the exact package before authoring InstallerSwitches.')
 
-      [pscustomobject]@{
-        InstallerType              = 'Paquet Builder'
-        ProductCode                = $null
-        PackageName                = ([string]$VersionInfo.ProductName).Trim()
-        DisplayName                = ([string]$VersionInfo.ProductName).Trim()
-        ProductName                = ([string]$VersionInfo.ProductName).Trim()
-        DisplayVersion             = ([string]$VersionInfo.ProductVersion).Trim()
-        Publisher                  = ([string]$VersionInfo.CompanyName).Trim()
-        FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-        Scope                      = $Scope
-        SupportedScopes            = if ($Scope) { @($Scope) } else { @() }
-        RequestedExecutionLevel    = $ExecutionLevel
-        SupportsSilentInstallation = $null
-        RegistryWrites             = $RegistryWrites
-        RegistryAssociationInfo    = $RegistryAssociationInfo
-        Protocols                  = $RegistryAssociationInfo.Protocols
-        FileExtensions             = $RegistryAssociationInfo.FileExtensions
-        WritesAppsAndFeaturesEntry = $null
-        PayloadFiles               = @($ArchiveData.Payload.Entries.FullName)
-        RuntimeFiles               = @($ArchiveData.Runtime.Entries.FullName)
-        NestedInstallerFiles       = $NestedInstallers
-        PayloadArchiveRange        = $ArchiveData.Payload.Range
-        RuntimeArchiveRange        = $ArchiveData.Runtime.Range
-        Warnings                   = @($Warnings)
-        ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.PaquetBuilder'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'validated payload and runtime 7z archives') }
-      }
-    } finally {
-      Remove-Item -LiteralPath $ArchiveData.Payload.ArchivePath -Force -ErrorAction SilentlyContinue
-      Remove-Item -LiteralPath $ArchiveData.Runtime.ArchivePath -Force -ErrorAction SilentlyContinue
+    [pscustomobject]@{
+      InstallerType              = 'Paquet Builder'
+      ProductCode                = $null
+      PackageName                = ([string]$VersionInfo.ProductName).Trim()
+      DisplayName                = ([string]$VersionInfo.ProductName).Trim()
+      ProductName                = ([string]$VersionInfo.ProductName).Trim()
+      DisplayVersion             = ([string]$VersionInfo.ProductVersion).Trim()
+      Publisher                  = ([string]$VersionInfo.CompanyName).Trim()
+      FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
+      Scope                      = $Scope
+      SupportedScopes            = if ($Scope) { @($Scope) } else { @() }
+      RequestedExecutionLevel    = $ExecutionLevel
+      SupportsSilentInstallation = $null
+      RegistryWrites             = $RegistryWrites
+      RegistryAssociationInfo    = $RegistryAssociationInfo
+      Protocols                  = $RegistryAssociationInfo.Protocols
+      FileExtensions             = $RegistryAssociationInfo.FileExtensions
+      WritesAppsAndFeaturesEntry = $null
+      PayloadFiles               = @($ArchiveData.Payload.Entries.FullName)
+      RuntimeFiles               = @($ArchiveData.Runtime.Entries.FullName)
+      NestedInstallerFiles       = $NestedInstallers
+      PayloadArchiveRange        = $ArchiveData.Payload.Range
+      RuntimeArchiveRange        = $ArchiveData.Runtime.Range
+      Warnings                   = @($Warnings)
+      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.PaquetBuilder'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'validated payload and runtime 7z archives') }
     }
   }
 }
@@ -130,35 +115,30 @@ function Expand-PaquetBuilderInstaller {
 
   process {
     $ArchiveData = Get-PaquetBuilderArchiveData -Path $Path
-    try {
-      if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-PaquetBuilder-$([guid]::NewGuid().ToString('N'))") }
-      $null = New-Item -Path $DestinationPath -ItemType Directory -Force
-      $Selected = switch ($ArchiveKind) {
-        'Payload' { @($ArchiveData.Payload) }
-        'Runtime' { @($ArchiveData.Runtime) }
-        'All' { @($ArchiveData.Payload, $ArchiveData.Runtime) }
-      }
-      $Written = 0L
-      $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-      foreach ($ArchiveRecord in $Selected) {
-        $Archive = Get-InstallerArchive -Path $ArchiveRecord.ArchivePath
-        try {
-          foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
-            if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
-            $Written += $Entry.Length
-            if ($Written -gt $MaximumExpandedBytes) { throw 'Paquet Builder extraction exceeds the configured output limit' }
-            $RelativePath = if ($ArchiveKind -eq 'All') { Join-Path $ArchiveRecord.Kind $Entry.FullName } else { $Entry.FullName }
-            $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
-            $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
-          }
-        } finally { $Archive.Dispose() }
-      }
-      if ($Result.Count -eq 0) { throw "No Paquet Builder files matched '$Name'" }
-      return $Result.ToArray()
-    } finally {
-      Remove-Item -LiteralPath $ArchiveData.Payload.ArchivePath -Force -ErrorAction SilentlyContinue
-      Remove-Item -LiteralPath $ArchiveData.Runtime.ArchivePath -Force -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-PaquetBuilder-$([guid]::NewGuid().ToString('N'))") }
+    $null = New-Item -Path $DestinationPath -ItemType Directory -Force
+    $Selected = switch ($ArchiveKind) {
+      'Payload' { @($ArchiveData.Payload) }
+      'Runtime' { @($ArchiveData.Runtime) }
+      'All' { @($ArchiveData.Payload, $ArchiveData.Runtime) }
     }
+    $Written = 0L
+    $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    foreach ($ArchiveRecord in $Selected) {
+      $Context = Open-InstallerArchiveRange -Path $ArchiveRecord.SourcePath -Range $ArchiveRecord.Range
+      try {
+        foreach ($Entry in Get-InstallerArchiveEntry -Archive $Context.Archive) {
+          if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
+          $Written += $Entry.Length
+          if ($Written -gt $MaximumExpandedBytes) { throw 'Paquet Builder extraction exceeds the configured output limit' }
+          $RelativePath = if ($ArchiveKind -eq 'All') { Join-Path $ArchiveRecord.Kind $Entry.FullName } else { $Entry.FullName }
+          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
+          $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
+        }
+      } finally { Close-InstallerArchiveRange -Context $Context }
+      }
+    if ($Result.Count -eq 0) { throw "No Paquet Builder files matched '$Name'" }
+    return $Result.ToArray()
   }
 }
 

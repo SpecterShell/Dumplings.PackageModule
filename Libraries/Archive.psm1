@@ -17,6 +17,66 @@ function Get-InstallerArchive {
   return [SharpCompress.Archives.ArchiveFactory]::Open($Stream)
 }
 
+function Open-InstallerArchiveRange {
+  <#
+  .SYNOPSIS
+    Open an exact embedded archive range without materializing a temporary file
+  .DESCRIPTION
+    The returned context owns the archive, bounded range stream, and source file
+    stream. Pass it to Close-InstallerArchiveRange when archive access is done.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Range')]$Range,
+    [Parameter(Mandatory, ParameterSetName = 'Coordinates')][ValidateRange(0, [long]::MaxValue)][long]$Offset,
+    [Parameter(Mandatory, ParameterSetName = 'Coordinates')][ValidateRange(1, [long]::MaxValue)][long]$Length
+  )
+
+  if ($PSCmdlet.ParameterSetName -eq 'Range') {
+    $Offset = [long]$Range.Offset
+    $Length = [long]$Range.Length
+  }
+  $Source = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  $RangeStream = $null
+  $Archive = $null
+  try {
+    $RangeStream = New-BoundedReadStream -Stream $Source -Offset $Offset -Length $Length -LeaveOpen
+    $Archive = Get-InstallerArchive -Stream $RangeStream
+    return [pscustomobject]@{
+      Archive      = $Archive
+      RangeStream  = $RangeStream
+      SourceStream = $Source
+      Offset       = $Offset
+      Length       = $Length
+    }
+  } catch {
+    if ($Archive) { $Archive.Dispose() }
+    if ($RangeStream) { $RangeStream.Dispose() }
+    $Source.Dispose()
+    throw
+  }
+}
+
+function Close-InstallerArchiveRange {
+  <#
+  .SYNOPSIS
+    Dispose a context returned by Open-InstallerArchiveRange
+  #>
+  param ([Parameter(Mandatory, ValueFromPipeline)]$Context)
+  process {
+    try {
+      if ($Context.Archive) { $Context.Archive.Dispose() }
+    } finally {
+      try {
+        if ($Context.RangeStream) { $Context.RangeStream.Dispose() }
+      } finally {
+        if ($Context.SourceStream) { $Context.SourceStream.Dispose() }
+      }
+    }
+  }
+}
+
 function Get-InstallerArchiveEntry {
   <#
   .SYNOPSIS
@@ -61,12 +121,10 @@ function Read-InstallerArchiveEntryBytes {
     [Parameter(Mandatory)][ValidateRange(1, [int]::MaxValue)][int]$MaximumBytes
   )
   $EntryStream = Open-InstallerArchiveEntry -Entry $Entry
-  $Output = [IO.MemoryStream]::new()
   try {
-    $null = Copy-BoundedStream -Source $EntryStream -Destination $Output -MaximumBytes $MaximumBytes
-    return $Output.ToArray()
+    $Length = if ($Entry.PSObject.Properties.Name -contains 'Length' -and [long]$Entry.Length -ge 0) { [long]$Entry.Length } else { -1L }
+    return ,([Dumplings.InstallerInfrastructure.BinaryIO]::ReadBounded($EntryStream, $MaximumBytes, $Length))
   } finally {
-    $Output.Dispose()
     $EntryStream.Dispose()
   }
 }
@@ -273,12 +331,11 @@ function Get-EmbeddedSevenZipArchiveRange {
       $ArchiveLength = 32L + [long]$NextHeaderOffset + [long]$NextHeaderSize
       if ($ArchiveLength -lt 32 -or $ArchiveLength -gt $MaximumArchiveBytes -or $ArchiveLength -gt $Stream.Length - $Offset) { continue }
 
-      $TemporaryPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-Embedded7z-$([guid]::NewGuid().ToString('N')).7z")
       $Archive = $null
+      $ArchiveStream = $null
       try {
-        $Destination = [IO.File]::Open($TemporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        try { Copy-BinaryStreamRange -Source $Stream -Destination $Destination -Offset $Offset -Length $ArchiveLength } finally { $Destination.Dispose() }
-        $Archive = Get-InstallerArchive -Path $TemporaryPath
+        $ArchiveStream = New-BoundedReadStream -Stream $Stream -Offset $Offset -Length $ArchiveLength -LeaveOpen
+        $Archive = Get-InstallerArchive -Stream $ArchiveStream
         $EntryCount = @(Get-InstallerArchiveEntry -Archive $Archive).Count
         if ($EntryCount -eq 0) { continue }
         [pscustomobject]@{
@@ -295,7 +352,7 @@ function Get-EmbeddedSevenZipArchiveRange {
         continue
       } finally {
         if ($Archive) { $Archive.Dispose() }
-        Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
+        if ($ArchiveStream) { $ArchiveStream.Dispose() }
       }
     }
   } finally {
@@ -397,4 +454,4 @@ function Read-RarArchiveComment {
   }
 }
 
-Export-ModuleMember -Function Get-InstallerArchive, Get-InstallerArchiveEntry, Open-InstallerArchiveEntry, Read-InstallerArchiveEntryBytes, Read-InstallerArchiveEntryText, Export-InstallerArchiveEntry, Export-InstallerArchiveSelection, Export-InstallerArchiveRange, Get-EmbeddedZipArchiveRange, Get-EmbeddedSevenZipArchiveRange, Read-RarArchiveComment
+Export-ModuleMember -Function Get-InstallerArchive, Open-InstallerArchiveRange, Close-InstallerArchiveRange, Get-InstallerArchiveEntry, Open-InstallerArchiveEntry, Read-InstallerArchiveEntryBytes, Read-InstallerArchiveEntryText, Export-InstallerArchiveEntry, Export-InstallerArchiveSelection, Export-InstallerArchiveRange, Get-EmbeddedZipArchiveRange, Get-EmbeddedSevenZipArchiveRange, Read-RarArchiveComment

@@ -106,7 +106,7 @@ function Read-InstallMateSequentialRecord {
   $Output = [IO.MemoryStream]::new($Count)
   try {
     $null = Copy-BoundedStream -Source $Stream -Destination $Output -MaximumBytes $Count -ExpectedBytes $Count
-    return $Output.ToArray()
+    return ,($Output.ToArray())
   } finally { $Output.Dispose() }
 }
 

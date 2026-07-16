@@ -309,6 +309,67 @@ Describe 'WinGet installer manifest metadata updates' {
       Should -Invoke Get-AdvancedInstallerMsiInfo -Exactly 1 -ParameterFilter { $Architecture -ceq 'x86' }
     }
 
+    It 'Parses same-URL Advanced Installer entries independently by architecture' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
+              Name    = 'Advanced Installer'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Metadata = [pscustomobject]@{
+                  InstallerType       = 'AdvancedInstaller'
+                  MsiPayloadSelection = [pscustomobject]@{
+                    SourceKind      = 'EmbeddedMsi'
+                    SelectionMethod = 'PayloadTable'
+                  }
+                }
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      Mock Get-AdvancedInstallerMsiInfo {
+        param($Installer, $Architecture)
+        [pscustomobject]@{
+          ProductName                    = "Advanced Product $Architecture"
+          ProductVersion                 = '5.0.0'
+          Publisher                      = 'Advanced Publisher'
+          ProductCode                    = "MSI.Product.$Architecture"
+          AppsAndFeaturesProductCode     = "ARP.Product.$Architecture"
+          UpgradeCode                    = "Upgrade.$Architecture"
+          AppsAndFeaturesInstallerType   = 'msi'
+          PackageArchitecture            = $Architecture
+          SelectedMsiPath                = "payload.$Architecture.msi"
+          SelectionMethod                = 'PayloadTable'
+        }
+      }
+      $X86Installer = [ordered]@{
+        Architecture           = 'x86'
+        InstallerType          = 'exe'
+        InstallerUrl           = $Script:InstallerUrl
+        InstallerSha256        = 'TASK-SUPPLIED-HASH'
+        ProductCode            = 'Old.Product.x86'
+        AppsAndFeaturesEntries = @([ordered]@{ UpgradeCode = 'Upgrade.x86'; InstallerType = 'msi' })
+      }
+      $X64Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'exe'
+        InstallerUrl           = $Script:InstallerUrl
+        InstallerSha256        = 'TASK-SUPPLIED-HASH'
+        ProductCode            = 'Old.Product.x64'
+        AppsAndFeaturesEntries = @([ordered]@{ UpgradeCode = 'Upgrade.x64'; InstallerType = 'msi' })
+      }
+
+      $X86Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $X86Installer -OldInstaller ($X86Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+      $X64Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $X64Installer -OldInstaller ($X64Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Installers @($X86Result) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $X86Result.ProductCode | Should -Be 'ARP.Product.x86'
+      $X64Result.ProductCode | Should -Be 'ARP.Product.x64'
+      Should -Invoke Get-WinGetInstallerAnalysis -Exactly 2
+      Should -Invoke Get-AdvancedInstallerMsiInfo -Exactly 1 -ParameterFilter { $Architecture -ceq 'x86' }
+      Should -Invoke Get-AdvancedInstallerMsiInfo -Exactly 1 -ParameterFilter { $Architecture -ceq 'x64' }
+    }
+
     It 'Preserves metadata when Advanced Installer selects an online MainAppURL payload' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
@@ -475,42 +536,6 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result.ProductCode | Should -Be 'Existing.InstallShield.Product'
       $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike "*'InstallScript' payload does not contain an MSI*"
       Should -Invoke Get-InstallShieldMsiInfo -Exactly 0
-    }
-
-    It 'Warns and preserves metadata when the InstallShield-selected MSI has another architecture' {
-      Mock Get-WinGetInstallerAnalysis {
-        [pscustomobject]@{
-          ParserResults    = @()
-          FamilyCandidates = @([pscustomobject]@{ Family = 'InstallShield'; Confidence = 'medium' })
-        }
-      }
-      Mock Get-InstallShieldInfo {
-        [pscustomobject]@{
-          InstallerType = 'InstallShield'
-          Variant       = 'Basic MSI'
-          HasMsi        = $true
-          MsiFiles      = @('payload.msi')
-          Warnings      = @()
-        }
-      }
-      Mock Get-InstallShieldMsiInfo {
-        [pscustomobject]@{
-          PackageArchitecture = 'x86'
-          SelectedMsiPath     = 'payload.msi'
-          SelectionMethod     = 'SetupIni'
-        }
-      }
-      $Installer = [ordered]@{
-        Architecture  = 'x64'
-        InstallerType = 'exe'
-        InstallerUrl  = $Script:InstallerUrl
-        ProductCode   = 'Existing.InstallShield.Product'
-      }
-
-      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
-
-      $Result.ProductCode | Should -Be 'Existing.InstallShield.Product'
-      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike "*MSI package architecture is 'x86'*"
     }
 
     It 'Warns and preserves generic EXE metadata when detection fails' {

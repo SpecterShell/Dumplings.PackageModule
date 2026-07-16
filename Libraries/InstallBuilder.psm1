@@ -15,6 +15,7 @@ $Script:InstallBuilderMaximumCookfsPages = 1000000
 $Script:InstallBuilderMaximumCookfsPageBytes = 536870912
 $Script:InstallBuilderMaximumCookfsEntries = 200000
 $Script:InstallBuilderCookfsPageCacheSize = 16
+$Script:InstallBuilderCookfsPageCacheBytes = 67108864
 $Script:InstallBuilderMaximumLzmaDictionaryBytes = 134217728
 
 function Get-InstallBuilderCandidateOffset {
@@ -208,7 +209,7 @@ function Expand-InstallBuilderCookfsRecord {
     if ($StoredBytes.Length - 1 -gt $MaximumExpandedBytes) { throw 'The CookFS uncompressed record exceeds the configured output limit' }
     $Result = [byte[]]::new($StoredBytes.Length - 1)
     if ($Result.Length) { [Array]::Copy($StoredBytes, 1, $Result, 0, $Result.Length) }
-    return $Result
+    return ,$Result
   }
   if ($CompressionId -eq 2 -and $StoredBytes.Length -lt 5) { throw 'The CookFS BZip2 record is truncated' }
   [long]$ExpectedLength = -1
@@ -238,7 +239,7 @@ function Expand-InstallBuilderCookfsRecord {
       }
     }
     $null = Expand-InstallerCompressedStream @ExpandArguments
-    return $Output.ToArray()
+    return ,($Output.ToArray())
   } finally {
     $Output.Dispose()
     $InputStream.Dispose()
@@ -380,6 +381,7 @@ function Get-InstallBuilderCookfsInfo {
           Entries         = $Entries.ToArray()
           PageCache       = [System.Collections.Generic.Dictionary[int, byte[]]]::new()
           PageCacheOrder  = [System.Collections.Generic.Queue[int]]::new()
+          PageCacheBytes  = 0L
         }
       } catch {
         continue
@@ -399,7 +401,7 @@ function Get-InstallBuilderCookfsPage {
   [OutputType([byte[]])]
   param ([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Cookfs, [Parameter(Mandatory)][uint32]$Page)
   if ($Page -ge $Cookfs.PageCount) { throw "The CookFS file index references missing page $Page" }
-  if ($Cookfs.PageCache.ContainsKey([int]$Page)) { return $Cookfs.PageCache[[int]$Page] }
+  if ($Cookfs.PageCache.ContainsKey([int]$Page)) { return ,$Cookfs.PageCache[[int]$Page] }
   $Stream = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
     $StoredPage = Read-BinaryBytes -Stream $Stream -Offset $Cookfs.PageOffsets[$Page] -Count ([int]$Cookfs.PageSizes[$Page])
@@ -407,10 +409,20 @@ function Get-InstallBuilderCookfsPage {
   } finally {
     $Stream.Dispose()
   }
-  while ($Cookfs.PageCacheOrder.Count -ge $Script:InstallBuilderCookfsPageCacheSize) { $null = $Cookfs.PageCache.Remove($Cookfs.PageCacheOrder.Dequeue()) }
-  $Cookfs.PageCache[[int]$Page] = $PageBytes
-  $Cookfs.PageCacheOrder.Enqueue([int]$Page)
-  return $PageBytes
+  while ($Cookfs.PageCacheOrder.Count -gt 0 -and (
+      $Cookfs.PageCacheOrder.Count -ge $Script:InstallBuilderCookfsPageCacheSize -or
+      $Cookfs.PageCacheBytes + $PageBytes.Length -gt $Script:InstallBuilderCookfsPageCacheBytes
+    )) {
+    $ExpiredPage = $Cookfs.PageCacheOrder.Dequeue()
+    $Cookfs.PageCacheBytes -= $Cookfs.PageCache[$ExpiredPage].Length
+    $null = $Cookfs.PageCache.Remove($ExpiredPage)
+  }
+  if ($PageBytes.Length -le $Script:InstallBuilderCookfsPageCacheBytes) {
+    $Cookfs.PageCache[[int]$Page] = $PageBytes
+    $Cookfs.PageCacheOrder.Enqueue([int]$Page)
+    $Cookfs.PageCacheBytes += $PageBytes.Length
+  }
+  return ,$PageBytes
 }
 
 function Get-InstallBuilderCookfsLogicalEntry {

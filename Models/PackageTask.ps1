@@ -67,6 +67,8 @@ class PackageTask: System.IDisposable {
   [System.Collections.IDictionary]$InstallerFiles = [ordered]@{}
   [bool]$MessageEnabled = $false
   [System.Collections.Generic.List[System.Tuple[string, Int64]]]$MessageSession = @()
+  [bool]$InvocationSucceeded = $false
+  [bool]$InvocationSkipped = $false
   #endregion
 
   # Initialize task
@@ -159,15 +161,19 @@ class PackageTask: System.IDisposable {
   # Invoke script
   [void] Invoke() {
     $DumplingsLogIdentifier = $Script:DumplingsLogIdentifier + $this.Name
+    $this.InvocationSucceeded = $false
+    $this.InvocationSkipped = $false
     if (($Global:DumplingsPreference.Contains('Force') -and $Global:DumplingsPreference.Force) -or -not ($this.Config.Contains('Skip') -and $this.Config.Skip)) {
       Write-Log -Object 'Run!'
       try {
         $null = & $this.ScriptPath
+        $this.InvocationSucceeded = $true
       } catch {
         $_ | Out-Host
         $this.Log("Unexpected error: ${_}", 'Error')
       }
     } else {
+      $this.InvocationSkipped = $true
       $this.Log('Skipped', 'Info')
     }
   }

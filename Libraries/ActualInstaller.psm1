@@ -14,23 +14,22 @@ function Get-ActualInstallerArchiveData {
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
+  $File = Get-Item -LiteralPath $Path -Force
   foreach ($Range in @(Get-EmbeddedZipArchiveRange -Path $Path)) {
     if ($Range.Length -gt $Script:ActualInstallerMaximumArchiveBytes) { continue }
-    $TemporaryPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-ActualInstaller-$([guid]::NewGuid().ToString('N')).zip")
-    $Archive = $null
+    $Context = $null
     try {
-      $Source = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-      $Destination = [IO.File]::Open($TemporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-      try { Copy-BinaryStreamRange -Source $Source -Destination $Destination -Offset $Range.Offset -Length $Range.Length } finally { $Destination.Dispose(); $Source.Dispose() }
-      $Archive = Get-InstallerArchive -Path $TemporaryPath
-      $Entries = @(Get-InstallerArchiveEntry -Archive $Archive)
+      $Context = Open-InstallerArchiveRange -Path $File.FullName -Range $Range
+      $Entries = @(Get-InstallerArchiveEntry -Archive $Context.Archive | ForEach-Object {
+          [pscustomobject]@{ FullName = $_.FullName; Length = $_.Length }
+        })
       $IniEntry = $Entries | Where-Object { $_.FullName -ieq 'aisetup.ini' } | Select-Object -First 1
       if (-not $IniEntry) { continue }
-      return [pscustomobject]@{ Range = $Range; ArchivePath = $TemporaryPath; Entries = $Entries; IniEntryName = $IniEntry.FullName; IniEntryLength = $IniEntry.Length }
+      return [pscustomobject]@{ SourcePath = $File.FullName; Range = $Range; Entries = $Entries; IniEntryName = $IniEntry.FullName; IniEntryLength = $IniEntry.Length }
     } catch {
-      Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
+      continue
     } finally {
-      if ($Archive) { $Archive.Dispose() }
+      if ($Context) { Close-InstallerArchiveRange -Context $Context }
     }
   }
   throw 'The file does not contain an Actual Installer aisetup.ini archive'
@@ -62,15 +61,14 @@ function Get-ActualInstallerInfo {
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
   process {
     $ArchiveData = Get-ActualInstallerArchiveData -Path $Path
+    $Context = Open-InstallerArchiveRange -Path $ArchiveData.SourcePath -Range $ArchiveData.Range
     try {
-      $Archive = Get-InstallerArchive -Path $ArchiveData.ArchivePath
-      try {
-        $IniEntry = Get-InstallerArchiveEntry -Archive $Archive | Where-Object { $_.FullName -ieq $ArchiveData.IniEntryName } | Select-Object -First 1
-        if (-not $IniEntry -or $IniEntry.Length -gt $Script:ActualInstallerMaximumEntryBytes) { throw 'The Actual Installer project INI exceeds the configured size limit' }
-        $Stream = Open-InstallerArchiveEntry -Entry $IniEntry
-        $Reader = [IO.StreamReader]::new($Stream, [Text.Encoding]::UTF8, $true)
-        try { $Ini = ConvertFrom-ActualInstallerIni -Content $Reader.ReadToEnd() } finally { $Reader.Dispose(); $Stream.Dispose() }
-      } finally { $Archive.Dispose() }
+      $Archive = $Context.Archive
+      $IniEntry = Get-InstallerArchiveEntry -Archive $Archive | Where-Object { $_.FullName -ieq $ArchiveData.IniEntryName } | Select-Object -First 1
+      if (-not $IniEntry -or $IniEntry.Length -gt $Script:ActualInstallerMaximumEntryBytes) { throw 'The Actual Installer project INI exceeds the configured size limit' }
+      $Stream = Open-InstallerArchiveEntry -Entry $IniEntry
+      $Reader = [IO.StreamReader]::new($Stream, [Text.Encoding]::UTF8, $true)
+      try { $Ini = ConvertFrom-ActualInstallerIni -Content $Reader.ReadToEnd() } finally { $Reader.Dispose(); $Stream.Dispose() }
       $Setup = $Ini['Setup']; $Registry = $Ini['Registry']
       $RegistryWrites = if ($Registry) { foreach ($Key in @($Registry.Keys)) { [pscustomobject]@{ Root = 'HKCU'; Key = 'Software\\Softeza\\Actual Installer'; Name = $Key; Value = $Registry[$Key]; Type = 'REG_SZ' } } } else { @() }
       $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
@@ -108,7 +106,7 @@ function Get-ActualInstallerInfo {
         Warnings                     = @($Warnings)
         ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.ActualInstaller'; ParserMajor = 1; Sources = @('Validated embedded ZIP archive', 'aisetup.ini') }
       }
-    } finally { Remove-Item -LiteralPath $ArchiveData.ArchivePath -Force -ErrorAction SilentlyContinue }
+    } finally { Close-InstallerArchiveRange -Context $Context }
   }
 }
 
@@ -126,22 +124,21 @@ function Expand-ActualInstallerInstaller {
   )
   process {
     $ArchiveData = Get-ActualInstallerArchiveData -Path $Path
+    $Context = Open-InstallerArchiveRange -Path $ArchiveData.SourcePath -Range $ArchiveData.Range
     try {
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-ActualInstaller-$([guid]::NewGuid().ToString('N'))") }
       $null = New-Item -Path $DestinationPath -ItemType Directory -Force
-      $Archive = Get-InstallerArchive -Path $ArchiveData.ArchivePath
+      $Archive = $Context.Archive
       $Written = 0L; $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-      try {
-        foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
-          if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
-          $Written += $Entry.Length
-          if ($Written -gt $MaximumExpandedBytes) { throw 'Actual Installer extraction exceeds the configured output limit' }
-          $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath (Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName) -MaximumBytes $MaximumExpandedBytes))
-        }
-      } finally { $Archive.Dispose() }
+      foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
+        if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
+        $Written += $Entry.Length
+        if ($Written -gt $MaximumExpandedBytes) { throw 'Actual Installer extraction exceeds the configured output limit' }
+        $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath (Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName) -MaximumBytes $MaximumExpandedBytes))
+      }
       if ($Result.Count -eq 0) { throw "No Actual Installer files matched '$Name'" }
       return $Result.ToArray()
-    } finally { Remove-Item -LiteralPath $ArchiveData.ArchivePath -Force -ErrorAction SilentlyContinue }
+    } finally { Close-InstallerArchiveRange -Context $Context }
   }
 }
 

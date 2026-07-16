@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 
@@ -24,32 +25,51 @@ namespace Dumplings.InstallerInfrastructure
             if (boundedLength < pattern.Length) return Array.Empty<long>();
 
             long original = stream.Position;
-            List<long> results = new List<long>();
-            byte[] buffer = new byte[(1024 * 1024) + pattern.Length - 1];
-            int carryLength = 0;
-            long consumed = 0;
+            List<long> results = new List<long>(Math.Min(maximum, 128));
+            const int chunkSize = 1024 * 1024;
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(chunkSize + pattern.Length - 1);
+            int[] shifts = CreateShiftTable(pattern);
             try
             {
-                stream.Position = start;
-                while (consumed < boundedLength)
+                if (reverse)
                 {
-                    int requested = (int)Math.Min(1024 * 1024, boundedLength - consumed);
-                    int read = stream.Read(buffer, carryLength, requested);
-                    if (read <= 0) break;
-                    int windowLength = carryLength + read;
-                    long baseOffset = start + consumed - carryLength;
-                    FindWindow(buffer, windowLength, pattern, baseOffset, start, start + boundedLength, results, maximum, reverse, alignment);
-                    if (!reverse && results.Count >= maximum) break;
-                    carryLength = Math.Min(pattern.Length - 1, windowLength);
-                    if (carryLength > 0) Buffer.BlockCopy(buffer, windowLength - carryLength, buffer, 0, carryLength);
-                    consumed += read;
+                    long chunkEnd = start + boundedLength;
+                    while (chunkEnd > start && results.Count < maximum)
+                    {
+                        int primaryLength = (int)Math.Min(chunkSize, chunkEnd - start);
+                        long chunkStart = chunkEnd - primaryLength;
+                        int suffixLength = (int)Math.Min(pattern.Length - 1L, start + boundedLength - chunkEnd);
+                        int windowLength = primaryLength + suffixLength;
+                        ReadExactly(stream, chunkStart, buffer, windowLength);
+                        FindWindowReverse(buffer, windowLength, pattern, chunkStart, chunkEnd, results, maximum, alignment);
+                        chunkEnd = chunkStart;
+                    }
+                }
+                else
+                {
+                    int carryLength = 0;
+                    long consumed = 0;
+                    stream.Position = start;
+                    while (consumed < boundedLength)
+                    {
+                        int requested = (int)Math.Min(chunkSize, boundedLength - consumed);
+                        int read = stream.Read(buffer, carryLength, requested);
+                        if (read <= 0) break;
+                        int windowLength = carryLength + read;
+                        long baseOffset = start + consumed - carryLength;
+                        FindWindowForward(buffer, windowLength, pattern, shifts, baseOffset, start, start + boundedLength, results, maximum, alignment);
+                        if (results.Count >= maximum) break;
+                        carryLength = Math.Min(pattern.Length - 1, windowLength);
+                        if (carryLength > 0) Buffer.BlockCopy(buffer, windowLength - carryLength, buffer, 0, carryLength);
+                        consumed += read;
+                    }
                 }
             }
             finally
             {
                 if (restorePosition) stream.Position = original;
+                ArrayPool<byte>.Shared.Return(buffer);
             }
-            if (reverse) results.Reverse();
             return results.ToArray();
         }
 
@@ -74,14 +94,10 @@ namespace Dumplings.InstallerInfrastructure
             return results.ToArray();
         }
 
-        private static void FindWindow(byte[] bytes, int byteCount, byte[] pattern, long baseOffset, long minimum, long maximumOffset, List<long> results, int maximum, bool reverse, int alignment)
+        private static void FindWindowForward(byte[] bytes, int byteCount, byte[] pattern, int[] shifts, long baseOffset, long minimum, long maximumOffset, List<long> results, int maximum, int alignment)
         {
             int last = byteCount - pattern.Length;
             int patternLast = pattern.Length - 1;
-            int[] shifts = new int[256];
-            for (int value = 0; value < shifts.Length; value++) shifts[value] = pattern.Length;
-            for (int index = 0; index < patternLast; index++) shifts[pattern[index]] = patternLast - index;
-
             int candidate = 0;
             while (candidate <= last)
             {
@@ -93,9 +109,8 @@ namespace Dumplings.InstallerInfrastructure
                     if (offset >= minimum && offset + pattern.Length <= maximumOffset && offset % alignment == 0 &&
                         (results.Count == 0 || results[results.Count - 1] != offset))
                     {
-                        if (reverse && results.Count == maximum) results.RemoveAt(0);
                         results.Add(offset);
-                        if (!reverse && results.Count >= maximum) return;
+                        if (results.Count >= maximum) return;
                     }
                     candidate++;
                 }
@@ -103,6 +118,37 @@ namespace Dumplings.InstallerInfrastructure
                 {
                     candidate += shifts[bytes[candidate + patternLast]];
                 }
+            }
+        }
+
+        private static void FindWindowReverse(byte[] bytes, int byteCount, byte[] pattern, long baseOffset, long maximumStartExclusive, List<long> results, int maximum, int alignment)
+        {
+            int last = Math.Min(byteCount - pattern.Length, checked((int)(maximumStartExclusive - baseOffset - 1)));
+            for (int candidate = last; candidate >= 0 && results.Count < maximum; candidate--)
+            {
+                long offset = baseOffset + candidate;
+                if (offset % alignment == 0 && Matches(bytes, pattern, candidate)) results.Add(offset);
+            }
+        }
+
+        private static int[] CreateShiftTable(byte[] pattern)
+        {
+            int[] shifts = new int[256];
+            for (int value = 0; value < shifts.Length; value++) shifts[value] = pattern.Length;
+            int last = pattern.Length - 1;
+            for (int index = 0; index < last; index++) shifts[pattern[index]] = last - index;
+            return shifts;
+        }
+
+        private static void ReadExactly(Stream stream, long offset, byte[] buffer, int count)
+        {
+            stream.Position = offset;
+            int total = 0;
+            while (total < count)
+            {
+                int read = stream.Read(buffer, total, count - total);
+                if (read <= 0) throw new EndOfStreamException($"Unexpected end of stream at offset {offset + total}.");
+                total += read;
             }
         }
 

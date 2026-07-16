@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 
@@ -97,12 +98,12 @@ namespace Dumplings.InstallerInfrastructure
             MemoryStream memory = new MemoryStream();
             FileStream file = null;
             string path = null;
-            byte[] buffer = new byte[1024 * 1024];
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
             long total = 0;
             try
             {
                 int read;
-                while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+                while ((read = source.Read(buffer, 0, Math.Min(buffer.Length, 1024 * 1024))) > 0)
                 {
                     total += read;
                     if (total > maximumBytes) throw new InvalidDataException($"The stream exceeds the {maximumBytes}-byte spool limit.");
@@ -127,6 +128,10 @@ namespace Dumplings.InstallerInfrastructure
                 memory?.Dispose();
                 if (path != null) try { File.Delete(path); } catch { }
                 throw;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
 
@@ -174,27 +179,55 @@ namespace Dumplings.InstallerInfrastructure
             if (destination == null) throw new ArgumentNullException(nameof(destination));
             if (!source.CanRead || !destination.CanWrite) throw new ArgumentException("Source must be readable and destination must be writable.");
             if (maximumBytes < 0 || expectedBytes < -1 || expectedBytes > maximumBytes) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
-            byte[] buffer = new byte[1024 * 1024];
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
             long total = 0;
-            while (expectedBytes < 0 || total < expectedBytes)
+            try
             {
-                int request = (int)Math.Min(buffer.Length, expectedBytes < 0 ? maximumBytes - total + 1 : expectedBytes - total);
-                if (request <= 0)
+                while (expectedBytes < 0 || total < expectedBytes)
                 {
-                    if (expectedBytes < 0 && source.ReadByte() >= 0) throw new InvalidDataException($"The stream exceeds the {maximumBytes}-byte limit.");
-                    break;
+                    int request = (int)Math.Min(buffer.Length, expectedBytes < 0 ? maximumBytes - total + 1 : expectedBytes - total);
+                    if (request <= 0)
+                    {
+                        if (expectedBytes < 0 && source.ReadByte() >= 0) throw new InvalidDataException($"The stream exceeds the {maximumBytes}-byte limit.");
+                        break;
+                    }
+                    int read = source.Read(buffer, 0, request);
+                    if (read <= 0)
+                    {
+                        if (expectedBytes >= 0) throw new EndOfStreamException($"The stream ended after {total} bytes; expected {expectedBytes}.");
+                        break;
+                    }
+                    total += read;
+                    if (total > maximumBytes) throw new InvalidDataException($"The stream exceeds the {maximumBytes}-byte limit.");
+                    destination.Write(buffer, 0, read);
                 }
-                int read = source.Read(buffer, 0, request);
-                if (read <= 0)
-                {
-                    if (expectedBytes >= 0) throw new EndOfStreamException($"The stream ended after {total} bytes; expected {expectedBytes}.");
-                    break;
-                }
-                total += read;
-                if (total > maximumBytes) throw new InvalidDataException($"The stream exceeds the {maximumBytes}-byte limit.");
-                destination.Write(buffer, 0, read);
             }
+            finally { ArrayPool<byte>.Shared.Return(buffer); }
             return total;
+        }
+
+        public static byte[] ReadBounded(Stream source, int maximumBytes, long expectedBytes)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (!source.CanRead) throw new ArgumentException("The source stream must be readable.", nameof(source));
+            if (maximumBytes < 0 || expectedBytes < -1 || expectedBytes > maximumBytes || expectedBytes > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+            if (expectedBytes >= 0)
+            {
+                byte[] result = new byte[(int)expectedBytes];
+                int total = 0;
+                while (total < result.Length)
+                {
+                    int read = source.Read(result, total, result.Length - total);
+                    if (read <= 0) throw new EndOfStreamException($"The stream ended after {total} bytes; expected {expectedBytes}.");
+                    total += read;
+                }
+                if (source.ReadByte() >= 0) throw new InvalidDataException($"The stream exceeds its declared {expectedBytes}-byte length.");
+                return result;
+            }
+
+            using MemoryStream output = new MemoryStream(Math.Min(maximumBytes, 1024 * 1024));
+            CopyBounded(source, output, maximumBytes, -1);
+            return output.ToArray();
         }
 
         public static long CopyXor(Stream source, Stream destination, byte key, long expectedBytes)
@@ -203,17 +236,21 @@ namespace Dumplings.InstallerInfrastructure
             if (destination == null) throw new ArgumentNullException(nameof(destination));
             if (!source.CanRead || !destination.CanWrite) throw new ArgumentException("Source must be readable and destination must be writable.");
             if (expectedBytes < 0) throw new ArgumentOutOfRangeException(nameof(expectedBytes));
-            byte[] buffer = new byte[1024 * 1024];
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
             long total = 0;
-            while (total < expectedBytes)
+            try
             {
-                int request = (int)Math.Min(buffer.Length, expectedBytes - total);
-                int read = source.Read(buffer, 0, request);
-                if (read <= 0) throw new EndOfStreamException($"The stream ended after {total} bytes; expected {expectedBytes}.");
-                for (int i = 0; i < read; i++) buffer[i] ^= key;
-                destination.Write(buffer, 0, read);
-                total += read;
+                while (total < expectedBytes)
+                {
+                    int request = (int)Math.Min(buffer.Length, expectedBytes - total);
+                    int read = source.Read(buffer, 0, request);
+                    if (read <= 0) throw new EndOfStreamException($"The stream ended after {total} bytes; expected {expectedBytes}.");
+                    for (int i = 0; i < read; i++) buffer[i] ^= key;
+                    destination.Write(buffer, 0, read);
+                    total += read;
+                }
             }
+            finally { ArrayPool<byte>.Shared.Return(buffer); }
             return total;
         }
 
@@ -240,11 +277,11 @@ namespace Dumplings.InstallerInfrastructure
             long original = stream.CanSeek ? stream.Position : 0;
             uint crc = uint.MaxValue;
             long total = 0;
-            byte[] buffer = new byte[1024 * 1024];
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
             try
             {
                 int read;
-                while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+                while ((read = stream.Read(buffer, 0, Math.Min(buffer.Length, 1024 * 1024))) > 0)
                 {
                     total += read;
                     if (total > maximumBytes) throw new InvalidDataException($"The stream exceeds the {maximumBytes}-byte CRC limit.");
@@ -255,6 +292,7 @@ namespace Dumplings.InstallerInfrastructure
             finally
             {
                 if (restorePosition && stream.CanSeek) stream.Position = original;
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
 

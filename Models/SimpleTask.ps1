@@ -27,6 +27,8 @@ class SimpleTask: System.IDisposable {
   [ValidateNotNullOrEmpty()][string]$Path
   [System.Collections.IDictionary]$Config = [ordered]@{}
   [string]$ScriptPath
+  [bool]$InvocationSucceeded = $false
+  [bool]$InvocationSkipped = $false
   #endregion
 
   SimpleTask([System.Collections.IDictionary]$Properties) {
@@ -82,15 +84,19 @@ class SimpleTask: System.IDisposable {
   # Invoke script
   [void] Invoke() {
     $DumplingsLogIdentifier = $Script:DumplingsLogIdentifier + $this.Name
+    $this.InvocationSucceeded = $false
+    $this.InvocationSkipped = $false
     if (($Global:DumplingsPreference.Contains('NoSkip') -and $Global:DumplingsPreference.NoSkip) -or -not ($this.Config.Contains('Skip') -and $this.Config.Skip)) {
       Write-Log -Object 'Run!'
       try {
         $null = & $this.ScriptPath
+        $this.InvocationSucceeded = $true
       } catch {
         $_ | Out-Host
         $this.Log("Unexpected error: ${_}", 'Error')
       }
     } else {
+      $this.InvocationSkipped = $true
       $this.Log('Skipped', 'Info')
     }
   }
