@@ -1,17 +1,14 @@
-# Load the Versioning class from codes
-if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.Versioning').Type) {
+# Load the version comparison classes from code
+if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.WinGetVersion').Type) {
   Add-Type -Path (Join-Path $PSScriptRoot 'Assets' 'Versioning.cs')
 }
 
-# Add type accelerator for the Versioning class
+# Add type accelerators for the version comparison classes
 $TypeAcceleratorsClass = [psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')
 $TypeAccelerators = $TypeAcceleratorsClass::Get
 @(
-  [Dumplings.Versioning.Versioning]
-  [Dumplings.Versioning.SemanticVersion]
-  [Dumplings.Versioning.GeneralVersion]
-  [Dumplings.Versioning.ComplexVersion]
-  [Dumplings.Versioning.RawVersion]
+  [Dumplings.Versioning.WinGetVersion]
+  [Dumplings.Versioning.ChunkVersion]
 ) | ForEach-Object -Process { if (-not $TypeAccelerators.ContainsKey($_.Name)) { $TypeAcceleratorsClass::Add($_.Name, $_) } }
 
 # Import libraries

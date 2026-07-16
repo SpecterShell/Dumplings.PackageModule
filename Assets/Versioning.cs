@@ -1,845 +1,541 @@
 /*
-This is an experimental adaption of https://github.com/fosskers/rs-versions to C#. Kudos to the original author Colin Woodbury.
-The license of the original version, an MIT license, is attached:
+WinGetVersion is adapted from the Windows Package Manager version comparator:
+https://github.com/microsoft/winget-cli/blob/master/src/AppInstallerSharedLib/Versions.cpp
 
-MIT License
-
-Copyright (c) 2021 Colin Woodbury
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Compared to the original version, this adaption has the following differences:
-- The original version uses nom for parsing, while this version uses regular expressions.
-- Another version type "Raw" is introduced to represent versions that are not fitted to the other three types,
-  which splits the version into numeric and non-numeric chunks and compares them chunk by chunk.
-- GeneralVersion::ToComplexVersion() also considers the metadata value.
-- Some version downcastings are done by reparsing the string representation of the version as they may have different sets of separators.
-
-TODO:
-- Implement the IEquatable interface for all version types.
+The Windows Package Manager source is licensed under the MIT License.
+ChunkVersion is original Dumplings code and is also licensed under the repository's MIT License.
 */
 #nullable enable
 using System;
 using System.Collections.Generic;
-using System.Text;
-using System.Text.RegularExpressions;
+using System.Globalization;
 
 namespace Dumplings.Versioning
 {
-    public enum VersionType { Semantic, General, Complex, Raw }
-
-    public interface IVersion
+    /// <summary>
+    /// Compares package versions using the same part model and precedence rules as WinGet.
+    /// </summary>
+    public sealed class WinGetVersion : IComparable, IComparable<WinGetVersion>, IEquatable<WinGetVersion>
     {
-        VersionType Type { get; }
-        public string ToString();
-    }
-
-    public enum ChunkType { Numeric, Alphanum }
-    public class Chunk : IComparable<Chunk>
-    {
-        public ChunkType Type { get; }
-        public string Alphanum { get; }
-        public uint? Numeric { get; }
-
-        internal Chunk(uint numeric) { Numeric = numeric; Alphanum = numeric.ToString(); Type = ChunkType.Numeric; }
-        internal Chunk(string value) { Alphanum = value; Numeric = null; Type = ChunkType.Alphanum; }
-
-        public static Chunk Parse(string input)
+        public enum ApproximateComparator
         {
-            if (uint.TryParse(input, out uint num))
-                return new Chunk(num);
-            else
-                return new Chunk(input);
+            None,
+            LessThan,
+            GreaterThan,
         }
 
-        public static bool TryParse(string input, out Chunk? chunk)
+        private const string LatestValue = "Latest";
+        private const string UnknownValue = "Unknown";
+        private readonly List<Part> _parts = new();
+
+        public string Value { get; }
+        public ApproximateComparator Approximation { get; }
+        public bool IsApproximate => Approximation != ApproximateComparator.None;
+        public bool IsLatest => Approximation != ApproximateComparator.LessThan && IsBaseLatest;
+        public bool IsUnknown => IsBaseUnknown;
+
+        public WinGetVersion(string value)
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            Value = value.Trim();
+
+            string baseVersion = Value;
+            if (baseVersion.StartsWith("< ", StringComparison.OrdinalIgnoreCase))
+            {
+                Approximation = ApproximateComparator.LessThan;
+                baseVersion = baseVersion.Substring(2);
+            }
+            else if (baseVersion.StartsWith("> ", StringComparison.OrdinalIgnoreCase))
+            {
+                Approximation = ApproximateComparator.GreaterThan;
+                baseVersion = baseVersion.Substring(2);
+            }
+
+            int digitPosition = IndexOfAsciiDigit(baseVersion);
+            int splitPosition = baseVersion.IndexOf('.');
+            if (digitPosition >= 0 && (splitPosition < 0 || digitPosition < splitPosition))
+            {
+                baseVersion = baseVersion.Substring(digitPosition);
+            }
+
+            int position = 0;
+            while (position < baseVersion.Length)
+            {
+                int nextPosition = baseVersion.IndexOf('.', position);
+                int length = (nextPosition < 0 ? baseVersion.Length : nextPosition) - position;
+                _parts.Add(new Part(baseVersion.Substring(position, length)));
+                position += length + 1;
+            }
+
+            while (_parts.Count > 0 && _parts[_parts.Count - 1].IsZero)
+            {
+                _parts.RemoveAt(_parts.Count - 1);
+            }
+
+            if (IsApproximate && IsBaseUnknown)
+            {
+                throw new ArgumentException("An approximate WinGet version cannot use Unknown as its base version.", nameof(value));
+            }
+        }
+
+        public static WinGetVersion Parse(string value) => new(value);
+
+        public static bool TryParse(string? value, out WinGetVersion? version)
         {
             try
             {
-                chunk = Parse(input);
-                return true;
+                version = value is null ? null : new WinGetVersion(value);
+                return version is not null;
             }
-            catch
-            {
-                chunk = null;
-                return false;
-            }
-        }
-
-        public uint? GetDigit()
-        {
-            return Numeric.HasValue ? Numeric : null;
-        }
-
-        public uint? GetPrefixDigit()
-        {
-            if (Numeric.HasValue) return Numeric;
-
-            var match = Regex.Match(Alphanum, @"^(0|\d+)");
-            return (match.Success && uint.TryParse(match.Groups[1].Value, out uint numeric)) ? numeric : null;
-        }
-
-        public uint? GetSuffixDigit()
-        {
-            if (Numeric.HasValue) return Numeric;
-
-            var match = Regex.Match(Alphanum, @"^[a-zA-Z]+(0|\d+)");
-            return (match.Success && uint.TryParse(match.Groups[1].Value, out uint numeric)) ? numeric : null;
-        }
-
-        public int CompareTo(Chunk? other)
-        {
-            if (other == null) return 1;
-            else return Numeric.HasValue && other.Numeric.HasValue ? Numeric.Value.CompareTo(other.Numeric.Value) : string.Compare(Alphanum, other.Alphanum, StringComparison.Ordinal);
-        }
-
-        public int CompareToSemantic(Chunk? other)
-        {
-            if (other is null) return 1;
-            if (Numeric.HasValue && other.Numeric.HasValue) return Numeric.Value.CompareTo(other.Numeric.Value);
-            if (Numeric.HasValue && !other.Numeric.HasValue) return -1;
-            if (!Numeric.HasValue && other.Numeric.HasValue) return 1;
-            return string.Compare(Alphanum, other.Alphanum, StringComparison.Ordinal);
-        }
-
-        public int CompareToGeneral(Chunk? other)
-        {
-            if (other is null) return 1;
-            if (Numeric.HasValue && other.Numeric.HasValue) return Numeric.Value.CompareTo(other.Numeric.Value);
-            else if (Numeric.HasValue && !other.Numeric.HasValue)
-            {
-                var otherDigit = other.GetPrefixDigit();
-                if (otherDigit is not null)
-                {
-                    var cmp = Numeric.Value.CompareTo(otherDigit.Value);
-                    // 1.2.0 > 1.2.0rc1
-                    return cmp == 0 ? 1 : cmp;
-                }
-                else return 1;
-            }
-            else if (!Numeric.HasValue && other.Numeric.HasValue)
-            {
-                var digit = GetPrefixDigit();
-                if (digit is not null)
-                {
-                    var cmp = digit.Value.CompareTo(other.Numeric.Value);
-                    // 1.2.0rc1 < 1.2.0
-                    return cmp == 0 ? -1 : cmp;
-                }
-                else return -1;
-            }
-            else
-            {
-                if (Regex.IsMatch(Alphanum, $"^[a-zA-Z]") && Alphanum[0] == other.Alphanum[0])
-                {
-                    // r8 < r23
-                    var digit = GetSuffixDigit();
-                    var otherDigit = other.GetSuffixDigit();
-                    return digit is not null && otherDigit is not null ? digit.Value.CompareTo(otherDigit.Value) : string.Compare(Alphanum, other.Alphanum, StringComparison.Ordinal);
-                }
-                else if (Regex.IsMatch(Alphanum, @"^\d") && Regex.IsMatch(other.Alphanum, @"^\d"))
-                {
-                    // 0rc1 < 1rc1
-                    var digit = GetPrefixDigit();
-                    var otherDigit = other.GetPrefixDigit();
-                    return digit is not null && otherDigit is not null ? digit.Value.CompareTo(otherDigit.Value) : string.Compare(Alphanum, other.Alphanum, StringComparison.Ordinal);
-                }
-                else return string.Compare(Alphanum, other.Alphanum, StringComparison.Ordinal);
-            }
-        }
-
-        public override string ToString() => Alphanum;
-    }
-
-    public enum ComplexChunkType { Digits, Rev, Plain }
-    public class ComplexChunk : IComparable<ComplexChunk>
-    {
-        public ComplexChunkType Type { get; }
-        public string Alphanum { get; }
-        public uint? Numeric { get; }
-
-        internal ComplexChunk(ComplexChunkType type, string alphanum, uint? numeric = null)
-        {
-            if (type == ComplexChunkType.Digits && numeric is null) throw new ArgumentException("A numeric value must be provided for a Digits type.");
-            if (type == ComplexChunkType.Rev && numeric is null) throw new ArgumentException("A numeric value must be provided for a Rev type.");
-            Type = type;
-            Alphanum = alphanum;
-            Numeric = numeric;
-        }
-
-        public static ComplexChunk Parse(string input)
-        {
-            var match = Regex.Match(input, @"^\d+$");
-            if (match.Success && uint.TryParse(input, out uint num)) return new ComplexChunk(ComplexChunkType.Digits, input, num);
-
-            match = Regex.Match(input, @"^r(\d+)$");
-            if (match.Success && uint.TryParse(match.Groups[1].Value, out uint rev)) return new ComplexChunk(ComplexChunkType.Rev, input, rev);
-
-            return new ComplexChunk(ComplexChunkType.Plain, input);
-        }
-
-        public static bool TryParse(string input, out ComplexChunk? chunk)
-        {
-            try
-            {
-                chunk = Parse(input);
-                return true;
-            }
-            catch
-            {
-                chunk = null;
-                return false;
-            }
-        }
-
-        public uint? GetDigit()
-        {
-            return Numeric.HasValue ? Numeric : null;
-        }
-
-        public uint? GetPrefixDigit()
-        {
-            if (Numeric.HasValue) return Numeric;
-
-            var match = Regex.Match(Alphanum, @"^(0|\d+)");
-            return (match.Success && uint.TryParse(match.Groups[1].Value, out uint numeric)) ? numeric : null;
-        }
-
-        public uint? GetSuffixDigit()
-        {
-            if (Numeric.HasValue) return Numeric;
-
-            var match = Regex.Match(Alphanum, @"^[a-zA-Z]+(0|\d+)");
-            return (match.Success && uint.TryParse(match.Groups[1].Value, out uint numeric)) ? numeric : null;
-        }
-
-        public int CompareTo(ComplexChunk? other)
-        {
-            if (other is null) return 1;
-            // Normal cases.
-            else if (Type == ComplexChunkType.Digits && other.Type == ComplexChunkType.Digits)
-            {
-                if (!Numeric.HasValue || !other.Numeric.HasValue) throw new Exception("This should never happen.");
-                return Numeric.Value.CompareTo(other.Numeric);
-            }
-            else if (Type == ComplexChunkType.Rev && other.Type == ComplexChunkType.Rev)
-            {
-                if (!Numeric.HasValue || !other.Numeric.HasValue) throw new Exception("This should never happen.");
-                return Numeric.Value.CompareTo(other.Numeric);
-            }
-            // If I'm a concrete number and you're just a revision, then I'm greater no matter what
-            else if (Type == ComplexChunkType.Digits && other.Type == ComplexChunkType.Rev) return 1;
-            else if (Type == ComplexChunkType.Rev && other.Type == ComplexChunkType.Digits) return -1;
-            // There's no sensible pairing, so we fall back to String-based comparison.
-            else return string.Compare(Alphanum, other.Alphanum, StringComparison.Ordinal);
-        }
-
-        public override string ToString() => Alphanum;
-    }
-
-    public class Chunks : List<Chunk>, IComparable<Chunks>
-    {
-        public static Chunks Parse(string input)
-        {
-            var chunks = new Chunks();
-            foreach (var part in input.Split('.')) chunks.Add(Chunk.Parse(part));
-            return chunks;
-        }
-
-        public int CompareTo(Chunks? other)
-        {
-            if (other is null) return 1;
-
-            for (int i = 0; i < Math.Max(Count, other.Count); i++)
-            {
-                var left = i < Count ? this[i] : null;
-                var right = i < other.Count ? other[i] : null;
-
-                if (left is not null && right is not null)
-                {
-                    var cmp = left.CompareToSemantic(right);
-                    if (cmp != 0) return cmp;
-                }
-                // From the Semver spec: A larger set of pre-release fields has a higher precedence than a smaller set, if all the preceding identifiers are equal.
-                else if (left is not null && right is null) return 1;
-                else if (left is null && right is not null) return -1;
-                else throw new Exception("This should never happen.");
-            }
-
-            return 0;
-        }
-
-        public ComplexChunks ToComplexChunks()
-        {
-            var chunkGroup = new ComplexChunks();
-            foreach (var chunk in this) chunkGroup.Add(chunk.Numeric.HasValue ? new ComplexChunk(ComplexChunkType.Digits, chunk.Numeric.Value.ToString(), chunk.Numeric) : ComplexChunk.Parse(chunk.Alphanum));
-            return chunkGroup;
-        }
-
-        public override string ToString() => string.Join('.', this);
-    }
-
-    public class Release : List<Chunk>, IComparable<Release>
-    {
-        public static Release Parse(string input)
-        {
-            var chunks = new Release();
-            foreach (var part in input.Split('.')) chunks.Add(Chunk.Parse(part));
-            return chunks;
-        }
-
-        public int CompareTo(Release? other)
-        {
-            if (other is null) return 1;
-
-            for (int i = 0; i < Math.Max(Count, other.Count); i++)
-            {
-                var left = i < Count ? this[i] : null;
-                var right = i < other.Count ? other[i] : null;
-
-                if (left is not null && right is not null)
-                {
-                    var cmp = left.CompareToGeneral(right);
-                    if (cmp != 0) return cmp;
-                }
-                // From the Semver spec: A larger set of pre-release fields has a higher precedence than a smaller set, if all the preceding identifiers are equal.
-                else if (left is not null && right is null) return 1;
-                else if (left is null && right is not null) return -1;
-                else throw new Exception("This should never happen.");
-            }
-
-            return 0;
-        }
-
-        public ComplexChunks ToComplexChunks()
-        {
-            var chunkGroup = new ComplexChunks();
-            foreach (var chunk in this) chunkGroup.Add(chunk.Numeric.HasValue ? new ComplexChunk(ComplexChunkType.Digits, chunk.Numeric.Value.ToString(), chunk.Numeric) : ComplexChunk.Parse(chunk.Alphanum));
-            return chunkGroup;
-        }
-
-        public override string ToString() => string.Join('.', this);
-    }
-
-    public class ComplexChunks : List<ComplexChunk>, IComparable<ComplexChunks>
-    {
-        public static ComplexChunks Parse(string input)
-        {
-            var chunks = new ComplexChunks();
-            foreach (var part in input.Split('.')) chunks.Add(ComplexChunk.Parse(part));
-            return chunks;
-        }
-
-        public int CompareTo(ComplexChunks? other)
-        {
-            if (other is null) return 1;
-            for (int i = 0; i < Math.Max(Count, other.Count); i++)
-            {
-                var left = i < Count ? this[i] : null;
-                var right = i < other.Count ? other[i] : null;
-                if (left is not null && right is not null)
-                {
-                    var cmp = left.CompareTo(right);
-                    if (cmp != 0) return cmp;
-                }
-                else if (left is not null && right is null) return 1;
-                else if (left is null && right is not null) return -1;
-                else throw new Exception("This should never happen.");
-            }
-            return 0;
-        }
-
-        public override string ToString() => string.Join('.', this);
-    }
-
-    public class SemanticVersion : IVersion, IComparable<SemanticVersion>
-    {
-        public VersionType Type => VersionType.Semantic;
-        public uint Major { get; }
-        public uint Minor { get; }
-        public uint Patch { get; }
-        public Release? PreRelease { get; }
-        public string? Metadata { get; }
-        private static Regex VersionPattern = new(@"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$", RegexOptions.Compiled);
-
-        internal SemanticVersion(uint major, uint minor, uint patch, Release? preRelease = null, string? metadata = null) { Major = major; Minor = minor; Patch = patch; PreRelease = preRelease; Metadata = metadata; }
-
-        public static SemanticVersion Parse(string input)
-        {
-            var match = VersionPattern.Match(input);
-            if (match.Success) return new SemanticVersion(
-                uint.Parse(match.Groups[1].Value),
-                uint.Parse(match.Groups[2].Value),
-                uint.Parse(match.Groups[3].Value),
-                match.Groups[4].Success ? Release.Parse(match.Groups[4].Value) : null,
-                match.Groups[5].Success ? match.Groups[5].Value : null
-            );
-            else throw new ArgumentException("The input string is not a valid Semantic Version.");
-        }
-
-        public static bool TryParse(string input, out SemanticVersion? version)
-        {
-            try
-            {
-                version = Parse(input);
-                return true;
-            }
-            catch
+            catch (ArgumentException)
             {
                 version = null;
                 return false;
             }
         }
 
-        public int CompareTo(SemanticVersion? other)
+        public static WinGetVersion CreateLatest() => new(LatestValue);
+        public static WinGetVersion CreateUnknown() => new(UnknownValue);
+
+        public int CompareTo(WinGetVersion? other)
         {
-            if (other is null) return 1;
+            if (other is null)
+            {
+                return 1;
+            }
+
+            if (IsBaseLatest || other.IsBaseLatest)
+            {
+                if (IsBaseLatest && other.IsBaseLatest)
+                {
+                    return CompareApproximation(other);
+                }
+
+                return IsBaseLatest ? 1 : -1;
+            }
+
+            if (IsBaseUnknown || other.IsBaseUnknown)
+            {
+                if (IsBaseUnknown && other.IsBaseUnknown)
+                {
+                    return CompareApproximation(other);
+                }
+
+                return IsBaseUnknown ? -1 : 1;
+            }
+
+            int partCount = Math.Max(_parts.Count, other._parts.Count);
+            for (int index = 0; index < partCount; index++)
+            {
+                Part left = index < _parts.Count ? _parts[index] : Part.Zero;
+                Part right = index < other._parts.Count ? other._parts[index] : Part.Zero;
+                int result = left.CompareTo(right);
+                if (result != 0)
+                {
+                    return result;
+                }
+            }
+
+            return CompareApproximation(other);
+        }
+
+        int IComparable.CompareTo(object? obj)
+        {
+            if (obj is null)
+            {
+                return 1;
+            }
+
+            return obj is WinGetVersion other
+                ? CompareTo(other)
+                : throw new ArgumentException($"Object must be a {nameof(WinGetVersion)}.", nameof(obj));
+        }
+
+        public bool Equals(WinGetVersion? other) => other is not null && CompareTo(other) == 0;
+        public override bool Equals(object? obj) => obj is WinGetVersion other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            HashCode hash = new();
+            hash.Add(Approximation);
+            if (IsBaseLatest)
+            {
+                hash.Add(LatestValue, StringComparer.OrdinalIgnoreCase);
+            }
+            else if (IsBaseUnknown)
+            {
+                hash.Add(UnknownValue, StringComparer.OrdinalIgnoreCase);
+            }
             else
             {
-                var major = Major.CompareTo(other.Major);
-                if (major != 0) return major;
-
-                var minor = Minor.CompareTo(other.Minor);
-                if (minor != 0) return minor;
-
-                var patch = Patch.CompareTo(other.Patch);
-                if (patch != 0) return patch;
-
-                // Build metadata does not affect version precendence, and pre-release versions have lower precedence than normal versions.
-                if (PreRelease is null) return other.PreRelease is null ? 0 : 1;
-                else if (other.PreRelease is null) return -1;
-                else return PreRelease.CompareTo(other.PreRelease);
-            }
-        }
-
-        public int CompareTo(GeneralVersion? other)
-        {
-            if (other is null) return 1;
-
-            // A GeneralVersion with a non-zero epoch value is automatically greater than any SemanticVersion.
-            if (other.Epoch.HasValue && other.Epoch > 0) return -1;
-
-            // GetPrefixDigit() pulls a leading digit from the GeneralVersion's chunk if it could.
-            // If it couldn't, that chunk is some string (perhaps a git hash) and is considered as marking a beta/prerelease version.
-            // It is thus considered less than the SemanticVersion.
-            var otherMajor = other.Chunks.Count > 0 ? other.Chunks[0].GetPrefixDigit() : null;
-            if (otherMajor is null) return 1;
-            var cmp = Major.CompareTo(otherMajor);
-            if (cmp != 0) return cmp;
-
-            var otherMinor = other.Chunks.Count > 1 ? other.Chunks[1].GetPrefixDigit() : null;
-            if (otherMinor is null) return 1;
-            cmp = Minor.CompareTo(otherMinor);
-            if (cmp != 0) return cmp;
-
-            var otherPatch = other.Chunks.Count > 2 ? other.Chunks[2].GetPrefixDigit() : null;
-            if (otherPatch is null) return 1;
-            cmp = Patch.CompareTo(otherPatch);
-            if (cmp != 0) return cmp;
-
-            // By this point, the major/minor/patch positions have all been equal.
-            // If there is a fourth position, its type, not its value, will determine which overall version is greater.
-            var other4thChunk = other.Chunks.Count > 3 ? other.Chunks[3] : null;
-            // 1.2.3 < 1.2.3.0
-            // 1.2.3 > 1.2.3.git
-            if (other4thChunk is not null) return other4thChunk.Numeric.HasValue ? -1 : 1;
-
-            return (PreRelease ?? []).CompareTo(other.Release ?? []);
-        }
-
-        public int CompareTo(ComplexVersion? other)
-        {
-            if (other is null) return 1;
-            // Do our best to compare a SemVer and a Mess.
-            // If we're lucky, the Mess will be well-formed enough to pull out SemVer-like values at each position, yielding sane comparisons.
-            // Otherwise we're forced to downcast the SemVer into a Mess and let the String-based Ord instance of Mess handle things.
-            var other1stChunkGroup = other.ChunkGroups.Count > 1 && other.Separators.Count > 0 && other.Separators[0] == Separator.Colon ? other.ChunkGroups[1] : other.ChunkGroups[0];
-
-            var otherMajor = other1stChunkGroup.Count > 0 ? other1stChunkGroup[0].GetDigit() : null;
-            if (otherMajor is null) return ToComplexVersion().CompareTo(other);
-            var cmp = Major.CompareTo(otherMajor);
-            if (cmp != 0) return cmp;
-
-            var otherMinor = other1stChunkGroup.Count > 1 ? other1stChunkGroup[1].GetDigit() : null;
-            if (otherMinor is null) return ToComplexVersion().CompareTo(other);
-            cmp = Minor.CompareTo(otherMinor);
-            if (cmp != 0) return cmp;
-
-            if (other1stChunkGroup.Count > 2)
-            {
-                var otherPatch = other1stChunkGroup[2].GetDigit();
-                if (otherPatch is null)
+                foreach (Part part in _parts)
                 {
-                    // Even if we weren't able to extract a standalone patch number, we might still be able to find a number at the head of the Chunk in that position.
-                    var otherPatchText = other1stChunkGroup[2].Alphanum;
-                    var otherPatchChunk = Regex.IsMatch(otherPatchText, @"^[a-zA-Z0-9]+$") ? Chunk.Parse(otherPatchText) : null;
-                    var otherPatchPre = otherPatchChunk?.GetPrefixDigit();
-                    // This follows SemVer's rule that pre-releases have lower precedence.
-                    if (otherPatchPre is not null) return Patch >= otherPatchPre ? 1 : -1;
-                    // We were very close, but in the end the Mess had a nonsensical value in its patch position.
-                    else return ToComplexVersion().CompareTo(other);
+                    hash.Add(part.Integer);
+                    hash.Add(part.Other, StringComparer.OrdinalIgnoreCase);
                 }
-                cmp = Patch.CompareTo(otherPatch);
-                if (cmp != 0) return cmp;
-                // If they've been equal up to this point, the Mess will by definition have more to it, meaning that it's more likely to be newer, despite its poor shape.
-                else return ToComplexVersion().CompareTo(other);
             }
-            else return ToComplexVersion().CompareTo(other);
+
+            return hash.ToHashCode();
         }
 
-        public int CompareTo(RawVersion? other) => ToRawVersion().CompareTo(other);
+        public override string ToString() => Value;
 
-        public GeneralVersion ToGeneralVersion() => new(null, [new Chunk(Major), new Chunk(Minor), new Chunk(Patch)], PreRelease, Metadata);
+        public static bool operator <(WinGetVersion left, WinGetVersion right) => left.CompareTo(right) < 0;
+        public static bool operator >(WinGetVersion left, WinGetVersion right) => left.CompareTo(right) > 0;
+        public static bool operator <=(WinGetVersion left, WinGetVersion right) => left.CompareTo(right) <= 0;
+        public static bool operator >=(WinGetVersion left, WinGetVersion right) => left.CompareTo(right) >= 0;
+        public static bool operator ==(WinGetVersion? left, WinGetVersion? right) => EqualityComparer<WinGetVersion>.Default.Equals(left, right);
+        public static bool operator !=(WinGetVersion? left, WinGetVersion? right) => !(left == right);
 
-        public ComplexVersion ToComplexVersion() => ComplexVersion.Parse(ToString());
+        private bool IsBaseLatest => _parts.Count == 1 && _parts[0].Integer == 0 && string.Equals(_parts[0].Other, LatestValue, StringComparison.OrdinalIgnoreCase);
+        private bool IsBaseUnknown => _parts.Count == 1 && _parts[0].Integer == 0 && string.Equals(_parts[0].Other, UnknownValue, StringComparison.OrdinalIgnoreCase);
 
-        public RawVersion ToRawVersion() => RawVersion.Parse(ToString());
+        private int CompareApproximation(WinGetVersion other) => GetApproximationRank(Approximation).CompareTo(GetApproximationRank(other.Approximation));
 
-        public override string ToString() => $"{Major}.{Minor}.{Patch}{(PreRelease is not null ? $"-{PreRelease}" : "")}{(Metadata is not null ? $"+{Metadata}" : "")}";
+        private static int GetApproximationRank(ApproximateComparator approximation) => approximation switch
+        {
+            ApproximateComparator.LessThan => 0,
+            ApproximateComparator.None => 1,
+            ApproximateComparator.GreaterThan => 2,
+            _ => throw new ArgumentOutOfRangeException(nameof(approximation)),
+        };
+
+        private static int IndexOfAsciiDigit(string value)
+        {
+            for (int index = 0; index < value.Length; index++)
+            {
+                if (value[index] >= '0' && value[index] <= '9')
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
+        private sealed class Part : IComparable<Part>
+        {
+            public static readonly Part Zero = new(0, string.Empty);
+
+            public ulong Integer { get; }
+            public string Other { get; }
+            public bool IsZero => Integer == 0 && Other.Length == 0;
+
+            public Part(string value)
+            {
+                string part = value.Trim();
+                int digitCount = 0;
+                while (digitCount < part.Length && part[digitCount] >= '0' && part[digitCount] <= '9')
+                {
+                    digitCount++;
+                }
+
+                if (digitCount == 0)
+                {
+                    Other = part;
+                    return;
+                }
+
+                string integerText = part.Substring(0, digitCount);
+                if (!ulong.TryParse(integerText, NumberStyles.None, CultureInfo.InvariantCulture, out ulong integer))
+                {
+                    Other = part;
+                    return;
+                }
+
+                Integer = integer;
+                Other = part.Substring(digitCount);
+            }
+
+            private Part(ulong integer, string other)
+            {
+                Integer = integer;
+                Other = other;
+            }
+
+            public int CompareTo(Part? other)
+            {
+                if (other is null)
+                {
+                    return 1;
+                }
+
+                int result = Integer.CompareTo(other.Integer);
+                if (result != 0)
+                {
+                    return result;
+                }
+
+                if (Other.Length == 0 || other.Other.Length == 0)
+                {
+                    return Other.Length == other.Other.Length ? 0 : (Other.Length == 0 ? 1 : -1);
+                }
+
+                return StringComparer.OrdinalIgnoreCase.Compare(Other, other.Other);
+            }
+        }
     }
 
-    public class GeneralVersion : IVersion, IComparable<GeneralVersion>
+    /// <summary>
+    /// Compares loosely structured versions as groups of unbounded numeric and textual parts.
+    /// </summary>
+    public sealed class ChunkVersion : IComparable, IComparable<ChunkVersion>, IEquatable<ChunkVersion>
     {
-        public VersionType Type => VersionType.General;
-        public uint? Epoch { get; }
-        public Chunks Chunks { get; }
-        public Release? Release { get; }
-        public string? Metadata { get; }
-        private static Regex VersionPattern = new(@"^(?:(0|[1-9]\d*):)?((?:0|[1-9]\d*|\d*[a-zA-Z][0-9a-zA-Z]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z][0-9a-zA-Z]*))*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$", RegexOptions.Compiled);
+        private readonly List<Group> _groups;
 
-        internal GeneralVersion(uint? epoch, Chunks chunks, Release? release, string? metadata = null) { Epoch = epoch; Chunks = chunks; Release = release; Metadata = metadata; }
+        public string Value { get; }
 
-        public static GeneralVersion Parse(string input)
+        public ChunkVersion(string value)
         {
-            var match = VersionPattern.Match(input);
-            if (match.Success) return new GeneralVersion(
-                match.Groups[1].Success ? uint.Parse(match.Groups[1].Value) : null,
-                Chunks.Parse(match.Groups[2].Value),
-                match.Groups[3].Success ? Release.Parse(match.Groups[3].Value) : null,
-                match.Groups[4].Success ? match.Groups[4].Value : null
-            );
-            else throw new ArgumentException("The input string is not a valid General Version.");
+            ArgumentNullException.ThrowIfNull(value);
+            Value = value.Trim();
+            _groups = ParseGroups(Value);
         }
 
-        public static bool TryParse(string input, out GeneralVersion? version)
+        public static ChunkVersion Parse(string value) => new(value);
+
+        public static bool TryParse(string? value, out ChunkVersion? version)
         {
-            try
-            {
-                version = Parse(input);
-                return true;
-            }
-            catch
+            if (value is null)
             {
                 version = null;
                 return false;
             }
+
+            version = new ChunkVersion(value);
+            return true;
         }
 
-        public int CompareTo(SemanticVersion? other) => other is not null ? -other.CompareTo(this) : 1;
-
-        public int CompareTo(GeneralVersion? other)
+        public int CompareTo(ChunkVersion? other)
         {
-            if (other is null) return 1;
-            else
+            if (other is null)
             {
-                var cmp = (Epoch ?? 0).CompareTo(other.Epoch ?? 0);
-                if (cmp != 0) return cmp;
-
-                cmp = Chunks.CompareTo(other.Chunks);
-                if (cmp != 0) return cmp;
-
-                return (Release ?? []).CompareTo(other.Release ?? []);
+                return 1;
             }
+
+            int groupCount = Math.Max(_groups.Count, other._groups.Count);
+            for (int index = 0; index < groupCount; index++)
+            {
+                Group left = index < _groups.Count ? _groups[index] : Group.Zero;
+                Group right = index < other._groups.Count ? other._groups[index] : Group.Zero;
+                int result = left.CompareTo(right);
+                if (result != 0)
+                {
+                    return result;
+                }
+            }
+
+            return 0;
         }
 
-        public int CompareTo(ComplexVersion? other)
+        int IComparable.CompareTo(object? obj)
         {
-            if (other is null) return 1;
-
-            // If we're lucky, we can pull specific numbers out of both inputs and accomplish the comparison without extra allocations.
-            if (Epoch.HasValue && Epoch > 0 && other.ChunkGroups.Count > 0 && other.ChunkGroups[0].Count == 1)
+            if (obj is null)
             {
-                // A near-nonsense case where a ComplexVersion is comprised of a single digit and nothing else. In this case its epoch would be considered 0.
-                if (other.ChunkGroups.Count == 1) return 1;
-                else if (other.Separators[0] == Separator.Colon)
+                return 1;
+            }
+
+            return obj is ChunkVersion other
+                ? CompareTo(other)
+                : throw new ArgumentException($"Object must be a {nameof(ChunkVersion)}.", nameof(obj));
+        }
+
+        public bool Equals(ChunkVersion? other) => other is not null && CompareTo(other) == 0;
+        public override bool Equals(object? obj) => obj is ChunkVersion other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            HashCode hash = new();
+            foreach (Group group in _groups)
+            {
+                hash.Add(group);
+            }
+
+            return hash.ToHashCode();
+        }
+
+        public override string ToString() => Value;
+
+        public static bool operator <(ChunkVersion left, ChunkVersion right) => left.CompareTo(right) < 0;
+        public static bool operator >(ChunkVersion left, ChunkVersion right) => left.CompareTo(right) > 0;
+        public static bool operator <=(ChunkVersion left, ChunkVersion right) => left.CompareTo(right) <= 0;
+        public static bool operator >=(ChunkVersion left, ChunkVersion right) => left.CompareTo(right) >= 0;
+        public static bool operator ==(ChunkVersion? left, ChunkVersion? right) => EqualityComparer<ChunkVersion>.Default.Equals(left, right);
+        public static bool operator !=(ChunkVersion? left, ChunkVersion? right) => !(left == right);
+
+        private static List<Group> ParseGroups(string value)
+        {
+            List<Group> groups = new();
+            int start = 0;
+            for (int index = 0; index <= value.Length; index++)
+            {
+                if (index == value.Length || value[index] == '-' || value[index] == '+')
                 {
-                    var otherEpoch = other.ChunkGroups[0][0].GetDigit();
-                    if (otherEpoch is not null)
+                    groups.Add(Group.Parse(value, start, index - start));
+                    start = index + 1;
+                }
+            }
+
+            while (groups.Count > 0 && groups[groups.Count - 1].IsZero)
+            {
+                groups.RemoveAt(groups.Count - 1);
+            }
+
+            return groups;
+        }
+
+        private enum PartKind
+        {
+            Text,
+            Numeric,
+        }
+
+        private sealed class Group : IComparable<Group>, IEquatable<Group>
+        {
+            public static readonly Group Zero = new(new List<Part>());
+            private readonly List<Part> _parts;
+
+            public bool IsZero => _parts.Count == 0;
+
+            private Group(List<Part> parts)
+            {
+                _parts = parts;
+            }
+
+            public static Group Parse(string value, int start, int length)
+            {
+                List<Part> parts = new();
+                int end = start + length;
+                int index = start;
+                while (index < end)
+                {
+                    if (IsAsciiDigit(value[index]))
                     {
-                        var cmp = Epoch.Value.CompareTo(otherEpoch.Value);
-                        if (cmp != 0) return cmp;
-                        return CompareToContinued(other);
+                        int tokenStart = index++;
+                        while (index < end && IsAsciiDigit(value[index]))
+                        {
+                            index++;
+                        }
+
+                        parts.Add(Part.Numeric(value.Substring(tokenStart, index - tokenStart)));
                     }
-                    // The ComplexVersion's epoch is a letter, etc.
-                    else return 1;
-                }
-                // Similar nonsense, where the ComplexVersion had a single *something* before some non-colon separator. We then consider the epoch to be 0.
-                else return 1;
-            }
-            // The GeneralVersion has an epoch but the ComplexVersion doesn't. Or if it does, it's malformed.
-            else if (Epoch.HasValue && Epoch > 0) return 1;
-            else return CompareToContinued(other);
-        }
-
-        private int CompareToContinued(ComplexVersion other)
-        {
-            // It's assumed the epoch check has already been done, and we're comparing the main parts of each version now.
-            for (int i = 0; i < Math.Max(Chunks.Count, other.ChunkGroups[0].Count); i++)
-            {
-                var left = i < Chunks.Count ? Chunks[i].GetDigit() : null;
-                var right = i < other.ChunkGroups[0].Count ? other.ChunkGroups[0][i].GetDigit() : null;
-
-                if (left.HasValue && right.HasValue)
-                {
-                    var cmp = left.Value.CompareTo(right);
-                    if (cmp != 0) return cmp;
-                }
-                // Sane values can't be extracted from one or both of the arguments.
-                else return ToComplexVersion().CompareTo(other);
-            }
-            return ToComplexVersion().CompareTo(other);
-        }
-
-        public int CompareTo(RawVersion? other) => ToRawVersion().CompareTo(other);
-
-        public ComplexVersion ToComplexVersion() => ComplexVersion.Parse(ToString());
-
-        public RawVersion ToRawVersion() => RawVersion.Parse(ToString());
-
-        public override string ToString() => $"{(Epoch.HasValue ? $"{Epoch}:" : "")}{Chunks}{(Release is not null ? $"-{Release}" : "")}{(Metadata is not null ? $"+{Metadata}" : "")}";
-    }
-
-    public enum Separator { Colon = ':', Hyphen = '-', Plus = '+', Underscore = '_', Tilde = '~' }
-    public class ComplexVersion : IVersion, IComparable<ComplexVersion>
-    {
-        public VersionType Type => VersionType.Complex;
-        public List<ComplexChunks> ChunkGroups { get; }
-        public List<Separator> Separators { get; }
-        private static Regex VersionPattern = new(@"^([a-zA-Z0-9]+(?:\.[a-zA-Z0-9]+)*)(?:([:\-+_~])([a-zA-Z0-9]+(?:\.[a-zA-Z0-9]+)*))*$", RegexOptions.Compiled);
-
-        internal ComplexVersion(List<ComplexChunks> chunkGroups, List<Separator> separators) { ChunkGroups = chunkGroups; Separators = separators; }
-
-        public static ComplexVersion Parse(string input)
-        {
-            var match = VersionPattern.Match(input);
-            if (match.Success)
-            {
-                var chunkGroups = new List<ComplexChunks>();
-                var separators = new List<Separator>();
-
-                chunkGroups.Add(ComplexChunks.Parse(match.Groups[1].Value));
-
-                for (int i = 0; i < match.Groups[3].Captures.Count; i++)
-                {
-                    separators.Add((Separator)match.Groups[2].Captures[i].Value[0]);
-                    chunkGroups.Add(ComplexChunks.Parse(match.Groups[3].Captures[i].Value));
-                }
-
-                return new ComplexVersion(chunkGroups, separators);
-            }
-            else throw new ArgumentException("The input string is not a valid Complex Version.");
-        }
-
-        public static bool TryParse(string input, out ComplexVersion? version)
-        {
-            try
-            {
-                version = Parse(input);
-                return true;
-            }
-            catch
-            {
-                version = null;
-                return false;
-            }
-        }
-
-        public int CompareTo(SemanticVersion? other) => other is not null ? -other.CompareTo(this) : 1;
-
-        public int CompareTo(GeneralVersion? other) => other is not null ? -other.CompareTo(this) : 1;
-
-        public int CompareTo(ComplexVersion? other)
-        {
-            if (other is null) return 1;
-            else
-            {
-                for (int i = 0; i < Math.Max(ChunkGroups.Count, other.ChunkGroups.Count); i++)
-                {
-                    var leftGroup = i < ChunkGroups.Count ? ChunkGroups[i] : null;
-                    var rightGroup = i < other.ChunkGroups.Count ? other.ChunkGroups[i] : null;
-                    if (leftGroup is not null && rightGroup is not null)
+                    else if (char.IsLetter(value[index]))
                     {
-                        var cmp = leftGroup.CompareTo(rightGroup);
-                        if (cmp != 0) return cmp;
+                        int tokenStart = index++;
+                        while (index < end && char.IsLetter(value[index]))
+                        {
+                            index++;
+                        }
+
+                        parts.Add(Part.Text(value.Substring(tokenStart, index - tokenStart)));
                     }
-                    else if (leftGroup is not null && rightGroup is null) return 1;
-                    else if (leftGroup is null && rightGroup is not null) return -1;
-                    else throw new Exception("This should never happen.");
+                    else
+                    {
+                        index++;
+                    }
+                }
+
+                while (parts.Count > 0 && parts[parts.Count - 1].IsZero)
+                {
+                    parts.RemoveAt(parts.Count - 1);
+                }
+
+                return new Group(parts);
+            }
+
+            public int CompareTo(Group? other)
+            {
+                if (other is null)
+                {
+                    return 1;
+                }
+
+                int partCount = Math.Max(_parts.Count, other._parts.Count);
+                for (int index = 0; index < partCount; index++)
+                {
+                    Part left = index < _parts.Count ? _parts[index] : Part.Zero;
+                    Part right = index < other._parts.Count ? other._parts[index] : Part.Zero;
+                    int result = left.CompareTo(right);
+                    if (result != 0)
+                    {
+                        return result;
+                    }
                 }
 
                 return 0;
             }
-        }
 
-        public int CompareTo(RawVersion? other) => ToRawVersion().CompareTo(other);
+            public bool Equals(Group? other) => other is not null && CompareTo(other) == 0;
+            public override bool Equals(object? obj) => obj is Group other && Equals(other);
 
-        public RawVersion ToRawVersion() => RawVersion.Parse(ToString());
-
-        public override string ToString()
-        {
-            var result = new StringBuilder();
-            for (int i = 0; i < ChunkGroups.Count; i++)
+            public override int GetHashCode()
             {
-                result.Append(ChunkGroups[i]);
-                if (i < Separators.Count)
+                HashCode hash = new();
+                foreach (Part part in _parts)
                 {
-                    switch (Separators[i])
-                    {
-                        case Separator.Colon:
-                            result.Append(':');
-                            break;
-                        case Separator.Hyphen:
-                            result.Append('-');
-                            break;
-                        case Separator.Plus:
-                            result.Append('+');
-                            break;
-                        case Separator.Underscore:
-                            result.Append('_');
-                            break;
-                        case Separator.Tilde:
-                            result.Append('~');
-                            break;
-                    }
+                    hash.Add(part);
                 }
+
+                return hash.ToHashCode();
             }
-            return result.ToString();
-        }
-    }
 
-    public class RawVersion : IVersion, IComparable<RawVersion>
-    {
-        public VersionType Type => VersionType.Raw;
-        public List<Chunk> Chunks { get; }
-        private static Regex VersionPattern = new(@"^(\d+|[^\d]+)+$", RegexOptions.Compiled);
-
-        internal RawVersion(List<Chunk> chunks) { Chunks = chunks; }
-
-        public static RawVersion Parse(string input)
-        {
-            var match = VersionPattern.Match(input);
-            if (match.Success)
-            {
-                var chunks = new Chunks();
-                for (int i = 0; i < match.Groups[1].Captures.Count; i++) chunks.Add(Chunk.Parse(match.Groups[1].Captures[i].Value));
-                return new RawVersion(chunks);
-            }
-            else throw new ArgumentException("The input string is not a valid Complex Version.");
+            private static bool IsAsciiDigit(char value) => value >= '0' && value <= '9';
         }
 
-        public static bool TryParse(string input, out RawVersion? version)
+        private sealed class Part : IComparable<Part>, IEquatable<Part>
         {
-            try
+            public static readonly Part Zero = new(PartKind.Numeric, "0");
+
+            private PartKind Kind { get; }
+            private string Value { get; }
+            public bool IsZero => Kind == PartKind.Numeric && Value == "0";
+
+            private Part(PartKind kind, string value)
             {
-                version = Parse(input);
-                return true;
+                Kind = kind;
+                Value = value;
             }
-            catch
+
+            public static Part Numeric(string value)
             {
-                version = null;
-                return false;
-            }
-        }
-
-        public int CompareTo(SemanticVersion? other) => other is not null ? -other.CompareTo(this) : 1;
-
-        public int CompareTo(GeneralVersion? other) => other is not null ? -other.CompareTo(this) : 1;
-
-        public int CompareTo(ComplexVersion? other) => other is not null ? -other.CompareTo(this) : 1;
-
-        public int CompareTo(RawVersion? other)
-        {
-            if (other is null) return 1;
-
-            for (int i = 0; i < Math.Max(Chunks.Count, other.Chunks.Count); i++)
-            {
-                var left = i < Chunks.Count ? Chunks[i] : null;
-                var right = i < other.Chunks.Count ? other.Chunks[i] : null;
-                if (left is not null && right is not null)
+                int nonZero = 0;
+                while (nonZero < value.Length - 1 && value[nonZero] == '0')
                 {
-                    var cmp = left.CompareTo(right);
-                    if (cmp != 0) return cmp;
+                    nonZero++;
                 }
-                else if (left is not null && right is null) return 1;
-                else if (left is null && right is not null) return -1;
-                else throw new Exception("This should never happen.");
+
+                return new Part(PartKind.Numeric, value.Substring(nonZero));
             }
 
-            return 0;
+            public static Part Text(string value) => new(PartKind.Text, value);
+
+            public int CompareTo(Part? other)
+            {
+                if (other is null)
+                {
+                    return 1;
+                }
+
+                if (Kind != other.Kind)
+                {
+                    return Kind == PartKind.Text ? -1 : 1;
+                }
+
+                if (Kind == PartKind.Text)
+                {
+                    return StringComparer.OrdinalIgnoreCase.Compare(Value, other.Value);
+                }
+
+                int result = Value.Length.CompareTo(other.Value.Length);
+                return result != 0 ? result : string.CompareOrdinal(Value, other.Value);
+            }
+
+            public bool Equals(Part? other) => other is not null && CompareTo(other) == 0;
+            public override bool Equals(object? obj) => obj is Part other && Equals(other);
+
+            public override int GetHashCode() => Kind == PartKind.Text
+                ? HashCode.Combine(Kind, StringComparer.OrdinalIgnoreCase.GetHashCode(Value))
+                : HashCode.Combine(Kind, Value);
         }
-
-        public override string ToString() => string.Join("", Chunks);
-    }
-
-    public class Versioning : IComparable<Versioning>
-    {
-        public IVersion Version { get; }
-        public VersionType Type => Version.Type;
-
-        public Versioning(IVersion version) => Version = version;
-
-        public static Versioning Parse(string input)
-        {
-            if (SemanticVersion.TryParse(input, out SemanticVersion? sv) && sv is not null) return new Versioning(sv);
-            else if (GeneralVersion.TryParse(input, out GeneralVersion? gv) && gv is not null) return new Versioning(gv);
-            else if (ComplexVersion.TryParse(input, out ComplexVersion? cv) && cv is not null) return new Versioning(cv);
-            else if (RawVersion.TryParse(input, out RawVersion? rv) && rv is not null) return new Versioning(rv);
-            else throw new ArgumentException("The input string is not a valid version.");
-        }
-
-        public int CompareTo(Versioning? other)
-        {
-            if (other is null) return 1;
-
-            else if (Version is SemanticVersion sv && other.Version is SemanticVersion otherSV) return sv.CompareTo(otherSV);
-            else if (Version is GeneralVersion gv && other.Version is GeneralVersion otherGV) return gv.CompareTo(otherGV);
-            else if (Version is ComplexVersion cv && other.Version is ComplexVersion otherCV) return cv.CompareTo(otherCV);
-            else if (Version is RawVersion rv && other.Version is RawVersion otherRV) return rv.CompareTo(otherRV);
-
-            else if (Version is SemanticVersion sv1 && other.Version is GeneralVersion otherGV1) return sv1.CompareTo(otherGV1);
-            else if (Version is GeneralVersion gv1 && other.Version is SemanticVersion otherSV1) return -otherSV1.CompareTo(gv1);
-
-            else if (Version is SemanticVersion sv2 && other.Version is ComplexVersion otherCV2) return sv2.CompareTo(otherCV2);
-            else if (Version is ComplexVersion cv2 && other.Version is SemanticVersion otherSV2) return -otherSV2.CompareTo(cv2);
-            else if (Version is GeneralVersion gv2 && other.Version is ComplexVersion otherCV3) return gv2.CompareTo(otherCV3);
-            else if (Version is ComplexVersion cv3 && other.Version is GeneralVersion otherGV3) return -otherGV3.CompareTo(cv3);
-
-            else if (Version is SemanticVersion sv3 && other.Version is RawVersion otherRV2) return sv3.CompareTo(otherRV2);
-            else if (Version is RawVersion rv2 && other.Version is SemanticVersion otherSV3) return -otherSV3.CompareTo(rv2);
-            else if (Version is GeneralVersion gv3 && other.Version is RawVersion otherRV3) return gv3.CompareTo(otherRV3);
-            else if (Version is RawVersion rv3 && other.Version is GeneralVersion otherGV4) return -otherGV4.CompareTo(rv3);
-            else if (Version is ComplexVersion cv4 && other.Version is RawVersion otherRV4) return cv4.CompareTo(otherRV4);
-            else if (Version is RawVersion rv4 && other.Version is ComplexVersion otherCV4) return -otherCV4.CompareTo(rv4);
-
-            else throw new Exception($"Unsupported version type {Type}");
-        }
-
-        public override string ToString() => Version.ToString();
     }
 }

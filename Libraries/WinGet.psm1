@@ -126,7 +126,7 @@ function Send-WinGetManifest {
     $NewCommitType = if ($Global:DumplingsPreference['NewCommitType']) { $Global:DumplingsPreference.NewCommitType }
     elseif ($NewPackageIdentifier -cne $RefPackageIdentifier) { 'New package' }
     else {
-      switch (([Versioning]$NewPackageVersion).CompareTo([Versioning]$RefPackageVersion)) {
+      switch (([WinGetVersion]$NewPackageVersion).CompareTo([WinGetVersion]$RefPackageVersion)) {
         { $_ -gt 0 } { 'New version'; continue }
         0 { 'Update'; continue }
         { $_ -lt 0 } { 'Add version'; continue }

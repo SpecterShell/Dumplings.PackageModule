@@ -5,11 +5,6 @@ $ErrorActionPreference = 'Stop'
 # Force stop on undefined variables or properties
 Set-StrictMode -Version 3
 
-# The locale for sorting strings
-$Culture = 'en-US'
-# The scriptblock for sorting natural numbers
-$ToNatural = { [regex]::Replace($_, '\d+', { $args[0].Value.PadLeft(20) }) }
-
 function Get-WinGetGitHubPackagePath {
   <#
   .SYNOPSIS
@@ -138,7 +133,7 @@ function Get-WinGetGitHubPackageVersion {
     $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/trees/${RepoBranch}:${Prefix}?recursive=true"
     $Response.tree |
       ForEach-Object -Process { if ($_.type -eq 'blob' -and $_.path -match "^([^/]+)/$([regex]::Escape($PackageIdentifier))\.yaml$") { $Matches[1] } } |
-      Sort-Object -Property $Script:ToNatural -Stable -Culture $Script:Culture
+      Sort-Object -Property { [WinGetVersion]$_ } -Stable
   }
 }
 

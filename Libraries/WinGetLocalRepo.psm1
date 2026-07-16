@@ -7,11 +7,6 @@ Set-StrictMode -Version 3
 
 # UTF-8 without BOM encoding
 $Encoding = [System.Text.UTF8Encoding]::new($false)
-# The locale for sorting strings
-$Culture = 'en-US'
-# The scriptblock for sorting natural numbers
-$ToNatural = { [regex]::Replace($_, '\d+', { $args[0].Value.PadLeft(20) }) }
-
 function Get-WinGetLocalPackagePath {
   <#
   .SYNOPSIS
@@ -127,7 +122,7 @@ function Get-WinGetLocalPackageVersion {
 
     Join-Path $Prefix '*' "${PackageIdentifier}.yaml" |
       Get-ChildItem -File | Select-Object -ExpandProperty 'Directory' | Select-Object -ExpandProperty 'Name' |
-      Sort-Object -Property $Script:ToNatural -Stable -Culture $Script:Culture |
+      Sort-Object -Property { [WinGetVersion]$_ } -Stable |
       Write-Output -NoEnumerate
   }
 }
