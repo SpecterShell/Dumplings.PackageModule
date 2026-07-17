@@ -152,6 +152,8 @@ Describe 'Squirrel parser' {
     $Info.DisplayVersion | Should -Be '1.0.9244'
     $Info.Publisher | Should -Be 'Discord Inc.'
     $Info.Scope | Should -Be 'user'
+    $Info.DefaultInstallLocation | Should -Be '%LocalAppData%\Discord'
+    $Info.SuggestedManifestFields.InstallationMetadata.DefaultInstallLocation | Should -Be '%LocalAppData%\Discord'
     $Info.NupkgPath | Should -Be 'Discord-1.0.9244-full.nupkg'
   }
 

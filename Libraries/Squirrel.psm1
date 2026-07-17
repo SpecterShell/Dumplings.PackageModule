@@ -270,6 +270,13 @@ function New-SquirrelInfo {
   )
 
   $DisplayName = if ([string]::IsNullOrWhiteSpace($Nuspec.Title)) { $Nuspec.Id } else { $Nuspec.Title }
+  # Squirrel.Windows and Velopack both use LocalAppData\<package ID> as the
+  # default root unless an explicit install directory overrides it.
+  $DefaultInstallLocation = if ($Nuspec.Id -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$') {
+    '%LocalAppData%\' + $Nuspec.Id
+  } else {
+    $null
+  }
 
   [pscustomobject]@{
     Path                    = (Get-Item -Path $Path -Force).FullName
@@ -284,13 +291,15 @@ function New-SquirrelInfo {
     DisplayVersion          = $Nuspec.Version
     Publisher               = $Nuspec.Authors
     Scope                   = 'user'
+    DefaultInstallLocation  = $DefaultInstallLocation
     SuggestedManifestFields = [pscustomobject]@{
-      InstallerType  = 'exe # Squirrel'
-      Scope          = 'user'
-      ProductCode    = $Nuspec.Id
-      DisplayName    = $DisplayName
-      Publisher      = $Nuspec.Authors
-      DisplayVersion = $Nuspec.Version
+      InstallerType        = 'exe # Squirrel'
+      Scope                = 'user'
+      ProductCode          = $Nuspec.Id
+      DisplayName          = $DisplayName
+      Publisher            = $Nuspec.Authors
+      DisplayVersion       = $Nuspec.Version
+      InstallationMetadata = [pscustomobject]@{ DefaultInstallLocation = $DefaultInstallLocation }
     }
   }
 }

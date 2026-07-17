@@ -594,12 +594,13 @@ Describe 'WinGet installer manifest metadata updates' {
               Success = $true
               Result  = [pscustomobject]@{
                 Metadata = [pscustomobject]@{
-                  InstallerType  = 'Squirrel'
-                  ProductCode    = 'New.Squirrel.Product'
-                  DisplayName    = 'New Squirrel Product'
-                  DisplayVersion = '2.0.0'
-                  Publisher      = 'New Squirrel Publisher'
-                  Scope          = 'machine'
+                  InstallerType          = 'Squirrel'
+                  ProductCode            = 'New.Squirrel.Product'
+                  DisplayName            = 'New Squirrel Product'
+                  DisplayVersion         = '2.0.0'
+                  Publisher              = 'New Squirrel Publisher'
+                  Scope                  = 'machine'
+                  DefaultInstallLocation = '%LocalAppData%\New.Squirrel.Product'
                 }
               }
             })
@@ -612,6 +613,7 @@ Describe 'WinGet installer manifest metadata updates' {
         InstallerUrl           = $Script:InstallerUrl
         Scope                  = 'user'
         ProductCode            = 'Old.Squirrel.Product'
+        InstallationMetadata   = [ordered]@{ DefaultInstallLocation = '%LocalAppData%\Old.Squirrel.Product' }
         AppsAndFeaturesEntries = @([ordered]@{
             DisplayName    = 'Old Squirrel Product'
             DisplayVersion = '1.0.0'
@@ -625,6 +627,7 @@ Describe 'WinGet installer manifest metadata updates' {
       @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
       $Result.ProductCode | Should -Be 'New.Squirrel.Product'
       $Result.Scope | Should -Be 'user'
+      $Result.InstallationMetadata.DefaultInstallLocation | Should -Be '%LocalAppData%\New.Squirrel.Product'
       $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'New Squirrel Product'
       $Result.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '2.0.0'
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New Squirrel Publisher'
