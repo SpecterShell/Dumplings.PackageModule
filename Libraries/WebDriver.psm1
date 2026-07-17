@@ -480,6 +480,76 @@ function Exit-WebDriverLease {
   return $Result
 }
 
+function Save-WebDriverScreenshot {
+  <#
+  .SYNOPSIS
+    Save the current browser viewport to the Dumplings output directory
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][object]$Driver,
+    [Parameter(Mandatory)][ValidateSet('Edge', 'Firefox')][string]$Browser,
+    [Parameter(Mandatory)][string]$OwnerId,
+    [switch]$Failed
+  )
+
+  $OutputVariable = Get-Variable -Name DumplingsOutput -Scope Global -ErrorAction SilentlyContinue
+  $OutputDirectory = if ($OutputVariable -and $OutputVariable.Value) {
+    [string]$OutputVariable.Value
+  } else {
+    Join-Path (Get-Location).Path 'Outputs'
+  }
+  $null = New-Item -Path $OutputDirectory -ItemType Directory -Force
+
+  $OwnerParts = @($OwnerId -split '/', 3)
+  $TaskName = if ($OwnerParts.Count -gt 1) { $OwnerParts[1] } else { $OwnerParts[0] }
+  $InvalidCharacterPattern = '[' + [regex]::Escape(( -join [IO.Path]::GetInvalidFileNameChars())) + ']'
+  $SafeTaskName = ([regex]::Replace($TaskName, $InvalidCharacterPattern, '_')).Trim().TrimEnd('.')
+  if ([string]::IsNullOrWhiteSpace($SafeTaskName)) { $SafeTaskName = 'WebDriver' }
+  if ($SafeTaskName.Length -gt 80) { $SafeTaskName = $SafeTaskName.Substring(0, 80) }
+
+  $Status = $Failed ? 'Failed' : 'Succeeded'
+  $Timestamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmssfffffffZ', [Globalization.CultureInfo]::InvariantCulture)
+  $ScreenshotPath = Join-Path $OutputDirectory "WebDriver-${SafeTaskName}-${Browser}-${Status}-${Timestamp}.png"
+  $Driver.GetScreenshot().SaveAsFile($ScreenshotPath)
+  return $ScreenshotPath
+}
+
+function Invoke-WebDriverScriptBlock {
+  <#
+  .SYNOPSIS
+    Run a script block under a scoped WebDriver lease and optionally capture its final page state
+  #>
+  param (
+    [Parameter(Mandatory)][ValidateSet('Edge', 'Firefox')][string]$Browser,
+    [switch]$Headless,
+    [switch]$Screenshot,
+    [Parameter(Mandatory)][scriptblock]$ScriptBlock
+  )
+
+  $OwnerId = Get-WebDriverLeaseOwnerId
+  $Succeeded = $false
+  $Driver = $null
+  try {
+    $Driver = if ($Browser -eq 'Edge') { Get-EdgeDriver -Headless:$Headless } else { Get-FirefoxDriver -Headless:$Headless }
+    & $ScriptBlock $Driver
+    $Succeeded = $true
+  } finally {
+    try {
+      if ($Screenshot -and $Driver) {
+        try {
+          $ScreenshotPath = Save-WebDriverScreenshot -Driver $Driver -Browser $Browser -OwnerId $OwnerId -Failed:(-not $Succeeded)
+          Write-Verbose -Message "The WebDriver screenshot was saved to: ${ScreenshotPath}"
+        } catch {
+          Write-Warning -Message "Failed to save the WebDriver screenshot: $($_.Exception.Message)" -WarningAction Continue
+        }
+      }
+    } finally {
+      $null = Exit-WebDriverLease -OwnerId $OwnerId -Failed:(-not $Succeeded)
+    }
+  }
+}
+
 function Use-EdgeDriver {
   <#
   .SYNOPSIS
@@ -487,18 +557,11 @@ function Use-EdgeDriver {
   #>
   param (
     [switch]$Headless,
+    [switch]$Screenshot,
     [Parameter(Mandatory, Position = 0)][scriptblock]$ScriptBlock
   )
 
-  $OwnerId = Get-WebDriverLeaseOwnerId
-  $Succeeded = $false
-  try {
-    $Driver = Get-EdgeDriver -Headless:$Headless
-    & $ScriptBlock $Driver
-    $Succeeded = $true
-  } finally {
-    $null = Exit-WebDriverLease -OwnerId $OwnerId -Failed:(-not $Succeeded)
-  }
+  Invoke-WebDriverScriptBlock -Browser Edge -Headless:$Headless -Screenshot:$Screenshot -ScriptBlock $ScriptBlock
 }
 
 function Use-FirefoxDriver {
@@ -508,18 +571,11 @@ function Use-FirefoxDriver {
   #>
   param (
     [switch]$Headless,
+    [switch]$Screenshot,
     [Parameter(Mandatory, Position = 0)][scriptblock]$ScriptBlock
   )
 
-  $OwnerId = Get-WebDriverLeaseOwnerId
-  $Succeeded = $false
-  try {
-    $Driver = Get-FirefoxDriver -Headless:$Headless
-    & $ScriptBlock $Driver
-    $Succeeded = $true
-  } finally {
-    $null = Exit-WebDriverLease -OwnerId $OwnerId -Failed:(-not $Succeeded)
-  }
+  Invoke-WebDriverScriptBlock -Browser Firefox -Headless:$Headless -Screenshot:$Screenshot -ScriptBlock $ScriptBlock
 }
 
 function Stop-EdgeDriver {

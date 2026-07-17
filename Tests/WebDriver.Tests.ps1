@@ -342,20 +342,69 @@ Describe 'Scoped WebDriver PowerShell API' {
 
   It 'returns script output unchanged and releases a successful lease' {
     Mock Get-EdgeDriver { 'fake-driver' } -ModuleName WebDriver
+    Mock Save-WebDriverScreenshot {} -ModuleName WebDriver
     Mock Exit-WebDriverLease {} -ModuleName WebDriver
 
     $Result = @(Use-EdgeDriver -Headless { param($Driver) "${Driver}:one"; 'two' })
 
     $Result | Should -Be @('fake-driver:one', 'two')
+    Should -Invoke Save-WebDriverScreenshot -ModuleName WebDriver -Times 0
     Should -Invoke Exit-WebDriverLease -ModuleName WebDriver -Times 1 -ParameterFilter { -not $Failed }
   }
 
-  It 'releases a failed lease from finally' {
+  It 'captures the final page after a successful script without changing its output' {
     Mock Get-EdgeDriver { 'fake-driver' } -ModuleName WebDriver
+    Mock Save-WebDriverScreenshot { 'screenshot.png' } -ModuleName WebDriver
     Mock Exit-WebDriverLease {} -ModuleName WebDriver
 
-    { Use-EdgeDriver { throw 'test failure' } } | Should -Throw '*test failure*'
+    $Result = @(Use-EdgeDriver -Screenshot { param($Driver) "${Driver}:result" })
+
+    $Result | Should -Be @('fake-driver:result')
+    Should -Invoke Save-WebDriverScreenshot -ModuleName WebDriver -Times 1 -ParameterFilter { $Browser -eq 'Edge' -and -not $Failed }
+    Should -Invoke Exit-WebDriverLease -ModuleName WebDriver -Times 1 -ParameterFilter { -not $Failed }
+  }
+
+  It 'captures a failed script before releasing its lease and preserves the script error' {
+    Mock Get-FirefoxDriver { 'fake-driver' } -ModuleName WebDriver
+    Mock Save-WebDriverScreenshot { 'screenshot.png' } -ModuleName WebDriver
+    Mock Exit-WebDriverLease {} -ModuleName WebDriver
+
+    { Use-FirefoxDriver -Screenshot { throw 'test failure' } } | Should -Throw '*test failure*'
+    Should -Invoke Save-WebDriverScreenshot -ModuleName WebDriver -Times 1 -ParameterFilter { $Browser -eq 'Firefox' -and $Failed }
     Should -Invoke Exit-WebDriverLease -ModuleName WebDriver -Times 1 -ParameterFilter { $Failed }
+  }
+
+  It 'does not mask a script error when screenshot capture also fails' {
+    Mock Get-EdgeDriver { 'fake-driver' } -ModuleName WebDriver
+    Mock Save-WebDriverScreenshot { throw 'screenshot failure' } -ModuleName WebDriver
+    Mock Exit-WebDriverLease {} -ModuleName WebDriver
+
+    { Use-EdgeDriver -Screenshot { throw 'script failure' } } | Should -Throw '*script failure*'
+    Should -Invoke Exit-WebDriverLease -ModuleName WebDriver -Times 1 -ParameterFilter { $Failed }
+  }
+
+  It 'writes screenshot bytes to the Dumplings output directory' {
+    $Screenshot = [pscustomobject]@{}
+    $Screenshot | Add-Member -MemberType ScriptMethod -Name SaveAsFile -Value {
+      param($Path)
+      [IO.File]::WriteAllBytes($Path, [byte[]](1, 2, 3))
+    }
+    $Driver = [pscustomobject]@{ Screenshot = $Screenshot }
+    $Driver | Add-Member -MemberType ScriptMethod -Name GetScreenshot -Value { $this.Screenshot }
+    $OutputPath = Join-Path $TestDrive 'Outputs'
+
+    $Path = InModuleScope WebDriver -Parameters @{ Driver = $Driver; OutputPath = $OutputPath } {
+      param ($Driver, $OutputPath)
+      $Global:DumplingsOutput = $OutputPath
+      try {
+        Save-WebDriverScreenshot -Driver $Driver -Browser Edge -OwnerId 'DumplingsWok0/Test.Package/invocation' -Failed
+      } finally {
+        Remove-Variable -Name DumplingsOutput -Scope Global -ErrorAction SilentlyContinue
+      }
+    }
+
+    $Path | Should -Match 'WebDriver-Test\.Package-Edge-Failed-\d{8}-\d{13}Z\.png$'
+    [IO.File]::ReadAllBytes($Path) | Should -Be ([byte[]](1, 2, 3))
   }
 }
 
