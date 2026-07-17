@@ -62,7 +62,7 @@ function Read-CreateInstallArchiveLogicalRange {
 
   if ($Offset -lt 0 -or $Offset + $Count -gt $Layout.SummarySize) { throw 'The requested GEA logical range is outside the compressed data stream' }
   $Result = [byte[]]::new($Count)
-  if ($Count -eq 0) { return ,$Result }
+  if ($Count -eq 0) { return , $Result }
   $Stream = [IO.File]::Open($Layout.Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
     $Remaining = $Count
@@ -86,7 +86,7 @@ function Read-CreateInstallArchiveLogicalRange {
       $LogicalOffset += $ReadCount
     }
   } finally { $Stream.Dispose() }
-  return ,$Result
+  return , $Result
 }
 
 function ConvertFrom-CreateInstallFileTable {
@@ -268,14 +268,14 @@ function Get-CreateInstallBlockInfo {
     $OutputSize = if ($CompressionType -eq 0) { [long]$CompressedSize } else { [Math]::Min([long]$Layout.BlockSize, $OutputRemaining) }
     if ($OutputSize -le 0 -or $OutputSize -gt $OutputRemaining) { throw "The GEA block for '$($Entry.FullName)' has an invalid output size" }
     [pscustomobject]@{
-      RawOrder        = [byte]$RawOrder
-      CompressionType = [int]$CompressionType
-      CompressionName = switch ($CompressionType) { 0 { 'Store' } 1 { 'LZGE' } 2 { 'PPMd' } default { 'Unknown' } }
+      RawOrder         = [byte]$RawOrder
+      CompressionType  = [int]$CompressionType
+      CompressionName  = switch ($CompressionType) { 0 { 'Store' } 1 { 'LZGE' } 2 { 'PPMd' } default { 'Unknown' } }
       CompressionOrder = [int]$CompressionOrder
-      HeaderOffset    = [long]$LogicalOffset
-      DataOffset      = [long]($LogicalOffset + $HeaderSize)
-      CompressedSize  = [long]$CompressedSize
-      OutputSize      = [long]$OutputSize
+      HeaderOffset     = [long]$LogicalOffset
+      DataOffset       = [long]($LogicalOffset + $HeaderSize)
+      CompressedSize   = [long]$CompressedSize
+      OutputSize       = [long]$OutputSize
     }
     $LogicalOffset += $HeaderSize + [long]$CompressedSize
     $CompressedRemaining -= $HeaderSize + [long]$CompressedSize
@@ -304,7 +304,7 @@ function Get-CreateInstallInfo {
     $Warnings = [System.Collections.Generic.List[string]]::new()
     $Warnings.Add('CreateInstall PE version resources identify the package but do not prove the visible uninstall key. Validate ProductCode and ARP fields in a VM.')
     if ($ExecutionLevel -ieq 'requireAdministrator') { $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest.') }
-    if ($Layout.PasswordCount -gt 0 -or ($Layout.Entries | Where-Object PasswordId -gt 0 | Select-Object -First 1)) { $Warnings.Add('The GEA archive contains password-protected files; encrypted entries are intentionally unsupported.') }
+    if ($Layout.PasswordCount -gt 0 -or ($Layout.Entries | Where-Object PasswordId -GT 0 | Select-Object -First 1)) { $Warnings.Add('The GEA archive contains password-protected files; encrypted entries are intentionally unsupported.') }
     if ($CompressionMethods.Contains('PPMd')) { $Warnings.Add('The GEA archive uses PPMd blocks, which are not yet supported by the CreateInstall extractor.') }
 
     [pscustomobject]@{

@@ -62,12 +62,12 @@ Describe 'InstallShield parser' {
         $Stream = [IO.MemoryStream]::new($Encoded)
         try {
           $Attribute = [pscustomobject]@{
-            FileName         = $FileName
-            Seed             = $Seed
-            EncodedFlags     = 6
-            FileLength       = $Encoded.Length
+            FileName          = $FileName
+            Seed              = $Seed
+            EncodedFlags      = 6
+            FileLength        = $Encoded.Length
             IsUnicodeLauncher = 1
-            DataOffset       = 0
+            DataOffset        = 0
           }
           $OutputPath = Export-InstallShieldDecodedFile -Stream $Stream -Attribute $Attribute -DestinationPath $ExpandedPath -StreamMode
           Test-BinarySequence -Left ([IO.File]::ReadAllBytes($OutputPath)) -Right $Expected | Should -BeTrue

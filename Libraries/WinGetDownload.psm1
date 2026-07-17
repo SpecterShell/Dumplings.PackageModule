@@ -570,12 +570,12 @@ function Test-WinGetInstallerDownload {
     $FallbackOccurred = $false
     $EffectiveMethod = $null
     $DownloadControl = @{
-      ConnectionTimeoutSeconds       = $ConnectionTimeoutSeconds
-      OperationTimeoutSeconds        = $OperationTimeoutSeconds
-      MaximumRetryCount              = $MaximumRetryCount
-      RetryIntervalSec               = $RetryIntervalSec
-      MaximumRetryDelaySeconds       = $MaximumRetryDelaySeconds
-      MaximumTotalRetryDelaySeconds  = $MaximumTotalRetryDelaySeconds
+      ConnectionTimeoutSeconds      = $ConnectionTimeoutSeconds
+      OperationTimeoutSeconds       = $OperationTimeoutSeconds
+      MaximumRetryCount             = $MaximumRetryCount
+      RetryIntervalSec              = $RetryIntervalSec
+      MaximumRetryDelaySeconds      = $MaximumRetryDelaySeconds
+      MaximumTotalRetryDelaySeconds = $MaximumTotalRetryDelaySeconds
     }
 
     try {

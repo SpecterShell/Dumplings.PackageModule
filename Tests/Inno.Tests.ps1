@@ -21,6 +21,17 @@ BeforeAll {
 }
 
 Describe 'Inno bridge' {
+  It 'Should normalize escaped AppId and user Program Files metadata through the bridge' {
+    $Fixture = Get-InstallerFixture -Name 'kiro-ide-1.0.138-stable-win32-x64.exe' -Url 'https://prod.download.desktop.kiro.dev/releases/stable/win32-x64/signed/1.0.138/kiro-ide-1.0.138-stable-win32-x64.exe'
+    $Info = Get-InnoInfo -Path $Fixture
+
+    $Info.ProductCode | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
+    $Info.AppId | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}'
+    $Info.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\Kiro'
+    $Info.Scope | Should -Be 'user'
+    Read-ProductCodeFromInno -Path $Fixture | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
+  }
+
   It 'Should detect a default-machine dual-scope Inno installer through the bridge' {
     $Fixture = Get-InstallerFixture -Name 'WinSCP-6.5.6-Setup.exe' -Url 'https://sourceforge.net/projects/winscp/files/WinSCP/6.5.6/WinSCP-6.5.6-Setup.exe/download' -UseSourceForgeMetaRefresh
     $Info = Get-InnoInfo -Path $Fixture
@@ -59,12 +70,15 @@ Describe 'Inno bridge' {
     $Fixture = Get-InstallerFixture -Name 'BankLinkBooks.exe' -Url 'https://download.myob.com/BankLinkBooks.exe'
     $Info = Get-InnoInfo -Path $Fixture
 
-    $Info.SupportedScopes | Should -BeNullOrEmpty
+    $Info.PrivilegesRequired | Should -Be 'admin'
+    $Info.DefaultScope | Should -Be 'machine'
+    $Info.SupportedScopes | Should -Be @('machine')
     $Info.SupportsDualScope | Should -BeFalse
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.SupportedArchitectures | Should -Be @('x86', 'x64', 'arm64')
     $Info.UnsupportedArchitectures | Should -BeNullOrEmpty
     Test-InnoDualScope -Path $Fixture | Should -BeFalse
-    Read-SupportedScopesFromInno -Path $Fixture | Should -BeNullOrEmpty
+    Read-SupportedScopesFromInno -Path $Fixture | Should -Be @('machine')
     Read-UnsupportedArchitecturesFromInno -Path $Fixture | Should -BeNullOrEmpty
     Test-InnoAppsAndFeaturesEntry -Path $Fixture | Should -BeTrue
   }
@@ -84,7 +98,8 @@ Describe 'Inno bridge' {
 
     $Info.InstallerType | Should -Be 'Inno'
     $Info.DisplayName | Should -Be 'Argente'
-    $Info.ProductCode | Should -Be 'Argente'
+    $Info.AppId | Should -Be 'Argente'
+    $Info.ProductCode | Should -BeNullOrEmpty
     $Info.CreateUninstallRegKey | Should -Be 'yes'
     $Info.Uninstallable | Should -Be 'no'
     $Info.WritesAppsAndFeaturesEntry | Should -BeFalse

@@ -81,30 +81,30 @@ function Get-ActualInstallerInfo {
       }
       $Warnings.Add('Actual Installer GUID is project identity evidence, not proof of the visible ARP key. /CU and /RUNAS /ALL select user or machine installation; validate the selected scope and ARP entry in a VM.')
       [pscustomobject]@{
-        InstallerType                = 'Actual Installer'
-        ProductCode                  = $ProductCode
-        PackageName                  = $Setup['AppName']
-        DisplayName                  = $Setup['AppName']
-        ProductName                  = $Setup['AppName']
-        DisplayVersion               = $DisplayVersion
-        Publisher                    = $Setup['CompanyName']
-        PublisherUrl                 = $Setup['WebSite']
-        DefaultInstallationDirectory = $Setup['InstallDir']
+        InstallerType                  = 'Actual Installer'
+        ProductCode                    = $ProductCode
+        PackageName                    = $Setup['AppName']
+        DisplayName                    = $Setup['AppName']
+        ProductName                    = $Setup['AppName']
+        DisplayVersion                 = $DisplayVersion
+        Publisher                      = $Setup['CompanyName']
+        PublisherUrl                   = $Setup['WebSite']
+        DefaultInstallationDirectory   = $Setup['InstallDir']
         AlternateInstallationDirectory = $Setup['AltInstallDir']
-        MainExecutable               = $Setup['MainExe']
-        Uninstaller                  = $Setup['UninstallFile']
-        ShowsAppsAndFeaturesEntry    = $Setup['ShowAddRemove'] -eq '1'
-        Scope                        = $null
-        SupportedScopes              = @('user', 'machine')
-        RegistryWrites               = @($RegistryWrites)
-        RegistryAssociationInfo      = $RegistryAssociationInfo
-        Protocols                    = $RegistryAssociationInfo.Protocols
-        FileExtensions               = $RegistryAssociationInfo.FileExtensions
-        EmbeddedFiles                = @($ArchiveData.Entries.FullName)
-        ArchiveRange                 = $ArchiveData.Range
-        WritesAppsAndFeaturesEntry   = if ($Setup['ShowAddRemove'] -eq '1') { $true } else { $false }
-        Warnings                     = @($Warnings)
-        ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.ActualInstaller'; ParserMajor = 1; Sources = @('Validated embedded ZIP archive', 'aisetup.ini') }
+        MainExecutable                 = $Setup['MainExe']
+        Uninstaller                    = $Setup['UninstallFile']
+        ShowsAppsAndFeaturesEntry      = $Setup['ShowAddRemove'] -eq '1'
+        Scope                          = $null
+        SupportedScopes                = @('user', 'machine')
+        RegistryWrites                 = @($RegistryWrites)
+        RegistryAssociationInfo        = $RegistryAssociationInfo
+        Protocols                      = $RegistryAssociationInfo.Protocols
+        FileExtensions                 = $RegistryAssociationInfo.FileExtensions
+        EmbeddedFiles                  = @($ArchiveData.Entries.FullName)
+        ArchiveRange                   = $ArchiveData.Range
+        WritesAppsAndFeaturesEntry     = if ($Setup['ShowAddRemove'] -eq '1') { $true } else { $false }
+        Warnings                       = @($Warnings)
+        ParserVersionInfo              = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.ActualInstaller'; ParserMajor = 1; Sources = @('Validated embedded ZIP archive', 'aisetup.ini') }
       }
     } finally { Close-InstallerArchiveRange -Context $Context }
   }
@@ -147,7 +147,7 @@ function Test-ActualInstaller {
   .SYNOPSIS
     Test whether a file contains a parseable Actual Installer project
   #>
-  [OutputType([bool])] param([Parameter(Position=0,ValueFromPipeline,Mandatory)][string]$Path)
+  [OutputType([bool])] param([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
   process { try { $null = Get-ActualInstallerInfo -Path $Path; $true } catch { $false } }
 }
 function Read-ProtocolsFromActualInstaller {
@@ -175,7 +175,7 @@ function Read-ProductVersionFromActualInstaller {
   .SYNOPSIS
     Read the resolved Actual Installer project version
   #>
-  param([Parameter(ValueFromPipeline,Mandatory)][string]$Path)
+  param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-ActualInstallerInfo -Path $Path).DisplayVersion }
 }
 function Read-ProductNameFromActualInstaller {
@@ -183,7 +183,7 @@ function Read-ProductNameFromActualInstaller {
   .SYNOPSIS
     Read the Actual Installer project name
   #>
-  param([Parameter(ValueFromPipeline,Mandatory)][string]$Path)
+  param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-ActualInstallerInfo -Path $Path).DisplayName }
 }
 function Read-PublisherFromActualInstaller {
@@ -191,7 +191,7 @@ function Read-PublisherFromActualInstaller {
   .SYNOPSIS
     Read the Actual Installer project publisher
   #>
-  param([Parameter(ValueFromPipeline,Mandatory)][string]$Path)
+  param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-ActualInstallerInfo -Path $Path).Publisher }
 }
 function Read-ProductCodeFromActualInstaller {
@@ -199,7 +199,7 @@ function Read-ProductCodeFromActualInstaller {
   .SYNOPSIS
     Read the Actual Installer project GUID
   #>
-  param([Parameter(ValueFromPipeline,Mandatory)][string]$Path)
+  param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-ActualInstallerInfo -Path $Path).ProductCode }
 }
 

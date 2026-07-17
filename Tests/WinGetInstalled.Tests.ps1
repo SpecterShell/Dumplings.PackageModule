@@ -8,13 +8,13 @@ BeforeAll {
       DefaultLocale     = 'en-US'
     }
     Installer = [ordered]@{
-      ManifestType  = 'installer'
-      ProductCode   = '{11111111-1111-1111-1111-111111111111}'
-      Installers    = @(
+      ManifestType = 'installer'
+      ProductCode  = '{11111111-1111-1111-1111-111111111111}'
+      Installers   = @(
         [ordered]@{
-          Architecture            = 'x64'
-          InstallerType           = 'msi'
-          AppsAndFeaturesEntries  = @(
+          Architecture           = 'x64'
+          InstallerType          = 'msi'
+          AppsAndFeaturesEntries = @(
             [ordered]@{
               DisplayName = 'Contoso Desktop'
               Publisher   = 'Contoso, Ltd.'
@@ -23,10 +23,10 @@ BeforeAll {
           )
         },
         [ordered]@{
-          Architecture       = 'arm64'
-          InstallerType      = 'msix'
-          PackageFamilyName  = 'Contoso.App_1234567890abc'
-          ProductCode        = '{33333333-3333-3333-3333-333333333333}'
+          Architecture      = 'arm64'
+          InstallerType     = 'msix'
+          PackageFamilyName = 'Contoso.App_1234567890abc'
+          ProductCode       = '{33333333-3333-3333-3333-333333333333}'
         }
       )
     }

@@ -161,21 +161,21 @@ function Get-SevenZipSfxInfo {
     }
 
     [pscustomobject]@{
-      Path                       = $Installer.FullName
-      Format                     = '7z SFX'
-      ConfigOffset               = $ConfigStart
-      ArchiveOffset              = $ArchiveOffset
-      Configuration              = $Config.Values
-      CommandSource              = $Config.CommandSource
-      CommandLine                = $Config.Command.CommandLine
-      ExecutedPayload            = $Config.Command.ExecutedPayload
-      ExecutedPayloads           = @($Config.Commands | Where-Object { $_.Detail.Command.ExecutedPayload } | ForEach-Object { $_.Detail.Command.ExecutedPayload } | Select-Object -Unique)
-      PayloadReference           = $Config.Command.PayloadReference
-      PayloadArguments           = $Config.Command.ArgumentList
-      Commands                   = $Config.Commands
-      PassesAdditionalArguments  = $Config.PassesAdditionalArguments
-      NestedFiles                = @($Entries.FullName)
-      Warnings                   = @(
+      Path                      = $Installer.FullName
+      Format                    = '7z SFX'
+      ConfigOffset              = $ConfigStart
+      ArchiveOffset             = $ArchiveOffset
+      Configuration             = $Config.Values
+      CommandSource             = $Config.CommandSource
+      CommandLine               = $Config.Command.CommandLine
+      ExecutedPayload           = $Config.Command.ExecutedPayload
+      ExecutedPayloads          = @($Config.Commands | Where-Object { $_.Detail.Command.ExecutedPayload } | ForEach-Object { $_.Detail.Command.ExecutedPayload } | Select-Object -Unique)
+      PayloadReference          = $Config.Command.PayloadReference
+      PayloadArguments          = $Config.Command.ArgumentList
+      Commands                  = $Config.Commands
+      PassesAdditionalArguments = $Config.PassesAdditionalArguments
+      NestedFiles               = @($Entries.FullName)
+      Warnings                  = @(
         foreach ($Command in $Config.Commands) {
           if (-not $Command.Detail.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded archive entry: $($Command.Detail.Command.CommandLine)" }
         }

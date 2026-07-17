@@ -250,7 +250,7 @@ Describe 'WinGet native download compatibility probe' {
       $Now = [datetimeoffset]'2026-07-17T12:00:00Z'
       $RetryDate = $Now.AddSeconds(12).ToString('R', [Globalization.CultureInfo]::InvariantCulture)
       $Result = [pscustomobject]@{
-        HttpStatusCode = 429
+        HttpStatusCode  = 429
         ResponseHeaders = "HTTP/1.1 429 Too Many Requests`r`nRetry-After: $RetryDate`r`n"
       }
 
@@ -313,10 +313,10 @@ Describe 'WinGet native download compatibility probe' {
       Mock Write-Progress { }
       $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
       $Operation = [pscustomobject]@{
-        IsCompleted = $false
-        Result = $Result
-        WaitCount = 0
-        CancelCount = 0
+        IsCompleted  = $false
+        Result       = $Result
+        WaitCount    = 0
+        CancelCount  = 0
         DisposeCount = 0
       }
       $Operation | Add-Member ScriptMethod Wait {
@@ -348,9 +348,9 @@ Describe 'WinGet native download compatibility probe' {
     InModuleScope WinGetDownload {
       Mock Write-Progress { }
       $Operation = [pscustomobject]@{
-        IsCompleted = $false
-        Result = [Dumplings.WinGetDownload.DownloadResult]::new()
-        CancelCount = 0
+        IsCompleted  = $false
+        Result       = [Dumplings.WinGetDownload.DownloadResult]::new()
+        CancelCount  = 0
         DisposeCount = 0
       }
       $Operation | Add-Member ScriptMethod Wait { param($Milliseconds) [Threading.Thread]::Sleep($Milliseconds); return $false }

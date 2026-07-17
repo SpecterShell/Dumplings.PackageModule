@@ -17,18 +17,18 @@ BeforeAll {
       [object[]]$FileExtensions = @()
     )
     [pscustomobject][ordered]@{
-      SchemaVersion = 1
-      Phase = $Phase
-      CapturedAtUtc = '2026-07-12T00:00:00.0000000Z'
-      ComputerName = 'TESTVM'
-      UserName = 'TESTVM\Tester'
-      UserSid = 'S-1-5-21-1'
-      IsElevated = $true
-      OperatingSystem = 'Windows'
-      Is64BitOperatingSystem = $true
-      Is64BitProcess = $true
-      ARPEntries = $ARPEntries
-      ProtocolAssociations = $Protocols
+      SchemaVersion             = 1
+      Phase                     = $Phase
+      CapturedAtUtc             = '2026-07-12T00:00:00.0000000Z'
+      ComputerName              = 'TESTVM'
+      UserName                  = 'TESTVM\Tester'
+      UserSid                   = 'S-1-5-21-1'
+      IsElevated                = $true
+      OperatingSystem           = 'Windows'
+      Is64BitOperatingSystem    = $true
+      Is64BitProcess            = $true
+      ARPEntries                = $ARPEntries
+      ProtocolAssociations      = $Protocols
       FileExtensionAssociations = $FileExtensions
     }
   }

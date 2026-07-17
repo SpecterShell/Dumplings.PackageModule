@@ -200,7 +200,7 @@ function ConvertTo-WinGetInstallerManifestMetadata {
   .PARAMETER InstallerType
     The effective WinGet installer type
   .PARAMETER OldInstaller
-    The old installer entry, used to preserve Inno uninstall-key suffixes
+    The existing installer entry, used when normalizing parser metadata for manifest updates
   #>
   [OutputType([System.Collections.IDictionary])]
   param (
@@ -219,38 +219,26 @@ function ConvertTo-WinGetInstallerManifestMetadata {
   # Scope, associations, dependencies, and locale identity remain author-controlled.
   # Publisher here is used only for an existing AppsAndFeaturesEntries.Publisher field.
   $PropertyMap = [ordered]@{
-    ProductCode                    = @('AppsAndFeaturesProductCode', 'ProductCode')
-    UpgradeCode                    = @('UpgradeCode')
-    DisplayName                    = @('DisplayName', 'ProductName')
-    DisplayVersion                 = @('DisplayVersion', 'ProductVersion', 'Version')
-    Publisher                      = $InstallerType -cin @('msix', 'appx') ? @('PublisherDisplayName') : @('Publisher', 'Manufacturer', 'Authors')
-    DefaultInstallLocation         = @('DefaultInstallLocation')
-    AppsAndFeaturesInstallerType   = @('AppsAndFeaturesInstallerType')
-    WritesAppsAndFeaturesEntry     = @('WritesAppsAndFeaturesEntry')
-    SignatureSha256                = @('SignatureSha256')
-    PackageFamilyName              = @('PackageFamilyName')
-    Platform                       = @('Platform')
-    MinimumOSVersion               = @('MinimumOSVersion')
-    Capabilities                   = @('Capabilities')
-    RestrictedCapabilities         = @('RestrictedCapabilities')
+    ProductCode                  = @('AppsAndFeaturesProductCode', 'ProductCode')
+    UpgradeCode                  = @('UpgradeCode')
+    DisplayName                  = @('DisplayName', 'ProductName')
+    DisplayVersion               = @('DisplayVersion', 'ProductVersion', 'Version')
+    Publisher                    = $InstallerType -cin @('msix', 'appx') ? @('PublisherDisplayName') : @('Publisher', 'Manufacturer', 'Authors')
+    DefaultInstallLocation       = @('DefaultInstallLocation')
+    AppsAndFeaturesInstallerType = @('AppsAndFeaturesInstallerType')
+    WritesAppsAndFeaturesEntry   = @('WritesAppsAndFeaturesEntry')
+    SignatureSha256              = @('SignatureSha256')
+    PackageFamilyName            = @('PackageFamilyName')
+    Platform                     = @('Platform')
+    MinimumOSVersion             = @('MinimumOSVersion')
+    Capabilities                 = @('Capabilities')
+    RestrictedCapabilities       = @('RestrictedCapabilities')
+    UnresolvedFields             = @('UnresolvedFields')
   }
 
   foreach ($TargetProperty in $PropertyMap.Keys) {
     $Property = Get-WinGetInstallerMetadataProperty -InputObject $InputObject -Name $PropertyMap[$TargetProperty]
     if ($Property.Found) { $Metadata[$TargetProperty] = $Property.Value }
-  }
-
-  if ($InstallerType -ceq 'inno' -and $Metadata.Contains('ProductCode') -and -not [string]::IsNullOrWhiteSpace($Metadata.ProductCode)) {
-    # Get-InnoInfo returns AppId. Keep the uninstall-key suffix used by the accepted manifest.
-    $OldInnoProductCode = [string]$OldInstaller['ProductCode']
-    if ([string]::IsNullOrWhiteSpace($OldInnoProductCode)) {
-      $OldInnoEntry = @($OldInstaller['AppsAndFeaturesEntries']).Where({ $_['ProductCode'] }, 'First')
-      if ($OldInnoEntry.Count -gt 0) { $OldInnoProductCode = [string]$OldInnoEntry[0]['ProductCode'] }
-    }
-    $InnoSuffix = [regex]::Match($OldInnoProductCode, '(?i)(_is\d+)$')
-    if ($InnoSuffix.Success -and -not $Metadata.ProductCode.EndsWith($InnoSuffix.Value, [StringComparison]::OrdinalIgnoreCase)) {
-      $Metadata.ProductCode += $InnoSuffix.Value
-    }
   }
 
   $Metadata
@@ -405,11 +393,11 @@ function Get-WinGetGenericInstallerManifestInfo {
     $ParserOutputs = @($MsiInfo, $CommandLineMetadata, $Metadata, $SuccessfulParser.Result) | Where-Object { $null -ne $_ }
     $WarningsProperty = $null -eq $Metadata ? $null : $Metadata.PSObject.Properties['Warnings']
     return [pscustomobject]@{
-      ParserName       = $SuccessfulParser.Name
-      InputObject      = @($ParserOutputs)
-      SelectedMsiPath  = $null -eq $MsiInfo ? $null : $MsiInfo.SelectedMsiPath
-      SelectionMethod  = $null -eq $MsiInfo ? $null : $MsiInfo.SelectionMethod
-      Warnings         = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
+      ParserName      = $SuccessfulParser.Name
+      InputObject     = @($ParserOutputs)
+      SelectedMsiPath = $null -eq $MsiInfo ? $null : $MsiInfo.SelectedMsiPath
+      SelectionMethod = $null -eq $MsiInfo ? $null : $MsiInfo.SelectionMethod
+      Warnings        = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
     }
   }
 
@@ -482,6 +470,10 @@ function Set-WinGetInstallerManifestMetadata {
     $Logger.Invoke($Message, 'Warning')
   }
   $HasScalarValue = { param($Value) $null -ne $Value -and -not ($Value -is [string] -and [string]::IsNullOrWhiteSpace($Value)) }
+  $UnresolvedFields = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($Field in @($Metadata['UnresolvedFields'])) {
+    if (-not [string]::IsNullOrWhiteSpace($Field)) { $null = $UnresolvedFields.Add([string]$Field) }
+  }
 
   $NeedsAppsAndFeaturesMetadata = ($Installer.Contains('ProductCode') -and -not $InstallerEntry.Contains('ProductCode')) -or ([bool]$Installer['AppsAndFeaturesEntries'] -and -not $InstallerEntry.Contains('AppsAndFeaturesEntries'))
   if ($Metadata.Contains('WritesAppsAndFeaturesEntry') -and -not [bool]$Metadata.WritesAppsAndFeaturesEntry -and $NeedsAppsAndFeaturesMetadata) {
@@ -492,7 +484,7 @@ function Set-WinGetInstallerManifestMetadata {
   }
 
   foreach ($Field in @('ProductCode', 'SignatureSha256', 'PackageFamilyName', 'MinimumOSVersion')) {
-    if (-not $Installer.Contains($Field) -or $InstallerEntry.Contains($Field)) { continue }
+    if (-not $Installer.Contains($Field) -or $InstallerEntry.Contains($Field) -or $UnresolvedFields.Contains($Field)) { continue }
     if ($Metadata.Contains($Field) -and (& $HasScalarValue $Metadata[$Field])) {
       $Installer[$Field] = $Metadata[$Field]
     } else {
@@ -510,7 +502,7 @@ function Set-WinGetInstallerManifestMetadata {
   }
 
   $TaskOverridesDefaultInstallLocation = $InstallerEntry.Contains('InstallationMetadata') -and $InstallerEntry.InstallationMetadata -is [System.Collections.IDictionary] -and $InstallerEntry.InstallationMetadata.Contains('DefaultInstallLocation')
-  if ($Installer.Contains('InstallationMetadata') -and $Installer.InstallationMetadata -is [System.Collections.IDictionary] -and $Installer.InstallationMetadata.Contains('DefaultInstallLocation') -and -not $TaskOverridesDefaultInstallLocation) {
+  if ($Installer.Contains('InstallationMetadata') -and $Installer.InstallationMetadata -is [System.Collections.IDictionary] -and $Installer.InstallationMetadata.Contains('DefaultInstallLocation') -and -not $TaskOverridesDefaultInstallLocation -and -not $UnresolvedFields.Contains('DefaultInstallLocation')) {
     if ($Metadata.Contains('DefaultInstallLocation') -and (& $HasScalarValue $Metadata.DefaultInstallLocation)) {
       $Installer.InstallationMetadata.DefaultInstallLocation = $Metadata.DefaultInstallLocation
     } elseif (-not $Strict) {
@@ -555,6 +547,7 @@ function Set-WinGetInstallerManifestMetadata {
     foreach ($Field in $AppsAndFeaturesMap.Keys) {
       if (-not $Entry.Contains($Field)) { continue }
       $MetadataField = $AppsAndFeaturesMap[$Field]
+      if ($UnresolvedFields.Contains($MetadataField)) { continue }
       if ($Metadata.Contains($MetadataField) -and (& $HasScalarValue $Metadata[$MetadataField])) {
         $Entry[$Field] = $Metadata[$MetadataField]
       } else {

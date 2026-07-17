@@ -128,11 +128,11 @@ function Get-QSetupLayout {
   }
   if ($Records.Count -eq $MaximumRecords -and $Offset -lt $File.Length) { $Warnings.Add("The QSetup record count exceeds the $MaximumRecords-record limit.") }
   [pscustomobject]@{
-    Preamble       = $Preamble
-    Records        = $Records.ToArray()
-    Complete       = $Offset -eq $File.Length
+    Preamble        = $Preamble
+    Records         = $Records.ToArray()
+    Complete        = $Offset -eq $File.Length
     ParsedEndOffset = [long]$Offset
-    Warnings       = @($Warnings)
+    Warnings        = @($Warnings)
   }
 }
 
@@ -242,33 +242,33 @@ function Get-QSetupInfo {
     if ($Directive.ContainsKey('SET_PERFORM_EXECUTE_OP')) { $Warnings.Add('QSetup defines custom execution actions. Inspect nested executables and action arguments before finalizing dependencies or switches.') }
 
     [pscustomobject]@{
-      InstallerType              = 'QSetup'
-      ProductCode                = $ProductCode
-      PackageName                = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_NAME'
-      DisplayName                = $DisplayName
-      ProductName                = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_NAME'
-      DisplayVersion             = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_VERSION'
-      Publisher                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_NAME'
-      PublisherUrl               = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_URL'
-      ProjectName                = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROJECT_NAME'
-      ProjectStamp               = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PC_STAMP'
-      ComposerBuild              = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPOSER_BUILD'
+      InstallerType                = 'QSetup'
+      ProductCode                  = $ProductCode
+      PackageName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_NAME'
+      DisplayName                  = $DisplayName
+      ProductName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_NAME'
+      DisplayVersion               = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_VERSION'
+      Publisher                    = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_NAME'
+      PublisherUrl                 = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_URL'
+      ProjectName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROJECT_NAME'
+      ProjectStamp                 = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PC_STAMP'
+      ComposerBuild                = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPOSER_BUILD'
       DefaultInstallationDirectory = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_TARGET_DIR'
-      MainExecutable             = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_EXE_NAME'
-      Scope                      = $Scope
-      SupportedScopes            = if ($Scope) { @($Scope) } else { @() }
-      SupportedArchitectures     = $SupportedArchitectures
-      AllowedOperatingSystems    = $AllowedOs
-      RegistryWrites             = $RegistryWrites
-      RegistryAssociationInfo    = $RegistryAssociationInfo
-      Protocols                  = $RegistryAssociationInfo.Protocols
-      FileExtensions             = $RegistryAssociationInfo.FileExtensions
-      WritesAppsAndFeaturesEntry = [bool]$WritesAppsAndFeaturesEntry
-      Records                    = @($Layout.Records | Select-Object Name, Required, Stamp, Offset, CompressedLength)
-      ExtractedFiles             = @($Layout.Records.Name)
-      SetupDirectives            = $Directive
-      Warnings                   = @($Warnings)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.QSetup'; ParserMajor = 1; Sources = @('validated QSetup zlib record table', 'Setup.txt directives') }
+      MainExecutable               = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_EXE_NAME'
+      Scope                        = $Scope
+      SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
+      SupportedArchitectures       = $SupportedArchitectures
+      AllowedOperatingSystems      = $AllowedOs
+      RegistryWrites               = $RegistryWrites
+      RegistryAssociationInfo      = $RegistryAssociationInfo
+      Protocols                    = $RegistryAssociationInfo.Protocols
+      FileExtensions               = $RegistryAssociationInfo.FileExtensions
+      WritesAppsAndFeaturesEntry   = [bool]$WritesAppsAndFeaturesEntry
+      Records                      = @($Layout.Records | Select-Object Name, Required, Stamp, Offset, CompressedLength)
+      ExtractedFiles               = @($Layout.Records.Name)
+      SetupDirectives              = $Directive
+      Warnings                     = @($Warnings)
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.QSetup'; ParserMajor = 1; Sources = @('validated QSetup zlib record table', 'Setup.txt directives') }
     }
   }
 }

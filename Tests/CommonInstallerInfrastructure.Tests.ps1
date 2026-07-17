@@ -20,19 +20,19 @@ Describe 'Shared installer infrastructure parity' {
     $PackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $ParserRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\InstallerParsers'))
     foreach ($RelativePath in @(
-      'Libraries\Runtime.psm1',
-      'Libraries\Binary.psm1',
-      'Libraries\Compression.psm1',
-      'Libraries\Archive.psm1',
-      'Libraries\PE.psm1',
-      'Libraries\RegistryAssociations.psm1',
-      'Assets\InstallerInfrastructure\BinaryIO.cs',
-      'Assets\InstallerInfrastructure\PatternSearch.cs',
-      'Assets\InstallerInfrastructure\PEImageReader.cs',
-      'Assets\SharpCompress.dll',
-      'Assets\ZstdSharp.dll',
-      'Tests\TestFixture.ps1'
-    )) {
+        'Libraries\Runtime.psm1',
+        'Libraries\Binary.psm1',
+        'Libraries\Compression.psm1',
+        'Libraries\Archive.psm1',
+        'Libraries\PE.psm1',
+        'Libraries\RegistryAssociations.psm1',
+        'Assets\InstallerInfrastructure\BinaryIO.cs',
+        'Assets\InstallerInfrastructure\PatternSearch.cs',
+        'Assets\InstallerInfrastructure\PEImageReader.cs',
+        'Assets\SharpCompress.dll',
+        'Assets\ZstdSharp.dll',
+        'Tests\TestFixture.ps1'
+      )) {
       (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PackageRoot $RelativePath)).Hash |
         Should -Be (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ParserRoot $RelativePath)).Hash
     }
@@ -194,7 +194,10 @@ Describe 'Bounded binary streams' {
   }
 
   It 'computes the standard CRC32 vector and enforces copy limits' {
-    Get-BinaryCrc32 -Bytes ([Text.Encoding]::ASCII.GetBytes('123456789')) | Should -Be ([uint32]3421780262)
+    $CrcBytes = [Text.Encoding]::ASCII.GetBytes('__123456789__')
+    Get-BinaryCrc32 -Bytes $CrcBytes -Offset 2 -Count 9 | Should -Be ([uint32]3421780262)
+    Get-BinaryCrc32 -Bytes $CrcBytes | Should -Not -Be ([uint32]3421780262)
+    { Get-BinaryCrc32 -Bytes $CrcBytes -Offset 8 -Count 6 } | Should -Throw
     $Source = [IO.MemoryStream]::new([byte[]](1, 2, 3))
     $Destination = [IO.MemoryStream]::new()
     try { { Copy-BoundedStream -Source $Source -Destination $Destination -MaximumBytes 2 } | Should -Throw }
@@ -239,6 +242,20 @@ Describe 'Get-PEVersionStringTable' {
       $Layout = Get-PELayout -Stream $Stream
       $Layout.Sections.Count | Should -BeGreaterThan 0
       $Stream.Position | Should -Be 5
+    } finally { $Stream.Dispose() }
+  }
+
+  It 'reuses a caller-provided PE layout while enumerating resources' {
+    $ExecutablePath = (Get-Process -Id $PID).Path
+    $Stream = [IO.File]::OpenRead($ExecutablePath)
+    $Stream.Position = 7
+    try {
+      $Layout = Get-PELayout -Stream $Stream
+      $Resources = @(Get-PEResourceInfo -Stream $Stream -Layout $Layout)
+
+      $Resources.Count | Should -BeGreaterThan 0
+      $Stream.Position | Should -Be 7
+      [object]::ReferenceEquals($Resources[0].SourceStream, $Stream) | Should -BeTrue
     } finally { $Stream.Dispose() }
   }
 }

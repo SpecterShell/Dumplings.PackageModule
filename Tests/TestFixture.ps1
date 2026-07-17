@@ -59,10 +59,10 @@ function Write-DumplingsTestFixtureCacheRecord {
   $MetadataPath = "$Path.fixture.json"
   $PartialMetadataPath = "$MetadataPath.partial"
   [ordered]@{
-    Uri             = $Uri
-    Length          = $File.Length
-    Sha256          = Get-DumplingsTestFixtureHash -Path $Path
-    CachedAtUtc     = [DateTime]::UtcNow.ToString('o')
+    Uri         = $Uri
+    Length      = $File.Length
+    Sha256      = Get-DumplingsTestFixtureHash -Path $Path
+    CachedAtUtc = [DateTime]::UtcNow.ToString('o')
   } | ConvertTo-Json | Set-Content -LiteralPath $PartialMetadataPath -Encoding UTF8
   Move-Item -LiteralPath $PartialMetadataPath -Destination $MetadataPath -Force
 }

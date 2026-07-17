@@ -53,16 +53,16 @@ Describe 'Get-WinGetPRValidationLog' {
       if ($RequestUri -match 'api\.github\.com/.+/comments') {
         return @(
           [pscustomobject]@{
-            id = 100
+            id         = 100
             created_at = '2026-07-10T00:00:00Z'
-            user = [pscustomobject]@{ login = 'wingetbot' }
-            body = 'Validation Pipeline Run [older](https://dev.azure.com/shine-oss/winget-pkgs/_build/results?buildId=111)'
+            user       = [pscustomobject]@{ login = 'wingetbot' }
+            body       = 'Validation Pipeline Run [older](https://dev.azure.com/shine-oss/winget-pkgs/_build/results?buildId=111)'
           },
           [pscustomobject]@{
-            id = 101
+            id         = 101
             created_at = '2026-07-11T00:00:00Z'
-            user = [pscustomobject]@{ login = 'wingetbot' }
-            body = 'Validation Pipeline Run [newer](https://dev.azure.com/shine-oss/winget-pkgs/_build/results?buildId=222)'
+            user       = [pscustomobject]@{ login = 'wingetbot' }
+            body       = 'Validation Pipeline Run [newer](https://dev.azure.com/shine-oss/winget-pkgs/_build/results?buildId=222)'
           }
         )
       }

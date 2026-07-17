@@ -88,13 +88,13 @@ function Get-InstallerArchiveEntry {
   foreach ($Entry in $Archive.Entries) {
     if ($Entry.IsDirectory) { continue }
     [pscustomobject]@{
-      Key         = [string]$Entry.Key
-      FullName    = [string]$Entry.Key
-      Length      = [long]$Entry.Size
-      Size        = [long]$Entry.Size
+      Key            = [string]$Entry.Key
+      FullName       = [string]$Entry.Key
+      Length         = [long]$Entry.Size
+      Size           = [long]$Entry.Size
       CompressedSize = [long]$Entry.CompressedSize
-      LinkTarget   = if ($Entry.PSObject.Properties.Name -contains 'LinkTarget') { [string]$Entry.LinkTarget } else { $null }
-      NativeEntry = $Entry
+      LinkTarget     = if ($Entry.PSObject.Properties.Name -contains 'LinkTarget') { [string]$Entry.LinkTarget } else { $null }
+      NativeEntry    = $Entry
     }
   }
 }
@@ -123,7 +123,7 @@ function Read-InstallerArchiveEntryBytes {
   $EntryStream = Open-InstallerArchiveEntry -Entry $Entry
   try {
     $Length = if ($Entry.PSObject.Properties.Name -contains 'Length' -and [long]$Entry.Length -ge 0) { [long]$Entry.Length } else { -1L }
-    return ,([Dumplings.InstallerInfrastructure.BinaryIO]::ReadBounded($EntryStream, $MaximumBytes, $Length))
+    return , ([Dumplings.InstallerInfrastructure.BinaryIO]::ReadBounded($EntryStream, $MaximumBytes, $Length))
   } finally {
     $EntryStream.Dispose()
   }
@@ -339,13 +339,13 @@ function Get-EmbeddedSevenZipArchiveRange {
         $EntryCount = @(Get-InstallerArchiveEntry -Archive $Archive).Count
         if ($EntryCount -eq 0) { continue }
         [pscustomobject]@{
-          Offset          = [long]$Offset
-          Length          = [long]$ArchiveLength
-          MajorVersion    = [byte]$Header[6]
-          MinorVersion    = [byte]$Header[7]
-          EntryCount      = [int]$EntryCount
+          Offset           = [long]$Offset
+          Length           = [long]$ArchiveLength
+          MajorVersion     = [byte]$Header[6]
+          MinorVersion     = [byte]$Header[7]
+          EntryCount       = [int]$EntryCount
           NextHeaderOffset = [uint64]$NextHeaderOffset
-          NextHeaderSize  = [uint64]$NextHeaderSize
+          NextHeaderSize   = [uint64]$NextHeaderSize
         }
         if (--$MaximumArchives -le 0) { break }
       } catch {

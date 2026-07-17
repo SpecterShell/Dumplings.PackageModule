@@ -8,7 +8,7 @@ function Read-PEFileBytes {
   #>
   [OutputType([byte[]])]
   param ([Parameter(Mandatory)][IO.Stream]$Stream, [Parameter(Mandatory)][long]$Offset, [Parameter(Mandatory)][int]$Count)
-  return ,(Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count)
+  return , (Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count)
 }
 
 function Read-PEUInt16 {
@@ -95,8 +95,8 @@ function Open-PEReaderInput {
   if ($Stream) { return [pscustomobject]@{ Stream = $Stream; Path = $null; OwnsStream = $false } }
   $File = Get-Item -LiteralPath $Path -Force
   [pscustomobject]@{
-    Stream = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite')
-    Path = $File.FullName
+    Stream     = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite')
+    Path       = $File.FullName
     OwnsStream = $true
   }
 }
@@ -187,15 +187,19 @@ function Get-PEResourceInfo {
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, ParameterSetName = 'Path')][string]$Path,
     [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream,
+    [Parameter(ParameterSetName = 'Stream')][psobject]$Layout,
     [ValidateRange(1, 100000)][int]$MaximumResources = 10000
   )
   process {
     Import-BinaryPatternSearch
     $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
     try {
-      $Layout = [Dumplings.InstallerInfrastructure.PEImageReader]::ReadLayout($ReaderInput.Stream, $true)
-      if (-not $Layout) { return }
-      foreach ($Resource in [Dumplings.InstallerInfrastructure.PEImageReader]::ReadResources($ReaderInput.Stream, $Layout, $MaximumResources, $true)) {
+      $NativeLayout = if ($Layout) {
+        if (-not $Layout.NativeLayout) { throw 'The supplied PE layout does not contain native layout evidence.' }
+        $Layout.NativeLayout
+      } else { [Dumplings.InstallerInfrastructure.PEImageReader]::ReadLayout($ReaderInput.Stream, $true) }
+      if (-not $NativeLayout) { return }
+      foreach ($Resource in [Dumplings.InstallerInfrastructure.PEImageReader]::ReadResources($ReaderInput.Stream, $NativeLayout, $MaximumResources, $true)) {
         [pscustomobject]@{
           Path = $ReaderInput.Path; SourceStream = if ($ReaderInput.OwnsStream) { $null } else { $ReaderInput.Stream }
           TypeName = $Resource.TypeName; TypeId = $Resource.TypeId; Name = $Resource.Name; Id = $Resource.Id
@@ -215,9 +219,9 @@ function Read-PEResourceData {
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][psobject]$Resource, [ValidateRange(1, 1073741824)][long]$MaximumBytes = 134217728)
   process {
     if ($Resource.Size -lt 0 -or $Resource.Size -gt $MaximumBytes -or $Resource.Size -gt [int]::MaxValue) { throw "The PE resource exceeds the $MaximumBytes-byte read limit." }
-    if ($Resource.SourceStream) { return ,(Read-BinaryBytes -Stream $Resource.SourceStream -Offset $Resource.Offset -Count ([int]$Resource.Size)) }
+    if ($Resource.SourceStream) { return , (Read-BinaryBytes -Stream $Resource.SourceStream -Offset $Resource.Offset -Count ([int]$Resource.Size)) }
     $Stream = [IO.File]::Open($Resource.Path, 'Open', 'Read', 'ReadWrite')
-    try { return ,(Read-BinaryBytes -Stream $Stream -Offset $Resource.Offset -Count ([int]$Resource.Size)) } finally { $Stream.Dispose() }
+    try { return , (Read-BinaryBytes -Stream $Stream -Offset $Resource.Offset -Count ([int]$Resource.Size)) } finally { $Stream.Dispose() }
   }
 }
 
@@ -294,7 +298,7 @@ function Get-PEVersionStringTable {
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
   process {
     $Strings = [ordered]@{}
-    foreach ($Resource in @(Get-PEResourceInfo -Path $Path | Where-Object TypeId -eq 16)) {
+    foreach ($Resource in @(Get-PEResourceInfo -Path $Path | Where-Object TypeId -EQ 16)) {
       $Bytes = Read-PEResourceData -Resource $Resource -MaximumBytes 16777216; $Root = Read-PEVersionResourceBlock -Bytes $Bytes -Offset 0 -Limit $Bytes.Length
       $Pending = [Collections.Generic.Queue[object]]::new(); $Pending.Enqueue($Root)
       while ($Pending.Count) {

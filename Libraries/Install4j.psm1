@@ -43,9 +43,9 @@ function Read-Install4jFileByteRange {
     [int]$Count
   )
 
-  if ($Offset -lt 0 -or $Offset -ge $Stream.Length -or $Count -le 0) { return ,([byte[]]::new(0)) }
+  if ($Offset -lt 0 -or $Offset -ge $Stream.Length -or $Count -le 0) { return , ([byte[]]::new(0)) }
 
-  return ,(Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count -AllowPartial)
+  return , (Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count -AllowPartial)
 }
 
 function Read-Install4jInt32BigEndian {
@@ -411,31 +411,31 @@ function ConvertFrom-Install4jConfigXml {
     $Extension = Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'extension'
     $Extension = Expand-Install4jStaticText -Value $Extension -General $General -CompilerVariables $CompilerVariables
     [pscustomobject]@{
-      Extension  = $Extension
+      Extension   = $Extension
       Description = Expand-Install4jStaticText -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'description') -General $General -CompilerVariables $CompilerVariables
-      LauncherId = Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'launcherId'
-      Windows    = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'windows')
-      Selected   = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'selected')
+      LauncherId  = Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'launcherId'
+      Windows     = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'windows')
+      Selected    = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'selected')
     }
   }
 
   [pscustomobject]@{
-    Source                         = $Source
-    Install4jVersion               = Get-Install4jXmlAttribute -Element $Root -Name 'install4jVersion'
-    Install4jBuild                 = Get-Install4jXmlAttribute -Element $Root -Name 'install4jBuild'
-    Type                           = Get-Install4jXmlAttribute -Element $Root -Name 'type'
-    Archive                        = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlAttribute -Element $Root -Name 'archive')
-    Bitness                        = Get-Install4jXmlAttribute -Element $Root -Name 'bitness'
-    General                        = [pscustomobject]$General
-    CompilerVariables              = [pscustomobject]$CompilerVariables
-    HasRegisterAddRemoveAction     = [bool]$RegisterActionNode
-    RegisterAddRemoveItemName      = $RegisterItemName
-    HasRequestPrivilegesAction     = [bool]$RequestPrivilegesNode
-    RequestPrivileges              = $RequestPrivileges
-    MsiProductId                   = $CompilerVariables['sys.msiProductId']
-    DefaultInstallationDirectory   = $General.DefaultInstallationDirectory
-    PrivilegedInstallerRequest     = $General.PrivilegedInstallerRequest
-    FileAssociationActions          = @($FileAssociationActions)
+    Source                       = $Source
+    Install4jVersion             = Get-Install4jXmlAttribute -Element $Root -Name 'install4jVersion'
+    Install4jBuild               = Get-Install4jXmlAttribute -Element $Root -Name 'install4jBuild'
+    Type                         = Get-Install4jXmlAttribute -Element $Root -Name 'type'
+    Archive                      = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlAttribute -Element $Root -Name 'archive')
+    Bitness                      = Get-Install4jXmlAttribute -Element $Root -Name 'bitness'
+    General                      = [pscustomobject]$General
+    CompilerVariables            = [pscustomobject]$CompilerVariables
+    HasRegisterAddRemoveAction   = [bool]$RegisterActionNode
+    RegisterAddRemoveItemName    = $RegisterItemName
+    HasRequestPrivilegesAction   = [bool]$RequestPrivilegesNode
+    RequestPrivileges            = $RequestPrivileges
+    MsiProductId                 = $CompilerVariables['sys.msiProductId']
+    DefaultInstallationDirectory = $General.DefaultInstallationDirectory
+    PrivilegedInstallerRequest   = $General.PrivilegedInstallerRequest
+    FileAssociationActions       = @($FileAssociationActions)
   }
 }
 
@@ -459,13 +459,13 @@ function Get-Install4jAssociationInfo {
     }
     if (-not $SeenExtensions.Add($Extension)) { continue }
     $Associations.Add([pscustomobject]@{
-        FileExtension      = $Extension.ToLowerInvariant()
-        Extension          = ".$($Extension.ToLowerInvariant())"
-        Description        = $Action.Description
-        LauncherId         = $Action.LauncherId
+        FileExtension       = $Extension.ToLowerInvariant()
+        Extension           = ".$($Extension.ToLowerInvariant())"
+        Description         = $Action.Description
+        LauncherId          = $Action.LauncherId
         IsSelectedByDefault = $Action.Selected
-        Source             = 'install4j CreateFileAssociationAction'
-        Evidence           = $Action
+        Source              = 'install4j CreateFileAssociationAction'
+        Evidence            = $Action
       })
   }
 
@@ -597,10 +597,10 @@ function Get-Install4jLauncherConfiguration {
         throw "Invalid install4j startup-file length for '$Name': $Length"
       }
       $Entries.Add([pscustomobject]@{
-          Name        = $Name
-          Offset      = [long]$Stream.Position
-          Length      = [long]$Length
-          Transform   = 'Xor88'
+          Name         = $Name
+          Offset       = [long]$Stream.Position
+          Length       = [long]$Length
+          Transform    = 'Xor88'
           TransformKey = $Script:Install4jLauncherTransformKey
         })
       $Stream.Position += $Length
@@ -650,7 +650,7 @@ function Read-Install4jLauncherFile {
   try {
     $Source.Position = $Entry.Offset
     $null = Copy-BinaryXorStream -Source $Source -Destination $Destination -Key ([byte]$Entry.TransformKey) -ExpectedBytes $Entry.Length
-    return ,($Destination.ToArray())
+    return , ($Destination.ToArray())
   } finally {
     $Destination.Dispose()
     $Source.Dispose()
@@ -690,10 +690,10 @@ function Get-Install4jEmbeddedFileTable {
         if ($Length -lt 0 -or $Length -gt $File.Length) { throw 'Invalid install4j embedded file length' }
 
         $Entries.Add([pscustomobject]@{
-            Name                 = $Name
-            Length               = $Length
+            Name                  = $Name
+            Length                = $Length
             PayloadRelativeOffset = $PayloadRelativeOffset
-            Offset               = [long]0
+            Offset                = [long]0
           })
         $PayloadRelativeOffset += $Length
       }
@@ -739,7 +739,7 @@ function Read-Install4jEmbeddedFile {
 
   $Stream = [System.IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   try {
-    return ,(Read-Install4jFileByteRange -Stream $Stream -Offset $Entry.Offset -Count ([int]$Entry.Length))
+    return , (Read-Install4jFileByteRange -Stream $Stream -Offset $Entry.Offset -Count ([int]$Entry.Length))
   } finally {
     $Stream.Dispose()
   }
@@ -1171,40 +1171,40 @@ function Get-Install4jInfo {
     foreach ($Warning in @($AssociationInfo.Warnings)) { $Warnings.Add($Warning) }
 
     $Info = [pscustomobject]@{
-      InstallerType                 = 'install4j'
-      Family                        = 'install4j'
-      ProductCode                   = $ApplicationId
-      ApplicationId                 = $ApplicationId
-      PackageName                   = $Config.General.ApplicationName
-      DisplayName                   = $DisplayName
-      ProductName                   = Get-Install4jFirstValue -Value @($Config.General.ApplicationName, $VersionInfo.ProductName, $VersionInfo.FileDescription)
-      DisplayVersion                = $DisplayVersion
-      Publisher                     = $Publisher
-      PublisherUrl                  = $Config.General.PublisherUrl
-      Architecture                  = $Architecture
-      Scope                         = $ScopeInfo.Scope
-      DefaultScope                  = $ScopeInfo.DefaultScope
-      SupportedScopes               = $ScopeInfo.SupportedScopes
-      SupportsDualScope             = $ScopeInfo.SupportsDualScope
-      ScopeConfidence               = $ScopeInfo.Confidence
-      ScopeEvidence                 = $ScopeInfo.Evidence
-      WritesAppsAndFeaturesEntry    = $WritesAppsAndFeaturesEntry
-      DefaultInstallationDirectory  = $DefaultInstallationDirectory
-      UninstallerFilename           = $Config.General.UninstallerFilename
-      UninstallerDirectory          = $Config.General.UninstallerDirectory
-      MsiProductId                  = $Config.MsiProductId
-      EmbeddedFiles                 = @($EmbeddedFiles)
-      EmbeddedFileTables            = @($EmbeddedFileTables)
-      LauncherConfiguration         = $LauncherConfiguration
-      CanExpand                     = [bool]($LauncherConfiguration -or $EmbeddedFileTables.Count -gt 0)
-       RegistryWrites                = @()
-       RegistryAssociationInfo       = $AssociationInfo
-       Protocols                     = $AssociationInfo.Protocols
-       FileExtensions                = $AssociationInfo.FileExtensions
-      VersionInfo                   = $VersionInfo
-      Config                        = $Config
-      Warnings                      = @($Warnings)
-      ParserVersionInfo             = [pscustomobject]@{
+      InstallerType                = 'install4j'
+      Family                       = 'install4j'
+      ProductCode                  = $ApplicationId
+      ApplicationId                = $ApplicationId
+      PackageName                  = $Config.General.ApplicationName
+      DisplayName                  = $DisplayName
+      ProductName                  = Get-Install4jFirstValue -Value @($Config.General.ApplicationName, $VersionInfo.ProductName, $VersionInfo.FileDescription)
+      DisplayVersion               = $DisplayVersion
+      Publisher                    = $Publisher
+      PublisherUrl                 = $Config.General.PublisherUrl
+      Architecture                 = $Architecture
+      Scope                        = $ScopeInfo.Scope
+      DefaultScope                 = $ScopeInfo.DefaultScope
+      SupportedScopes              = $ScopeInfo.SupportedScopes
+      SupportsDualScope            = $ScopeInfo.SupportsDualScope
+      ScopeConfidence              = $ScopeInfo.Confidence
+      ScopeEvidence                = $ScopeInfo.Evidence
+      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+      DefaultInstallationDirectory = $DefaultInstallationDirectory
+      UninstallerFilename          = $Config.General.UninstallerFilename
+      UninstallerDirectory         = $Config.General.UninstallerDirectory
+      MsiProductId                 = $Config.MsiProductId
+      EmbeddedFiles                = @($EmbeddedFiles)
+      EmbeddedFileTables           = @($EmbeddedFileTables)
+      LauncherConfiguration        = $LauncherConfiguration
+      CanExpand                    = [bool]($LauncherConfiguration -or $EmbeddedFileTables.Count -gt 0)
+      RegistryWrites               = @()
+      RegistryAssociationInfo      = $AssociationInfo
+      Protocols                    = $AssociationInfo.Protocols
+      FileExtensions               = $AssociationInfo.FileExtensions
+      VersionInfo                  = $VersionInfo
+      Config                       = $Config
+      Warnings                     = @($Warnings)
+      ParserVersionInfo            = [pscustomobject]@{
         Parser      = 'Dumplings.PackageModule.Install4j'
         ParserMajor = 2
         Sources     = @('install4j launcher parameter block and startup-file table', 'install4j i4jparams.conf XML', 'install4j ContentCollector unextracted-file table', 'PE version resource')

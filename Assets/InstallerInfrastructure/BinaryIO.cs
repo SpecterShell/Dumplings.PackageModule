@@ -265,8 +265,16 @@ namespace Dumplings.InstallerInfrastructure
         public static uint Crc32(byte[] bytes)
         {
             if (bytes == null) throw new ArgumentNullException(nameof(bytes));
+            return Crc32(bytes, 0, bytes.Length);
+        }
+
+        public static uint Crc32(byte[] bytes, int offset, int count)
+        {
+            if (bytes == null) throw new ArgumentNullException(nameof(bytes));
+            if (offset < 0 || count < 0 || offset > bytes.Length || count > bytes.Length - offset) throw new ArgumentOutOfRangeException(nameof(count));
             uint crc = uint.MaxValue;
-            foreach (byte value in bytes) crc = CrcTable[(crc ^ value) & 0xFF] ^ (crc >> 8);
+            int end = offset + count;
+            for (int index = offset; index < end; index++) crc = CrcTable[(crc ^ bytes[index]) & 0xFF] ^ (crc >> 8);
             return crc ^ uint.MaxValue;
         }
 

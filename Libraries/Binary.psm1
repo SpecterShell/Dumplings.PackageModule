@@ -71,7 +71,7 @@ function Read-BinaryBytes {
   if ($Offset -lt 0 -or $Offset -gt $Stream.Length) { throw "Binary read offset is outside the stream: $Offset" }
   $ActualCount = if ($AllowPartial) { [int][Math]::Min($Count, $Stream.Length - $Offset) } else { $Count }
   # Prevent PowerShell from expanding byte arrays into boxed pipeline objects.
-  return ,([Dumplings.InstallerInfrastructure.BinaryIO]::ReadExactly($Stream, $Offset, $ActualCount, $true))
+  return , ([Dumplings.InstallerInfrastructure.BinaryIO]::ReadExactly($Stream, $Offset, $ActualCount, $true))
 }
 
 function Read-BinaryInteger {
@@ -184,17 +184,30 @@ function Get-BinaryCrc32 {
   <#
   .SYNOPSIS
     Calculate CRC32 from a path, stream, or byte array
+  .PARAMETER Offset
+    The first byte-array offset included in the checksum
+  .PARAMETER Count
+    The number of byte-array values to include, or -1 for the remaining values
+  .PARAMETER MaximumBytes
+    The maximum number of stream or file bytes to checksum
   #>
   [OutputType([uint32])]
   param (
     [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
     [Parameter(Mandatory, ParameterSetName = 'Stream')][System.IO.Stream]$Stream,
     [Parameter(Mandatory, ParameterSetName = 'Bytes')][byte[]]$Bytes,
+    [Parameter(ParameterSetName = 'Bytes')][ValidateRange(0, [int]::MaxValue)][int]$Offset = 0,
+    [Parameter(ParameterSetName = 'Bytes')][ValidateRange(-1, [int]::MaxValue)][int]$Count = -1,
     [ValidateRange(0, [long]::MaxValue)][long]$MaximumBytes = [long]::MaxValue
   )
   Assert-InstallerInfrastructureLoaded
   switch ($PSCmdlet.ParameterSetName) {
-    'Bytes' { return [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32($Bytes) }
+    'Bytes' {
+      if ($Offset -gt $Bytes.Length) { throw 'The CRC32 byte offset is outside the input array.' }
+      if ($Count -lt 0) { $Count = $Bytes.Length - $Offset }
+      if ($Count -gt $Bytes.Length - $Offset) { throw 'The CRC32 byte range is outside the input array.' }
+      return [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32($Bytes, $Offset, $Count)
+    }
     'Stream' { return [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32($Stream, $true, $MaximumBytes) }
     'Path' {
       $InputStream = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, 'Open', 'Read', 'ReadWrite')

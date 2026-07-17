@@ -91,8 +91,8 @@ function Get-InstallerRegistryAssociationInfo {
   $SeenExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
   foreach ($Write in @($ClassWrites | Where-Object {
-      $_.RelativeKey.IndexOf('\') -lt 0 -and [string]$_.Name -ieq 'URL Protocol'
-    })) {
+        $_.RelativeKey.IndexOf('\') -lt 0 -and [string]$_.Name -ieq 'URL Protocol'
+      })) {
     $Protocol = $Write.RelativeKey.Trim()
     if ($Protocol -notmatch '^[A-Za-z][A-Za-z0-9+.-]{0,254}$') {
       $Warnings.Add("Ignored non-literal protocol key '$Protocol'.")
@@ -131,8 +131,8 @@ function Get-InstallerRegistryAssociationInfo {
     $DefaultProgId = Get-InstallerClassDefaultValue -RegistryWrite $ClassWrites -Root $Root -RelativeKey $Extension
     if ($DefaultProgId) { $ProgIds.Add($DefaultProgId) }
     foreach ($Write in @($ClassWrites | Where-Object {
-        $_.Root -eq $Root -and $_.RelativeKey -ieq "$Extension\OpenWithProgids" -and -not (Test-InstallerDefaultRegistryValueName -Name $_.Name)
-      })) {
+          $_.Root -eq $Root -and $_.RelativeKey -ieq "$Extension\OpenWithProgids" -and -not (Test-InstallerDefaultRegistryValueName -Name $_.Name)
+        })) {
       $ProgId = [string]$Write.Name
       if (-not [string]::IsNullOrWhiteSpace($ProgId) -and -not $ProgIds.Contains($ProgId)) { $ProgIds.Add($ProgId) }
     }

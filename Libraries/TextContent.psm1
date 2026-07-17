@@ -43,7 +43,7 @@ function Expand-Node {
       # Extract the child nodes of the inline nodes and add them to the list
       ({ $_.HasChildNodes }) { $ChildNodes += Expand-Node -Node $_.ChildNodes; continue }
       # In case something went wrong
-      Default { $ChildNodes += $_; continue }
+      default { $ChildNodes += $_; continue }
     }
 
     return $ChildNodes

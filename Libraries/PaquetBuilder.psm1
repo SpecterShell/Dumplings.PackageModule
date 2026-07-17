@@ -38,8 +38,8 @@ function Get-PaquetBuilderArchiveData {
     }
   }
 
-  $Runtime = $Candidates | Where-Object Kind -eq 'Runtime' | Select-Object -First 1
-  $Payload = $Candidates | Where-Object Kind -eq 'Payload' | Sort-Object { $_.Range.Length } -Descending | Select-Object -First 1
+  $Runtime = $Candidates | Where-Object Kind -EQ 'Runtime' | Select-Object -First 1
+  $Payload = $Candidates | Where-Object Kind -EQ 'Payload' | Sort-Object { $_.Range.Length } -Descending | Select-Object -First 1
   if (-not $Runtime -or -not $Payload) { throw 'The PE overlay does not contain both Paquet Builder payload and runtime archives' }
   return [pscustomobject]@{ Payload = $Payload; Runtime = $Runtime }
 }
@@ -136,7 +136,7 @@ function Expand-PaquetBuilderInstaller {
           $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
         }
       } finally { Close-InstallerArchiveRange -Context $Context }
-      }
+    }
     if ($Result.Count -eq 0) { throw "No Paquet Builder files matched '$Name'" }
     return $Result.ToArray()
   }

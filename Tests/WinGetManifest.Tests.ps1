@@ -76,13 +76,14 @@ Describe 'WinGet installer manifest metadata updates' {
       Should -Invoke Get-NSISInfo -Exactly 1
     }
 
-    It 'Updates Inno metadata while preserving the uninstall-key suffix' {
+    It 'Updates source-derived Inno ProductCode and directory metadata' {
       Mock Get-InnoInfo {
         [pscustomobject]@{
-          ProductCode                = 'New.Inno.Product'
-          DisplayName                = 'New Inno Name'
+          ProductCode                = '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
+          DisplayName                = 'Kiro'
           DisplayVersion             = '3.0.0'
-          Publisher                  = 'New Inno Publisher'
+          Publisher                  = 'Amazon Web Services'
+          DefaultInstallLocation     = '%LocalAppData%\Programs\Kiro'
           WritesAppsAndFeaturesEntry = $true
         }
       }
@@ -90,24 +91,66 @@ Describe 'WinGet installer manifest metadata updates' {
         Architecture           = 'x86'
         InstallerType          = 'inno'
         InstallerUrl           = $Script:InstallerUrl
-        ProductCode            = 'Old.Inno.Product_is1'
+        ProductCode            = '{{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
+        InstallationMetadata   = [ordered]@{
+          DefaultInstallLocation = '{userpf}\Kiro'
+        }
         AppsAndFeaturesEntries = @([ordered]@{
             DisplayName    = 'Old Inno Name'
             DisplayVersion = '2.0.0'
             Publisher      = 'Old Inno Publisher'
-            ProductCode    = 'Old.Inno.Product_is1'
+            ProductCode    = '{{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
           })
       }
       $OldInstaller = $Installer | Copy-Object
 
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
-      $Result.ProductCode | Should -Be 'New.Inno.Product_is1'
-      $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'New Inno Name'
+      $Result.ProductCode | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
+      $Result.InstallationMetadata.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\Kiro'
+      $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'Kiro'
       $Result.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '3.0.0'
-      $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New Inno Publisher'
-      $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'New.Inno.Product_is1'
+      $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'Amazon Web Services'
+      $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
       Should -Invoke Get-InnoInfo -Exactly 1
+    }
+
+    It 'Preserves existing Inno fields when their values use runtime constants' {
+      Mock Get-InnoInfo {
+        [pscustomobject]@{
+          ProductCode                = $null
+          DisplayName                = $null
+          DisplayVersion             = $null
+          Publisher                  = $null
+          DefaultInstallLocation     = $null
+          UnresolvedFields           = @('ProductCode', 'DisplayName', 'DisplayVersion', 'Publisher', 'DefaultInstallLocation')
+          WritesAppsAndFeaturesEntry = $true
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'inno'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = 'Existing.Product_is1'
+        InstallationMetadata   = [ordered]@{ DefaultInstallLocation = '%LocalAppData%\Existing' }
+        AppsAndFeaturesEntries = @([ordered]@{
+            DisplayName    = 'Existing Name'
+            DisplayVersion = '1.0.0'
+            Publisher      = 'Existing Publisher'
+            ProductCode    = 'Existing.Product_is1'
+          })
+      }
+      $OldInstaller = $Installer | Copy-Object
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Existing.Product_is1'
+      $Result.InstallationMetadata.DefaultInstallLocation | Should -Be '%LocalAppData%\Existing'
+      $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'Existing Name'
+      $Result.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '1.0.0'
+      $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'Existing Publisher'
+      $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'Existing.Product_is1'
+      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }) | Should -BeNullOrEmpty
     }
 
     It 'Rejects known Inno wrappers that cannot own the existing ARP metadata' {
@@ -169,18 +212,18 @@ Describe 'WinGet installer manifest metadata updates' {
     It 'Updates MSI fields from one aggregate parser result' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
-          ProductCode                    = '{NEW-PRODUCT}'
-          ProductName                    = 'New MSI Product'
-          ProductVersion                 = '2.0.0'
-          Publisher                      = 'New MSI Publisher'
-          UpgradeCode                    = '{UPGRADE}'
-          AllUsers                       = '1'
-          InstallerBuilder               = 'Advanced Installer'
-          AppsAndFeaturesProductCode     = '{NEW-PRODUCT}.msq'
-          AppsAndFeaturesInstallerType   = 'exe'
-          Protocols                      = @('new-protocol')
-          FileExtensions                 = @('newext')
-          Dependencies                   = [ordered]@{ PackageDependencies = @([ordered]@{ PackageIdentifier = 'New.Dependency' }) }
+          ProductCode                  = '{NEW-PRODUCT}'
+          ProductName                  = 'New MSI Product'
+          ProductVersion               = '2.0.0'
+          Publisher                    = 'New MSI Publisher'
+          UpgradeCode                  = '{UPGRADE}'
+          AllUsers                     = '1'
+          InstallerBuilder             = 'Advanced Installer'
+          AppsAndFeaturesProductCode   = '{NEW-PRODUCT}.msq'
+          AppsAndFeaturesInstallerType = 'exe'
+          Protocols                    = @('new-protocol')
+          FileExtensions               = @('newext')
+          Dependencies                 = [ordered]@{ PackageDependencies = @([ordered]@{ PackageIdentifier = 'New.Dependency' }) }
         }
       }
       $Installer = [ordered]@{
@@ -433,16 +476,16 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-AdvancedInstallerMsiInfo {
         param($Installer, $Architecture)
         [pscustomobject]@{
-          ProductName                    = "New Advanced Product $Architecture"
-          ProductVersion                 = '5.0.0'
-          Publisher                      = 'New Advanced Publisher'
-          ProductCode                    = '{MSI-PRODUCT}'
-          AppsAndFeaturesProductCode     = "Advanced.Product.$Architecture"
-          UpgradeCode                    = '{ADVANCED-UPGRADE}'
-          AppsAndFeaturesInstallerType   = 'exe'
-          PackageArchitecture            = $Architecture
-          SelectedMsiPath                = "payload.$Architecture.msi"
-          SelectionMethod                = 'PayloadTable'
+          ProductName                  = "New Advanced Product $Architecture"
+          ProductVersion               = '5.0.0'
+          Publisher                    = 'New Advanced Publisher'
+          ProductCode                  = '{MSI-PRODUCT}'
+          AppsAndFeaturesProductCode   = "Advanced.Product.$Architecture"
+          UpgradeCode                  = '{ADVANCED-UPGRADE}'
+          AppsAndFeaturesInstallerType = 'exe'
+          PackageArchitecture          = $Architecture
+          SelectedMsiPath              = "payload.$Architecture.msi"
+          SelectionMethod              = 'PayloadTable'
         }
       }
       $Installer = [ordered]@{
@@ -513,16 +556,16 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-AdvancedInstallerMsiInfo {
         param($Installer, $Architecture)
         [pscustomobject]@{
-          ProductName                    = "Advanced Product $Architecture"
-          ProductVersion                 = '5.0.0'
-          Publisher                      = 'Advanced Publisher'
-          ProductCode                    = "MSI.Product.$Architecture"
-          AppsAndFeaturesProductCode     = "ARP.Product.$Architecture"
-          UpgradeCode                    = "Upgrade.$Architecture"
-          AppsAndFeaturesInstallerType   = 'msi'
-          PackageArchitecture            = $Architecture
-          SelectedMsiPath                = "payload.$Architecture.msi"
-          SelectionMethod                = 'PayloadTable'
+          ProductName                  = "Advanced Product $Architecture"
+          ProductVersion               = '5.0.0'
+          Publisher                    = 'Advanced Publisher'
+          ProductCode                  = "MSI.Product.$Architecture"
+          AppsAndFeaturesProductCode   = "ARP.Product.$Architecture"
+          UpgradeCode                  = "Upgrade.$Architecture"
+          AppsAndFeaturesInstallerType = 'msi'
+          PackageArchitecture          = $Architecture
+          SelectedMsiPath              = "payload.$Architecture.msi"
+          SelectionMethod              = 'PayloadTable'
         }
       }
       $X86Installer = [ordered]@{
@@ -636,7 +679,7 @@ Describe 'WinGet installer manifest metadata updates' {
     It 'Resolves a Chromium Setup ProductCode from the manifest channel switch' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
-          ParserResults = @([pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
               Name    = 'Chromium Setup'
               Success = $true
               Result  = [pscustomobject]@{
@@ -668,7 +711,7 @@ Describe 'WinGet installer manifest metadata updates' {
     It 'Uses a source-backed ProductCode returned by a tagged Chromium wrapper' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
-          ParserResults = @([pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
               Name    = 'Chromium Setup'
               Success = $true
               Result  = [pscustomobject]@{
@@ -717,16 +760,16 @@ Describe 'WinGet installer manifest metadata updates' {
       }
       Mock Get-InstallShieldMsiInfo {
         [pscustomobject]@{
-          ProductName                    = 'New InstallShield Product'
-          ProductVersion                 = '4.0.0'
-          Publisher                      = 'New InstallShield Publisher'
-          ProductCode                    = '{INSTALLSHIELD-MSI}'
-          AppsAndFeaturesProductCode     = '{INSTALLSHIELD-MSI}'
-          UpgradeCode                    = '{INSTALLSHIELD-UPGRADE}'
-          AppsAndFeaturesInstallerType   = 'msi'
-          PackageArchitecture            = 'x64'
-          SelectedMsiPath                = 'payload.msi'
-          SelectionMethod                = 'SetupIni'
+          ProductName                  = 'New InstallShield Product'
+          ProductVersion               = '4.0.0'
+          Publisher                    = 'New InstallShield Publisher'
+          ProductCode                  = '{INSTALLSHIELD-MSI}'
+          AppsAndFeaturesProductCode   = '{INSTALLSHIELD-MSI}'
+          UpgradeCode                  = '{INSTALLSHIELD-UPGRADE}'
+          AppsAndFeaturesInstallerType = 'msi'
+          PackageArchitecture          = 'x64'
+          SelectedMsiPath              = 'payload.msi'
+          SelectionMethod              = 'SetupIni'
         }
       }
       $Installer = [ordered]@{

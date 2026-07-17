@@ -549,7 +549,7 @@ function ConvertTo-MSIXManifestDependencyInfo {
     })
 
   [pscustomobject]@{
-    Dependencies                = [pscustomobject]@{
+    Dependencies               = [pscustomobject]@{
       PackageDependencies = $Allowed
     }
     UnknownPackageDependencies = $Unknown
@@ -601,8 +601,8 @@ function ConvertTo-MSIXManifestAssociationInfo {
             }
             if (-not $SeenExtensions.Add($ExtensionValue)) { continue }
             $FileExtensions.Add([pscustomobject]@{
-                FileExtension  = $ExtensionValue.TrimStart('.').ToLowerInvariant()
-                Extension      = $ExtensionValue.ToLowerInvariant()
+                FileExtension   = $ExtensionValue.TrimStart('.').ToLowerInvariant()
+                Extension       = $ExtensionValue.ToLowerInvariant()
                 AssociationName = $AssociationName
                 Executable      = if ($Extension.HasAttribute('Executable')) { [string]$Extension.GetAttribute('Executable') } else { $null }
                 EntryPoint      = if ($Extension.HasAttribute('EntryPoint')) { [string]$Extension.GetAttribute('EntryPoint') } else { $null }
@@ -704,26 +704,26 @@ function Get-MSIXInfo {
     $MinimumOSVersion = ($TargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.MinVersion) } | Sort-Object -Property { [System.Version]$_.MinVersion } | Select-Object -First 1).MinVersion
 
     [pscustomobject]@{
-      Path                    = $File.FullName
-      InstallerType           = $PackageTypeInfo.InstallerType
-      PackageKind             = $PackageTypeInfo.PackageKind
-      InstallerTypeEvidence   = $PackageTypeInfo.Evidence
-      InstallerTypeAmbiguous  = $PackageTypeInfo.IsAmbiguous
-      Name                    = [string]$Identity.Name
-      Publisher               = [string]$Identity.Publisher
-      Version                 = [string]$Identity.Version
-      Architecture            = [string]$Identity.ProcessorArchitecture
-      DisplayName             = [string]$DisplayName
-      PublisherDisplayName    = [string]$PublisherDisplayName
-      PackageFamilyName       = "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
-      Platform                = @($TargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Name) } | Select-Object -ExpandProperty Name -Unique)
-      MinimumOSVersion        = $MinimumOSVersion
+      Path                       = $File.FullName
+      InstallerType              = $PackageTypeInfo.InstallerType
+      PackageKind                = $PackageTypeInfo.PackageKind
+      InstallerTypeEvidence      = $PackageTypeInfo.Evidence
+      InstallerTypeAmbiguous     = $PackageTypeInfo.IsAmbiguous
+      Name                       = [string]$Identity.Name
+      Publisher                  = [string]$Identity.Publisher
+      Version                    = [string]$Identity.Version
+      Architecture               = [string]$Identity.ProcessorArchitecture
+      DisplayName                = [string]$DisplayName
+      PublisherDisplayName       = [string]$PublisherDisplayName
+      PackageFamilyName          = "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
+      Platform                   = @($TargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Name) } | Select-Object -ExpandProperty Name -Unique)
+      MinimumOSVersion           = $MinimumOSVersion
       Dependencies               = $DependencyInfo.Dependencies
       UnknownPackageDependencies = $DependencyInfo.UnknownPackageDependencies
-       Warnings                   = @($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings)
-       Protocols                  = $AssociationInfo.Protocols
-       FileExtensions             = $AssociationInfo.FileExtensions
-       RegistryAssociationInfo    = $AssociationInfo
+      Warnings                   = @($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings)
+      Protocols                  = $AssociationInfo.Protocols
+      FileExtensions             = $AssociationInfo.FileExtensions
+      RegistryAssociationInfo    = $AssociationInfo
       Capabilities               = @($Capabilities | Sort-Object -Unique)
       RestrictedCapabilities     = @($RestrictedCapabilities | Sort-Object -Unique)
       SignatureSha256            = Read-SignatureSha256FromMSIX -Path $File.FullName

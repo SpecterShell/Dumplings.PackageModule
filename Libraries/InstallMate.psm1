@@ -106,7 +106,7 @@ function Read-InstallMateSequentialRecord {
   $Output = [IO.MemoryStream]::new($Count)
   try {
     $null = Copy-BoundedStream -Source $Stream -Destination $Output -MaximumBytes $Count -ExpectedBytes $Count
-    return ,($Output.ToArray())
+    return , ($Output.ToArray())
   } finally { $Output.Dispose() }
 }
 
@@ -133,10 +133,10 @@ function Open-InstallMateDecoderContext {
     $Decoder = New-InstallerDecompressionStream -Algorithm Lzma -Stream $DataStream -Properties $Properties -CompressedSize $CompressedSize -UncompressedSize -1 -LeaveOpen
     return [pscustomobject]@{
       InstallerStream = $InstallerStream
-      DataStream       = $DataStream
-      Decoder          = $Decoder
-      Properties       = $Properties
-      CompressedSize   = $CompressedSize
+      DataStream      = $DataStream
+      Decoder         = $Decoder
+      Properties      = $Properties
+      CompressedSize  = $CompressedSize
     }
   } catch {
     if ($Decoder) { $Decoder.Dispose() }
@@ -209,13 +209,13 @@ function Get-InstallMateFileRecord {
     $ParentKey = [byte[]]::new(8)
     [Buffer]::BlockCopy($Database, [int]$Offset + 0x14, $ParentKey, 0, $ParentKey.Length)
     $Records.Add([pscustomobject]@{
-      RecordOffset     = [long]$Offset
-      Key              = [Convert]::ToHexString($Key)
-      ParentKey        = [Convert]::ToHexString($ParentKey)
-      SegmentType      = [BitConverter]::ToUInt16($Key, 0)
-      FileName         = $Name
-      UncompressedSize = [long]$FileSize
-    })
+        RecordOffset     = [long]$Offset
+        Key              = [Convert]::ToHexString($Key)
+        ParentKey        = [Convert]::ToHexString($ParentKey)
+        SegmentType      = [BitConverter]::ToUInt16($Key, 0)
+        FileName         = $Name
+        UncompressedSize = [long]$FileSize
+      })
   }
   $Records.ToArray()
 }
@@ -250,11 +250,11 @@ function Read-InstallMateDatabaseInfo {
   }
   $FileRecords = @(Get-InstallMateFileRecord -Database $Database.Bytes)
   [pscustomobject]@{
-    DatabaseSignature  = $Database.DatabaseSignature
-    DatabaseLength     = $Database.Length
+    DatabaseSignature   = $Database.DatabaseSignature
+    DatabaseLength      = $Database.Length
     InstallRecordOffset = $InstallRecordOffset
-    InstallLevel       = $InstallLevel
-    FileRecords        = $FileRecords
+    InstallLevel        = $InstallLevel
+    FileRecords         = $FileRecords
   }
 }
 
@@ -301,16 +301,16 @@ function Get-InstallMateArchiveInfo {
       if ($DeclaredArchiveSize -lt $Script:InstallMateMinimumHeaderBytes -or $DeclaredArchiveSize -gt $AvailableArchiveBytes + 64) { continue }
 
       return [pscustomobject]@{
-        Signature            = $SignatureText
-        FormatMajor          = [uint16]$FormatMajor
-        FormatMinor          = [uint16]$FormatMinor
-        FormatVersion        = "$FormatMajor.$FormatMinor"
-        ArchiveOffset        = [long]$Offset
-        DataEndOffset        = [long]$DataEnd
+        Signature             = $SignatureText
+        FormatMajor           = [uint16]$FormatMajor
+        FormatMinor           = [uint16]$FormatMinor
+        FormatVersion         = "$FormatMajor.$FormatMinor"
+        ArchiveOffset         = [long]$Offset
+        DataEndOffset         = [long]$DataEnd
         AvailableArchiveBytes = $AvailableArchiveBytes
-        DeclaredArchiveSize  = $DeclaredArchiveSize
-        CertificateOffset    = if ($DataEnd -lt $File.Length) { [long]$DataEnd } else { $null }
-        IsComplete           = $DeclaredArchiveSize -le $AvailableArchiveBytes + 64
+        DeclaredArchiveSize   = $DeclaredArchiveSize
+        CertificateOffset     = if ($DataEnd -lt $File.Length) { [long]$DataEnd } else { $null }
+        IsComplete            = $DeclaredArchiveSize -le $AvailableArchiveBytes + 64
       }
     }
   }

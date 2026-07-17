@@ -27,7 +27,7 @@ Describe 'InstallForge static parser' {
       Mock Get-InstallForgeConfigurationArchiveData {
         [pscustomobject]@{
           ArchivePath = Join-Path $TestDrive 'missing-config.7z'
-          Entries = @([pscustomobject]@{ FullName = 'SC.dat'; EncodedName = 'UwBDAC4AZABhAHQA'; Length = 512 })
+          Entries     = @([pscustomobject]@{ FullName = 'SC.dat'; EncodedName = 'UwBDAC4AZABhAHQA'; Length = 512 })
         }
       }
       Mock Read-InstallForgeConfigurationText {
@@ -46,8 +46,8 @@ ProgramRun = <InstallPath>\Example.exe
       Mock Get-InstallForgePayloadArchiveData {
         [pscustomobject]@{
           ArchivePath = Join-Path $TestDrive 'missing-payload.7z'
-          Offset = 4096
-          Entries = @(
+          Offset      = 4096
+          Entries     = @(
             [pscustomobject]@{ FullName = 'Example.exe'; EncodedName = 'RQB4AGEAbQBwAGwAZQAuAGUAeABlAA=='; Length = 10 },
             [pscustomobject]@{ FullName = 'bin\empty.empty'; EncodedName = 'YgBpAG4A\empty.empty'; Length = 1 }
           )

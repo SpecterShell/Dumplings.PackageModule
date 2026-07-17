@@ -37,7 +37,7 @@ function Get-IExpressInfo {
     $ResourceNames = @($Resources | Where-Object Name | ForEach-Object { $_.Name.ToUpperInvariant() })
     $OriginalName = [Diagnostics.FileVersionInfo]::GetVersionInfo($Installer.FullName).OriginalFilename
     $IsWExtract = $OriginalName -match '^(?i)wextract(?:\.exe)?$' -or
-      ($ResourceNames -contains 'CABINET' -and $ResourceNames -contains 'RUNPROGRAM')
+    ($ResourceNames -contains 'CABINET' -and $ResourceNames -contains 'RUNPROGRAM')
     if (-not $IsWExtract) { throw 'The file does not contain the expected IExpress/WExtract resources.' }
 
     $TextResourceNames = @(

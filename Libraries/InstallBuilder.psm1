@@ -209,7 +209,7 @@ function Expand-InstallBuilderCookfsRecord {
     if ($StoredBytes.Length - 1 -gt $MaximumExpandedBytes) { throw 'The CookFS uncompressed record exceeds the configured output limit' }
     $Result = [byte[]]::new($StoredBytes.Length - 1)
     if ($Result.Length) { [Array]::Copy($StoredBytes, 1, $Result, 0, $Result.Length) }
-    return ,$Result
+    return , $Result
   }
   if ($CompressionId -eq 2 -and $StoredBytes.Length -lt 5) { throw 'The CookFS BZip2 record is truncated' }
   [long]$ExpectedLength = -1
@@ -239,7 +239,7 @@ function Expand-InstallBuilderCookfsRecord {
       }
     }
     $null = Expand-InstallerCompressedStream @ExpandArguments
-    return ,($Output.ToArray())
+    return , ($Output.ToArray())
   } finally {
     $Output.Dispose()
     $InputStream.Dispose()
@@ -368,20 +368,20 @@ function Get-InstallBuilderCookfsInfo {
           }
         }
         return [pscustomobject]@{
-          EndOffset       = $EndOffset
-          IndexOffset     = $IndexOffset
-          PageDataOffset  = $PageDataStart
-          PageCount       = $PageCount
-          IndexSize       = $IndexSize
-          CompressionIds              = @($CompressionIds | Sort-Object)
-          CompressionTypes            = @($CompressionTypes | Sort-Object)
-          HasUnsupportedCompression   = $HasUnsupportedCompression
-          PageSizes       = $PageSizes
-          PageOffsets     = $PageOffsets
-          Entries         = $Entries.ToArray()
-          PageCache       = [System.Collections.Generic.Dictionary[int, byte[]]]::new()
-          PageCacheOrder  = [System.Collections.Generic.Queue[int]]::new()
-          PageCacheBytes  = 0L
+          EndOffset                 = $EndOffset
+          IndexOffset               = $IndexOffset
+          PageDataOffset            = $PageDataStart
+          PageCount                 = $PageCount
+          IndexSize                 = $IndexSize
+          CompressionIds            = @($CompressionIds | Sort-Object)
+          CompressionTypes          = @($CompressionTypes | Sort-Object)
+          HasUnsupportedCompression = $HasUnsupportedCompression
+          PageSizes                 = $PageSizes
+          PageOffsets               = $PageOffsets
+          Entries                   = $Entries.ToArray()
+          PageCache                 = [System.Collections.Generic.Dictionary[int, byte[]]]::new()
+          PageCacheOrder            = [System.Collections.Generic.Queue[int]]::new()
+          PageCacheBytes            = 0L
         }
       } catch {
         continue
@@ -401,7 +401,7 @@ function Get-InstallBuilderCookfsPage {
   [OutputType([byte[]])]
   param ([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Cookfs, [Parameter(Mandatory)][uint32]$Page)
   if ($Page -ge $Cookfs.PageCount) { throw "The CookFS file index references missing page $Page" }
-  if ($Cookfs.PageCache.ContainsKey([int]$Page)) { return ,$Cookfs.PageCache[[int]$Page] }
+  if ($Cookfs.PageCache.ContainsKey([int]$Page)) { return , $Cookfs.PageCache[[int]$Page] }
   $Stream = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
     $StoredPage = Read-BinaryBytes -Stream $Stream -Offset $Cookfs.PageOffsets[$Page] -Count ([int]$Cookfs.PageSizes[$Page])
@@ -422,7 +422,7 @@ function Get-InstallBuilderCookfsPage {
     $Cookfs.PageCacheOrder.Enqueue([int]$Page)
     $Cookfs.PageCacheBytes += $PageBytes.Length
   }
-  return ,$PageBytes
+  return , $PageBytes
 }
 
 function Get-InstallBuilderCookfsLogicalEntry {

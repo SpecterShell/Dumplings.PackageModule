@@ -94,7 +94,7 @@ function Read-PublisherFromInno {
 function Read-ProductCodeFromInno {
   <#
   .SYNOPSIS
-    Read the AppId value from an Inno Setup installer
+    Read the built-in Apps & Features ProductCode from an Inno Setup installer
   .PARAMETER Path
     The path to the Inno Setup installer
   #>
@@ -106,7 +106,7 @@ function Read-ProductCodeFromInno {
 
   process {
     $Info = Get-InnoInfo -Path $Path
-    if ([string]::IsNullOrWhiteSpace($Info.ProductCode)) { throw 'The Inno Setup installer does not expose an AppId value' }
+    if ([string]::IsNullOrWhiteSpace($Info.ProductCode)) { throw 'The Inno Setup installer does not expose a built-in Apps & Features ProductCode' }
     return $Info.ProductCode
   }
 }
@@ -216,7 +216,7 @@ function Expand-InnoInstaller {
   .PARAMETER DestinationPath
     The directory where matching files should be written
   .PARAMETER Name
-    The file name or wildcard pattern to extract
+    The exact source, destination, or base file name to extract; wildcard extraction is not supported
   .PARAMETER Language
     An optional Inno Setup language name used to disambiguate language-specific payloads
   #>
@@ -228,8 +228,8 @@ function Expand-InnoInstaller {
     [Parameter(HelpMessage = 'The directory where matching files should be written')]
     [string]$DestinationPath,
 
-    [Parameter(HelpMessage = 'The file name or wildcard pattern to extract')]
-    [string]$Name = '*',
+    [Parameter(Mandatory, HelpMessage = 'The exact source, destination, or base file name to extract')]
+    [string]$Name,
 
     [Parameter(HelpMessage = 'An optional Inno Setup language name used to disambiguate language-specific payloads')]
     [string]$Language

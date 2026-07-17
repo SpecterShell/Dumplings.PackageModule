@@ -86,11 +86,11 @@ function Get-PEArchitectureInfo {
         Get-PEArchitectureInfo -Path $Related
       } catch {
         [pscustomobject]@{
-          Path                         = (Get-Item -LiteralPath $Related -Force -ErrorAction SilentlyContinue).FullName
-          RecommendedWinGetArchitecture = $null
+          Path                           = (Get-Item -LiteralPath $Related -Force -ErrorAction SilentlyContinue).FullName
+          RecommendedWinGetArchitecture  = $null
           RecommendedWinGetArchitectures = @()
-          SupportedArchitectures       = @()
-          Warnings                     = @($_.Exception.Message)
+          SupportedArchitectures         = @()
+          Warnings                       = @($_.Exception.Message)
         }
       }
     }
@@ -370,40 +370,40 @@ function Get-PEDotNetBundleInfo {
         $MajorVersion = [System.BitConverter]::ToUInt32($HeaderBytes, 0)
         $MinorVersion = [System.BitConverter]::ToUInt32($HeaderBytes, 4)
         $EmbeddedFileCount = [System.BitConverter]::ToInt32($HeaderBytes, 8)
-      if (-not (($MajorVersion -eq 6 -and $MinorVersion -eq 0) -or ($MajorVersion -eq 2 -and $MinorVersion -eq 0))) { continue }
-      if ($EmbeddedFileCount -le 0) { continue }
+        if (-not (($MajorVersion -eq 6 -and $MinorVersion -eq 0) -or ($MajorVersion -eq 2 -and $MinorVersion -eq 0))) { continue }
+        if ($EmbeddedFileCount -le 0) { continue }
 
-      $ReadOffset = 12
-      $BundleId = Read-PEBundleString -Bytes $HeaderBytes -Offset $ReadOffset
-      if (-not $BundleId) { continue }
-      $ReadOffset += $BundleId.BytesRead
+        $ReadOffset = 12
+        $BundleId = Read-PEBundleString -Bytes $HeaderBytes -Offset $ReadOffset
+        if (-not $BundleId) { continue }
+        $ReadOffset += $BundleId.BytesRead
 
-      $DepsJsonOffset = [System.BitConverter]::ToInt64($HeaderBytes, $ReadOffset)
-      $DepsJsonSize = [System.BitConverter]::ToInt64($HeaderBytes, $ReadOffset + 8)
-      $RuntimeConfigJsonOffset = [System.BitConverter]::ToInt64($HeaderBytes, $ReadOffset + 16)
-      $RuntimeConfigJsonSize = [System.BitConverter]::ToInt64($HeaderBytes, $ReadOffset + 24)
-      $Flags = [System.BitConverter]::ToUInt64($HeaderBytes, $ReadOffset + 32)
+        $DepsJsonOffset = [System.BitConverter]::ToInt64($HeaderBytes, $ReadOffset)
+        $DepsJsonSize = [System.BitConverter]::ToInt64($HeaderBytes, $ReadOffset + 8)
+        $RuntimeConfigJsonOffset = [System.BitConverter]::ToInt64($HeaderBytes, $ReadOffset + 16)
+        $RuntimeConfigJsonSize = [System.BitConverter]::ToInt64($HeaderBytes, $ReadOffset + 24)
+        $Flags = [System.BitConverter]::ToUInt64($HeaderBytes, $ReadOffset + 32)
 
-      $RuntimeConfigJson = $null
-      if ($RuntimeConfigJsonOffset -gt 0 -and $RuntimeConfigJsonSize -gt 0 -and $RuntimeConfigJsonSize -lt 10485760 -and $RuntimeConfigJsonOffset + $RuntimeConfigJsonSize -le $Stream.Length) {
-        $RuntimeConfigJson = [Text.Encoding]::UTF8.GetString((Read-BinaryBytes -Stream $Stream -Offset $RuntimeConfigJsonOffset -Count ([int]$RuntimeConfigJsonSize)))
-      }
+        $RuntimeConfigJson = $null
+        if ($RuntimeConfigJsonOffset -gt 0 -and $RuntimeConfigJsonSize -gt 0 -and $RuntimeConfigJsonSize -lt 10485760 -and $RuntimeConfigJsonOffset + $RuntimeConfigJsonSize -le $Stream.Length) {
+          $RuntimeConfigJson = [Text.Encoding]::UTF8.GetString((Read-BinaryBytes -Stream $Stream -Offset $RuntimeConfigJsonOffset -Count ([int]$RuntimeConfigJsonSize)))
+        }
 
-      $BundleHeaders.Add([pscustomobject]@{
-          HeaderOffset              = $HeaderOffset
-          SignatureOffset           = $SignatureOffset
-          MajorVersion              = $MajorVersion
-          MinorVersion              = $MinorVersion
-          EmbeddedFileCount         = $EmbeddedFileCount
-          BundleId                  = $BundleId.Value
-          DepsJsonOffset            = $DepsJsonOffset
-          DepsJsonSize              = $DepsJsonSize
-          RuntimeConfigJsonOffset   = $RuntimeConfigJsonOffset
-          RuntimeConfigJsonSize     = $RuntimeConfigJsonSize
-          RuntimeConfigJson         = $RuntimeConfigJson
-          Flags                     = $Flags
-          IsNetCoreApp3CompatMode   = ($Flags -band 1) -ne 0
-        })
+        $BundleHeaders.Add([pscustomobject]@{
+            HeaderOffset            = $HeaderOffset
+            SignatureOffset         = $SignatureOffset
+            MajorVersion            = $MajorVersion
+            MinorVersion            = $MinorVersion
+            EmbeddedFileCount       = $EmbeddedFileCount
+            BundleId                = $BundleId.Value
+            DepsJsonOffset          = $DepsJsonOffset
+            DepsJsonSize            = $DepsJsonSize
+            RuntimeConfigJsonOffset = $RuntimeConfigJsonOffset
+            RuntimeConfigJsonSize   = $RuntimeConfigJsonSize
+            RuntimeConfigJson       = $RuntimeConfigJson
+            Flags                   = $Flags
+            IsNetCoreApp3CompatMode = ($Flags -band 1) -ne 0
+          })
       } catch {
         continue
       }
@@ -597,15 +597,15 @@ function Get-PEDotNetAppHostInfo {
   $File = Get-Item -LiteralPath $Path -Force
   if ($ArchitectureInfo.FileKind -ne 'Executable' -or $ArchitectureInfo.IsManaged -or $File.Length -gt 536870912) {
     return [pscustomobject]@{
-      IsAppHost                      = $false
-      IsBound                        = $false
-      IsUnboundTemplate              = $false
-      BoundAssemblyRelativePath      = $null
-      BoundAssemblyPath              = $null
-      BoundAssemblyIsManaged         = $false
-      CandidateBoundAssemblyPaths    = @()
-      PlaceholderOffset              = $null
-      BundleInfo                     = $null
+      IsAppHost                   = $false
+      IsBound                     = $false
+      IsUnboundTemplate           = $false
+      BoundAssemblyRelativePath   = $null
+      BoundAssemblyPath           = $null
+      BoundAssemblyIsManaged      = $false
+      CandidateBoundAssemblyPaths = @()
+      PlaceholderOffset           = $null
+      BundleInfo                  = $null
     }
   }
 
@@ -630,15 +630,15 @@ function Get-PEDotNetAppHostInfo {
   $ManagedCandidate = @($ResolvedCandidates | Where-Object { $_.IsManaged } | Select-Object -First 1)[0]
 
   [pscustomobject]@{
-    IsAppHost                      = $null -ne $ManagedCandidate -or $null -ne $BundleInfo -or $null -ne $PlaceholderOffset
-    IsBound                        = $null -ne $ManagedCandidate
-    IsUnboundTemplate              = $null -ne $PlaceholderOffset
-    BoundAssemblyRelativePath      = if ($ManagedCandidate) { $ManagedCandidate.RelativePath } else { $null }
-    BoundAssemblyPath              = if ($ManagedCandidate) { $ManagedCandidate.Path } else { $null }
-    BoundAssemblyIsManaged         = if ($ManagedCandidate) { $ManagedCandidate.IsManaged } else { $false }
-    CandidateBoundAssemblyPaths    = @($Candidates)
-    PlaceholderOffset              = $PlaceholderOffset
-    BundleInfo                     = $BundleInfo
+    IsAppHost                   = $null -ne $ManagedCandidate -or $null -ne $BundleInfo -or $null -ne $PlaceholderOffset
+    IsBound                     = $null -ne $ManagedCandidate
+    IsUnboundTemplate           = $null -ne $PlaceholderOffset
+    BoundAssemblyRelativePath   = if ($ManagedCandidate) { $ManagedCandidate.RelativePath } else { $null }
+    BoundAssemblyPath           = if ($ManagedCandidate) { $ManagedCandidate.Path } else { $null }
+    BoundAssemblyIsManaged      = if ($ManagedCandidate) { $ManagedCandidate.IsManaged } else { $false }
+    CandidateBoundAssemblyPaths = @($Candidates)
+    PlaceholderOffset           = $PlaceholderOffset
+    BundleInfo                  = $BundleInfo
   }
 }
 

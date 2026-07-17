@@ -111,8 +111,8 @@ Describe 'MSI builder and install-location parser' {
 
     $Info.Protocols | Should -BeNullOrEmpty
     $Info.FileExtensions | Should -Be @('drawio', 'mermaid', 'mmd', 'vsdx')
-    ($Info.FileExtensionAssociations | Where-Object FileExtension -eq 'drawio').DefaultProgId | Should -Be 'draw.io.drawio'
-    ($Info.FileExtensionAssociations | Where-Object FileExtension -eq 'drawio').Command | Should -Be 'Open with draw.io'
+    ($Info.FileExtensionAssociations | Where-Object FileExtension -EQ 'drawio').DefaultProgId | Should -Be 'draw.io.drawio'
+    ($Info.FileExtensionAssociations | Where-Object FileExtension -EQ 'drawio').Command | Should -Be 'Open with draw.io'
     Read-FileExtensionsFromMsi -Path $Fixture | Should -Be @('drawio', 'mermaid', 'mmd', 'vsdx')
   }
 

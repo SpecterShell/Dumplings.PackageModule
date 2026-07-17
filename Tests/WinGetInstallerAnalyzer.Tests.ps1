@@ -96,7 +96,7 @@ Describe 'Installer manifest behavior defaults' {
 
       $Defaults.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
       $Defaults.ExpectedReturnCodes.Count | Should -Be 20
-      ($Defaults.ExpectedReturnCodes | Where-Object InstallerReturnCode -eq 3010).ReturnResponse | Should -Be 'rebootRequiredToFinish'
+      ($Defaults.ExpectedReturnCodes | Where-Object InstallerReturnCode -EQ 3010).ReturnResponse | Should -Be 'rebootRequiredToFinish'
     }
   }
 
@@ -113,7 +113,7 @@ Describe 'Installer manifest behavior defaults' {
       $Defaults.InstallerSwitches.Silent | Should -Be '/silent'
       $Defaults.InstallerSwitches.SilentWithProgress | Should -Be '/passive'
       $Defaults.ExpectedReturnCodes.Count | Should -Be 19
-      ($Defaults.ExpectedReturnCodes | Where-Object InstallerReturnCode -eq 0x80040711).ReturnResponse | Should -Be 'installInProgress'
+      ($Defaults.ExpectedReturnCodes | Where-Object InstallerReturnCode -EQ 0x80040711).ReturnResponse | Should -Be 'installInProgress'
     }
   }
 
@@ -259,7 +259,7 @@ Describe 'WinGet installer analyzer content detection' {
     $Candidate = & $Module {
       param($FixturePath)
       Get-WinGetInstallerGenericExeFamilyCandidate -File (Get-Item -LiteralPath $FixturePath) -Budget 1048576 |
-        Where-Object Family -eq 'Paquet Builder' |
+        Where-Object Family -EQ 'Paquet Builder' |
         Select-Object -First 1
     } $FixturePath
 
@@ -275,7 +275,7 @@ Describe 'WinGet installer analyzer content detection' {
     $Candidate = & $Module {
       param($FixturePath)
       Get-WinGetInstallerGenericExeFamilyCandidate -File (Get-Item -LiteralPath $FixturePath) -Budget 1048576 |
-        Where-Object Family -eq 'CreateInstall' |
+        Where-Object Family -EQ 'CreateInstall' |
         Select-Object -First 1
     } $FixturePath
 
@@ -320,7 +320,7 @@ Describe 'WinGet installer analyzer content detection' {
   It 'Should remove silent switches from GUI-only Qt IFW analyzer evidence' {
     $Installer = Get-AnalyzerInstallerFixture -Name 'qtlinguistinstaller-5.12.2.exe' -Url 'https://download.qt.io/linguist_releases/qtlinguistinstaller-5.12.2.exe'
     $Analysis = Get-WinGetInstallerAnalysis -Path $Installer
-    $Result = $Analysis.ParserResults | Where-Object Name -eq 'Qt Installer Framework' | Select-Object -First 1
+    $Result = $Analysis.ParserResults | Where-Object Name -EQ 'Qt Installer Framework' | Select-Object -First 1
 
     $Result.Success | Should -BeTrue
     $Result.Result.InterfaceVariant | Should -Be 'GUI'

@@ -113,10 +113,10 @@ function Get-InstallShieldHeader {
   if ($Type -gt 4) { return $null }
 
   [pscustomobject]@{
-    Signature = $Signature
-    NumFiles  = [System.BitConverter]::ToUInt16($Bytes, 14)
-    Type      = $Type
-    NextOffset = $Offset + 46
+    Signature     = $Signature
+    NumFiles      = [System.BitConverter]::ToUInt16($Bytes, 14)
+    Type          = $Type
+    NextOffset    = $Offset + 46
     IsSetupStream = $Signature -eq 'ISSetupStream'
   }
 }
@@ -139,13 +139,13 @@ function Get-InstallShieldOldAttribute {
   if ([string]::IsNullOrWhiteSpace($FileName) -or $FileLength -gt $Stream.Length - $DataOffset) { return $null }
 
   [pscustomobject]@{
-    FileName = $FileName
-    Seed = [System.Text.Encoding]::UTF8.GetBytes($FileName)
-    EncodedFlags = [System.BitConverter]::ToUInt32($Bytes, 260)
-    FileLength = $FileLength
+    FileName          = $FileName
+    Seed              = [System.Text.Encoding]::UTF8.GetBytes($FileName)
+    EncodedFlags      = [System.BitConverter]::ToUInt32($Bytes, 260)
+    FileLength        = $FileLength
     IsUnicodeLauncher = [System.BitConverter]::ToUInt16($Bytes, 280)
-    DataOffset = $DataOffset
-    NextOffset = $DataOffset
+    DataOffset        = $DataOffset
+    NextOffset        = $DataOffset
   }
 }
 
@@ -178,13 +178,13 @@ function Get-InstallShieldStreamAttribute {
   if ([string]::IsNullOrWhiteSpace($FileName) -or $FileLength -gt $Stream.Length - $DataOffset) { return $null }
 
   [pscustomobject]@{
-    FileName = $FileName
-    Seed = [System.Text.Encoding]::UTF8.GetBytes($FileName)
-    EncodedFlags = [System.BitConverter]::ToUInt32($Bytes, 4)
-    FileLength = $FileLength
+    FileName          = $FileName
+    Seed              = [System.Text.Encoding]::UTF8.GetBytes($FileName)
+    EncodedFlags      = [System.BitConverter]::ToUInt32($Bytes, 4)
+    FileLength        = $FileLength
     IsUnicodeLauncher = [System.BitConverter]::ToUInt16($Bytes, 22)
-    DataOffset = $DataOffset
-    NextOffset = $DataOffset
+    DataOffset        = $DataOffset
+    NextOffset        = $DataOffset
   }
 }
 
@@ -314,7 +314,7 @@ function Expand-InstallShieldEncryptedPayload {
   if ($Files.Count -eq 0) { return $null }
 
   [pscustomobject]@{
-    Format = $Header.Signature
+    Format         = $Header.Signature
     ConsumedOffset = $Cursor
     ExtractedFiles = @($Files)
   }
@@ -406,11 +406,11 @@ function Get-InstallShieldPlainRecord {
   if ($Length -gt $Stream.Length - $Cursor) { return $null }
 
   [pscustomobject]@{
-    FileName = $FileName
+    FileName        = $FileName
     DestinationName = $DestinationName
-    Version = $Version
-    FileLength = [uint32]$Length
-    DataOffset = [long]$Cursor
+    Version         = $Version
+    FileLength      = [uint32]$Length
+    DataOffset      = [long]$Cursor
   }
 }
 
@@ -443,7 +443,7 @@ function Expand-InstallShieldPlainPayload {
   if ($Files.Count -eq 0) { return $null }
 
   [pscustomobject]@{
-    Format = if ($Unicode) { 'PlainUnicode' } else { 'Plain' }
+    Format         = if ($Unicode) { 'PlainUnicode' } else { 'Plain' }
     ConsumedOffset = $Cursor
     ExtractedFiles = @($Files)
   }
@@ -494,10 +494,10 @@ function Invoke-InstallShieldExtraction {
 
     [pscustomobject]@{
       DestinationPath = (Get-Item -Path $DestinationPath -Force).FullName
-      DataOffset = $DataOffset
-      ConsumedOffset = $Result.ConsumedOffset
-      Format = $Result.Format
-      ExtractedFiles = @($LauncherPath) + @($Result.ExtractedFiles)
+      DataOffset      = $DataOffset
+      ConsumedOffset  = $Result.ConsumedOffset
+      Format          = $Result.Format
+      ExtractedFiles  = @($LauncherPath) + @($Result.ExtractedFiles)
     }
   } finally {
     $Stream.Dispose()
@@ -703,15 +703,15 @@ function Get-InstallShieldMsiPayloadSelection {
   }
 
   return [pscustomobject]@{
-    SelectionMethod  = $SelectionMethod
-    SourceKind       = $SourceKind
-    SetupIniPath     = $null -eq $SetupIni ? $null : [System.IO.Path]::GetRelativePath($ExtractedPath, $SetupIni.FullName)
-    PackageName      = [string]::IsNullOrWhiteSpace($PackageName) ? $null : $PackageName
-    PackageLocation  = [string]::IsNullOrWhiteSpace($PackageLocation) ? $null : $PackageLocation
-    ConfiguredPaths  = @($ConfiguredPaths)
-    SelectedMsiPath  = $null -eq $Selected ? $null : $Selected.RelativePath
-    Configuration    = $Configuration
-    Warnings         = @($Warnings)
+    SelectionMethod = $SelectionMethod
+    SourceKind      = $SourceKind
+    SetupIniPath    = $null -eq $SetupIni ? $null : [System.IO.Path]::GetRelativePath($ExtractedPath, $SetupIni.FullName)
+    PackageName     = [string]::IsNullOrWhiteSpace($PackageName) ? $null : $PackageName
+    PackageLocation = [string]::IsNullOrWhiteSpace($PackageLocation) ? $null : $PackageLocation
+    ConfiguredPaths = @($ConfiguredPaths)
+    SelectedMsiPath = $null -eq $Selected ? $null : $Selected.RelativePath
+    Configuration   = $Configuration
+    Warnings        = @($Warnings)
   }
 }
 

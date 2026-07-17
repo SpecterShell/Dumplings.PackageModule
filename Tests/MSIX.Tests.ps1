@@ -107,7 +107,7 @@ Describe 'MSIX/AppX dependency filtering' {
     $Info.Protocols | Should -Be @('example')
     $Info.FileExtensions | Should -Be @('example', 'exdoc')
     $Info.ProtocolAssociations[0].Executable | Should -Be 'Example.exe'
-    ($Info.FileExtensionAssociations | Where-Object FileExtension -eq 'example').AssociationName | Should -Be 'example.document'
+    ($Info.FileExtensionAssociations | Where-Object FileExtension -EQ 'example').AssociationName | Should -Be 'example.document'
   }
 
   It 'Should include only approved framework dependencies and preserve minimum versions' {
@@ -126,9 +126,9 @@ Describe 'MSIX/AppX dependency filtering' {
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Contain 'Microsoft.WindowsAppRuntime.1.6'
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Contain 'Microsoft.UI.Xaml.2.8'
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Not -Contain 'Contoso.CustomFramework'
-    ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -eq 'Microsoft.WindowsAppRuntime.1.6').MinimumVersion | Should -Be '6000.0.0.0'
+    ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.WindowsAppRuntime.1.6').MinimumVersion | Should -Be '6000.0.0.0'
     $Info.UnknownPackageDependencies.PackageIdentifier | Should -Contain 'Contoso.CustomFramework'
-    $Info.Warnings[0] | Should -BeLike "*Contoso.CustomFramework*not included*"
+    $Info.Warnings[0] | Should -BeLike '*Contoso.CustomFramework*not included*'
   }
 
   It 'Should keep the highest minimum version for duplicate allowed dependencies' {

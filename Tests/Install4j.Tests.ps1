@@ -354,7 +354,7 @@ Describe 'install4j parser' {
       $ExtractedFiles = @(Get-ChildItem -Path $Result -Recurse -File)
       $ExtractedFiles.Count | Should -BeGreaterThan 0
       $ExtractedFiles.Name | Should -Not -Contain 'install4j.exe'
-      @($ExtractedFiles | Where-Object Name -ne 'README.txt') | Should -BeNullOrEmpty
+      @($ExtractedFiles | Where-Object Name -NE 'README.txt') | Should -BeNullOrEmpty
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }

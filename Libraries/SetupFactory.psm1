@@ -32,9 +32,9 @@ function Expand-SetupFactoryInstaller {
   )
   process {
     Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'SetupFactory.Expand' -Argument @{
-      Path = (Get-Item -LiteralPath $Path -Force).FullName
-      DestinationPath = $DestinationPath
-      Name = $Name
+      Path                 = (Get-Item -LiteralPath $Path -Force).FullName
+      DestinationPath      = $DestinationPath
+      Name                 = $Name
       MaximumExpandedBytes = $MaximumExpandedBytes
     }
   }

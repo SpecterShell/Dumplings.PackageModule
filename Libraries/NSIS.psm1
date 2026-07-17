@@ -112,9 +112,9 @@ function ConvertFrom-ElectronBuilderUpdateFeed {
 
     $Files = @($Feed.files | ForEach-Object -Process {
         [pscustomobject]@{
-          Url    = $_.url
-          Sha512 = $_.sha512
-          Size   = $_.size
+          Url          = $_.url
+          Sha512       = $_.sha512
+          Size         = $_.size
           BlockMapSize = $_.blockMapSize
         }
       })

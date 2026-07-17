@@ -190,7 +190,7 @@ function Test-InstallAnywhereInstaller {
   .SYNOPSIS
     Test whether a file contains a parseable InstallAnywhere project
   #>
-  [OutputType([bool])] param([Parameter(Position=0,ValueFromPipeline,Mandatory)][string]$Path)
+  [OutputType([bool])] param([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
   process { try { $null = Get-InstallAnywhereInfo -Path $Path; $true } catch { $false } }
 }
 function Read-ProtocolsFromInstallAnywhere {
@@ -218,7 +218,7 @@ function Read-ProductVersionFromInstallAnywhere {
   .SYNOPSIS
     Read the explicit InstallAnywhere product version
   #>
-  param([Parameter(ValueFromPipeline,Mandatory)][string]$Path)
+  param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAnywhereInfo -Path $Path).DisplayVersion }
 }
 function Read-ProductNameFromInstallAnywhere {
@@ -226,7 +226,7 @@ function Read-ProductNameFromInstallAnywhere {
   .SYNOPSIS
     Read the explicit InstallAnywhere product name
   #>
-  param([Parameter(ValueFromPipeline,Mandatory)][string]$Path)
+  param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAnywhereInfo -Path $Path).DisplayName }
 }
 function Read-PublisherFromInstallAnywhere {
@@ -234,7 +234,7 @@ function Read-PublisherFromInstallAnywhere {
   .SYNOPSIS
     Read the explicit InstallAnywhere publisher
   #>
-  param([Parameter(ValueFromPipeline,Mandatory)][string]$Path)
+  param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAnywhereInfo -Path $Path).Publisher }
 }
 function Read-ProductCodeFromInstallAnywhere {
@@ -242,7 +242,7 @@ function Read-ProductCodeFromInstallAnywhere {
   .SYNOPSIS
     Read the InstallAnywhere project product identifier
   #>
-  param([Parameter(ValueFromPipeline,Mandatory)][string]$Path)
+  param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAnywhereInfo -Path $Path).ProductCode }
 }
 

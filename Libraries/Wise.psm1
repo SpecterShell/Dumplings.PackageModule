@@ -132,7 +132,7 @@ function Get-WiseInfo {
       $VersionStrings = @(Get-PEVersionStringTable -Path $File.FullName)[0]
 
       [pscustomobject]@{
-        InstallerType                 = 'Wise MSI'
+        InstallerType                = 'Wise MSI'
         WiseVariant                  = 'Wise for Windows Installer'
         DisplayName                  = $MsiInfo.ProductName
         ProductName                  = $MsiInfo.ProductName

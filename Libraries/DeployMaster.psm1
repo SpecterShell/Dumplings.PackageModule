@@ -55,14 +55,14 @@ function Get-DeployMasterPackageLocator {
   if ($ActualCrc32 -ne $ExpectedCrc32) { throw 'The DeployMaster package integrity CRC32 check failed.' }
 
   [pscustomobject]@{
-    LocatorOffset    = 0x80L
-    PackageOffset    = $PackageOffset
-    IntegrityLength  = $IntegrityLength
+    LocatorOffset     = 0x80L
+    PackageOffset     = $PackageOffset
+    IntegrityLength   = $IntegrityLength
     PackageDataOffset = $PackageOffset + $IntegrityLength
-    ExpectedCrc32    = $ExpectedCrc32
-    ActualCrc32      = $ActualCrc32
-    ExpectedFileSize = $ExpectedFileSize
-    Reserved         = $Reserved
+    ExpectedCrc32     = $ExpectedCrc32
+    ActualCrc32       = $ActualCrc32
+    ExpectedFileSize  = $ExpectedFileSize
+    Reserved          = $Reserved
   }
 }
 
@@ -106,14 +106,14 @@ function Get-DeployMasterPackageHeader {
     $CoreEntries = [Collections.Generic.List[object]]::new()
     if ($PrimaryOffset -ne 0) {
       if ($PrimaryOffset -lt $Locator.PackageOffset + $Layout.HeaderSize -or $PrimaryCompressedSize -le 0 -or
-          $PrimaryUncompressedSize -le 0 -or $PrimaryUncompressedSize -gt $MaximumCoreBytes -or
-          $PrimaryOffset + $PrimaryCompressedSize -gt $IntegrityEnd) { continue }
+        $PrimaryUncompressedSize -le 0 -or $PrimaryUncompressedSize -gt $MaximumCoreBytes -or
+        $PrimaryOffset + $PrimaryCompressedSize -gt $IntegrityEnd) { continue }
       $CoreEntries.Add([pscustomobject]@{ Architecture = 'x86'; Offset = $PrimaryOffset; CompressedSize = $PrimaryCompressedSize; UncompressedSize = $PrimaryUncompressedSize })
     } elseif ($PrimaryCompressedSize -ne 0 -or $PrimaryUncompressedSize -ne 0) { continue }
     if ($SecondaryOffsetValue -notin 0, [uint32]::MaxValue) {
       if ($SecondaryOffset -lt $Locator.PackageOffset + $Layout.HeaderSize -or $SecondaryCompressedSize -le 0 -or
-          $SecondaryUncompressedSize -le 0 -or $SecondaryUncompressedSize -gt $MaximumCoreBytes -or
-          $SecondaryOffset + $SecondaryCompressedSize -gt $IntegrityEnd) { continue }
+        $SecondaryUncompressedSize -le 0 -or $SecondaryUncompressedSize -gt $MaximumCoreBytes -or
+        $SecondaryOffset + $SecondaryCompressedSize -gt $IntegrityEnd) { continue }
       $CoreEntries.Add([pscustomobject]@{ Architecture = 'x64'; Offset = $SecondaryOffset; CompressedSize = $SecondaryCompressedSize; UncompressedSize = $SecondaryUncompressedSize })
     } elseif ($SecondaryCompressedSize -ne 0 -or $SecondaryUncompressedSize -ne 0) { continue }
     if ($CoreEntries.Count -eq 0) { continue }
@@ -123,21 +123,21 @@ function Get-DeployMasterPackageHeader {
     $ScopeValue = [int](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x15 + $Layout.Shift) -Size 1)
     if ($ScopeValue -gt 2) { continue }
     $Candidates.Add([pscustomobject]@{
-        Layout              = $Layout.Name
-        FormatVersion       = $Layout.Version
-        HeaderSize          = $Layout.HeaderSize
-        ScopeValue          = $ScopeValue
-        CoreEntries         = $CoreEntries.ToArray()
+        Layout               = $Layout.Name
+        FormatVersion        = $Layout.Version
+        HeaderSize           = $Layout.HeaderSize
+        ScopeValue           = $ScopeValue
+        CoreEntries          = $CoreEntries.ToArray()
         SecondaryOffsetValue = $SecondaryOffsetValue
-        LanguageBlockOffset = $LanguageOffset
+        LanguageBlockOffset  = $LanguageOffset
       })
   }
   if ($Candidates.Count -ne 1) { throw 'The DeployMaster package-control layout could not be normalized unambiguously.' }
 
   $Candidate = $Candidates[0]
   $ScopeInfo = Get-DeployMasterScopeInfo -Value $Candidate.ScopeValue
-  $PrimaryCore = @($Candidate.CoreEntries | Where-Object Architecture -eq 'x86' | Select-Object -First 1)
-  $SecondaryCore = @($Candidate.CoreEntries | Where-Object Architecture -eq 'x64' | Select-Object -First 1)
+  $PrimaryCore = @($Candidate.CoreEntries | Where-Object Architecture -EQ 'x86' | Select-Object -First 1)
+  $SecondaryCore = @($Candidate.CoreEntries | Where-Object Architecture -EQ 'x64' | Select-Object -First 1)
   $ApplicationArchitectureMode = if ($PrimaryCore.Count -and $SecondaryCore.Count) {
     'x86AndX64Application'
   } elseif ($SecondaryCore.Count) {
@@ -154,25 +154,25 @@ function Get-DeployMasterPackageHeader {
   }
   $FirstCore = $Candidate.CoreEntries | Select-Object -First 1
   [pscustomobject]@{
-    Layout                  = $Candidate.Layout
-    FormatVersion           = $Candidate.FormatVersion
-    HeaderSize              = $Candidate.HeaderSize
-    LzmaProperties          = $Properties
-    LzmaPropertyByte        = [byte]$Properties[0]
-    DictionarySize          = $DictionarySize
-    ScopeValue              = $Candidate.ScopeValue
-    Scope                   = $ScopeInfo.Scope
-    DefaultScope            = $ScopeInfo.DefaultScope
-    SupportedScopes         = $ScopeInfo.SupportedScopes
-    SupportsDualScope       = $ScopeInfo.SupportsDualScope
-    CoreOffset              = $FirstCore.Offset
-    CoreCompressedSize      = $FirstCore.CompressedSize
-    CoreUncompressedSize    = $FirstCore.UncompressedSize
-    CoreEntries             = $Candidate.CoreEntries
-    ApplicationArchitectureMode = $ApplicationArchitectureMode
-    ApplicationArchitectures = @($Candidate.CoreEntries | Select-Object -ExpandProperty Architecture)
+    Layout                                = $Candidate.Layout
+    FormatVersion                         = $Candidate.FormatVersion
+    HeaderSize                            = $Candidate.HeaderSize
+    LzmaProperties                        = $Properties
+    LzmaPropertyByte                      = [byte]$Properties[0]
+    DictionarySize                        = $DictionarySize
+    ScopeValue                            = $Candidate.ScopeValue
+    Scope                                 = $ScopeInfo.Scope
+    DefaultScope                          = $ScopeInfo.DefaultScope
+    SupportedScopes                       = $ScopeInfo.SupportedScopes
+    SupportsDualScope                     = $ScopeInfo.SupportsDualScope
+    CoreOffset                            = $FirstCore.Offset
+    CoreCompressedSize                    = $FirstCore.CompressedSize
+    CoreUncompressedSize                  = $FirstCore.UncompressedSize
+    CoreEntries                           = $Candidate.CoreEntries
+    ApplicationArchitectureMode           = $ApplicationArchitectureMode
+    ApplicationArchitectures              = @($Candidate.CoreEntries | Select-Object -ExpandProperty Architecture)
     SupportedOperatingSystemArchitectures = $OperatingSystemArchitectures
-    LanguageBlockOffset     = $Candidate.LanguageBlockOffset
+    LanguageBlockOffset                   = $Candidate.LanguageBlockOffset
   }
 }
 
@@ -245,31 +245,31 @@ function ConvertFrom-DeployMasterIdentity {
   }
 
   [pscustomobject]@{
-    Publisher               = [string]$Fields[0]
-    PublisherUrl            = [string]$Fields[1]
-    DisplayName             = [string]$Fields[2]
-    PackageUrl              = [string]$Fields[3]
-    DisplayVersion          = [string]$Fields[4]
-    ReleaseDateValue        = [string]$Fields[5]
-    ReleaseDate             = $ReleaseDate
-    Copyright               = [string]$Fields[6]
-    LicenseUrl              = [string]$Fields[7]
-    LicenseFileName         = $LicenseFileName
-    MachineInstallLocation  = $MachineInstallLocation
-    UserInstallLocation     = $UserInstallLocation
-    CommonFilesLocation     = [string]$Fields[13]
-    CommonPublisherLocation = [string]$Fields[14]
-    MachineMenuLocation     = [string]$Fields[15]
-    UserMenuLocation        = [string]$Fields[16]
-    CommonDataLocation      = [string]$Fields[17]
-    UserDataLocation        = [string]$Fields[18]
-    LocationMarker          = $LocationMarker
+    Publisher                  = [string]$Fields[0]
+    PublisherUrl               = [string]$Fields[1]
+    DisplayName                = [string]$Fields[2]
+    PackageUrl                 = [string]$Fields[3]
+    DisplayVersion             = [string]$Fields[4]
+    ReleaseDateValue           = [string]$Fields[5]
+    ReleaseDate                = $ReleaseDate
+    Copyright                  = [string]$Fields[6]
+    LicenseUrl                 = [string]$Fields[7]
+    LicenseFileName            = $LicenseFileName
+    MachineInstallLocation     = $MachineInstallLocation
+    UserInstallLocation        = $UserInstallLocation
+    CommonFilesLocation        = [string]$Fields[13]
+    CommonPublisherLocation    = [string]$Fields[14]
+    MachineMenuLocation        = [string]$Fields[15]
+    UserMenuLocation           = [string]$Fields[16]
+    CommonDataLocation         = [string]$Fields[17]
+    UserDataLocation           = [string]$Fields[18]
+    LocationMarker             = $LocationMarker
     LocationMarkerMatchesScope = $LocationMarker -eq @{
       0 = 2
       1 = 1
       2 = 3
     }[$ScopeValue]
-    Fields                  = $Fields
+    Fields                     = $Fields
   }
 }
 
@@ -344,7 +344,7 @@ function Get-DeployMasterFileEntry {
         $LicenseOffsets = [Collections.Generic.List[long]]::new()
         for ($LicenseHeader = 0; $LicenseHeader + 8 + $StoredSizes[0] -le $Index; $LicenseHeader++) {
           if ([BitConverter]::ToUInt32($Metadata, $LicenseHeader) -eq $StoredSizes[0] -and
-              [BitConverter]::ToUInt32($Metadata, $LicenseHeader + 4) -eq $RawSizes[0]) {
+            [BitConverter]::ToUInt32($Metadata, $LicenseHeader + 4) -eq $RawSizes[0]) {
             $LicenseOffsets.Add($IdentityEnd + $LicenseHeader + 8)
           }
         }
@@ -357,10 +357,10 @@ function Get-DeployMasterFileEntry {
       }
       if ($Valid) {
         $Candidates.Add([pscustomobject]@{
-            TableKind = $CandidateTableKind
+            TableKind   = $CandidateTableKind
             TableOffset = $Index
-            Offsets = $Offsets.ToArray()
-            RawSizes = $RawSizes.ToArray()
+            Offsets     = $Offsets.ToArray()
+            RawSizes    = $RawSizes.ToArray()
             StoredSizes = $StoredSizes.ToArray()
           })
       }
@@ -580,14 +580,14 @@ function Read-DeployMasterPackageData {
   }
 
   [pscustomobject]@{
-    Locator       = $Locator
-    Header        = $Header
-    LanguageBlock = $LanguageBlock
-    IdentityBlock = $IdentityBlock
-    Identity      = $Identity
-    FileEntries   = $FileEntries
+    Locator          = $Locator
+    Header           = $Header
+    LanguageBlock    = $LanguageBlock
+    IdentityBlock    = $IdentityBlock
+    Identity         = $Identity
+    FileEntries      = $FileEntries
     FileAssociations = $FileAssociations
-    Warnings      = @($Warnings)
+    Warnings         = @($Warnings)
   }
 }
 
@@ -671,42 +671,42 @@ function Get-DeployMasterInfo {
     } else { $PackageData.Header.ApplicationArchitectureMode }
 
     [pscustomobject]@{
-      InstallerType              = 'DeployMaster'
-      ProductCode                = $Identity.DisplayName
-      ProductCodeEvidence        = 'DeployMaster structured identity and built-in uninstall-key convention'
-      PackageName                = $Identity.DisplayName
-      DisplayName                = $Identity.DisplayName
-      ProductName                = $Identity.DisplayName
-      DisplayVersion             = $Identity.DisplayVersion
-      Publisher                  = $Identity.Publisher
-      PublisherUrl               = $Identity.PublisherUrl
-      PackageUrl                 = $Identity.PackageUrl
-      Copyright                  = $Identity.Copyright
-      ReleaseDate                = $Identity.ReleaseDate
-      InstallLocation            = $InstallLocation
-      MachineInstallLocation     = $Identity.MachineInstallLocation
-      UserInstallLocation        = $Identity.UserInstallLocation
-      RuntimeProductName         = $RuntimeProductName
-      FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-      Scope                      = $PackageData.Header.Scope
-      DefaultScope               = $PackageData.Header.DefaultScope
-      SupportedScopes            = $PackageData.Header.SupportedScopes
-      SupportsDualScope          = $PackageData.Header.SupportsDualScope
-      InstallerArchitecture      = $InstallerArchitecture
-      ApplicationArchitectureMode = $ApplicationArchitectureMode
-      ApplicationArchitectures   = $PackageData.Header.ApplicationArchitectures
-      SupportedArchitectures     = $PackageData.Header.ApplicationArchitectures
+      InstallerType                         = 'DeployMaster'
+      ProductCode                           = $Identity.DisplayName
+      ProductCodeEvidence                   = 'DeployMaster structured identity and built-in uninstall-key convention'
+      PackageName                           = $Identity.DisplayName
+      DisplayName                           = $Identity.DisplayName
+      ProductName                           = $Identity.DisplayName
+      DisplayVersion                        = $Identity.DisplayVersion
+      Publisher                             = $Identity.Publisher
+      PublisherUrl                          = $Identity.PublisherUrl
+      PackageUrl                            = $Identity.PackageUrl
+      Copyright                             = $Identity.Copyright
+      ReleaseDate                           = $Identity.ReleaseDate
+      InstallLocation                       = $InstallLocation
+      MachineInstallLocation                = $Identity.MachineInstallLocation
+      UserInstallLocation                   = $Identity.UserInstallLocation
+      RuntimeProductName                    = $RuntimeProductName
+      FileDescription                       = ([string]$VersionInfo.FileDescription).Trim()
+      Scope                                 = $PackageData.Header.Scope
+      DefaultScope                          = $PackageData.Header.DefaultScope
+      SupportedScopes                       = $PackageData.Header.SupportedScopes
+      SupportsDualScope                     = $PackageData.Header.SupportsDualScope
+      InstallerArchitecture                 = $InstallerArchitecture
+      ApplicationArchitectureMode           = $ApplicationArchitectureMode
+      ApplicationArchitectures              = $PackageData.Header.ApplicationArchitectures
+      SupportedArchitectures                = $PackageData.Header.ApplicationArchitectures
       SupportedOperatingSystemArchitectures = $PackageData.Header.SupportedOperatingSystemArchitectures
-      RequestedExecutionLevel    = Get-PERequestedExecutionLevel -Path $File.FullName
-      RegistryWrites             = $RegistryWrites
-      RegistryAssociationInfo    = $RegistryAssociationInfo
-      Protocols                  = $RegistryAssociationInfo.Protocols
-      FileExtensions             = $RegistryAssociationInfo.FileExtensions
-      FileAssociations           = $PackageData.FileAssociations
-      WritesAppsAndFeaturesEntry = $true
-      FileEntries                = $PackageData.FileEntries
-      ExtractedFiles             = @($PackageData.FileEntries | Select-Object -ExpandProperty FullName)
-      OverlayInfo                = [pscustomobject]@{
+      RequestedExecutionLevel               = Get-PERequestedExecutionLevel -Path $File.FullName
+      RegistryWrites                        = $RegistryWrites
+      RegistryAssociationInfo               = $RegistryAssociationInfo
+      Protocols                             = $RegistryAssociationInfo.Protocols
+      FileExtensions                        = $RegistryAssociationInfo.FileExtensions
+      FileAssociations                      = $PackageData.FileAssociations
+      WritesAppsAndFeaturesEntry            = $true
+      FileEntries                           = $PackageData.FileEntries
+      ExtractedFiles                        = @($PackageData.FileEntries | Select-Object -ExpandProperty FullName)
+      OverlayInfo                           = [pscustomobject]@{
         OverlayOffset     = $PackageData.Locator.PackageOffset
         OverlayLength     = $File.Length - $PackageData.Locator.PackageOffset
         IntegrityLength   = $PackageData.Locator.IntegrityLength
@@ -716,9 +716,9 @@ function Get-DeployMasterInfo {
         FormatVersion     = $PackageData.Header.FormatVersion
         PackageDataOffset = $PackageData.Locator.PackageDataOffset
       }
-      CanExpand                  = $true
-      Warnings                   = @($Warnings | Select-Object -Unique)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.DeployMaster'; ParserMajor = 2; Sources = @('DeployMaster 0x80 package locator', 'CRC32-protected package-control header', 'bounded LZMA identity and file-type blocks', 'controlled scope and architecture builder outputs') }
+      CanExpand                             = $true
+      Warnings                              = @($Warnings | Select-Object -Unique)
+      ParserVersionInfo                     = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.DeployMaster'; ParserMajor = 2; Sources = @('DeployMaster 0x80 package locator', 'CRC32-protected package-control header', 'bounded LZMA identity and file-type blocks', 'controlled scope and architecture builder outputs') }
     }
   }
 }

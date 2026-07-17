@@ -27,7 +27,7 @@ function Read-Varint {
       'UInt32' { $Value = [UInt32]0; continue }
       'Int32' { $Value = [Int32]0; continue }
       'Raw' { return $Buffer.ToArray() }
-      Default { throw "The specified type ${OutputType} is invalid for type Varint" }
+      default { throw "The specified type ${OutputType} is invalid for type Varint" }
     }
 
     for ($i = $Buffer.Count - 1; $i -ge 0; $i--) {
@@ -56,7 +56,7 @@ function Read-Fixed64 {
       'Int64' { return [System.BitConverter]::ToInt64($Buffer, 0) }
       'Double' { return [System.BitConverter]::ToDouble($Buffer, 0) }
       'Raw' { return $Buffer }
-      Default { throw "The specified type ${OutputType} is invalid for type Fixed64" }
+      default { throw "The specified type ${OutputType} is invalid for type Fixed64" }
     }
   }
 }
@@ -80,7 +80,7 @@ function Read-Fixed32 {
       'Int32' { return [System.BitConverter]::ToInt32($Buffer, 0) }
       'Float' { return [System.BitConverter]::ToSingle($Buffer, 0) }
       'Raw' { return $Buffer }
-      Default { throw "The specified type ${OutputType} is invalid for type Fixed32" }
+      default { throw "The specified type ${OutputType} is invalid for type Fixed32" }
     }
   }
 }
@@ -182,7 +182,7 @@ function ConvertFrom-ProtoBuf {
         # Possible types include Int32, UInt32, Float and ZigZag encodings
         5 { $Value = Read-Fixed32 -Stream $Stream -OutputType $Fixed32Type; continue }
         # StartGroup (3), EndGroup (4) and others
-        Default { throw "Unsupported or unknown WireType ${WireType}" }
+        default { throw "Unsupported or unknown WireType ${WireType}" }
       }
 
       # If there are repeated objects (objects with the same field number) at the same level, wrap them into a list

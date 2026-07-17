@@ -259,18 +259,18 @@ function Get-MsiStaticTableInfo {
   $MimeRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `ContentType`, `Extension_`, `CLSID` FROM `MIME`' -FieldNames @('ContentType', 'Extension', 'ClassId'))
 
   [PSCustomObject]@{
-    Properties       = $Properties
-    Tables           = $Tables
-    DirectoryRows    = $DirectoryRows
-    ComponentRows    = $ComponentRows
-    CustomActionRows = $CustomActionRows
+    Properties          = $Properties
+    Tables              = $Tables
+    DirectoryRows       = $DirectoryRows
+    ComponentRows       = $ComponentRows
+    CustomActionRows    = $CustomActionRows
     LaunchConditionRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Condition`, `Description` FROM `LaunchCondition`' -FieldNames @('Condition', 'Description'))
-    RegistryRows     = @($RegistryRows)
-    ExtensionRows    = $ExtensionRows
-    ProgIdRows       = $ProgIdRows
-    VerbRows         = $VerbRows
-    MimeRows         = $MimeRows
-    SummaryInfo      = $Database.SummaryInfo
+    RegistryRows        = @($RegistryRows)
+    ExtensionRows       = $ExtensionRows
+    ProgIdRows          = $ProgIdRows
+    VerbRows            = $VerbRows
+    MimeRows            = $MimeRows
+    SummaryInfo         = $Database.SummaryInfo
   }
 }
 
@@ -693,22 +693,22 @@ function Get-MsiAppsAndFeaturesInfo {
       }
 
       [PSCustomObject]@{
-        InstallerType                       = $InstallerBuilder -eq 'WiX' ? 'wix' : 'msi'
-        ProductCode                         = $ProductCode
-        ProductName                         = $Properties['ProductName']
-        ProductVersion                      = $Properties['ProductVersion']
-        UpgradeCode                         = $Properties['UpgradeCode']
-        InstallerBuilder                    = $InstallerBuilder
-        AppsAndFeaturesInstallerType        = $AppsAndFeaturesInstallerType
-        AppsAndFeaturesWindowsInstaller     = $AppsAndFeaturesWindowsInstaller
-        AppsAndFeaturesProductCode          = $AppsAndFeaturesProductCode
-        HasCustomAppsAndFeaturesEntry       = [bool]$CustomAppsAndFeaturesProductCode
-        HasMsqAppsAndFeaturesEntry          = $HasMsqAppsAndFeaturesEntry
-        HidesMsiAppsAndFeaturesEntry        = $HidesMsiAppsAndFeaturesEntry
-        CustomAppsAndFeaturesRegistryKey    = $CustomAppsAndFeaturesEntry ? $CustomAppsAndFeaturesEntry.Name : $null
-        CustomAppsAndFeaturesRegistryRows   = $CustomAppsAndFeaturesRegistryRows
-        MsqAppsAndFeaturesRegistryKey       = $MsqRegistryRows.Count -gt 0 ? $MsqRegistryRows[0].Key : $null
-        MsqAppsAndFeaturesRegistryRows      = $MsqRegistryRows
+        InstallerType                     = $InstallerBuilder -eq 'WiX' ? 'wix' : 'msi'
+        ProductCode                       = $ProductCode
+        ProductName                       = $Properties['ProductName']
+        ProductVersion                    = $Properties['ProductVersion']
+        UpgradeCode                       = $Properties['UpgradeCode']
+        InstallerBuilder                  = $InstallerBuilder
+        AppsAndFeaturesInstallerType      = $AppsAndFeaturesInstallerType
+        AppsAndFeaturesWindowsInstaller   = $AppsAndFeaturesWindowsInstaller
+        AppsAndFeaturesProductCode        = $AppsAndFeaturesProductCode
+        HasCustomAppsAndFeaturesEntry     = [bool]$CustomAppsAndFeaturesProductCode
+        HasMsqAppsAndFeaturesEntry        = $HasMsqAppsAndFeaturesEntry
+        HidesMsiAppsAndFeaturesEntry      = $HidesMsiAppsAndFeaturesEntry
+        CustomAppsAndFeaturesRegistryKey  = $CustomAppsAndFeaturesEntry ? $CustomAppsAndFeaturesEntry.Name : $null
+        CustomAppsAndFeaturesRegistryRows = $CustomAppsAndFeaturesRegistryRows
+        MsqAppsAndFeaturesRegistryKey     = $MsqRegistryRows.Count -gt 0 ? $MsqRegistryRows[0].Key : $null
+        MsqAppsAndFeaturesRegistryRows    = $MsqRegistryRows
       }
     } finally {
       switch ($PSCmdlet.ParameterSetName) {

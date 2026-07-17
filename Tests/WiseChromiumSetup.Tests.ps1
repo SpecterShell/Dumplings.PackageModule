@@ -38,6 +38,32 @@ Describe 'Chromium updater tag parser' {
     $Info.IsTagged | Should -BeFalse
     $Info.Length | Should -Be 0
   }
+
+  It 'Should parse the UTF-16 Microsoft Edge certificate tag' {
+    $RawTag = 'appguid={F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}&appname=Microsoft%20Edge%20WebView2%20Runtime&needsadmin=Prefers'
+    $Bytes = [Text.Encoding]::Unicode.GetBytes("MSEDGE_${RawTag}_EGDESM")
+
+    $Info = ConvertFrom-ChromiumUpdaterTagData -Bytes $Bytes
+
+    $Info.MarkerFound | Should -BeTrue
+    $Info.IsTagged | Should -BeTrue
+    $Info.TagFormat | Should -BeExactly 'MicrosoftEdgeCertificateTag'
+    $Info.ApplicationId | Should -BeExactly '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    $Info.ApplicationName | Should -BeExactly 'Microsoft Edge WebView2 Runtime'
+    $Info.NeedsAdmin | Should -BeExactly 'Prefers'
+  }
+
+  It 'Should parse the source-defined wide updater tag framing' {
+    $RawTag = 'appguid={WIDE-APP}&appname=Wide%20Browser&needsadmin=false'
+    $Bytes = [Text.Encoding]::Unicode.GetBytes("Gact2.0Omaha${RawTag}ahamO0.2tcaG")
+
+    $Info = ConvertFrom-ChromiumUpdaterTagData -Bytes $Bytes
+
+    $Info.TagFormat | Should -BeExactly 'ChromiumWideCertificateTag'
+    $Info.ApplicationId | Should -BeExactly '{WIDE-APP}'
+    $Info.ApplicationName | Should -BeExactly 'Wide Browser'
+    $Info.NeedsAdmin | Should -BeExactly 'false'
+  }
 }
 
 Describe 'Chromium resource classification' {
@@ -56,7 +82,7 @@ Describe 'Chromium resource classification' {
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BL'; TypeId = $null; Name = 'setup.ex_'; Id = $null; Offset = 300; Size = 400 }
         )
       }
-      Mock Read-ChromiumInstallerTag { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
       $Info.Variant | Should -Be 'ChromiumMiniInstaller'
@@ -64,6 +90,8 @@ Describe 'Chromium resource classification' {
       $Info.SupportedScopes | Should -Be @('user', 'machine')
       $Info.MachineScopeSwitch | Should -Be '--system-level'
       $Info.ExecutedPayloads | Should -Be @('setup.exe')
+      Should -Invoke Get-PELayout -Times 1 -Exactly
+      Should -Invoke Get-PEResourceInfo -Times 1 -Exactly
     }
   }
 
@@ -77,7 +105,7 @@ Describe 'Chromium resource classification' {
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BL'; TypeId = $null; Name = 'SETUP.EX_'; Id = $null; Offset = 300; Size = 400 }
         )
       }
-      Mock Read-ChromiumInstallerTag { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
       $Info.Variant | Should -Be 'ChromiumMiniInstaller'
@@ -92,7 +120,7 @@ Describe 'Chromium resource classification' {
       param($SyntheticPath)
       Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
       Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'updater.packed.7z'; Id = $null; Offset = 100; Size = 200 } }
-      Mock Read-ChromiumInstallerTag { [pscustomobject]@{ MarkerFound = $true; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $true; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
       $Info.Variant | Should -Be 'ChromiumUpdater'
@@ -106,7 +134,7 @@ Describe 'Chromium resource classification' {
       param($SyntheticPath)
       Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
       Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B'; TypeId = $null; Name = $null; Id = 102; Offset = 100; Size = 200 } }
-      Mock Read-ChromiumInstallerTag { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
+      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
       Mock Get-ChromiumOmahaOfflineManifestInfo { $null }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
@@ -116,6 +144,43 @@ Describe 'Chromium resource classification' {
       $Info.ProductCode | Should -BeNullOrEmpty
       $Info.Scope | Should -Be 'machine'
       $Info.Warnings[0] | Should -BeLike '*not an ARP ProductCode*'
+    }
+  }
+
+  It 'Should leave online status unknown when an Omaha offline-manifest check fails' {
+    InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
+      param($SyntheticPath)
+      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
+      Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B'; Id = 102; Offset = 100; Size = 200 } }
+      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
+      Mock Get-ChromiumOmahaOfflineManifestInfo { throw 'malformed payload' }
+
+      $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
+
+      $Info.OfflineManifestChecked | Should -BeTrue
+      $Info.IsOnlineBootstrapper | Should -BeNullOrEmpty
+      ($Info.Warnings -join ' ') | Should -BeLike '*could not be checked*malformed payload*'
+    }
+  }
+
+  It 'Should prefer B7 setup resources over BL and BN like Chromium mini_installer' {
+    InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
+      param($SyntheticPath)
+      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
+      Mock Get-PEResourceInfo {
+        @(
+          [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BN'; Name = 'CHROME.7Z'; Offset = 100; Size = 200 }
+          [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BN'; Name = 'SETUP.EXE'; Offset = 300; Size = 400 }
+          [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BL'; Name = 'SETUP.EX_'; Offset = 500; Size = 600 }
+          [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; Name = 'SETUP.PACKED.7Z'; Offset = 700; Size = 800 }
+        )
+      }
+      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+
+      $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
+
+      $Info.Variant | Should -BeExactly 'ChromiumMiniInstaller'
+      $Info.SetupResourceName | Should -BeExactly 'SETUP.PACKED.7Z'
     }
   }
 
@@ -132,6 +197,13 @@ Describe 'Chromium resource classification' {
     InModuleScope ChromiumSetup -Parameters @{ ApplicationId = $ApplicationId; ProductCode = $ProductCode } {
       param($ApplicationId, $ProductCode)
       Resolve-BraveChromiumProductCode -ApplicationId $ApplicationId.ToLowerInvariant() -Publisher 'BraveSoftware Inc.' | Should -BeExactly $ProductCode
+    }
+  }
+
+  It 'Should resolve the documented WebView2 client identity to its uninstall key' {
+    InModuleScope ChromiumSetup {
+      Resolve-MicrosoftEdgeChromiumProductCode -ApplicationId '{f3017226-fe2a-4295-8bdf-00c3a9a7e4c5}' -Publisher 'Microsoft Corporation' | Should -BeExactly 'Microsoft EdgeWebView'
+      Resolve-MicrosoftEdgeChromiumProductCode -ApplicationId '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -Publisher 'Example Publisher' | Should -BeNullOrEmpty
     }
   }
 
@@ -237,6 +309,49 @@ Describe 'Chromium real installer fixtures' {
     $Files[0].Name | Should -Be 'updater.exe'
   }
 
+  It 'Should classify current online bootstrapper <Package>' -ForEach @(
+    @{
+      Package       = 'Google.Chrome'
+      Name          = 'ChromeOnlineSetup.exe'
+      Url           = 'https://dl.google.com/chrome/install/latest/chrome_installer.exe'
+      Variant       = 'ChromiumUpdater'
+      ApplicationId = '{8A69D345-D564-463C-AFF1-A69D9E530F96}'
+      ProductCode   = $null
+    }
+    @{
+      Package       = 'Brave.Brave.Beta'
+      Name          = 'BraveBrowserBetaSetup-1.93.120.exe'
+      Url           = 'https://github.com/brave/brave-browser/releases/download/v1.93.120/BraveBrowserBetaSetup.exe'
+      Variant       = 'Omaha'
+      ApplicationId = '{103BD053-949B-43A8-9120-2E424887DE11}'
+      ProductCode   = 'BraveSoftware Brave-Browser-Beta'
+    }
+    @{
+      Package       = 'Brave Origin Beta installer'
+      Name          = 'BraveOriginBetaSetup-1.93.120.exe'
+      Url           = 'https://github.com/brave/brave-browser/releases/download/v1.93.120/BraveOriginBetaSetup.exe'
+      Variant       = 'Omaha'
+      ApplicationId = '{56DA94FD-D872-416B-BFC4-1D7011DA7473}'
+      ProductCode   = 'BraveSoftware Brave-Origin-Beta'
+    }
+    @{
+      Package       = 'Microsoft.EdgeWebView2Runtime'
+      Name          = 'MicrosoftEdgeWebView2Bootstrapper.exe'
+      Url           = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+      Variant       = 'Omaha'
+      ApplicationId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+      ProductCode   = 'Microsoft EdgeWebView'
+    }
+  ) {
+    $Installer = Get-WiseChromiumFixture -Name $Name -Url $Url
+    $Info = Get-ChromiumSetupInfo -Path $Installer
+
+    $Info.Variant | Should -BeExactly $Variant
+    $Info.ApplicationId | Should -BeExactly $ApplicationId
+    $Info.ProductCode | Should -BeExactly $ProductCode
+    $Info.IsOnlineBootstrapper | Should -BeTrue
+  }
+
   It 'Should validate cached bare mini-installer resources without requiring the large CI download' {
     $Installer = Join-Path $Script:FixtureDirectory 'ChromeMiniInstallerUncompressed-150.0.7871.47-x64.exe'
     if (-not (Test-Path -LiteralPath $Installer)) { Set-ItResult -Skipped -Because 'The 489 MB Chrome mini-installer fixture is not cached.'; return }
@@ -280,6 +395,24 @@ Describe 'Chromium real installer fixtures' {
     $Info.IsOnlineBootstrapper | Should -BeFalse
     $Info.OfflineManifest.Packages[0].Name | Should -BeExactly 'brave_installer.exe'
     $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--do-not-launch-chrome'
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should parse a cached Microsoft Edge WebView2 standalone installer' {
+    $Installer = Join-Path $Script:FixtureDirectory 'MicrosoftEdgeWebView2RuntimeInstallerX64-150.0.4078.65.exe'
+    if (-not (Test-Path -LiteralPath $Installer)) { Set-ItResult -Skipped -Because 'The 204 MB Edge WebView2 fixture is not cached.'; return }
+
+    $Info = Get-ChromiumSetupInfo -Path $Installer
+
+    $Info.Variant | Should -BeExactly 'Omaha'
+    $Info.UpdaterTag.TagFormat | Should -BeExactly 'MicrosoftEdgeCertificateTag'
+    $Info.ApplicationId | Should -BeExactly '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    $Info.DisplayName | Should -BeExactly 'Microsoft Edge WebView2 Runtime'
+    $Info.DisplayVersion | Should -BeExactly '150.0.4078.65'
+    $Info.ProductCode | Should -BeExactly 'Microsoft EdgeWebView'
+    $Info.SupportedScopes | Should -Be @('user', 'machine')
+    $Info.IsOnlineBootstrapper | Should -BeFalse
+    $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--msedgewebview --verbose-logging --do-not-launch-msedge'
     $Info.Warnings | Should -BeNullOrEmpty
   }
 }

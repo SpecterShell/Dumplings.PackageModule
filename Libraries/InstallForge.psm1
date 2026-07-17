@@ -98,10 +98,10 @@ function Get-InstallForgeConfigurationArchiveData {
     $ConfigurationEntry = $Entries | Where-Object { $_.FullName -ieq 'SC.dat' } | Select-Object -First 1
     if (-not $ConfigurationEntry) { throw 'The InstallForge configuration archive does not contain SC.dat' }
     return [pscustomobject]@{
-      ArchivePath           = $TemporaryPath
-      Entries               = $Entries
+      ArchivePath            = $TemporaryPath
+      Entries                = $Entries
       ConfigurationEntryName = $ConfigurationEntry.EncodedName
-      Resource              = $Resource
+      Resource               = $Resource
     }
   } catch {
     Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
@@ -136,7 +136,7 @@ function Get-InstallForgePayloadArchiveData {
             FullName    = ConvertFrom-InstallForgeEncodedPath -Path $_.FullName
             Length      = $_.Length
           }
-      })
+        })
       if ($Entries.Count -eq 0 -or -not ($Entries | Where-Object { $_.EncodedName -ne $_.FullName } | Select-Object -First 1)) { continue }
       return [pscustomobject]@{ SourcePath = $File.FullName; Range = $Range; Entries = $Entries; Offset = [long]$Offset; Length = [long]$Length }
     } catch {

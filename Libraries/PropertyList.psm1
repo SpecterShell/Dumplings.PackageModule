@@ -65,7 +65,7 @@ function ConvertFrom-PropertyList {
         'data' { [System.Convert]::FromBase64String($Node.'#text') }
         'plist' { $Node.ChildNodes | ConvertFrom-PropertyList }
         '#document' { $Node.plist | ConvertFrom-PropertyList }
-        Default { throw "Unknown type $($Node.Name)" }
+        default { throw "Unknown type $($Node.Name)" }
       }
     }
   }

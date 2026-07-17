@@ -106,11 +106,11 @@ function Read-WinGetInstallerHeader {
   )
 
   $ReadCount = [Math]::Min($Count, [int]$File.Length)
-  if ($ReadCount -le 0) { return ,([byte[]]::new(0)) }
+  if ($ReadCount -le 0) { return , ([byte[]]::new(0)) }
 
   $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   try {
-    return ,(Read-PEFileBytes -Stream $Stream -Offset 0 -Count $ReadCount)
+    return , (Read-PEFileBytes -Stream $Stream -Offset 0 -Count $ReadCount)
   } finally {
     $Stream.Dispose()
   }
@@ -182,10 +182,10 @@ function Get-WinGetInstallerCfbTypeEvidence {
   }
 
   [pscustomobject]@{
-    Type     = $Type
-    Format   = $Format
-    ClassId  = $ClassIdText
-    Note     = 'Windows Installer CFB root storage CLSID, not filename extension, identifies MSI/MSP/MST.'
+    Type    = $Type
+    Format  = $Format
+    ClassId = $ClassIdText
+    Note    = 'Windows Installer CFB root storage CLSID, not filename extension, identifies MSI/MSP/MST.'
   }
 }
 
@@ -212,12 +212,12 @@ function Get-WinGetInstallerZipTypeEvidence {
     $HasAppxSignature = $EntryNames -contains 'AppxSignature.p7x'
 
     [pscustomobject]@{
-      EntryCount         = $Entries.Count
-      SampleEntries      = $SampleEntries
-      HasAppxManifest    = $HasAppxManifest
-      HasBundleManifest  = $HasBundleManifest
-      HasAppxSignature   = $HasAppxSignature
-      IsAppxMsixFamily   = $HasAppxManifest -or $HasBundleManifest -or $HasAppxSignature
+      EntryCount        = $Entries.Count
+      SampleEntries     = $SampleEntries
+      HasAppxManifest   = $HasAppxManifest
+      HasBundleManifest = $HasBundleManifest
+      HasAppxSignature  = $HasAppxSignature
+      IsAppxMsixFamily  = $HasAppxManifest -or $HasBundleManifest -or $HasAppxSignature
     }
   } finally {
     $Archive.Dispose()
@@ -1073,25 +1073,25 @@ function Invoke-WinGetInstallerMsixAnalysis {
   $AssociationInfo = ConvertTo-MSIXManifestAssociationInfo -Manifest $Manifests
 
   [pscustomobject]@{
-    Family                  = 'MSIX/AppX'
-    Confidence              = 'high'
-    InstallerType           = $PackageTypeInfo.InstallerType
-    PackageKind             = $PackageTypeInfo.PackageKind
-    InstallerTypeEvidence   = $PackageTypeInfo.Evidence
-    InstallerTypeAmbiguous  = $PackageTypeInfo.IsAmbiguous
-    ProductVersion          = if ($Identity) { $Identity.Version } else { Read-ProductVersionFromMSIX -Path $AnalyzerInstallerPath -ErrorAction SilentlyContinue }
-    PackageFamilyName       = if ($Identity) { "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)" } else { Read-FamilyNameFromMSIX -Path $AnalyzerInstallerPath -ErrorAction SilentlyContinue }
-    Dependencies            = $DependencyInfo.Dependencies
+    Family                     = 'MSIX/AppX'
+    Confidence                 = 'high'
+    InstallerType              = $PackageTypeInfo.InstallerType
+    PackageKind                = $PackageTypeInfo.PackageKind
+    InstallerTypeEvidence      = $PackageTypeInfo.Evidence
+    InstallerTypeAmbiguous     = $PackageTypeInfo.IsAmbiguous
+    ProductVersion             = if ($Identity) { $Identity.Version } else { Read-ProductVersionFromMSIX -Path $AnalyzerInstallerPath -ErrorAction SilentlyContinue }
+    PackageFamilyName          = if ($Identity) { "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)" } else { Read-FamilyNameFromMSIX -Path $AnalyzerInstallerPath -ErrorAction SilentlyContinue }
+    Dependencies               = $DependencyInfo.Dependencies
     UnknownPackageDependencies = $DependencyInfo.UnknownPackageDependencies
-    Warnings                = @($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings)
-    Protocols               = $AssociationInfo.Protocols
-    FileExtensions          = $AssociationInfo.FileExtensions
-    RegistryAssociationInfo = $AssociationInfo
-    SignatureSha256         = $SignatureEvidence.SignatureSha256
-    SignatureEvidence       = $SignatureEvidence
-    Rejected                = -not $SignatureEvidence.IsTrusted
-    RejectionReason         = $SignatureEvidence.RequiredAction
-    SuggestedManifestFields = [pscustomobject]@{ InstallerType = $PackageTypeInfo.InstallerType; Dependencies = $DependencyInfo.Dependencies }
+    Warnings                   = @($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings)
+    Protocols                  = $AssociationInfo.Protocols
+    FileExtensions             = $AssociationInfo.FileExtensions
+    RegistryAssociationInfo    = $AssociationInfo
+    SignatureSha256            = $SignatureEvidence.SignatureSha256
+    SignatureEvidence          = $SignatureEvidence
+    Rejected                   = -not $SignatureEvidence.IsTrusted
+    RejectionReason            = $SignatureEvidence.RequiredAction
+    SuggestedManifestFields    = [pscustomobject]@{ InstallerType = $PackageTypeInfo.InstallerType; Dependencies = $DependencyInfo.Dependencies }
   }
 }
 
@@ -1336,10 +1336,10 @@ function Invoke-WinGetInstallerZipAnalysis {
         }
 
         $PortableCandidateEvidence.Add([pscustomobject]@{
-            RelativeFilePath     = $Candidate.FullName
-            RelatedFilePaths     = @($RelatedPaths)
-            Length               = $Candidate.Length
-            Evidence             = Get-WinGetInstallerPortableEvidence -Path $CandidatePath -RelatedFile @($RelatedPaths)
+            RelativeFilePath = $Candidate.FullName
+            RelatedFilePaths = @($RelatedPaths)
+            Length           = $Candidate.Length
+            Evidence         = Get-WinGetInstallerPortableEvidence -Path $CandidatePath -RelatedFile @($RelatedPaths)
           })
       }
     } finally {
@@ -1349,14 +1349,14 @@ function Invoke-WinGetInstallerZipAnalysis {
     }
 
     [pscustomobject]@{
-      Family                  = 'ZIP/archive'
-      Confidence              = 'high'
-      InstallerType           = 'zip'
-      EntryCount              = $Entries.Count
-      NestedInstallerFiles    = $NestedInstallers
-      PortableCandidates      = $PortableCandidates
+      Family                    = 'ZIP/archive'
+      Confidence                = 'high'
+      InstallerType             = 'zip'
+      EntryCount                = $Entries.Count
+      NestedInstallerFiles      = $NestedInstallers
+      PortableCandidates        = $PortableCandidates
       PortableCandidateEvidence = @($PortableCandidateEvidence)
-      SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'zip'; NestedInstallerType = 'exe/msi/msix/portable based on selected nested file' }
+      SuggestedManifestFields   = [pscustomobject]@{ InstallerType = 'zip'; NestedInstallerType = 'exe/msi/msix/portable based on selected nested file' }
     }
   } finally {
     $Archive.Dispose()
@@ -1447,295 +1447,321 @@ function Invoke-WinGetInstallerExeParser {
   # Structured generic-family parsers are authoritative. Stop before broad SFX
   # heuristics when one succeeds because many installer engines embed archives.
   $StructuredParserResults = @(
-    if (Test-WinGetInstallerCandidateFamily -Family 'Chromium Setup') { Invoke-WinGetInstallerDetector -Name 'Chromium Setup' -ScriptBlock {
-    $Info = Get-ChromiumSetupInfo -Path $AnalyzerInstallerPath
-    $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Chromium Setup'
-    if ($Info.Variant -eq 'ChromiumMiniInstaller') {
-      $SuggestedManifestFields.InstallModes = @('silent')
-      $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Custom = '--do-not-launch-chrome'; Log = '--verbose-logging --log-file="<LOGPATH>"' }
-      $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = $null; Machine = '--system-level' }) -Force
-    } elseif ($Info.Variant -eq 'ChromiumUpdater' -and -not $Info.IsOnlineBootstrapper) {
-      $SuggestedManifestFields.InstallModes = @('interactive', 'silent')
-      $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Silent = '--install --silent'; SilentWithProgress = '--install --silent'; Interactive = '--install'; Log = '--enable-logging'; Upgrade = '--update' }
-      $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = '--enterprise'; Machine = '--system --enterprise' }) -Force
-    } elseif ($Info.Variant -eq 'Omaha' -and -not $Info.IsOnlineBootstrapper -and -not $Info.UpdaterTag.IsTagged) {
-      $SuggestedManifestFields.InstallModes = @('silent')
-      $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Silent = '/silent'; SilentWithProgress = '/silent' }
-      $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = $Info.UserScopeSwitch; Machine = $Info.MachineScopeSwitch }) -Force
-      $SuggestedManifestFields.Notes += 'This untagged Omaha package installs its embedded updater runtime. Keep the complete /install runtime tag in each scope-specific Custom switch.'
-    } elseif ($Info.Variant -eq 'Omaha' -and $Info.OfflineManifest) {
-      $SuggestedManifestFields.Notes += 'This tagged Omaha package contains an offline target manifest and payload. Use its package action as static wrapper evidence, but preserve vendor-specific accepted switches.'
-    } else {
-      $SuggestedManifestFields.Notes += 'This tagged updater setup is an application bootstrapper. Expand its payload and validate package-specific switches and final ARP behavior.'
+    if (Test-WinGetInstallerCandidateFamily -Family 'Chromium Setup') {
+      Invoke-WinGetInstallerDetector -Name 'Chromium Setup' -ScriptBlock {
+        $Info = Get-ChromiumSetupInfo -Path $AnalyzerInstallerPath
+        $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Chromium Setup'
+        if ($Info.Variant -eq 'ChromiumMiniInstaller') {
+          $SuggestedManifestFields.InstallModes = @('silent')
+          $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Custom = '--do-not-launch-chrome'; Log = '--verbose-logging --log-file="<LOGPATH>"' }
+          $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = $null; Machine = '--system-level' }) -Force
+        } elseif ($Info.Variant -eq 'ChromiumUpdater' -and -not $Info.IsOnlineBootstrapper) {
+          $SuggestedManifestFields.InstallModes = @('interactive', 'silent')
+          $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Silent = '--install --silent'; SilentWithProgress = '--install --silent'; Interactive = '--install'; Log = '--enable-logging'; Upgrade = '--update' }
+          $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = '--enterprise'; Machine = '--system --enterprise' }) -Force
+        } elseif ($Info.Variant -eq 'Omaha' -and -not $Info.IsOnlineBootstrapper -and -not $Info.UpdaterTag.IsTagged) {
+          $SuggestedManifestFields.InstallModes = @('silent')
+          $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Silent = '/silent'; SilentWithProgress = '/silent' }
+          $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = $Info.UserScopeSwitch; Machine = $Info.MachineScopeSwitch }) -Force
+          $SuggestedManifestFields.Notes += 'This untagged Omaha package installs its embedded updater runtime. Keep the complete /install runtime tag in each scope-specific Custom switch.'
+        } elseif ($Info.Variant -eq 'Omaha' -and $Info.OfflineManifest) {
+          $SuggestedManifestFields.Notes += 'This tagged Omaha package contains an offline target manifest and payload. Use its package action as static wrapper evidence, but preserve vendor-specific accepted switches.'
+        } else {
+          $SuggestedManifestFields.Notes += 'This tagged updater setup is an application bootstrapper. Expand its payload and validate package-specific switches and final ARP behavior.'
+        }
+        if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
+        if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue @($Info.SupportedScopes) -Force }
+        [pscustomobject]@{
+          Family                  = 'Chromium Setup'
+          Confidence              = 'high'
+          InstallerType           = 'exe # Chromium Setup'
+          Metadata                = $Info
+          Variant                 = $Info.Variant
+          ProductVersion          = $Info.DisplayVersion
+          ProductName             = $Info.DisplayName
+          Publisher               = $Info.Publisher
+          ProductCode             = $Info.ProductCode
+          ApplicationId           = $Info.ApplicationId
+          Scope                   = $Info.Scope
+          SupportedScopes         = $Info.SupportedScopes
+          SupportsDualScope       = $Info.SupportsDualScope
+          IsOnlineBootstrapper    = $Info.IsOnlineBootstrapper
+          OfflineManifest         = $Info.OfflineManifest
+          ArchiveResourceName     = $Info.ArchiveResourceName
+          SetupResourceName       = $Info.SetupResourceName
+          ExecutedPayloads        = $Info.ExecutedPayloads
+          NestedInstallerFiles    = $Info.NestedFiles
+          Warnings                = $Info.Warnings
+          SuggestedManifestFields = $SuggestedManifestFields
+        }
+      }
     }
-    if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
-    if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue @($Info.SupportedScopes) -Force }
-    [pscustomobject]@{
-      Family                  = 'Chromium Setup'
-      Confidence              = 'high'
-      InstallerType           = 'exe # Chromium Setup'
-      Metadata                = $Info
-      Variant                 = $Info.Variant
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      ApplicationId           = $Info.ApplicationId
-      Scope                   = $Info.Scope
-      SupportedScopes         = $Info.SupportedScopes
-      SupportsDualScope       = $Info.SupportsDualScope
-      IsOnlineBootstrapper    = $Info.IsOnlineBootstrapper
-      OfflineManifest         = $Info.OfflineManifest
-      ArchiveResourceName     = $Info.ArchiveResourceName
-      SetupResourceName       = $Info.SetupResourceName
-      ExecutedPayloads        = $Info.ExecutedPayloads
-      NestedInstallerFiles    = $Info.NestedFiles
-      Warnings                = $Info.Warnings
-      SuggestedManifestFields = $SuggestedManifestFields
+
+    if (Test-WinGetInstallerCandidateFamily -Family 'Wise') {
+      Invoke-WinGetInstallerDetector -Name 'Wise' -ScriptBlock {
+        $Info = Get-WiseInfo -Path $AnalyzerInstallerPath
+        $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Wise'
+        if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
+        if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
+        if ($Info.InstallLocationSwitch) { $SuggestedManifestFields.InstallerSwitches['InstallLocation'] = $Info.InstallLocationSwitch }
+        [pscustomobject]@{
+          Family                  = 'Wise'
+          Confidence              = 'high'
+          InstallerType           = 'exe # Wise MSI'
+          Metadata                = $Info
+          ProductVersion          = $Info.DisplayVersion
+          ProductName             = $Info.DisplayName
+          Publisher               = $Info.Publisher
+          ProductCode             = $Info.ProductCode
+          UpgradeCode             = $Info.UpgradeCode
+          Scope                   = $Info.Scope
+          SupportedScopes         = $Info.SupportedScopes
+          MsiInfo                 = $Info.AppsAndFeaturesEntries
+          Protocols               = $Info.Protocols
+          FileExtensions          = $Info.FileExtensions
+          RegistryAssociationInfo = $Info.RegistryAssociationInfo
+          NestedInstallerFiles    = $Info.ExtractedFiles
+          CanExpand               = $Info.CanExpand
+          Warnings                = $Info.Warnings
+          SuggestedManifestFields = $SuggestedManifestFields
+        }
+      }
     }
-  } }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'Wise') { Invoke-WinGetInstallerDetector -Name 'Wise' -ScriptBlock {
-    $Info = Get-WiseInfo -Path $AnalyzerInstallerPath
-    $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Wise'
-    if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
-    if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
-    if ($Info.InstallLocationSwitch) { $SuggestedManifestFields.InstallerSwitches['InstallLocation'] = $Info.InstallLocationSwitch }
-    [pscustomobject]@{
-      Family                  = 'Wise'
-      Confidence              = 'high'
-      InstallerType           = 'exe # Wise MSI'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      UpgradeCode             = $Info.UpgradeCode
-      Scope                   = $Info.Scope
-      SupportedScopes         = $Info.SupportedScopes
-      MsiInfo                 = $Info.AppsAndFeaturesEntries
-      Protocols               = $Info.Protocols
-      FileExtensions          = $Info.FileExtensions
-      RegistryAssociationInfo = $Info.RegistryAssociationInfo
-      NestedInstallerFiles    = $Info.ExtractedFiles
-      CanExpand               = $Info.CanExpand
-      Warnings                = $Info.Warnings
-      SuggestedManifestFields = $SuggestedManifestFields
+    if (Test-WinGetInstallerCandidateFamily -Family 'Setup Factory') {
+      Invoke-WinGetInstallerDetector -Name 'Setup Factory' -ScriptBlock {
+        $Info = Get-SetupFactoryInfo -Path $AnalyzerInstallerPath
+        [pscustomobject]@{
+          Family                  = 'Setup Factory'
+          Confidence              = 'high'
+          InstallerType           = 'exe # Setup Factory'
+          Metadata                = $Info
+          ProductVersion          = $Info.DisplayVersion
+          ProductName             = $Info.DisplayName
+          Publisher               = $Info.Publisher
+          ProductCode             = $Info.ProductCode
+          Scope                   = $Info.Scope
+          Protocols               = $Info.Protocols
+          FileExtensions          = $Info.FileExtensions
+          RegistryAssociationInfo = $Info.RegistryAssociationInfo
+          SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Setup Factory'
+        }
+      }
     }
-  } }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'Setup Factory') { Invoke-WinGetInstallerDetector -Name 'Setup Factory' -ScriptBlock {
-    $Info = Get-SetupFactoryInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'Setup Factory'
-      Confidence              = 'high'
-      InstallerType           = 'exe # Setup Factory'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      Scope                   = $Info.Scope
-      Protocols               = $Info.Protocols
-      FileExtensions          = $Info.FileExtensions
-      RegistryAssociationInfo = $Info.RegistryAssociationInfo
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Setup Factory'
+    if (Test-WinGetInstallerCandidateFamily -Family 'InstallAnywhere') {
+      Invoke-WinGetInstallerDetector -Name 'InstallAnywhere' -ScriptBlock {
+        $Info = Get-InstallAnywhereInfo -Path $AnalyzerInstallerPath
+        [pscustomobject]@{
+          Family                  = 'InstallAnywhere'
+          Confidence              = 'high'
+          InstallerType           = 'exe # InstallAnywhere'
+          Metadata                = $Info
+          ProductVersion          = $Info.DisplayVersion
+          ProductName             = $Info.DisplayName
+          Publisher               = $Info.Publisher
+          ProductCode             = $Info.ProductCode
+          UpgradeCode             = $Info.UpgradeCode
+          Scope                   = $Info.Scope
+          Protocols               = $Info.Protocols
+          FileExtensions          = $Info.FileExtensions
+          RegistryAssociationInfo = $Info.RegistryAssociationInfo
+          SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'InstallAnywhere'
+        }
+      }
     }
-  } }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'InstallAnywhere') { Invoke-WinGetInstallerDetector -Name 'InstallAnywhere' -ScriptBlock {
-    $Info = Get-InstallAnywhereInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'InstallAnywhere'
-      Confidence              = 'high'
-      InstallerType           = 'exe # InstallAnywhere'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      UpgradeCode             = $Info.UpgradeCode
-      Scope                   = $Info.Scope
-      Protocols               = $Info.Protocols
-      FileExtensions          = $Info.FileExtensions
-      RegistryAssociationInfo = $Info.RegistryAssociationInfo
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'InstallAnywhere'
+    if (Test-WinGetInstallerCandidateFamily -Family 'Actual Installer') {
+      Invoke-WinGetInstallerDetector -Name 'Actual Installer' -ScriptBlock {
+        $Info = Get-ActualInstallerInfo -Path $AnalyzerInstallerPath
+        [pscustomobject]@{
+          Family                  = 'Actual Installer'
+          Confidence              = 'high'
+          InstallerType           = 'exe # Actual Installer'
+          Metadata                = $Info
+          ProductVersion          = $Info.DisplayVersion
+          ProductName             = $Info.DisplayName
+          Publisher               = $Info.Publisher
+          ProductCode             = $Info.ProductCode
+          Scope                   = $Info.Scope
+          SupportedScopes         = $Info.SupportedScopes
+          Protocols               = $Info.Protocols
+          FileExtensions          = $Info.FileExtensions
+          RegistryAssociationInfo = $Info.RegistryAssociationInfo
+          SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Actual Installer'
+        }
+      }
     }
-  } }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'Actual Installer') { Invoke-WinGetInstallerDetector -Name 'Actual Installer' -ScriptBlock {
-    $Info = Get-ActualInstallerInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'Actual Installer'
-      Confidence              = 'high'
-      InstallerType           = 'exe # Actual Installer'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      Scope                   = $Info.Scope
-      SupportedScopes         = $Info.SupportedScopes
-      Protocols               = $Info.Protocols
-      FileExtensions          = $Info.FileExtensions
-      RegistryAssociationInfo = $Info.RegistryAssociationInfo
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Actual Installer'
+    if (Test-WinGetInstallerCandidateFamily -Family 'InstallBuilder') {
+      Invoke-WinGetInstallerDetector -Name 'InstallBuilder' -ScriptBlock {
+        $Info = Get-InstallBuilderInfo -Path $AnalyzerInstallerPath
+        [pscustomobject]@{
+          Family                  = 'InstallBuilder'
+          Confidence              = 'high'
+          InstallerType           = 'exe # InstallBuilder'
+          Metadata                = $Info
+          ProductVersion          = $Info.DisplayVersion
+          ProductName             = $Info.DisplayName
+          Publisher               = $Info.Publisher
+          ProductCode             = $Info.ProductCode
+          Scope                   = $Info.Scope
+          Protocols               = $Info.Protocols
+          FileExtensions          = $Info.FileExtensions
+          RegistryAssociationInfo = $Info.RegistryAssociationInfo
+          SupportedScopes         = $Info.SupportedScopes
+          NestedInstallerFiles    = $Info.PayloadFiles
+          PayloadCompression      = if ($Info.CookfsInfo) { $Info.CookfsInfo.CompressionTypes } else { @() }
+          SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'InstallBuilder'
+        }
+      }
     }
-  } }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'InstallBuilder') { Invoke-WinGetInstallerDetector -Name 'InstallBuilder' -ScriptBlock {
-    $Info = Get-InstallBuilderInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'InstallBuilder'
-      Confidence              = 'high'
-      InstallerType           = 'exe # InstallBuilder'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      Scope                   = $Info.Scope
-      Protocols               = $Info.Protocols
-      FileExtensions          = $Info.FileExtensions
-      RegistryAssociationInfo = $Info.RegistryAssociationInfo
-      SupportedScopes         = $Info.SupportedScopes
-      NestedInstallerFiles    = $Info.PayloadFiles
-      PayloadCompression      = if ($Info.CookfsInfo) { $Info.CookfsInfo.CompressionTypes } else { @() }
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'InstallBuilder'
+    if (Test-WinGetInstallerCandidateFamily -Family 'InstallForge') {
+      Invoke-WinGetInstallerDetector -Name 'InstallForge' -ScriptBlock {
+        ConvertTo-GenericExeParserEvidence -Family 'InstallForge' -Info (Get-InstallForgeInfo -Path $AnalyzerInstallerPath)
+      }
     }
-  } }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'InstallForge') { Invoke-WinGetInstallerDetector -Name 'InstallForge' -ScriptBlock {
-    ConvertTo-GenericExeParserEvidence -Family 'InstallForge' -Info (Get-InstallForgeInfo -Path $AnalyzerInstallerPath)
-  } }
+    if (Test-WinGetInstallerCandidateFamily -Family 'InstallAware') {
+      Invoke-WinGetInstallerDetector -Name 'InstallAware' -ScriptBlock {
+        ConvertTo-GenericExeParserEvidence -Family 'InstallAware' -Info (Get-InstallAwareInfo -Path $AnalyzerInstallerPath)
+      }
+    }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'InstallAware') { Invoke-WinGetInstallerDetector -Name 'InstallAware' -ScriptBlock {
-    ConvertTo-GenericExeParserEvidence -Family 'InstallAware' -Info (Get-InstallAwareInfo -Path $AnalyzerInstallerPath)
-  } }
+    if (Test-WinGetInstallerCandidateFamily -Family 'Paquet Builder') {
+      Invoke-WinGetInstallerDetector -Name 'Paquet Builder' -ScriptBlock {
+        ConvertTo-GenericExeParserEvidence -Family 'Paquet Builder' -Info (Get-PaquetBuilderInfo -Path $AnalyzerInstallerPath)
+      }
+    }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'Paquet Builder') { Invoke-WinGetInstallerDetector -Name 'Paquet Builder' -ScriptBlock {
-    ConvertTo-GenericExeParserEvidence -Family 'Paquet Builder' -Info (Get-PaquetBuilderInfo -Path $AnalyzerInstallerPath)
-  } }
+    if (Test-WinGetInstallerCandidateFamily -Family 'QSetup') {
+      Invoke-WinGetInstallerDetector -Name 'QSetup' -ScriptBlock {
+        ConvertTo-GenericExeParserEvidence -Family 'QSetup' -Info (Get-QSetupInfo -Path $AnalyzerInstallerPath)
+      }
+    }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'QSetup') { Invoke-WinGetInstallerDetector -Name 'QSetup' -ScriptBlock {
-    ConvertTo-GenericExeParserEvidence -Family 'QSetup' -Info (Get-QSetupInfo -Path $AnalyzerInstallerPath)
-  } }
+    if (Test-WinGetInstallerCandidateFamily -Family 'DeployMaster') {
+      Invoke-WinGetInstallerDetector -Name 'DeployMaster' -ScriptBlock {
+        $Info = Get-DeployMasterInfo -Path $AnalyzerInstallerPath
+        $Confidence = if ($Info.RuntimeProductName -match '(?i)DeployMaster' -or $Info.FileDescription -match '(?i)DeployMaster') { 'high' } else { 'medium' }
+        ConvertTo-GenericExeParserEvidence -Family 'DeployMaster' -Info $Info -Confidence $Confidence
+      }
+    }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'DeployMaster') { Invoke-WinGetInstallerDetector -Name 'DeployMaster' -ScriptBlock {
-    $Info = Get-DeployMasterInfo -Path $AnalyzerInstallerPath
-    $Confidence = if ($Info.RuntimeProductName -match '(?i)DeployMaster' -or $Info.FileDescription -match '(?i)DeployMaster') { 'high' } else { 'medium' }
-    ConvertTo-GenericExeParserEvidence -Family 'DeployMaster' -Info $Info -Confidence $Confidence
-  } }
+    if (Test-WinGetInstallerCandidateFamily -Family 'CreateInstall') {
+      Invoke-WinGetInstallerDetector -Name 'CreateInstall' -ScriptBlock {
+        ConvertTo-GenericExeParserEvidence -Family 'CreateInstall' -Info (Get-CreateInstallInfo -Path $AnalyzerInstallerPath)
+      }
+    }
 
-    if (Test-WinGetInstallerCandidateFamily -Family 'CreateInstall') { Invoke-WinGetInstallerDetector -Name 'CreateInstall' -ScriptBlock {
-    ConvertTo-GenericExeParserEvidence -Family 'CreateInstall' -Info (Get-CreateInstallInfo -Path $AnalyzerInstallerPath)
-  } }
-
-    if (Test-WinGetInstallerCandidateFamily -Family 'InstallMate') { Invoke-WinGetInstallerDetector -Name 'InstallMate' -ScriptBlock {
-    ConvertTo-GenericExeParserEvidence -Family 'InstallMate' -Info (Get-InstallMateInfo -Path $AnalyzerInstallerPath)
-  } }
+    if (Test-WinGetInstallerCandidateFamily -Family 'InstallMate') {
+      Invoke-WinGetInstallerDetector -Name 'InstallMate' -ScriptBlock {
+        ConvertTo-GenericExeParserEvidence -Family 'InstallMate' -Info (Get-InstallMateInfo -Path $AnalyzerInstallerPath)
+      }
+    }
   )
   $StructuredParserResults
   if ($StructuredParserResults.Success -contains $true) { return }
 
   if (Test-WinGetInstallerCandidateFamily -Family '7z SFX' -MinimumConfidence medium) {
     $WrapperResult = Invoke-WinGetInstallerDetector -Name '7z SFX' -ScriptBlock {
-    $Info = Get-SevenZipSfxInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = '7z SFX'
-      Confidence              = 'high'
-      InstallerType           = 'exe # 7z SFX'
-      Metadata                = $Info
-      ExecutedPayload         = $Info.ExecutedPayload
-      ExecutedPayloads        = $Info.ExecutedPayloads
-      PayloadArguments        = $Info.PayloadArguments
-      NestedInstallerFiles    = $Info.NestedFiles
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family '7z SFX'
+      $Info = Get-SevenZipSfxInfo -Path $AnalyzerInstallerPath
+      [pscustomobject]@{
+        Family                  = '7z SFX'
+        Confidence              = 'high'
+        InstallerType           = 'exe # 7z SFX'
+        Metadata                = $Info
+        ExecutedPayload         = $Info.ExecutedPayload
+        ExecutedPayloads        = $Info.ExecutedPayloads
+        PayloadArguments        = $Info.PayloadArguments
+        NestedInstallerFiles    = $Info.NestedFiles
+        SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family '7z SFX'
+      }
     }
-  }
     $WrapperResult
     if ($WrapperResult.Success) { return }
   }
 
   if (Test-WinGetInstallerCandidateFamily -Family 'WinRAR GUI SFX' -MinimumConfidence medium) {
     $WrapperResult = Invoke-WinGetInstallerDetector -Name 'WinRAR GUI SFX' -ScriptBlock {
-    $Info = Get-WinRarSfxInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'WinRAR GUI SFX'
-      Confidence              = 'high'
-      InstallerType           = 'exe # WinRAR GUI SFX'
-      Metadata                = $Info
-      ExecutedPayloads        = $Info.ExecutedPayloads
-      NestedInstallerFiles    = $Info.NestedFiles
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'WinRAR GUI SFX'
+      $Info = Get-WinRarSfxInfo -Path $AnalyzerInstallerPath
+      [pscustomobject]@{
+        Family                  = 'WinRAR GUI SFX'
+        Confidence              = 'high'
+        InstallerType           = 'exe # WinRAR GUI SFX'
+        Metadata                = $Info
+        ExecutedPayloads        = $Info.ExecutedPayloads
+        NestedInstallerFiles    = $Info.NestedFiles
+        SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'WinRAR GUI SFX'
+      }
     }
-  }
     $WrapperResult
     if ($WrapperResult.Success) { return }
   }
 
   if (Test-WinGetInstallerCandidateFamily -Family 'IExpress' -MinimumConfidence medium) {
     $WrapperResult = Invoke-WinGetInstallerDetector -Name 'IExpress' -ScriptBlock {
-    $Info = Get-IExpressInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'IExpress'
-      Confidence              = 'high'
-      InstallerType           = 'exe # IExpress'
-      Metadata                = $Info
-      ExecutedPayloads        = $Info.ExecutedPayloads
-      NestedInstallerFiles    = $Info.NestedFiles
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'IExpress'
+      $Info = Get-IExpressInfo -Path $AnalyzerInstallerPath
+      [pscustomobject]@{
+        Family                  = 'IExpress'
+        Confidence              = 'high'
+        InstallerType           = 'exe # IExpress'
+        Metadata                = $Info
+        ExecutedPayloads        = $Info.ExecutedPayloads
+        NestedInstallerFiles    = $Info.NestedFiles
+        SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'IExpress'
+      }
     }
-  }
     $WrapperResult
     if ($WrapperResult.Success) { return }
   }
 
   if (Test-WinGetInstallerCandidateFamily -Family 'dotNetInstaller' -MinimumConfidence medium) {
     $WrapperResult = Invoke-WinGetInstallerDetector -Name 'dotNetInstaller' -ScriptBlock {
-    $Info = Get-DotNetInstallerInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'dotNetInstaller'
-      Confidence              = 'high'
-      InstallerType           = 'exe # dotNetInstaller'
-      Metadata                = $Info
-      ProductVersion          = $Info.ProductVersion
-      ExecutedPayloads        = $Info.ExecutedPayloads
-      NestedInstallerFiles    = $Info.NestedFiles
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'dotNetInstaller'
+      $Info = Get-DotNetInstallerInfo -Path $AnalyzerInstallerPath
+      [pscustomobject]@{
+        Family                  = 'dotNetInstaller'
+        Confidence              = 'high'
+        InstallerType           = 'exe # dotNetInstaller'
+        Metadata                = $Info
+        ProductVersion          = $Info.ProductVersion
+        ExecutedPayloads        = $Info.ExecutedPayloads
+        NestedInstallerFiles    = $Info.NestedFiles
+        SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'dotNetInstaller'
+      }
     }
-  }
     $WrapperResult
     if ($WrapperResult.Success) { return }
   }
 
   if (Test-WinGetInstallerCandidateFamily -Family 'Burn') {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'Burn' -ScriptBlock {
-    $Info = Get-BurnInfo -Path $AnalyzerInstallerPath
-    $StubPath = Get-BurnStub -Path $AnalyzerInstallerPath
-    try {
-      $BootstrapperApplicationData = Get-BurnBootstrapperApplicationData -StubPath $StubPath -ErrorAction SilentlyContinue
-      $Manifest = Get-BurnManifest -StubPath $StubPath
-    } finally {
-      Remove-Item -LiteralPath $StubPath -Force -ErrorAction SilentlyContinue
-    }
-    $BundleProperties = $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties
-    $Registration = $Manifest.BurnManifest.Registration
-    $ProductCode = if ($BundleProperties) {
-      if ($BundleProperties.HasAttribute('Code')) { $BundleProperties.Code } else { $BundleProperties.Id }
-    } elseif ($Registration.HasAttribute('Code')) { $Registration.Code } else { $Registration.Id }
-    $UpgradeCode = if ($BundleProperties) { $BundleProperties.UpgradeCode } elseif ($Manifest.BurnManifest.RelatedBundle.HasAttribute('Code')) { $Manifest.BurnManifest.RelatedBundle.Code } else { $Manifest.BurnManifest.RelatedBundle.Id }
-    $ProductName = if ($BundleProperties) { $BundleProperties.DisplayName } else { $Registration.Arp.DisplayName }
-    [pscustomobject]@{
-      Family                  = 'Burn'
-      Confidence              = 'high'
-      InstallerType           = 'burn'
-      Metadata                = $Info
-      ProductCode             = $ProductCode
-      UpgradeCode             = $UpgradeCode
-      ProductName             = $ProductName
-      SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'burn' }
-    }
+      $Info = Get-BurnInfo -Path $AnalyzerInstallerPath
+      $StubPath = Get-BurnStub -Path $AnalyzerInstallerPath
+      try {
+        $BootstrapperApplicationData = Get-BurnBootstrapperApplicationData -StubPath $StubPath -ErrorAction SilentlyContinue
+        $Manifest = Get-BurnManifest -StubPath $StubPath
+      } finally {
+        Remove-Item -LiteralPath $StubPath -Force -ErrorAction SilentlyContinue
+      }
+      $BundleProperties = $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties
+      $Registration = $Manifest.BurnManifest.Registration
+      $ProductCode = if ($BundleProperties) {
+        if ($BundleProperties.HasAttribute('Code')) { $BundleProperties.Code } else { $BundleProperties.Id }
+      } elseif ($Registration.HasAttribute('Code')) { $Registration.Code } else { $Registration.Id }
+      $UpgradeCode = if ($BundleProperties) { $BundleProperties.UpgradeCode } elseif ($Manifest.BurnManifest.RelatedBundle.HasAttribute('Code')) { $Manifest.BurnManifest.RelatedBundle.Code } else { $Manifest.BurnManifest.RelatedBundle.Id }
+      $ProductName = if ($BundleProperties) { $BundleProperties.DisplayName } else { $Registration.Arp.DisplayName }
+      [pscustomobject]@{
+        Family                  = 'Burn'
+        Confidence              = 'high'
+        InstallerType           = 'burn'
+        Metadata                = $Info
+        ProductCode             = $ProductCode
+        UpgradeCode             = $UpgradeCode
+        ProductName             = $ProductName
+        SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'burn' }
+      }
     }
     $KnownResult
     if ($KnownResult.Success) { return }
@@ -1743,18 +1769,18 @@ function Invoke-WinGetInstallerExeParser {
 
   if (Test-WinGetInstallerCandidateFamily -Family 'Inno Setup') {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'Inno' -ScriptBlock {
-    $Info = Get-InnoInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'Inno Setup'
-      Confidence              = 'high'
-      InstallerType           = 'inno'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'inno' }
-    }
+      $Info = Get-InnoInfo -Path $AnalyzerInstallerPath
+      [pscustomobject]@{
+        Family                  = 'Inno Setup'
+        Confidence              = 'high'
+        InstallerType           = 'inno'
+        Metadata                = $Info
+        ProductVersion          = $Info.DisplayVersion
+        ProductName             = $Info.DisplayName
+        Publisher               = $Info.Publisher
+        ProductCode             = $Info.ProductCode
+        SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'inno' }
+      }
     }
     $KnownResult
     if ($KnownResult.Success) { return }
@@ -1762,22 +1788,22 @@ function Invoke-WinGetInstallerExeParser {
 
   if (Test-WinGetInstallerCandidateFamily -Family 'NSIS/Nullsoft') {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'NSIS' -ScriptBlock {
-    $Info = Get-NSISInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = 'NSIS/Nullsoft'
-      Confidence              = 'high'
-      InstallerType           = 'nullsoft'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      Scope                   = $Info.Scope
-      Protocols               = $Info.Protocols
-      FileExtensions          = $Info.FileExtensions
-      RegistryAssociationInfo = $Info.RegistryAssociationInfo
-      SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'nullsoft'; Scope = $Info.Scope; Notes = @('Create duplicate user/machine entries only when switch or registry-write evidence proves both modes.', 'Check decompiled strings/control flow for TestParameter, IfSilent, GetOptions, and custom silent-mode rejection.') }
-    }
+      $Info = Get-NSISInfo -Path $AnalyzerInstallerPath
+      [pscustomobject]@{
+        Family                  = 'NSIS/Nullsoft'
+        Confidence              = 'high'
+        InstallerType           = 'nullsoft'
+        Metadata                = $Info
+        ProductVersion          = $Info.DisplayVersion
+        ProductName             = $Info.DisplayName
+        Publisher               = $Info.Publisher
+        ProductCode             = $Info.ProductCode
+        Scope                   = $Info.Scope
+        Protocols               = $Info.Protocols
+        FileExtensions          = $Info.FileExtensions
+        RegistryAssociationInfo = $Info.RegistryAssociationInfo
+        SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'nullsoft'; Scope = $Info.Scope; Notes = @('Create duplicate user/machine entries only when switch or registry-write evidence proves both modes.', 'Check decompiled strings/control flow for TestParameter, IfSilent, GetOptions, and custom silent-mode rejection.') }
+      }
     }
     $KnownResult
     if ($KnownResult.Success) { return }
@@ -1785,19 +1811,19 @@ function Invoke-WinGetInstallerExeParser {
 
   if (Test-WinGetInstallerCandidateFamily -Family 'Advanced Installer') {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'Advanced Installer' -ScriptBlock {
-    $Info = Get-AdvancedInstallerInfo -Path $AnalyzerInstallerPath
-    $MsiInfo = if ($ShouldExtractEmbeddedMsi) { Get-AdvancedInstallerMsiInfo -Installer $Info -ErrorAction SilentlyContinue } else { $null }
-    [pscustomobject]@{
-      Family                  = 'Advanced Installer'
-      Confidence              = 'high'
-      InstallerType           = 'exe # Advanced Installer'
-      Metadata                = $Info
-      MsiInfo                 = $MsiInfo
-      Protocols               = if ($MsiInfo) { $MsiInfo.Protocols } else { @() }
-      FileExtensions          = if ($MsiInfo) { $MsiInfo.FileExtensions } else { @() }
-      RegistryAssociationInfo = if ($MsiInfo) { $MsiInfo.RegistryAssociationInfo } else { $null }
-      SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Advanced Installer'
-    }
+      $Info = Get-AdvancedInstallerInfo -Path $AnalyzerInstallerPath
+      $MsiInfo = if ($ShouldExtractEmbeddedMsi) { Get-AdvancedInstallerMsiInfo -Installer $Info -ErrorAction SilentlyContinue } else { $null }
+      [pscustomobject]@{
+        Family                  = 'Advanced Installer'
+        Confidence              = 'high'
+        InstallerType           = 'exe # Advanced Installer'
+        Metadata                = $Info
+        MsiInfo                 = $MsiInfo
+        Protocols               = if ($MsiInfo) { $MsiInfo.Protocols } else { @() }
+        FileExtensions          = if ($MsiInfo) { $MsiInfo.FileExtensions } else { @() }
+        RegistryAssociationInfo = if ($MsiInfo) { $MsiInfo.RegistryAssociationInfo } else { $null }
+        SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Advanced Installer'
+      }
     }
     $KnownResult
     if ($KnownResult.Success) { return }
@@ -1805,50 +1831,50 @@ function Invoke-WinGetInstallerExeParser {
 
   if (Test-WinGetInstallerCandidateFamily -Family 'Qt Installer Framework') {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'Qt Installer Framework' -ScriptBlock {
-    $Info = Get-QtInstallerFrameworkInfo -Path $AnalyzerInstallerPath
-    $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Qt Installer Framework'
-    if (-not $Info.SupportsSilentInstallation) {
-      $SuggestedManifestFields.InstallModes = @('interactive')
-      $SuggestedManifestFields.InstallerSwitches = [ordered]@{}
-      $SuggestedManifestFields.Notes += 'This installer is GUI-only or has its command-line interface disabled; do not submit it as silent-capable.'
-    } elseif (-not $Info.RequiresExplicitInstallLocation) {
-      $SuggestedManifestFields.InstallerSwitches = [ordered]@{
-        Silent             = 'install --accept-licenses --default-answer --confirm-command'
-        SilentWithProgress = 'install --accept-licenses --default-answer --confirm-command'
-        InstallLocation    = '--root "<INSTALLPATH>"'
+      $Info = Get-QtInstallerFrameworkInfo -Path $AnalyzerInstallerPath
+      $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Qt Installer Framework'
+      if (-not $Info.SupportsSilentInstallation) {
+        $SuggestedManifestFields.InstallModes = @('interactive')
+        $SuggestedManifestFields.InstallerSwitches = [ordered]@{}
+        $SuggestedManifestFields.Notes += 'This installer is GUI-only or has its command-line interface disabled; do not submit it as silent-capable.'
+      } elseif (-not $Info.RequiresExplicitInstallLocation) {
+        $SuggestedManifestFields.InstallerSwitches = [ordered]@{
+          Silent             = 'install --accept-licenses --default-answer --confirm-command'
+          SilentWithProgress = 'install --accept-licenses --default-answer --confirm-command'
+          InstallLocation    = '--root "<INSTALLPATH>"'
+        }
       }
-    }
-    $SuggestedManifestFields | Add-Member -NotePropertyName UpgradeBehavior -NotePropertyValue $Info.RecommendedUpgradeBehavior -Force
-    $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force
-    $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue $Info.SupportedScopes -Force
-    if ($Info.SupportsDualScope) {
-      $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{
-          User    = $Info.UserScopeSwitch
-          Machine = $Info.MachineScopeSwitch
-        }) -Force
-    }
-    [pscustomobject]@{
-      Family                  = 'Qt Installer Framework'
-      Confidence              = 'high'
-      InstallerType           = 'exe # Qt Installer Framework'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.PackageName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      Scope                   = $Info.Scope
-      SupportedScopes         = $Info.SupportedScopes
-      SupportsDualScope       = $Info.SupportsDualScope
-      Protocols               = $Info.Protocols
-      FileExtensions          = $Info.FileExtensions
-      RegistryAssociationInfo = $Info.RegistryAssociationInfo
-      InterfaceVariant        = $Info.InterfaceVariant
-      SupportsSilentInstallation = $Info.SupportsSilentInstallation
-      RequiresExplicitInstallLocation = $Info.RequiresExplicitInstallLocation
-      SupportsExistingInstallationOverride = $Info.SupportsExistingInstallationOverride
-      RecommendedUpgradeBehavior = $Info.RecommendedUpgradeBehavior
-      SuggestedManifestFields = $SuggestedManifestFields
-    }
+      $SuggestedManifestFields | Add-Member -NotePropertyName UpgradeBehavior -NotePropertyValue $Info.RecommendedUpgradeBehavior -Force
+      $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force
+      $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue $Info.SupportedScopes -Force
+      if ($Info.SupportsDualScope) {
+        $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{
+            User    = $Info.UserScopeSwitch
+            Machine = $Info.MachineScopeSwitch
+          }) -Force
+      }
+      [pscustomobject]@{
+        Family                               = 'Qt Installer Framework'
+        Confidence                           = 'high'
+        InstallerType                        = 'exe # Qt Installer Framework'
+        Metadata                             = $Info
+        ProductVersion                       = $Info.DisplayVersion
+        ProductName                          = $Info.PackageName
+        Publisher                            = $Info.Publisher
+        ProductCode                          = $Info.ProductCode
+        Scope                                = $Info.Scope
+        SupportedScopes                      = $Info.SupportedScopes
+        SupportsDualScope                    = $Info.SupportsDualScope
+        Protocols                            = $Info.Protocols
+        FileExtensions                       = $Info.FileExtensions
+        RegistryAssociationInfo              = $Info.RegistryAssociationInfo
+        InterfaceVariant                     = $Info.InterfaceVariant
+        SupportsSilentInstallation           = $Info.SupportsSilentInstallation
+        RequiresExplicitInstallLocation      = $Info.RequiresExplicitInstallLocation
+        SupportsExistingInstallationOverride = $Info.SupportsExistingInstallationOverride
+        RecommendedUpgradeBehavior           = $Info.RecommendedUpgradeBehavior
+        SuggestedManifestFields              = $SuggestedManifestFields
+      }
     }
     $KnownResult
     if ($KnownResult.Success) { return }
@@ -1856,25 +1882,25 @@ function Invoke-WinGetInstallerExeParser {
 
   if (Test-WinGetInstallerCandidateFamily -Family 'install4j') {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'install4j' -ScriptBlock {
-    $Info = Get-Install4jInfo -Path $AnalyzerInstallerPath
-    $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'install4j'
-    if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
-    if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue $Info.SupportedScopes -Force }
-    if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
-    [pscustomobject]@{
-      Family                  = 'install4j'
-      Confidence              = if ($Info.Config) { 'high' } else { 'medium' }
-      InstallerType           = 'exe # install4j'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.ProductName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      Scope                   = $Info.Scope
-      SupportedScopes         = $Info.SupportedScopes
-      SupportsDualScope       = $Info.SupportsDualScope
-      SuggestedManifestFields = $SuggestedManifestFields
-    }
+      $Info = Get-Install4jInfo -Path $AnalyzerInstallerPath
+      $SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'install4j'
+      if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
+      if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue $Info.SupportedScopes -Force }
+      if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
+      [pscustomobject]@{
+        Family                  = 'install4j'
+        Confidence              = if ($Info.Config) { 'high' } else { 'medium' }
+        InstallerType           = 'exe # install4j'
+        Metadata                = $Info
+        ProductVersion          = $Info.DisplayVersion
+        ProductName             = $Info.ProductName
+        Publisher               = $Info.Publisher
+        ProductCode             = $Info.ProductCode
+        Scope                   = $Info.Scope
+        SupportedScopes         = $Info.SupportedScopes
+        SupportsDualScope       = $Info.SupportsDualScope
+        SuggestedManifestFields = $SuggestedManifestFields
+      }
     }
     $KnownResult
     if ($KnownResult.Success) { return }
@@ -1882,19 +1908,19 @@ function Invoke-WinGetInstallerExeParser {
 
   if ((Test-WinGetInstallerCandidateFamily -Family 'Squirrel') -or (Test-WinGetInstallerCandidateFamily -Family 'Velopack')) {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'Squirrel/Velopack' -ScriptBlock {
-    $Info = Get-SquirrelInfo -Path $AnalyzerInstallerPath
-    [pscustomobject]@{
-      Family                  = $Info.Family
-      Confidence              = $Info.Confidence
-      InstallerType           = 'exe # Squirrel'
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      Scope                   = $Info.Scope
-      SuggestedManifestFields = $Info.SuggestedManifestFields
-    }
+      $Info = Get-SquirrelInfo -Path $AnalyzerInstallerPath
+      [pscustomobject]@{
+        Family                  = $Info.Family
+        Confidence              = $Info.Confidence
+        InstallerType           = 'exe # Squirrel'
+        Metadata                = $Info
+        ProductVersion          = $Info.DisplayVersion
+        ProductName             = $Info.DisplayName
+        Publisher               = $Info.Publisher
+        ProductCode             = $Info.ProductCode
+        Scope                   = $Info.Scope
+        SuggestedManifestFields = $Info.SuggestedManifestFields
+      }
     }
     $KnownResult
     if ($KnownResult.Success) { return }

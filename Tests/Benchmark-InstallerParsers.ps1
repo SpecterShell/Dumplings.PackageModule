@@ -7,6 +7,7 @@ param (
   [string]$NSISBaselineModulePath,
   [string]$ChromiumPath,
   [string]$InnoPath,
+  [string]$InnoExtractName,
   [string]$SetupFactoryPath,
   [string]$AdvancedInstallerPath,
   [string]$QtInstallerFrameworkPath,
@@ -37,9 +38,21 @@ function Invoke-InstallerParserBenchmark {
 `$ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath '$($RepositoryRoot.Replace("'", "''"))'
 `$InstallerPath = '$($ResolvedPath.Replace("'", "''"))'
+[GC]::Collect()
+[GC]::WaitForPendingFinalizers()
+[GC]::Collect()
+`$AllocatedBefore = [GC]::GetTotalAllocatedBytes(`$true)
+`$OperationStopwatch = [Diagnostics.Stopwatch]::StartNew()
 & {
 $Expression
 } | Out-Null
+`$OperationStopwatch.Stop()
+`$Metrics = [pscustomobject]@{
+  OperationElapsedMilliseconds = `$OperationStopwatch.Elapsed.TotalMilliseconds
+  AllocatedBytes = [GC]::GetTotalAllocatedBytes(`$true) - `$AllocatedBefore
+  ManagedBytesAfter = [GC]::GetTotalMemory(`$false)
+}
+[Console]::Out.WriteLine('__DUMPLINGS_BENCHMARK__:' + (`$Metrics | ConvertTo-Json -Compress))
 "@
   $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ScriptText))
   $StandardOutput = Join-Path ([IO.Path]::GetTempPath()) "Dumplings-Benchmark-$([guid]::NewGuid().ToString('N')).out"
@@ -54,14 +67,22 @@ $Expression
   $Process.WaitForExit()
   $Stopwatch.Stop()
   try {
+    $Metrics = $null
+    if ($Process.ExitCode -eq 0) {
+      $MetricsLine = Get-Content -LiteralPath $StandardOutput | Where-Object { $_.StartsWith('__DUMPLINGS_BENCHMARK__:') } | Select-Object -Last 1
+      if ($MetricsLine) { $Metrics = $MetricsLine.Substring('__DUMPLINGS_BENCHMARK__:'.Length) | ConvertFrom-Json }
+    }
     [pscustomobject]@{
-      Name                = $Name
-      Path                = $ResolvedPath
-      Length              = (Get-Item -LiteralPath $ResolvedPath).Length
-      ElapsedMilliseconds = $Stopwatch.ElapsedMilliseconds
-      PeakWorkingSetBytes = $PeakWorkingSetBytes
-      ExitCode            = $Process.ExitCode
-      Error               = if ($Process.ExitCode -ne 0) { Get-Content -LiteralPath $StandardError -Raw } else { $null }
+      Name                         = $Name
+      Path                         = $ResolvedPath
+      Length                       = (Get-Item -LiteralPath $ResolvedPath).Length
+      ElapsedMilliseconds          = $Stopwatch.ElapsedMilliseconds
+      OperationElapsedMilliseconds = $Metrics ? [Math]::Round([double]$Metrics.OperationElapsedMilliseconds, 2) : $null
+      AllocatedBytes               = $Metrics ? [long]$Metrics.AllocatedBytes : $null
+      ManagedBytesAfter            = $Metrics ? [long]$Metrics.ManagedBytesAfter : $null
+      PeakWorkingSetBytes          = $PeakWorkingSetBytes
+      ExitCode                     = $Process.ExitCode
+      Error                        = if ($Process.ExitCode -ne 0) { Get-Content -LiteralPath $StandardError -Raw } else { $null }
     }
   } finally {
     Remove-Item -LiteralPath $StandardOutput, $StandardError -Force -ErrorAction SilentlyContinue
@@ -81,6 +102,10 @@ $Results = @(
   }
   if ($InnoPath) {
     Invoke-InstallerParserBenchmark -Name Inno -Path $InnoPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Inno.psm1 -Force; Get-InnoInfo -Path `$InstallerPath"
+    if ($InnoExtractName) {
+      $ExtractName = $InnoExtractName.Replace("'", "''")
+      Invoke-InstallerParserBenchmark -Name InnoExtract -Path $InnoPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Inno.psm1 -Force; `$DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ('Dumplings-InnoBenchmark-' + [guid]::NewGuid().ToString('N')); try { Expand-InnoInstaller -Path `$InstallerPath -DestinationPath `$DestinationPath -Name '$ExtractName' } finally { Remove-Item -LiteralPath `$DestinationPath -Recurse -Force -ErrorAction SilentlyContinue }"
+    }
   }
   if ($SetupFactoryPath) {
     Invoke-InstallerParserBenchmark -Name SetupFactory -Path $SetupFactoryPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Compression.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\RegistryAssociations.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\SetupFactory.psm1 -Force; Get-SetupFactoryInfo -Path `$InstallerPath"
