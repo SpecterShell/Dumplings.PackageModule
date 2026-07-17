@@ -1458,11 +1458,13 @@ function Invoke-WinGetInstallerExeParser {
       $SuggestedManifestFields.InstallModes = @('interactive', 'silent')
       $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Silent = '--install --silent'; SilentWithProgress = '--install --silent'; Interactive = '--install'; Log = '--enable-logging'; Upgrade = '--update' }
       $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = '--enterprise'; Machine = '--system --enterprise' }) -Force
-    } elseif ($Info.Variant -eq 'Omaha' -and -not $Info.IsOnlineBootstrapper) {
+    } elseif ($Info.Variant -eq 'Omaha' -and -not $Info.IsOnlineBootstrapper -and -not $Info.UpdaterTag.IsTagged) {
       $SuggestedManifestFields.InstallModes = @('silent')
       $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Silent = '/silent'; SilentWithProgress = '/silent' }
       $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = $Info.UserScopeSwitch; Machine = $Info.MachineScopeSwitch }) -Force
       $SuggestedManifestFields.Notes += 'This untagged Omaha package installs its embedded updater runtime. Keep the complete /install runtime tag in each scope-specific Custom switch.'
+    } elseif ($Info.Variant -eq 'Omaha' -and $Info.OfflineManifest) {
+      $SuggestedManifestFields.Notes += 'This tagged Omaha package contains an offline target manifest and payload. Use its package action as static wrapper evidence, but preserve vendor-specific accepted switches.'
     } else {
       $SuggestedManifestFields.Notes += 'This tagged updater setup is an application bootstrapper. Expand its payload and validate package-specific switches and final ARP behavior.'
     }
@@ -1483,6 +1485,9 @@ function Invoke-WinGetInstallerExeParser {
       SupportedScopes         = $Info.SupportedScopes
       SupportsDualScope       = $Info.SupportsDualScope
       IsOnlineBootstrapper    = $Info.IsOnlineBootstrapper
+      OfflineManifest         = $Info.OfflineManifest
+      ArchiveResourceName     = $Info.ArchiveResourceName
+      SetupResourceName       = $Info.SetupResourceName
       ExecutedPayloads        = $Info.ExecutedPayloads
       NestedInstallerFiles    = $Info.NestedFiles
       Warnings                = $Info.Warnings

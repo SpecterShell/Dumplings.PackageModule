@@ -665,6 +665,36 @@ Describe 'WinGet installer manifest metadata updates' {
       @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
     }
 
+    It 'Uses a source-backed ProductCode returned by a tagged Chromium wrapper' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults = @([pscustomobject]@{
+              Name    = 'Chromium Setup'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Variant        = 'Omaha'
+                ProductCode    = 'BraveSoftware Brave-Origin-Nightly'
+                DisplayName    = 'Brave-Origin-Nightly'
+                DisplayVersion = '151.1.94.75'
+                Warnings       = @()
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'exe'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'BraveSoftware Brave-Origin-Nightly'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -BeExactly 'BraveSoftware Brave-Origin-Nightly'
+      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
+    }
+
     It 'Uses InstallShield marker evidence before parsing an embedded MSI' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{

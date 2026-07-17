@@ -67,6 +67,26 @@ Describe 'Chromium resource classification' {
     }
   }
 
+  It 'Should identify a branded mini-installer archive from the resource pairing' {
+    InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
+      param($SyntheticPath)
+      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
+      Mock Get-PEResourceInfo {
+        @(
+          [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'VIVALDI.PACKED.7Z'; Id = $null; Offset = 100; Size = 200 }
+          [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BL'; TypeId = $null; Name = 'SETUP.EX_'; Id = $null; Offset = 300; Size = 400 }
+        )
+      }
+      Mock Read-ChromiumInstallerTag { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+
+      $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
+      $Info.Variant | Should -Be 'ChromiumMiniInstaller'
+      $Info.ArchiveResourceName | Should -Be 'VIVALDI.PACKED.7Z'
+      $Info.SetupResourceName | Should -Be 'SETUP.EX_'
+      $Info.NestedFiles | Should -Be @('setup.exe', 'vivaldi.7z')
+    }
+  }
+
   It 'Should identify Chromium Updater from its B7 updater resource' {
     InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
       param($SyntheticPath)
@@ -87,6 +107,7 @@ Describe 'Chromium resource classification' {
       Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
       Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B'; TypeId = $null; Name = $null; Id = 102; Offset = 100; Size = 200 } }
       Mock Read-ChromiumInstallerTag { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
+      Mock Get-ChromiumOmahaOfflineManifestInfo { $null }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
       $Info.Variant | Should -Be 'Omaha'
@@ -95,6 +116,22 @@ Describe 'Chromium resource classification' {
       $Info.ProductCode | Should -BeNullOrEmpty
       $Info.Scope | Should -Be 'machine'
       $Info.Warnings[0] | Should -BeLike '*not an ARP ProductCode*'
+    }
+  }
+
+  It 'Should resolve Brave updater identities to source-defined uninstall keys' -ForEach @(
+    @{ ApplicationId = '{AFE6A462-C574-4B8A-AF43-4CC60DF4563B}'; ProductCode = 'BraveSoftware Brave-Browser' }
+    @{ ApplicationId = '{103BD053-949B-43A8-9120-2E424887DE11}'; ProductCode = 'BraveSoftware Brave-Browser-Beta' }
+    @{ ApplicationId = '{CB2150F2-595F-4633-891A-E39720CE0531}'; ProductCode = 'BraveSoftware Brave-Browser-Dev' }
+    @{ ApplicationId = '{C6CB981E-DB30-4876-8639-109F8933582C}'; ProductCode = 'BraveSoftware Brave-Browser-Nightly' }
+    @{ ApplicationId = '{F1EF32DE-F987-4289-81D2-6C4780027F9B}'; ProductCode = 'BraveSoftware Brave-Origin' }
+    @{ ApplicationId = '{56DA94FD-D872-416B-BFC4-1D7011DA7473}'; ProductCode = 'BraveSoftware Brave-Origin-Beta' }
+    @{ ApplicationId = '{716D6A4A-D071-47A8-AC64-DBDE3EE3797B}'; ProductCode = 'BraveSoftware Brave-Origin-Dev' }
+    @{ ApplicationId = '{50474E96-9CD2-4BC8-B0A7-0D4B6EF2E709}'; ProductCode = 'BraveSoftware Brave-Origin-Nightly' }
+  ) {
+    InModuleScope ChromiumSetup -Parameters @{ ApplicationId = $ApplicationId; ProductCode = $ProductCode } {
+      param($ApplicationId, $ProductCode)
+      Resolve-BraveChromiumProductCode -ApplicationId $ApplicationId.ToLowerInvariant() -Publisher 'BraveSoftware Inc.' | Should -BeExactly $ProductCode
     }
   }
 
@@ -119,6 +156,20 @@ Describe 'Chromium resource classification' {
     }
 
     Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--chrome-sxs' }) | Should -BeNullOrEmpty
+  }
+
+  It 'Should resolve the Vivaldi ARP key from exact mini-installer branding' {
+    $Info = [pscustomobject]@{
+      Variant             = 'ChromiumMiniInstaller'
+      Publisher           = 'Vivaldi Technologies AS'
+      ProductName         = 'Vivaldi Installer'
+      ArchiveResourceName = 'VIVALDI.PACKED.7Z'
+    }
+
+    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--do-not-launch-chrome' }) | Should -Be 'Vivaldi'
+
+    $WrappedInfo = [pscustomobject]@{ Variant = $Info.Variant; Metadata = $Info }
+    Resolve-ChromiumSetupProductCode -Info $WrappedInfo -InstallerSwitches ([ordered]@{ Custom = '--do-not-launch-chrome' }) | Should -Be 'Vivaldi'
   }
 }
 
@@ -196,15 +247,40 @@ Describe 'Chromium real installer fixtures' {
     $Info.Resources.Name | Should -Contain 'SETUP.EXE'
   }
 
+  It 'Should parse and expand a cached Vivaldi branded mini-installer' {
+    $Installer = Join-Path $Script:FixtureDirectory 'Vivaldi.8.2.4106.4.x64.exe'
+    if (-not (Test-Path -LiteralPath $Installer)) { Set-ItResult -Skipped -Because 'The Vivaldi Snapshot fixture is not cached.'; return }
+    $Destination = Join-Path $Script:FixtureDirectory 'Vivaldi-Expanded'
+    Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
+
+    $Info = Get-ChromiumSetupInfo -Path $Installer
+    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name 'setup.exe')
+
+    $Info.Variant | Should -Be 'ChromiumMiniInstaller'
+    $Info.ArchiveResourceName | Should -Be 'VIVALDI.PACKED.7Z'
+    $Info.NestedFiles | Should -Contain 'vivaldi.7z'
+    $Files | Should -HaveCount 1
+    $Files[0].Name | Should -Be 'setup.exe'
+    [Diagnostics.FileVersionInfo]::GetVersionInfo($Files[0].FullName).ProductVersion | Should -Be '8.2.4106.4'
+  }
+
   It 'Should expand a cached Omaha fixture through LZMA, BCJ2, and TAR' {
     $Installer = Join-Path $Script:FixtureDirectory 'BraveBrowserStandaloneSetup-1.92.139.exe'
     if (-not (Test-Path -LiteralPath $Installer)) { Set-ItResult -Skipped -Because 'The 153 MB Brave Omaha fixture is not cached.'; return }
+    $Info = Get-ChromiumSetupInfo -Path $Installer
     $Destination = Join-Path $Script:FixtureDirectory 'Brave-Omaha-Expanded'
     Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
     $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name '*.exe' -MaximumExpandedBytes 1073741824)
 
     $Files[0].Name | Should -Be 'BraveUpdate.exe'
     $Files.Name | Should -Contain 'BraveUpdateCore.exe'
+    $Info.Variant | Should -Be 'Omaha'
+    $Info.ProductCode | Should -BeExactly 'BraveSoftware Brave-Browser'
+    $Info.DisplayVersion | Should -BeExactly '150.1.92.139'
+    $Info.IsOnlineBootstrapper | Should -BeFalse
+    $Info.OfflineManifest.Packages[0].Name | Should -BeExactly 'brave_installer.exe'
+    $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--do-not-launch-chrome'
+    $Info.Warnings | Should -BeNullOrEmpty
   }
 }
 

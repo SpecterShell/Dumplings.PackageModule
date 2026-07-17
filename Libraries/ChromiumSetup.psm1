@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
-# Format sources: https://chromium.googlesource.com/chromium/src and https://github.com/google/omaha
+# Format sources: https://chromium.googlesource.com/chromium/src, https://github.com/google/omaha,
+# and https://github.com/brave/brave-core/tree/master/chromium_src/chrome/install_static
 # Static Chromium installer parser. It distinguishes the bare Chromium mini
 # installer, Chromium/Google Updater, and legacy Google Update/Omaha wrappers.
 # No installer payload or update command is executed.
@@ -10,6 +11,16 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 $Script:ChromiumUpdaterTagMarker = [Text.Encoding]::ASCII.GetBytes('Gact2.0Omaha')
 $Script:ChromiumMaximumCertificateBytes = 16777216
 $Script:ChromiumMaximumResourceBytes = 2147483648
+$Script:BraveProductCodeByAppGuid = @{
+  '{AFE6A462-C574-4B8A-AF43-4CC60DF4563B}' = 'BraveSoftware Brave-Browser'
+  '{103BD053-949B-43A8-9120-2E424887DE11}' = 'BraveSoftware Brave-Browser-Beta'
+  '{CB2150F2-595F-4633-891A-E39720CE0531}' = 'BraveSoftware Brave-Browser-Dev'
+  '{C6CB981E-DB30-4876-8639-109F8933582C}' = 'BraveSoftware Brave-Browser-Nightly'
+  '{F1EF32DE-F987-4289-81D2-6C4780027F9B}' = 'BraveSoftware Brave-Origin'
+  '{56DA94FD-D872-416B-BFC4-1D7011DA7473}' = 'BraveSoftware Brave-Origin-Beta'
+  '{716D6A4A-D071-47A8-AC64-DBDE3EE3797B}' = 'BraveSoftware Brave-Origin-Dev'
+  '{50474E96-9CD2-4BC8-B0A7-0D4B6EF2E709}' = 'BraveSoftware Brave-Origin-Nightly'
+}
 
 function ConvertFrom-ChromiumUpdaterTagData {
   <#
@@ -124,15 +135,136 @@ function Get-ChromiumSetupResourceEvidence {
   }
 }
 
+function Resolve-BraveChromiumProductCode {
+  <#
+  .SYNOPSIS
+    Resolve Brave's updater application identity to its uninstall registry key
+  .PARAMETER ApplicationId
+    The appguid from the signed Omaha tag
+  .PARAMETER Publisher
+    The outer executable publisher used to restrict the Brave-specific mapping
+  #>
+  [OutputType([string])]
+  param (
+    [string]$ApplicationId,
+    [string]$Publisher
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ApplicationId) -or ([string]$Publisher).TrimEnd('.') -cne 'BraveSoftware Inc') { return $null }
+  $Script:BraveProductCodeByAppGuid[$ApplicationId.ToUpperInvariant()]
+}
+
+function ConvertFrom-ChromiumOmahaOfflineManifest {
+  <#
+  .SYNOPSIS
+    Read target package and execution evidence from OfflineManifest.gup
+  .PARAMETER Path
+    The path to an extracted Omaha offline manifest
+  .PARAMETER ApplicationId
+    The tagged application identity used to select the matching app element
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [string]$ApplicationId
+  )
+
+  $Settings = [Xml.XmlReaderSettings]::new()
+  $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+  $Settings.XmlResolver = $null
+  $Settings.IgnoreComments = $true
+  $Reader = [Xml.XmlReader]::Create($Path, $Settings)
+  try {
+    $Document = [Xml.XmlDocument]::new()
+    $Document.XmlResolver = $null
+    $Document.Load($Reader)
+  } finally {
+    $Reader.Dispose()
+  }
+
+  $Applications = @($Document.SelectNodes('/response/app'))
+  $Application = if ([string]::IsNullOrWhiteSpace($ApplicationId)) {
+    $Applications | Select-Object -First 1
+  } else {
+    $Applications | Where-Object { $_.GetAttribute('appid').Equals($ApplicationId, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+  }
+  if (-not $Application) { throw "OfflineManifest.gup does not contain tagged application '$ApplicationId'." }
+  if ($Application.HasAttribute('status') -and $Application.GetAttribute('status') -cne 'ok') {
+    throw 'OfflineManifest.gup does not contain a successful application response.'
+  }
+
+  $UpdateCheck = $Application.SelectSingleNode('updatecheck')
+  $Manifest = if ($UpdateCheck) { $UpdateCheck.SelectSingleNode('manifest') } else { $null }
+  if (-not $UpdateCheck -or $UpdateCheck.GetAttribute('status') -cne 'ok' -or -not $Manifest) {
+    throw 'OfflineManifest.gup does not contain a successful update manifest.'
+  }
+
+  $Packages = [Collections.Generic.List[object]]::new()
+  foreach ($Package in @($Manifest.SelectNodes('packages/package'))) {
+    $Size = 0L
+    $HasSize = [long]::TryParse($Package.GetAttribute('size'), [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$Size)
+    $Packages.Add([pscustomobject]@{
+        Name       = $Package.GetAttribute('name')
+        HashSha256 = $Package.GetAttribute('hash_sha256')
+        Size       = $HasSize ? $Size : $null
+        Required   = $Package.GetAttribute('required') -ieq 'true'
+      })
+  }
+
+  $Actions = [Collections.Generic.List[object]]::new()
+  foreach ($Action in @($Manifest.SelectNodes('actions/action'))) {
+    $Actions.Add([pscustomobject]@{
+        Event      = $Action.GetAttribute('event')
+        Run        = $Action.GetAttribute('run')
+        Arguments  = $Action.GetAttribute('arguments').Trim()
+        NeedsAdmin = $Action.GetAttribute('needsadmin')
+      })
+  }
+
+  [pscustomobject]@{
+    ApplicationId = $Application.GetAttribute('appid')
+    Version       = $Manifest.GetAttribute('version')
+    Packages      = $Packages.ToArray()
+    Actions       = $Actions.ToArray()
+    InstallAction = $Actions | Where-Object Event -IEQ 'install' | Select-Object -First 1
+  }
+}
+
+function Get-ChromiumOmahaOfflineManifestInfo {
+  <#
+  .SYNOPSIS
+    Extract and parse a tagged Omaha wrapper's embedded offline manifest
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Resource,
+    [string]$ApplicationId
+  )
+
+  $TemporaryFolder = New-TempFolder
+  try {
+    $ManifestFiles = @(Expand-ChromiumOmahaPayload -Resource $Resource -DestinationPath $TemporaryFolder -Name 'OfflineManifest.gup' -MaximumExpandedBytes $Script:ChromiumMaximumResourceBytes)
+    if ($ManifestFiles.Count -eq 0) { return $null }
+    ConvertFrom-ChromiumOmahaOfflineManifest -Path $ManifestFiles[0].FullName -ApplicationId $ApplicationId
+  } finally {
+    Remove-Item -LiteralPath $TemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Get-ChromiumSetupInfo {
   <#
   .SYNOPSIS
     Classify and read static metadata from Chromium-family setup wrappers
   .PARAMETER Path
     The path to a bare mini-installer, Chromium Updater, or Omaha wrapper
+  .PARAMETER SkipOfflineManifest
+    Skip expensive Omaha payload decoding when only the outer resource layout is needed
   #>
   [OutputType([pscustomobject])]
-  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
+    [Parameter(DontShow)][switch]$SkipOfflineManifest
+  )
 
   process {
     $File = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -142,8 +274,24 @@ function Get-ChromiumSetupInfo {
     $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
     $Tag = Read-ChromiumInstallerTag -Path $File.FullName
 
-    $HasMiniArchive = [bool]($Resources | Where-Object { $_.Type -in @('B7', 'BN') -and $_.Name -match '(?i)^chrome(?:\.packed)?\.7z$' })
-    $HasMiniSetup = [bool]($Resources | Where-Object { $_.Type -in @('BL', 'BN') -and $_.Name -match '(?i)^setup(?:\.ex_|\.exe)$' })
+    # Chromium forks replace the archive prefix at build time. The resource
+    # types and the paired setup payload are the stable mini-installer layout.
+    $MiniArchives = @($Resources | Where-Object {
+        $_.Type -in @('B7', 'BN') -and
+        $_.Name -match '(?i)^(?!setup(?:[._]|$)|updater(?:[._]|$)).+(?:\.packed)?\.7z$'
+      })
+    $MiniSetups = @($Resources | Where-Object {
+        ($_.Type -eq 'B7' -and $_.Name -match '(?i)^setup(?:_patch)?(?:\.packed)?\.7z$') -or
+        ($_.Type -eq 'BL' -and $_.Name -match '(?i)^setup\.ex_$') -or
+        ($_.Type -eq 'BN' -and $_.Name -match '(?i)^setup\.exe$')
+      })
+    $MiniArchive = $MiniArchives | Select-Object -First 1
+    $MiniSetup = $MiniSetups | Select-Object -First 1
+    $MiniArchiveResourceName = if ($MiniArchive) { [string]$MiniArchive.Name } else { $null }
+    $MiniSetupResourceName = if ($MiniSetup) { [string]$MiniSetup.Name } else { $null }
+    $MiniArchiveFileName = if ($MiniArchive) { ($MiniArchive.Name -replace '(?i)\.packed(?=\.7z$)', '').ToLowerInvariant() } else { $null }
+    $HasMiniArchive = $MiniArchives.Count -eq 1
+    $HasMiniSetup = $MiniSetups.Count -gt 0
     $HasUpdaterArchive = [bool]($Resources | Where-Object { $_.Type -eq 'B7' -and $_.Name -match '(?i)^updater(?:\.packed)?\.7z$' })
     $HasOmahaPayload = [bool]($Resources | Where-Object { $_.Type -eq 'B' -and ($_.Id -eq 102 -or $_.Name -eq '102') })
 
@@ -156,6 +304,19 @@ function Get-ChromiumSetupInfo {
     } else {
       throw 'The PE does not contain a supported Chromium Setup resource layout.'
     }
+
+    $OfflineManifest = $null
+    $OfflineManifestError = $null
+    if ($Variant -eq 'Omaha' -and $Tag.IsTagged -and -not $SkipOfflineManifest) {
+      $OmahaResource = $Resources | Where-Object { $_.Type -eq 'B' -and ($_.Id -eq 102 -or $_.Name -eq '102') } | Select-Object -First 1
+      try {
+        $OfflineManifest = Get-ChromiumOmahaOfflineManifestInfo -Resource $OmahaResource.Resource -ApplicationId $Tag.ApplicationId
+      } catch {
+        $OfflineManifestError = $_.Exception.Message
+      }
+    }
+    $IsOnlineBootstrapper = $Tag.IsTagged -and -not $OfflineManifest
+    $ProductCode = Resolve-BraveChromiumProductCode -ApplicationId $Tag.ApplicationId -Publisher $VersionInfo.CompanyName
 
     $SupportedScopes = @()
     $Scope = $null
@@ -189,19 +350,29 @@ function Get-ChromiumSetupInfo {
     }
 
     $NestedFiles = switch ($Variant) {
-      'ChromiumMiniInstaller' { @('setup.exe', 'chrome.7z') }
+      'ChromiumMiniInstaller' { @('setup.exe', $MiniArchiveFileName) }
       'ChromiumUpdater' { @('updater.7z', 'bin\updater.exe') }
-      'Omaha' { @('BCJ2-decoded TAR payload') }
+      'Omaha' {
+        if ($OfflineManifest) { @('OfflineManifest.gup') + @($OfflineManifest.Packages.Name) }
+        else { @('BCJ2-decoded TAR payload') }
+      }
     }
     $ExecutedPayloads = switch ($Variant) {
       'ChromiumMiniInstaller' { @('setup.exe') }
       'ChromiumUpdater' { @('bin\updater.exe') }
-      'Omaha' { @('first executable in BCJ2-decoded TAR payload') }
+      'Omaha' {
+        if ($OfflineManifest.InstallAction) {
+          @((@($OfflineManifest.InstallAction.Run, $OfflineManifest.InstallAction.Arguments) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ' ')
+        } else {
+          @('first executable in BCJ2-decoded TAR payload')
+        }
+      }
     }
     $Warnings = [Collections.Generic.List[string]]::new()
-    if ($Tag.ApplicationId) { $Warnings.Add("Updater appguid '$($Tag.ApplicationId)' is update-protocol identity, not an ARP ProductCode.") }
-    if ($Tag.IsTagged) { $Warnings.Add("This setup is a tagged online bootstrapper. Outer version '$($VersionInfo.ProductVersion)' belongs to the updater and is not target-application version evidence; final version, ARP, and switch behavior require target-package evidence.") }
-    if ($Variant -eq 'Omaha') { $Warnings.Add('Omaha executes the first EXE in its decoded TAR payload. Expand and analyze that file before composing nested installer switches.') }
+    if ($OfflineManifestError) { $Warnings.Add("The tagged Omaha payload could not be checked for OfflineManifest.gup: $OfflineManifestError") }
+    if ($Tag.ApplicationId -and -not $ProductCode) { $Warnings.Add("Updater appguid '$($Tag.ApplicationId)' is update-protocol identity, not an ARP ProductCode.") }
+    if ($IsOnlineBootstrapper) { $Warnings.Add("This setup is a tagged online bootstrapper. Outer version '$($VersionInfo.ProductVersion)' belongs to the updater and is not target-application version evidence; final version, ARP, and switch behavior require target-package evidence.") }
+    if ($Variant -eq 'Omaha' -and -not $OfflineManifest) { $Warnings.Add('Omaha executes the first EXE in its decoded TAR payload. Expand and analyze that file before composing nested installer switches.') }
     if ($Variant -eq 'Omaha' -and -not $Tag.IsTagged) { $Warnings.Add('This is an untagged Omaha runtime installer. Its /install runtime tag controls user versus machine scope; do not substitute Chromium Updater --system switches.') }
     if ($Tag.IsTagged -and -not $SupportedScopes) { $Warnings.Add("The updater tag needsadmin value '$($Tag.NeedsAdmin)' does not provide deterministic WinGet scope evidence.") }
 
@@ -210,24 +381,27 @@ function Get-ChromiumSetupInfo {
       Variant                     = $Variant
       ProductName                 = $VersionInfo.ProductName
       DisplayName                 = $Tag.ApplicationName ?? $VersionInfo.ProductName
-      DisplayVersion              = if ($Tag.IsTagged) { $null } else { $VersionInfo.ProductVersion }
+      DisplayVersion              = if ($OfflineManifest) { $OfflineManifest.Version } elseif ($Tag.IsTagged) { $null } else { $VersionInfo.ProductVersion }
       OuterProductVersion         = $VersionInfo.ProductVersion
       Publisher                   = $VersionInfo.CompanyName
       OriginalFilename            = $VersionInfo.OriginalFilename
-      ProductCode                 = $null
+      ProductCode                 = $ProductCode
       ApplicationId               = $Tag.ApplicationId
+      ArchiveResourceName         = $MiniArchiveResourceName
+      SetupResourceName           = $MiniSetupResourceName
       Scope                       = $Scope
       SupportedScopes             = @($SupportedScopes)
       SupportsDualScope           = $SupportsDualScope
       UserScopeSwitch             = $UserScopeSwitch
       MachineScopeSwitch          = $MachineScopeSwitch
-      IsOnlineBootstrapper        = $Tag.IsTagged
+      IsOnlineBootstrapper        = $IsOnlineBootstrapper
       UpdaterTag                  = $Tag
+      OfflineManifest             = $OfflineManifest
       Resources                   = @($Resources | Select-Object Type, Name, Id, Offset, Size)
       NestedFiles                 = @($NestedFiles)
       ExtractedFiles              = @($NestedFiles)
       ExecutedPayloads            = @($ExecutedPayloads)
-      WritesAppsAndFeaturesEntry  = if ($Variant -eq 'ChromiumMiniInstaller') { $true } else { $null }
+      WritesAppsAndFeaturesEntry  = if ($Variant -eq 'ChromiumMiniInstaller' -or $ProductCode) { $true } else { $null }
       RegistryAssociationInfo     = $null
       Protocols                   = @()
       FileExtensions              = @()
@@ -236,7 +410,7 @@ function Get-ChromiumSetupInfo {
       ParserVersionInfo           = [pscustomobject]@{
         Parser      = 'Dumplings.PackageModule.ChromiumSetup'
         ParserMajor = 1
-        Sources     = @('Chromium mini_installer named resources', 'Chromium Updater metainstaller resources and certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload')
+        Sources     = @('Chromium mini_installer named resources', 'Chromium Updater metainstaller resources and certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload and OfflineManifest.gup', 'Brave install-mode app GUID and uninstall-key definitions')
       }
     }
   }
@@ -245,11 +419,11 @@ function Get-ChromiumSetupInfo {
 function Resolve-ChromiumSetupProductCode {
   <#
   .SYNOPSIS
-    Resolve the Google Chrome ARP key selected by mini-installer switches
+    Resolve a Chromium-family ARP key from deterministic branding and switches
   .DESCRIPTION
-    Google uses the same Chromium mini-installer layout for multiple Chrome
-    channels. The channel switches select the product-specific uninstall key,
-    so the installer bytes alone are insufficient to determine ProductCode.
+    Vivaldi has one product-specific uninstall key across its mini-installer
+    channels. Google uses the same mini-installer layout for multiple Chrome
+    channels, whose command-line switches select different uninstall keys.
   .PARAMETER Info
     The result returned by Get-ChromiumSetupInfo
   .PARAMETER InstallerSwitches
@@ -261,9 +435,24 @@ function Resolve-ChromiumSetupProductCode {
     [Parameter(Mandatory)][System.Collections.IDictionary]$InstallerSwitches
   )
 
-  if ($Info.Variant -cne 'ChromiumMiniInstaller' -or $Info.Publisher -cne 'Google LLC' -or $Info.ProductName -cne 'Google Chrome Installer') {
+  $MetadataProperty = $Info.PSObject.Properties['Metadata']
+  $IdentityInfo = if ($MetadataProperty -and $MetadataProperty.Value) { $MetadataProperty.Value } else { $Info }
+  $ProductCodeProperty = $IdentityInfo.PSObject.Properties['ProductCode']
+  if ($ProductCodeProperty -and -not [string]::IsNullOrWhiteSpace([string]$ProductCodeProperty.Value)) {
+    return [string]$ProductCodeProperty.Value
+  }
+  if ($IdentityInfo.Variant -cne 'ChromiumMiniInstaller') {
     return $null
   }
+
+  $ArchiveResourceName = $IdentityInfo.PSObject.Properties.Name -contains 'ArchiveResourceName' ? [string]$IdentityInfo.ArchiveResourceName : ''
+  if (([string]$IdentityInfo.Publisher).TrimEnd('.') -ceq 'Vivaldi Technologies AS' -and
+      $IdentityInfo.ProductName -ceq 'Vivaldi Installer' -and
+      $ArchiveResourceName -match '(?i)^vivaldi(?:\.packed)?\.7z$') {
+    return 'Vivaldi'
+  }
+
+  if ($IdentityInfo.Publisher -cne 'Google LLC' -or $IdentityInfo.ProductName -cne 'Google Chrome Installer') { return $null }
 
   $CommandLine = @($InstallerSwitches.Values | Where-Object { $_ -is [string] }) -join ' '
   $Channels = @(
@@ -394,7 +583,7 @@ function Expand-ChromiumSetupInstaller {
 
   process {
     $File = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    $Info = Get-ChromiumSetupInfo -Path $File.FullName
+    $Info = Get-ChromiumSetupInfo -Path $File.FullName -SkipOfflineManifest
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = New-TempFolder }
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
     $Resources = @(Get-ChromiumSetupResourceEvidence -Path $File.FullName)
@@ -508,7 +697,7 @@ function Test-OmahaInstaller {
 function Read-ProductVersionFromChromiumSetup {
   <#
   .SYNOPSIS
-    Read the outer Chromium setup product version
+    Read the target version when static Chromium setup evidence provides it
   .PARAMETER Path
     The path to the Chromium setup installer
   #>
