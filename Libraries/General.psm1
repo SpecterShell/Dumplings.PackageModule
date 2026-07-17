@@ -699,6 +699,74 @@ function Get-RedirectedUrl {
   (Invoke-WebRequest -Method Head @args).BaseResponse.RequestMessage.RequestUri.AbsoluteUri
 }
 
+function Get-WebResponseHeader {
+  <#
+  .SYNOPSIS
+    Get response headers without buffering the response body
+  .PARAMETER Uri
+    The Uniform Resource Identifier (URI)
+  .PARAMETER Method
+    The HTTP method for the web request
+  .PARAMETER Headers
+    The header hashtable for the web request
+  .PARAMETER UserAgent
+    The user agent string for the web request
+  .PARAMETER ConnectionTimeoutSeconds
+    The timeout in seconds for the web request
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The Uniform Resource Identifier (URI)')]
+    [string]$Uri,
+
+    [Parameter(HelpMessage = 'The HTTP method for the web request')]
+    [ValidateSet('GET', 'HEAD')]
+    [System.Net.Http.HttpMethod]$Method = [System.Net.Http.HttpMethod]::Get,
+
+    [Parameter(HelpMessage = 'The header hashtable for the web request')]
+    [System.Collections.IDictionary]$Headers,
+
+    [Parameter(HelpMessage = 'The user agent string for the web request')]
+    [string]$UserAgent,
+
+    [Parameter(HelpMessage = 'The timeout in seconds for the web request')]
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$ConnectionTimeoutSeconds
+  )
+
+  process {
+    $HttpClientHandler = [System.Net.Http.HttpClientHandler]@{ AllowAutoRedirect = $true }
+    $HttpClient = [System.Net.Http.HttpClient]::new($HttpClientHandler)
+    $HttpClient.Timeout = $ConnectionTimeoutSeconds ? [timespan]::FromSeconds($ConnectionTimeoutSeconds) : [System.Threading.Timeout]::InfiniteTimeSpan
+    $HttpRequest = [System.Net.Http.HttpRequestMessage]::new($Method, $Uri)
+    $HttpResponse = $null
+
+    try {
+      if ($Headers) { $Headers.GetEnumerator().ForEach({ $null = $HttpRequest.Headers.TryAddWithoutValidation($_.Key, $_.Value) }) }
+      if ($UserAgent) { $HttpRequest.Headers.Add('User-Agent', $UserAgent) }
+
+      $HttpResponse = $HttpClient.Send($HttpRequest, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
+      $null = $HttpResponse.EnsureSuccessStatusCode()
+
+      $ResponseHeaders = [hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+      foreach ($Header in $HttpResponse.Headers) { $ResponseHeaders[$Header.Key] = @($Header.Value) }
+      foreach ($Header in $HttpResponse.Content.Headers) { $ResponseHeaders[$Header.Key] = @($Header.Value) }
+
+      [pscustomobject]@{
+        StatusCode   = [int]($HttpResponse.StatusCode)
+        ReasonPhrase = $HttpResponse.ReasonPhrase
+        RequestUri   = $HttpResponse.RequestMessage.RequestUri.AbsoluteUri
+        Headers      = $ResponseHeaders
+      }
+    } finally {
+      if ($HttpResponse) { $HttpResponse.Dispose() }
+      $HttpRequest.Dispose()
+      $HttpClient.Dispose()
+      $HttpClientHandler.Dispose()
+    }
+  }
+}
+
 function Get-RedirectedUrls {
   <#
   .SYNOPSIS
