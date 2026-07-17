@@ -1,7 +1,10 @@
-BeforeAll {
-  . (Join-Path $PSScriptRoot 'TestFixture.ps1')
+BeforeDiscovery {
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'RegistryAssociations.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'MSI.psm1') -Force
+}
+
+BeforeAll {
+  . (Join-Path $PSScriptRoot 'TestFixture.ps1')
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\MSI'
   $Script:SquirrelFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Squirrel'
@@ -84,6 +87,24 @@ Describe 'MSI Apps & Features parser' {
 }
 
 Describe 'MSI builder and install-location parser' {
+  InModuleScope MSI {
+    It 'Should classify Chromium enterprise MSIs compiled from WiX source' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties       = @{}
+        Tables           = @('Property', 'Binary', 'CustomAction')
+        CustomActionRows = @(
+          [pscustomobject]@{ Action = 'SetProductTagProperty'; Source = 'ProductTag'; Target = 'appguid={APP-ID}' }
+          [pscustomobject]@{ Action = 'BuildInstallCommand'; Source = 'InstallCommand'; Target = '--silent --install' }
+          [pscustomobject]@{ Action = 'ExtractTagInfoFromInstaller'; Source = 'MsiInstallerCustomActionDll'; Target = 'ExtractTagInfoFromInstaller' }
+          [pscustomobject]@{ Action = 'DoInstall'; Source = 'GoogleChromeInstaller'; Target = '[InstallCommand]' }
+        )
+        SummaryInfo      = [pscustomobject]@{ CreatingApplication = $null; Comments = $null }
+      }
+
+      Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'
+    }
+  }
+
   It 'Should read Extension, ProgId, and Verb table associations from draw.io' {
     $Fixture = Get-InstallerFixture -Name 'draw.io-30.2.6.msi' -Url 'https://github.com/jgraph/drawio-desktop/releases/download/v30.2.6/draw.io-30.2.6.msi'
     $Info = Get-MsiAssociationInfo -Path $Fixture

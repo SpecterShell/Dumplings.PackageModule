@@ -502,6 +502,16 @@ function Get-MsiBuilderFromStaticTableInfo {
   if ($CustomActionNames | Where-Object { $_ -like 'IS*' -or $_ -like 'InstallShield*' }) { return 'InstallShield' }
   if ($SummaryInfoText -match '(?i)\bInstallShield\b') { return 'InstallShield' }
 
+  # Chromium enterprise MSIs are compiled from WiX source but do not retain
+  # generic Wix tables or properties in the resulting database.
+  # Source: https://chromium.googlesource.com/chromium/src/+/main/chrome/updater/win/signing/enterprise_standalone_installer.wxs.xml
+  $ChromiumWiXActionNames = @('SetProductTagProperty', 'BuildInstallCommand', 'ExtractTagInfoFromInstaller', 'DoInstall')
+  $HasChromiumWiXActions = -not ($ChromiumWiXActionNames | Where-Object { $_ -notin $CustomActionNames })
+  $HasChromiumWiXBinaryAction = [bool]($StaticTableInfo.CustomActionRows | Where-Object {
+      $_.Action -eq 'ExtractTagInfoFromInstaller' -and $_.Source -eq 'MsiInstallerCustomActionDll'
+    })
+  if ($HasChromiumWiXActions -and $HasChromiumWiXBinaryAction) { return 'WiX' }
+
   if ($Tables | Where-Object { $_ -like 'Wix*' }) { return 'WiX' }
   if ($Properties.Keys | Where-Object { $_ -like 'Wix*' -or $_ -eq 'WIXUI_INSTALLDIR' }) { return 'WiX' }
   if ($SummaryInfoText -match '(?i)\b(WiX|Windows Installer XML)\b') { return 'WiX' }
