@@ -10,6 +10,8 @@ Describe 'WinGet native download compatibility probe' {
       $Command.Parameters.Keys | Should -Contain 'OperationTimeoutSeconds'
       $Command.Parameters.Keys | Should -Contain 'MaximumRetryCount'
       $Command.Parameters.Keys | Should -Contain 'RetryIntervalSec'
+      $Command.Parameters.Keys | Should -Contain 'MaximumRetryDelaySeconds'
+      $Command.Parameters.Keys | Should -Contain 'MaximumTotalRetryDelaySeconds'
       $Command.Parameters['ConnectionTimeoutSeconds'].Aliases | Should -Contain 'TimeoutSec'
     }
   }
@@ -26,12 +28,14 @@ Describe 'WinGet native download compatibility probe' {
       Should -Invoke Invoke-WinGetDownloadOperation -Exactly 1 -ParameterFilter {
         $Activity -eq 'Downloading installer with WinINet' -and
         $ConnectionTimeoutSeconds -eq 15 -and $OperationTimeoutSeconds -eq 15 -and
-        $MaximumRetryCount -eq 3 -and $RetryIntervalSec -eq 3
+        $MaximumRetryCount -eq 3 -and $RetryIntervalSec -eq 3 -and
+        $MaximumRetryDelaySeconds -eq 30 -and $MaximumTotalRetryDelaySeconds -eq 60
       }
       Should -Invoke Invoke-WinGetDownloadOperation -Exactly 1 -ParameterFilter {
         $Activity -eq 'Downloading installer with Delivery Optimization' -and
         $ConnectionTimeoutSeconds -eq 15 -and $OperationTimeoutSeconds -eq 15 -and
-        $MaximumRetryCount -eq 3 -and $RetryIntervalSec -eq 3
+        $MaximumRetryCount -eq 3 -and $RetryIntervalSec -eq 3 -and
+        $MaximumRetryDelaySeconds -eq 30 -and $MaximumTotalRetryDelaySeconds -eq 60
       }
     }
   }
@@ -238,6 +242,69 @@ Describe 'WinGet native download compatibility probe' {
       $Result.AttemptCount | Should -Be 2
       Should -Invoke Open-WinGetWinINetDownloadOperation -Times 2
       Should -Invoke Start-Sleep -Times 1 -ParameterFilter { $Seconds -eq 7 }
+    }
+  }
+
+  It 'Parses HTTP-date Retry-After values' {
+    InModuleScope WinGetDownload {
+      $Now = [datetimeoffset]'2026-07-17T12:00:00Z'
+      $RetryDate = $Now.AddSeconds(12).ToString('R', [Globalization.CultureInfo]::InvariantCulture)
+      $Result = [pscustomobject]@{
+        HttpStatusCode = 429
+        ResponseHeaders = "HTTP/1.1 429 Too Many Requests`r`nRetry-After: $RetryDate`r`n"
+      }
+
+      Get-WinGetDownloadRetryInterval -Result $Result -DefaultSeconds 3 -UtcNow $Now | Should -Be 12
+    }
+  }
+
+  It 'Stops retrying when Retry-After exceeds the per-retry delay limit' {
+    InModuleScope WinGetDownload {
+      Mock Start-Sleep { }
+      Mock Open-WinGetWinINetDownloadOperation {
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'WinINet'
+        $Result.HttpStatusCode = 429
+        $Result.ResponseHeaders = "HTTP/1.1 429 Too Many Requests`r`nRetry-After: 3600`r`n"
+        $Operation = [pscustomobject]@{ IsCompleted = $true; Result = $Result }
+        $Operation | Add-Member ScriptMethod Wait { param($Milliseconds) $null = $Milliseconds; return $true }
+        $Operation | Add-Member ScriptMethod Cancel { }
+        $Operation | Add-Member ScriptMethod Dispose { }
+        return $Operation
+      }
+
+      $Result = Invoke-WinGetWinINetDownload -Uri 'https://example.com/installer.exe' -DestinationPath $TestDrive `
+        -UserAgent 'Dumplings-Test' -MaximumRetryCount 3 -MaximumRetryDelaySeconds 30 -MaximumTotalRetryDelaySeconds 60
+
+      $Result.HttpStatusCode | Should -Be 429
+      $Result.AttemptCount | Should -Be 1
+      Should -Invoke Open-WinGetWinINetDownloadOperation -Times 1
+      Should -Invoke Start-Sleep -Times 0
+    }
+  }
+
+  It 'Stops retrying before exceeding the cumulative retry-delay budget' {
+    InModuleScope WinGetDownload {
+      Mock Start-Sleep { }
+      Mock Open-WinGetWinINetDownloadOperation {
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'WinINet'
+        $Result.HttpStatusCode = 503
+        $Operation = [pscustomobject]@{ IsCompleted = $true; Result = $Result }
+        $Operation | Add-Member ScriptMethod Wait { param($Milliseconds) $null = $Milliseconds; return $true }
+        $Operation | Add-Member ScriptMethod Cancel { }
+        $Operation | Add-Member ScriptMethod Dispose { }
+        return $Operation
+      }
+
+      $Result = Invoke-WinGetWinINetDownload -Uri 'https://example.com/installer.exe' -DestinationPath $TestDrive `
+        -UserAgent 'Dumplings-Test' -MaximumRetryCount 3 -RetryIntervalSec 3 `
+        -MaximumRetryDelaySeconds 30 -MaximumTotalRetryDelaySeconds 5
+
+      $Result.HttpStatusCode | Should -Be 503
+      $Result.AttemptCount | Should -Be 2
+      Should -Invoke Open-WinGetWinINetDownloadOperation -Times 2
+      Should -Invoke Start-Sleep -Times 1 -ParameterFilter { $Seconds -eq 3 }
     }
   }
 

@@ -71,18 +71,33 @@ function Test-WinGetDownloadRetryStatus {
 function Get-WinGetDownloadRetryInterval {
   <#
   .SYNOPSIS
-    Read an integer Retry-After value for HTTP 429 responses
+    Read a Retry-After delay for HTTP 429 responses
   #>
   [OutputType([int])]
   param (
     [Parameter(Mandatory)]$Result,
-    [Parameter(Mandatory)][ValidateRange(1, [int]::MaxValue)][int]$DefaultSeconds
+    [Parameter(Mandatory)][ValidateRange(1, [int]::MaxValue)][int]$DefaultSeconds,
+    [datetimeoffset]$UtcNow = [datetimeoffset]::UtcNow
   )
 
   if ($Result.HttpStatusCode -eq 429 -and -not [string]::IsNullOrWhiteSpace($Result.ResponseHeaders)) {
-    $Match = [regex]::Match([string]$Result.ResponseHeaders, '(?im)^Retry-After\s*:\s*(?<Seconds>\d+)\s*$')
-    $RetryAfter = 0
-    if ($Match.Success -and [int]::TryParse($Match.Groups['Seconds'].Value, [ref]$RetryAfter) -and $RetryAfter -gt 0) { return $RetryAfter }
+    $Match = [regex]::Match([string]$Result.ResponseHeaders, '(?im)^Retry-After\s*:\s*(?<Value>[^\r\n]+?)\s*$')
+    if ($Match.Success) {
+      $Value = $Match.Groups['Value'].Value.Trim()
+      $RetryAfter = 0L
+      if ([long]::TryParse($Value, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$RetryAfter)) {
+        return [int][Math]::Min($RetryAfter, [int]::MaxValue)
+      }
+      # Preserve an oversized numeric delay as a value that exceeds normal limits.
+      if ($Value -match '^\d+$') { return [int]::MaxValue }
+
+      $RetryAfterDate = [datetimeoffset]::MinValue
+      $DateStyles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+      if ([datetimeoffset]::TryParse($Value, [Globalization.CultureInfo]::InvariantCulture, $DateStyles, [ref]$RetryAfterDate)) {
+        $Seconds = [Math]::Max(0, [Math]::Ceiling(($RetryAfterDate - $UtcNow).TotalSeconds))
+        return [int][Math]::Min($Seconds, [int]::MaxValue)
+      }
+    }
   }
   return $DefaultSeconds
 }
@@ -102,12 +117,15 @@ function Invoke-WinGetDownloadOperation {
     [Parameter(Mandatory)][string]$Activity,
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
     [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60,
     [ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
     [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
     [ValidateRange(1, [int]::MaxValue)][int]$ProgressId = 174593042
   )
 
   $MaximumAttempts = $MaximumRetryCount + 1
+  $TotalRetryDelaySeconds = 0L
   for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++) {
     $Operation = & $StartOperation $Attempt $OperationArgument
     if ($null -eq $Operation) { throw 'The native downloader did not return an operation.' }
@@ -157,8 +175,18 @@ function Invoke-WinGetDownloadOperation {
 
     if ($Attempt -ge $MaximumAttempts -or -not (Test-WinGetDownloadRetryStatus -StatusCode $Result.HttpStatusCode)) { return $Result }
     $Delay = Get-WinGetDownloadRetryInterval -Result $Result -DefaultSeconds $RetryIntervalSec
+    if ($Delay -gt $MaximumRetryDelaySeconds) {
+      Write-Verbose "Not retrying $Activity because the requested $Delay-second delay exceeds the $MaximumRetryDelaySeconds-second per-retry limit."
+      return $Result
+    }
+    $RemainingRetryDelaySeconds = [long]$MaximumTotalRetryDelaySeconds - $TotalRetryDelaySeconds
+    if ($Delay -gt $RemainingRetryDelaySeconds) {
+      Write-Verbose "Not retrying $Activity because the requested $Delay-second delay exceeds the $RemainingRetryDelaySeconds-second remaining retry-delay budget."
+      return $Result
+    }
     Write-Verbose "Retrying $Activity in $Delay second(s) after HTTP status $($Result.HttpStatusCode); attempt $($Attempt + 1) of $MaximumAttempts."
     Start-Sleep -Seconds $Delay
+    $TotalRetryDelaySeconds += $Delay
   }
 }
 
@@ -225,6 +253,10 @@ function Invoke-WinGetWinINetDownload {
     Number of retries for HTTP 304 and 400 through 599 responses
   .PARAMETER RetryIntervalSec
     Delay between retries; HTTP 429 Retry-After takes precedence
+  .PARAMETER MaximumRetryDelaySeconds
+    Maximum delay permitted before any single retry
+  .PARAMETER MaximumTotalRetryDelaySeconds
+    Maximum cumulative delay permitted across all retries
   #>
   [OutputType([Dumplings.WinGetDownload.DownloadResult])]
   param (
@@ -237,6 +269,8 @@ function Invoke-WinGetWinINetDownload {
     [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
     [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60,
     [switch]$ResponseOnly
   )
 
@@ -256,6 +290,7 @@ function Invoke-WinGetWinINetDownload {
     $null = $Attempt
     Open-WinGetWinINetDownloadOperation @Argument
   } -OperationArgument $OperationArgument -Activity 'Downloading installer with WinINet' -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
+    -MaximumRetryDelaySeconds $MaximumRetryDelaySeconds -MaximumTotalRetryDelaySeconds $MaximumTotalRetryDelaySeconds `
     -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
 }
 
@@ -281,6 +316,10 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     Number of retries for HTTP 304 and 400 through 599 responses
   .PARAMETER RetryIntervalSec
     Delay between retries; HTTP 429 Retry-After takes precedence
+  .PARAMETER MaximumRetryDelaySeconds
+    Maximum delay permitted before any single retry
+  .PARAMETER MaximumTotalRetryDelaySeconds
+    Maximum cumulative delay permitted across all retries
   #>
   [OutputType([Dumplings.WinGetDownload.DownloadResult])]
   param (
@@ -295,6 +334,8 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
     [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60,
     [switch]$ResponseOnly
   )
 
@@ -316,6 +357,7 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     $null = $Attempt
     Open-WinGetDeliveryOptimizationDownloadOperation @Argument
   } -OperationArgument $OperationArgument -Activity 'Downloading installer with Delivery Optimization' -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
+    -MaximumRetryDelaySeconds $MaximumRetryDelaySeconds -MaximumTotalRetryDelaySeconds $MaximumTotalRetryDelaySeconds `
     -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
 }
 
@@ -494,6 +536,10 @@ function Test-WinGetInstallerDownload {
     Default, Both, DeliveryOptimization, or WinINet
   .PARAMETER KeepDownloads
     Retain successful probe files instead of deleting them
+  .PARAMETER MaximumRetryDelaySeconds
+    Maximum delay permitted before any single native transport retry
+  .PARAMETER MaximumTotalRetryDelaySeconds
+    Maximum cumulative delay permitted across each native transport's retries
   #>
   [OutputType([pscustomobject])]
   param (
@@ -508,6 +554,8 @@ function Test-WinGetInstallerDownload {
     [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
     [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60,
     [string]$DestinationDirectory,
     [switch]$KeepDownloads,
     [switch]$ResponseOnly
@@ -522,10 +570,12 @@ function Test-WinGetInstallerDownload {
     $FallbackOccurred = $false
     $EffectiveMethod = $null
     $DownloadControl = @{
-      ConnectionTimeoutSeconds = $ConnectionTimeoutSeconds
-      OperationTimeoutSeconds  = $OperationTimeoutSeconds
-      MaximumRetryCount        = $MaximumRetryCount
-      RetryIntervalSec         = $RetryIntervalSec
+      ConnectionTimeoutSeconds       = $ConnectionTimeoutSeconds
+      OperationTimeoutSeconds        = $OperationTimeoutSeconds
+      MaximumRetryCount              = $MaximumRetryCount
+      RetryIntervalSec               = $RetryIntervalSec
+      MaximumRetryDelaySeconds       = $MaximumRetryDelaySeconds
+      MaximumTotalRetryDelaySeconds  = $MaximumTotalRetryDelaySeconds
     }
 
     try {
