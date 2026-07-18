@@ -98,7 +98,23 @@ Describe 'MSI builder and install-location parser' {
           [pscustomobject]@{ Action = 'ExtractTagInfoFromInstaller'; Source = 'MsiInstallerCustomActionDll'; Target = 'ExtractTagInfoFromInstaller' }
           [pscustomobject]@{ Action = 'DoInstall'; Source = 'GoogleChromeInstaller'; Target = '[InstallCommand]' }
         )
-        SummaryInfo      = [pscustomobject]@{ CreatingApplication = $null; Comments = $null }
+        SummaryInfo      = [pscustomobject]@{ CreatingApp = $null; Comments = $null }
+      }
+
+      Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'
+    }
+
+    It 'Should classify the MSI Program Name exposed by DTF as CreatingApp' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties          = @{}
+        Tables              = @('Property')
+        CustomActionRows    = @()
+        UpgradeRows         = @()
+        LaunchConditionRows = @()
+        SummaryInfo         = [pscustomobject]@{
+          CreatingApp = 'Windows Installer XML Toolset (3.11.2.4516)'
+          Comments    = $null
+        }
       }
 
       Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'

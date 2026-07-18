@@ -542,7 +542,10 @@ function Get-MsiBuilderFromStaticTableInfo {
   $Tables = @($StaticTableInfo.Tables)
   $CustomActionNames = @($StaticTableInfo.CustomActionRows.Action)
   $SummaryInfoText = @(
-    $StaticTableInfo.SummaryInfo.CreatingApplication
+    # DTF maps Summary Information PID_APPNAME (shown as "Program Name" by the Windows shell) to
+    # CreatingApp. CreatingApplication is not a DTF property and previously discarded Bytello's
+    # explicit "Windows Installer XML Toolset (...)" authoring marker.
+    $StaticTableInfo.SummaryInfo.CreatingApp
     $StaticTableInfo.SummaryInfo.Comments
     $Properties.Values
     $Properties.Keys
@@ -1520,6 +1523,25 @@ function Test-WiXInstaller {
           $PropertyValue = $Record.GetString(2)
           $PropertyName -match '(?i)\bWix' -or $PropertyValue -match '(?i)\b(wix|windows installer xml)\b'
         }) {
+        return $true
+      }
+
+      # MajorUpgrade output can be the only retained WiX signature. Require both compiler-owned
+      # Upgrade action properties and the generated downgrade guard rather than accepting one
+      # product-authored string that merely starts with WIX_.
+      $HasWiXUpgradeDetection = Test-QueryStringMatch -Database $Database -Query 'SELECT `ActionProperty` FROM `Upgrade`' -Predicate {
+        param($Record)
+        $Record.GetString(1) -ceq 'WIX_UPGRADE_DETECTED'
+      }
+      $HasWiXDowngradeDetection = Test-QueryStringMatch -Database $Database -Query 'SELECT `ActionProperty` FROM `Upgrade`' -Predicate {
+        param($Record)
+        $Record.GetString(1) -ceq 'WIX_DOWNGRADE_DETECTED'
+      }
+      $HasWiXDowngradeCondition = Test-QueryStringMatch -Database $Database -Query 'SELECT `Condition` FROM `LaunchCondition`' -Predicate {
+        param($Record)
+        $Record.GetString(1) -match '(?i)^\s*\(?\s*NOT\s+WIX_DOWNGRADE_DETECTED\s*\)?\s*$'
+      }
+      if ($HasWiXUpgradeDetection -and $HasWiXDowngradeDetection -and $HasWiXDowngradeCondition) {
         return $true
       }
 
