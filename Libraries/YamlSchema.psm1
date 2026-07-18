@@ -1,119 +1,483 @@
+# Generic JSON Schema processing for PowerShell objects serialized as YAML.
+# The module intentionally performs no YAML parsing and never accesses the
+# network unless the caller explicitly supplies -AllowNetworkReference.
+
+Set-StrictMode -Version 3
+
+function New-YamlSchemaDiagnostic {
+  <#
+  .SYNOPSIS
+    Create one structured schema validation diagnostic.
+  .PARAMETER Keyword
+    The JSON Schema keyword that produced the diagnostic.
+  .PARAMETER Message
+    A human-readable description of the validation failure.
+  .PARAMETER Field
+    The object field associated with the failure, when applicable.
+  .PARAMETER Value
+    The invalid value.
+  .PARAMETER ObjectPath
+    The JSONPath-like location of the value in the input object.
+  .PARAMETER SchemaPath
+    The JSON Pointer location of the applicable schema node.
+  .PARAMETER Reason
+    A stable reason that further classifies the keyword failure.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Keyword,
+    [Parameter(Mandatory)][string]$Message,
+    [string]$Field,
+    $Value,
+    [string]$ObjectPath = '$',
+    [string]$SchemaPath = '#',
+    [string]$Reason
+  )
+
+  return [pscustomobject]@{
+    PSTypeName = 'Dumplings.YamlSchema.Diagnostic'
+    Keyword    = $Keyword
+    Reason     = $Reason
+    Message    = $Message
+    Field      = $Field
+    Value      = $Value
+    ObjectPath = $ObjectPath
+    SchemaPath = $SchemaPath
+  }
+}
+
+function Copy-YamlSchemaObject {
+  <#
+  .SYNOPSIS
+    Deep-copy dictionaries and arrays without changing scalar values.
+  .PARAMETER InputObject
+    The value to copy.
+  #>
+  param ([AllowNull()]$InputObject)
+
+  if ($InputObject -is [System.Collections.IDictionary]) {
+    $Result = [ordered]@{}
+    foreach ($Key in $InputObject.Keys) {
+      $Result[$Key] = Copy-YamlSchemaObject -InputObject $InputObject[$Key]
+    }
+    return $Result
+  }
+  if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+    return , @($InputObject | ForEach-Object { Copy-YamlSchemaObject -InputObject $_ })
+  }
+  return $InputObject
+}
+
+function Test-YamlSchemaValueEqual {
+  <#
+  .SYNOPSIS
+    Compare two schema values using JSON structural equality.
+  .PARAMETER Left
+    The left value.
+  .PARAMETER Right
+    The right value.
+  #>
+  [OutputType([bool])]
+  param ([AllowNull()]$Left, [AllowNull()]$Right)
+
+  if ($null -eq $Left -or $null -eq $Right) {
+    return $null -eq $Left -and $null -eq $Right
+  }
+  if ($Left -is [System.Collections.IDictionary]) {
+    if ($Right -isnot [System.Collections.IDictionary] -or $Left.Count -ne $Right.Count) { return $false }
+    foreach ($Key in $Left.Keys) {
+      $RightKey = $Right.Keys | Where-Object { $_ -ceq $Key } | Select-Object -First 1
+      if ($null -eq $RightKey -or -not (Test-YamlSchemaValueEqual -Left $Left[$Key] -Right $Right[$RightKey])) { return $false }
+    }
+    return $true
+  }
+  if ($Left -is [System.Collections.IEnumerable] -and $Left -isnot [string]) {
+    if ($Right -isnot [System.Collections.IEnumerable] -or $Right -is [string]) { return $false }
+    $LeftItems = @($Left)
+    $RightItems = @($Right)
+    if ($LeftItems.Count -ne $RightItems.Count) { return $false }
+    for ($Index = 0; $Index -lt $LeftItems.Count; $Index++) {
+      if (-not (Test-YamlSchemaValueEqual -Left $LeftItems[$Index] -Right $RightItems[$Index])) { return $false }
+    }
+    return $true
+  }
+  return $Left -ceq $Right
+}
+
 function Get-YamlSchemaValue {
   <#
   .SYNOPSIS
-    Get the target definition of a reference in the given YAML schema
+    Resolve a JSON Schema reference against a root schema.
+  .DESCRIPTION
+    Supports local JSON Pointers and relative JSON files. Absolute network
+    references are rejected unless AllowNetworkReference is explicitly set.
   .PARAMETER InputObject
-    The YAML schema object
+    The root schema used for local references.
   .PARAMETER Ref
-    The reference string
+    The reference to resolve.
   .PARAMETER Path
-    The path to the root directory if the reference source is a relative file path
-  .EXAMPLE
-    Get-YamlSchemaValue -InputObject $Schema -Ref '#/definitions/Person'
-  .EXAMPLE
-    Get-YamlSchemaValue -InputObject $Schema -Ref 'https://example.com/schema.json#/definitions/Person'
-  .EXAMPLE
-    Get-YamlSchemaValue -InputObject $Schema -Ref 'schema.json#/definitions/Person' -Path 'C:\path\to\root\directory'
+    The directory used to resolve relative schema files.
+  .PARAMETER AllowNetworkReference
+    Permit downloading an absolute HTTP or HTTPS schema reference.
   #>
   param (
-    [Parameter(Position = 0, ValueFromPipeline, HelpMessage = 'The YAML schema object')]
-    $InputObject,
-
-    [Parameter(Position = 1, Mandatory, HelpMessage = 'The reference string')]
-    [ValidateNotNullOrWhiteSpace()]
-    [string]$Ref,
-
-    [Parameter(Position = 2, HelpMessage = 'The path to the root directory if the reference source is a relative file path')]
-    [ValidateNotNullOrWhiteSpace()]
-    [string]$Path
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]$InputObject,
+    [Parameter(Position = 1, Mandatory)][ValidateNotNullOrWhiteSpace()][string]$Ref,
+    [Parameter(Position = 2)][string]$Path,
+    [switch]$AllowNetworkReference
   )
 
   process {
-    $RefSource, $RefPath = $Ref.Split('#', 2)
+    $ReferenceParts = $Ref.Split('#', 2)
+    $ReferenceSource = $ReferenceParts[0]
+    $ReferencePath = $ReferenceParts.Count -gt 1 ? $ReferenceParts[1] : ''
+    $ReferenceSchema = $InputObject
 
-    # If the reference source is specified, get the reference source and replace the input object
-    # otherwise, use the input object as the reference source
-    if (-not [string]::IsNullOrWhiteSpace($RefSource)) {
-      if ([uri]::IsWellFormedUriString($RefSource, [System.UriKind]::Absolute)) {
-        # If the reference source is an absolute URI, download the reference source and replace the input object
-        $InputObject = Invoke-WebRequest -Uri $RefSource | ConvertFrom-Json -AsHashtable
-      } elseif ($Path -and (Test-Path -Path (Join-Path $Path $RefSource))) {
-        # If the reference source is a relative file path, read the reference source and replace the input object
-        $InputObject = Get-Content -Path (Join-Path $Path $RefSource) -Raw | ConvertFrom-Json -AsHashtable
-      } else {
-        throw "The reference source `"${RefSource}`" is not a valid URI or a valid file path."
-      }
-    }
-
-    # Get the target definition of the reference recursively
-    $RefSegments = $RefPath -split '/'
-    $Object = $InputObject
-    foreach ($RefSegment in $RefSegments) {
-      if (-not [string]::IsNullOrWhiteSpace($RefSegment)) {
-        if ($Object.Contains($RefSegment)) {
-          $Object = $Object[$RefSegment]
-        } else {
-          throw "The reference path `"${RefPath}`" is not valid."
+    # External references are resolved only from an explicit local root or an
+    # explicitly authorized network source, keeping normal validation offline.
+    if (-not [string]::IsNullOrWhiteSpace($ReferenceSource)) {
+      $ReferenceUri = $null
+      if ([uri]::TryCreate($ReferenceSource, [UriKind]::Absolute, [ref]$ReferenceUri) -and
+        $ReferenceUri.Scheme -cin @('http', 'https')) {
+        if (-not $AllowNetworkReference) {
+          throw "Network schema reference '${ReferenceSource}' is disabled"
         }
+        $ReferenceSchema = Invoke-RestMethod -Uri $ReferenceUri -Method Get
+        if ($ReferenceSchema -isnot [System.Collections.IDictionary]) {
+          $ReferenceSchema = $ReferenceSchema | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable
+        }
+      } elseif ($Path) {
+        $ReferenceFile = Join-Path -Path $Path -ChildPath $ReferenceSource
+        if (-not (Test-Path -LiteralPath $ReferenceFile -PathType Leaf)) {
+          throw "Schema reference file '${ReferenceSource}' does not exist under '${Path}'"
+        }
+        $ReferenceSchema = Get-Content -LiteralPath $ReferenceFile -Raw | ConvertFrom-Json -AsHashtable
+      } else {
+        throw "Schema reference '${ReferenceSource}' requires a schema root path"
       }
     }
 
-    return $Object
+    if ([string]::IsNullOrEmpty($ReferencePath)) { return $ReferenceSchema }
+    if (-not $ReferencePath.StartsWith('/')) {
+      throw "Schema reference path '${ReferencePath}' is not a JSON Pointer"
+    }
+
+    # RFC 6901 escapes '/' as '~1' and '~' as '~0'. Array indices are also
+    # accepted so references can target definitions contained in sequences.
+    $Current = $ReferenceSchema
+    foreach ($RawSegment in $ReferencePath.Substring(1).Split('/')) {
+      $Segment = $RawSegment.Replace('~1', '/').Replace('~0', '~')
+      if ($Current -is [System.Collections.IDictionary] -and $Current.Contains($Segment)) {
+        $Current = $Current[$Segment]
+      } elseif ($Current -is [System.Collections.IList] -and $Segment -match '^\d+$' -and [int]$Segment -lt $Current.Count) {
+        $Current = $Current[[int]$Segment]
+      } else {
+        throw "Schema reference path '${ReferencePath}' does not exist"
+      }
+    }
+    return $Current
   }
+}
+
+function Expand-YamlSchemaNode {
+  <#
+  .SYNOPSIS
+    Recursively expand references in one schema node.
+  .PARAMETER InputObject
+    The node to expand.
+  .PARAMETER RootObject
+    The root schema used to resolve references.
+  .PARAMETER Path
+    The directory used for relative references.
+  .PARAMETER ReferenceStack
+    Active references used to detect direct cycles.
+  .PARAMETER Depth
+    Current recursion depth.
+  .PARAMETER MaximumDepth
+    Maximum permitted recursion depth.
+  #>
+  param (
+    [AllowNull()]$InputObject,
+    [Parameter(Mandatory)]$RootObject,
+    [string]$Path,
+    [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$ReferenceStack,
+    [int]$Depth,
+    [int]$MaximumDepth
+  )
+
+  if ($Depth -gt $MaximumDepth) { throw "Schema expansion exceeded the maximum depth of ${MaximumDepth}" }
+  if ($InputObject -is [System.Collections.IDictionary]) {
+    if ($InputObject.Contains('$ref')) {
+      $Reference = [string]$InputObject['$ref']
+      if (-not $ReferenceStack.Add($Reference)) { throw "Cyclic schema reference detected at '${Reference}'" }
+      try {
+        return Expand-YamlSchemaNode -InputObject (Get-YamlSchemaValue -InputObject $RootObject -Ref $Reference -Path $Path) -RootObject $RootObject -Path $Path -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+      } finally {
+        $null = $ReferenceStack.Remove($Reference)
+      }
+    }
+
+    $Result = [ordered]@{}
+    foreach ($Key in $InputObject.Keys) {
+      $Result[$Key] = Expand-YamlSchemaNode -InputObject $InputObject[$Key] -RootObject $RootObject -Path $Path -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+    }
+    return $Result
+  }
+  if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+    return , @($InputObject | ForEach-Object {
+        Expand-YamlSchemaNode -InputObject $_ -RootObject $RootObject -Path $Path -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+      })
+  }
+  return $InputObject
 }
 
 function Expand-YamlSchema {
   <#
   .SYNOPSIS
-    Replace the references in the given YAML schema with their target definitions
+    Return a deep-copied schema with all supported references expanded.
   .PARAMETER InputObject
-    The YAML schema object
+    The schema to expand.
   .PARAMETER Clone
-    Clone the objects inside the schema to a new object and output a new YAML schema object instead of in-place replacement
-  .EXAMPLE
-    Expand-YamlSchema -InputObject $Schema
-  .EXAMPLE
-    Expand-YamlSchema -InputObject $Schema -Clone
+    Retained for call-site readability; expansion always returns a new object.
+  .PARAMETER Path
+    The directory used for relative schema references.
+  .PARAMETER MaximumDepth
+    Maximum schema recursion depth.
   #>
   param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The YAML schema object')]
-    $InputObject,
-
-    [Parameter(HelpMessage = 'Clone the objects inside the schema to a new object and output a new YAML schema object instead of in-place replacement')]
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]$InputObject,
     [switch]$Clone,
-
-    [Parameter(DontShow)]
-    $RootObject = $InputObject
+    [string]$Path,
+    [ValidateRange(1, 1024)][int]$MaximumDepth = 128
   )
 
   process {
-    if ($Clone) {
-      $OutputObject = [ordered]@{}
-      # Check if an object contains a "$ref" key
-      foreach ($Key in $InputObject.GetEnumerator()) {
-        if ($InputObject.$Key -is [System.Collections.IDictionary]) {
-          if ($InputObject.$Key.Contains('$ref')) {
-            $OutputObject[$Key] = Get-YamlSchemaValue -InputObject $RootObject -Ref $InputObject.$Key.'$ref'
-          } else {
-            $OutputObject[$Key] = Expand-YamlSchema -InputObject $InputObject.$Key -RootObject $RootObject -Clone
-          }
-        } else {
-          $OutputObject[$Key] = $InputObject.$Key
-        }
-      }
+    $Stack = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    return Expand-YamlSchemaNode -InputObject $InputObject -RootObject $InputObject -Path $Path -ReferenceStack $Stack -Depth 0 -MaximumDepth $MaximumDepth
+  }
+}
 
-      return $OutputObject
-    } else {
-      # Check if an object contains a "$ref" key
-      foreach ($Key in @($InputObject.Keys)) {
-        if ($InputObject.$Key -is [System.Collections.IDictionary]) {
-          if ($InputObject.$Key.Contains('$ref')) {
-            $InputObject.$Key = Get-YamlSchemaValue -InputObject $RootObject -Ref $InputObject.$Key.'$ref'
-          } else {
-            Expand-YamlSchema -InputObject $InputObject.$Key -RootObject $RootObject
+function Invoke-YamlSchemaNodeValidation {
+  <#
+  .SYNOPSIS
+    Validate one input value against one schema node.
+  .PARAMETER InputObject
+    The value being validated.
+  .PARAMETER Schema
+    The current schema node.
+  .PARAMETER RootSchema
+    The root schema used for references.
+  .PARAMETER ObjectPath
+    Current path in the input object.
+  .PARAMETER SchemaPath
+    Current path in the schema.
+  .PARAMETER ValidatePropertyNames
+    Report unknown and incorrectly cased properties.
+  .PARAMETER ReferenceStack
+    Active reference/object-path pairs used for cycle detection.
+  .PARAMETER Depth
+    Current recursion depth.
+  .PARAMETER MaximumDepth
+    Maximum validation recursion depth.
+  #>
+  param (
+    [AllowNull()]$InputObject,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Schema,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$RootSchema,
+    [string]$ObjectPath,
+    [string]$SchemaPath,
+    [switch]$ValidatePropertyNames,
+    [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$ReferenceStack,
+    [int]$Depth,
+    [int]$MaximumDepth
+  )
+
+  $Diagnostics = [System.Collections.Generic.List[object]]::new()
+  if ($Depth -gt $MaximumDepth) {
+    $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword '$ref' -Reason MaximumDepth -Message "Schema validation exceeded the maximum depth of ${MaximumDepth}." -ObjectPath $ObjectPath -SchemaPath $SchemaPath))
+    return $Diagnostics.ToArray()
+  }
+
+  # Resolve references lazily so recursive data schemas can advance through the
+  # input object while a direct reference cycle at one object path is rejected.
+  if ($Schema.Contains('$ref')) {
+    $Reference = [string]$Schema['$ref']
+    $ReferenceKey = "${Reference}|${ObjectPath}"
+    if (-not $ReferenceStack.Add($ReferenceKey)) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword '$ref' -Reason Cycle -Message "Cyclic schema reference detected at '${Reference}'." -ObjectPath $ObjectPath -SchemaPath $SchemaPath))
+      return $Diagnostics.ToArray()
+    }
+    try {
+      $Resolved = Get-YamlSchemaValue -InputObject $RootSchema -Ref $Reference
+      return Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Resolved -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath $Reference -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+    } catch {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword '$ref' -Reason InvalidReference -Message $_.Exception.Message -ObjectPath $ObjectPath -SchemaPath $SchemaPath))
+      return $Diagnostics.ToArray()
+    } finally {
+      $null = $ReferenceStack.Remove($ReferenceKey)
+    }
+  }
+
+  # oneOf and not are evaluated before the base node so their constraints are
+  # enforced in addition to any sibling keywords on the schema node.
+  if ($Schema.Contains('oneOf')) {
+    $AlternativeMatches = 0
+    foreach ($Alternative in @($Schema['oneOf'])) {
+      $AlternativeDiagnostics = @(Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Alternative -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/oneOf" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth)
+      if ($AlternativeDiagnostics.Count -eq 0) { $AlternativeMatches++ }
+    }
+    if ($AlternativeMatches -ne 1) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword oneOf -Reason MatchCount -Message "Value must match exactly one schema alternative; matched ${AlternativeMatches}." -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/oneOf"))
+    }
+  }
+  if ($Schema.Contains('not')) {
+    $NotDiagnostics = @(Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Schema['not'] -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/not" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth)
+    if ($NotDiagnostics.Count -eq 0) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword not -Reason ProhibitedMatch -Message 'Value matches a prohibited schema.' -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/not"))
+    }
+  }
+
+  # Determine the JSON type represented by the PowerShell value. Integer is a
+  # valid number, while strings are deliberately never coerced here.
+  $AllowedTypes = @($Schema.Contains('type') ? $Schema['type'] : @())
+  if ($AllowedTypes.Count -gt 0) {
+    $ActualType = if ($null -eq $InputObject) { 'null' }
+    elseif ($InputObject -is [System.Collections.IDictionary]) { 'object' }
+    elseif ($InputObject -is [bool]) { 'boolean' }
+    elseif ($InputObject -is [byte] -or $InputObject -is [sbyte] -or $InputObject -is [short] -or $InputObject -is [ushort] -or $InputObject -is [int] -or $InputObject -is [uint] -or $InputObject -is [long] -or $InputObject -is [ulong]) { 'integer' }
+    elseif ($InputObject -is [float] -or $InputObject -is [double] -or $InputObject -is [decimal]) { 'number' }
+    elseif ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) { 'array' }
+    elseif ($InputObject -is [string]) { 'string' }
+    else { $InputObject.GetType().Name }
+    if ($ActualType -cnotin $AllowedTypes -and -not ($ActualType -ceq 'integer' -and 'number' -cin $AllowedTypes)) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword type -Reason TypeMismatch -Message "Expected type '$($AllowedTypes -join '|')', found '${ActualType}'." -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/type"))
+      return $Diagnostics.ToArray()
+    }
+  }
+  if ($null -eq $InputObject) { return $Diagnostics.ToArray() }
+
+  if ($Schema.Contains('enum') -and -not @($Schema['enum']).Where({ Test-YamlSchemaValueEqual -Left $InputObject -Right $_ }, 'First')) {
+    $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword enum -Reason NotAllowed -Message 'Value is not in the allowed enumeration.' -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/enum"))
+  }
+  if ($Schema.Contains('const') -and -not (Test-YamlSchemaValueEqual -Left $InputObject -Right $Schema['const'])) {
+    $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword const -Reason NotEqual -Message "Value must equal '$($Schema['const'])'." -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/const"))
+  }
+
+  if ($InputObject -is [System.Collections.IDictionary]) {
+    foreach ($RequiredProperty in @($Schema.Contains('required') ? $Schema['required'] : @())) {
+      if (-not $InputObject.Contains($RequiredProperty)) {
+        $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword required -Reason MissingProperty -Message "Required property '${RequiredProperty}' is missing." -Field $RequiredProperty -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/required"))
+      }
+    }
+    if ($Schema.Contains('properties')) {
+      foreach ($Key in $InputObject.Keys) {
+        # OrderedDictionary lookups can be case-insensitive, so compare key
+        # text ordinally before deciding whether casing is valid.
+        $ExactKey = $Schema['properties'].Keys | Where-Object { $_ -ceq $Key } | Select-Object -First 1
+        if ($null -ne $ExactKey) {
+          $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $InputObject[$Key] -Schema $Schema['properties'][$ExactKey] -RootSchema $RootSchema -ObjectPath "${ObjectPath}.${Key}" -SchemaPath "${SchemaPath}/properties/${ExactKey}" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
+          continue
+        }
+
+        $ExpectedKey = $Schema['properties'].Keys | Where-Object { $_ -ieq $Key } | Select-Object -First 1
+        if ($ValidatePropertyNames -and $ExpectedKey) {
+          $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword properties -Reason PropertyNameCase -Message "Property '${Key}' has incorrect casing; expected '${ExpectedKey}'." -Field $Key -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/properties"))
+          $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $InputObject[$Key] -Schema $Schema['properties'][$ExpectedKey] -RootSchema $RootSchema -ObjectPath "${ObjectPath}.${Key}" -SchemaPath "${SchemaPath}/properties/${ExpectedKey}" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
+        } elseif ($ValidatePropertyNames -or ($Schema.Contains('additionalProperties') -and $Schema['additionalProperties'] -eq $false)) {
+          $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword properties -Reason UnknownProperty -Message "Property '${Key}' is not defined by the schema." -Field $Key -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/properties"))
+        }
+      }
+    }
+  } elseif ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+    $Items = @($InputObject)
+    if ($Schema.Contains('minItems') -and $Items.Count -lt [int]$Schema['minItems']) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword minItems -Reason TooFewItems -Message "Array contains fewer than $($Schema['minItems']) items." -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/minItems"))
+    }
+    if ($Schema.Contains('maxItems') -and $Items.Count -gt [int]$Schema['maxItems']) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword maxItems -Reason TooManyItems -Message "Array contains more than $($Schema['maxItems']) items." -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/maxItems"))
+    }
+    if ($Schema.Contains('uniqueItems') -and $Schema['uniqueItems']) {
+      for ($LeftIndex = 0; $LeftIndex -lt $Items.Count; $LeftIndex++) {
+        for ($RightIndex = $LeftIndex + 1; $RightIndex -lt $Items.Count; $RightIndex++) {
+          if (Test-YamlSchemaValueEqual -Left $Items[$LeftIndex] -Right $Items[$RightIndex]) {
+            $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword uniqueItems -Reason DuplicateItem -Message 'Array items must be unique.' -Value $Items[$RightIndex] -ObjectPath "${ObjectPath}[${RightIndex}]" -SchemaPath "${SchemaPath}/uniqueItems"))
           }
         }
       }
+    }
+    if ($Schema.Contains('items')) {
+      for ($Index = 0; $Index -lt $Items.Count; $Index++) {
+        $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $Items[$Index] -Schema $Schema['items'] -RootSchema $RootSchema -ObjectPath "${ObjectPath}[${Index}]" -SchemaPath "${SchemaPath}/items" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
+      }
+    }
+  } elseif ($InputObject -is [string]) {
+    if ($Schema.Contains('minLength') -and $InputObject.Length -lt [int]$Schema['minLength']) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword minLength -Reason TooShort -Message "String is shorter than $($Schema['minLength']) characters." -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/minLength"))
+    }
+    if ($Schema.Contains('maxLength') -and $InputObject.Length -gt [int]$Schema['maxLength']) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword maxLength -Reason TooLong -Message "String is longer than $($Schema['maxLength']) characters." -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/maxLength"))
+    }
+    if ($Schema.Contains('pattern') -and $InputObject -notmatch [string]$Schema['pattern']) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword pattern -Reason PatternMismatch -Message 'String does not match the required pattern.' -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/pattern"))
+    }
+    if ($Schema.Contains('format') -and $Schema['format'] -ceq 'date') {
+      $ParsedDate = [datetime]::MinValue
+      if (-not [datetime]::TryParseExact($InputObject, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$ParsedDate)) {
+        $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword format -Reason InvalidDate -Message 'String is not a valid ISO date.' -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/format"))
+      }
+    }
+  } elseif ($InputObject -is [ValueType] -and $InputObject -isnot [bool]) {
+    if ($Schema.Contains('minimum') -and $InputObject -lt $Schema['minimum']) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword minimum -Reason BelowMinimum -Message "Number is below the minimum $($Schema['minimum'])." -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/minimum"))
+    }
+    if ($Schema.Contains('maximum') -and $InputObject -gt $Schema['maximum']) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword maximum -Reason AboveMaximum -Message "Number is above the maximum $($Schema['maximum'])." -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/maximum"))
+    }
+    if ($Schema.Contains('format') -and $Schema['format'] -ceq 'long' -and $InputObject -isnot [long] -and $InputObject -isnot [int] -and $InputObject -isnot [short] -and $InputObject -isnot [byte]) {
+      $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword format -Reason InvalidLong -Message 'Value is not a signed integer.' -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/format"))
+    }
+  }
+
+  return $Diagnostics.ToArray()
+}
+
+function Get-YamlSchemaValidationResult {
+  <#
+  .SYNOPSIS
+    Validate a PowerShell object against a JSON Schema document.
+  .PARAMETER InputObject
+    The object to validate.
+  .PARAMETER Schema
+    The schema node applied to the input object.
+  .PARAMETER RootSchema
+    The root schema used to resolve local references. Defaults to Schema.
+  .PARAMETER ObjectPath
+    Initial JSONPath-like object location.
+  .PARAMETER SchemaPath
+    Initial JSON Pointer schema location.
+  .PARAMETER ValidatePropertyNames
+    Report unknown and incorrectly cased object properties.
+  .PARAMETER MaximumDepth
+    Maximum validation recursion depth.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][AllowNull()]$InputObject,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Schema,
+    [System.Collections.IDictionary]$RootSchema = $Schema,
+    [string]$ObjectPath = '$',
+    [string]$SchemaPath = '#',
+    [switch]$ValidatePropertyNames,
+    [ValidateRange(1, 1024)][int]$MaximumDepth = 128
+  )
+
+  process {
+    $Stack = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $Diagnostics = @(Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Schema -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath $SchemaPath -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $Stack -Depth 0 -MaximumDepth $MaximumDepth)
+    return [pscustomobject]@{
+      PSTypeName  = 'Dumplings.YamlSchema.ValidationResult'
+      IsValid     = $Diagnostics.Count -eq 0
+      Diagnostics = $Diagnostics
     }
   }
 }
@@ -121,235 +485,82 @@ function Expand-YamlSchema {
 function Test-YamlObject {
   <#
   .SYNOPSIS
-    Validate a YAML object using the given schema
+    Test whether a PowerShell object satisfies a JSON Schema node.
   .PARAMETER InputObject
-    The YAML object to validate
+    The object to validate.
   .PARAMETER Schema
-    The YAML schema to use for validation
+    The schema node applied to the object.
   .PARAMETER Recurse
-    Recursively validate the nested objects and arrays
-  .EXAMPLE
-    Test-YamlObject -InputObject $Object -Schema $Schema
-  .EXAMPLE
-    Test-YamlObject -InputObject $Object -Schema $Schema -Recurse
+    Retained for compatibility; structured validation is always recursive.
+  .PARAMETER ValidatePropertyNames
+    Report unknown and incorrectly cased object properties.
+  .PARAMETER PassThru
+    Return the structured validation result instead of a Boolean.
   #>
   param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The YAML object to validate')]
-    [AllowNull()]
-    $InputObject,
-
-    [Parameter(Mandatory, HelpMessage = 'The YAML schema to use for validation')]
-    $Schema,
-
-    [Parameter(HelpMessage = 'Recursively validate the nested objects and arrays')]
-    [switch]$Recurse
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][AllowNull()]$InputObject,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Schema,
+    [switch]$Recurse,
+    [switch]$ValidatePropertyNames,
+    [switch]$PassThru
   )
 
   process {
-    if ($Schema.type -contains 'null' -and $null -eq $InputObject) {
-      # If the schema allows null values and the input object is null, return $true
-      return $true
-    } elseif ($Schema.type -contains 'object') {
-      if ($null -eq $InputObject) {
-        # Check if the input object is null
-        Write-Warning -Message 'The input object is not nullable'
-        return $false
-      } elseif ($InputObject -is [System.Collections.IDictionary]) {
-        # Check if the input object contains all required properties
-        if ($Schema.Contains('required')) {
-          foreach ($RequiredProperty in $Schema.required) {
-            if (-not $InputObject.Contains($RequiredProperty)) {
-              Write-Warning -Message "The object does not contain the required property `"${RequiredProperty}`""
-              return $false
-            }
-          }
-        }
-        # Check if the input object contains invalid properties
-        if ($Recurse) {
-          foreach ($Key in $Schema.properties.Keys) {
-            if ($InputObject.Contains($Key) -and -not (Test-YamlObject -InputObject $InputObject[$Key] -Schema $Schema.properties.$Key -Recurse)) {
-              Write-Warning -Message "The object contains an invalid value for the property `"${Key}`""
-              return $false
-            }
-          }
-        }
-        # If all checks pass, return $true
-        return $true
-      } else {
-        # If the input object is not of object type, return $false
-        Write-Warning -Message 'The input object is not of object type'
-        return $false
-      }
-    } elseif ($Schema.type -contains 'array') {
-      if ($null -eq $InputObject) {
-        # Check if the input object is null
-        Write-Warning -Message 'The input object is not nullable'
-        return $false
-      } elseif ($InputObject -is [System.Collections.IEnumerable]) {
-        # Check if the input object has the correct number of items
-        if ($Schema.Contains('minItems') -and $InputObject.Count -lt $Schema.minItems) {
-          Write-Warning -Message "The array has $($InputObject.Count) items, fewer than the minimum number of items $($Schema.minItems)"
-          return $false
-        }
-        if ($Schema.Contains('maxItems') -and $InputObject.Count -gt $Schema.maxItems) {
-          Write-Warning -Message "The array has $($InputObject.Count) items, more than the maximum number of items $($Schema.maxItems)"
-          return $false
-        }
-        # Check if the input object contains invalid items
-        if ($Recurse) {
-          foreach ($Item in $InputObject) {
-            if (-not (Test-YamlObject -InputObject $Item -Schema $Schema.items -Recurse)) {
-              Write-Warning -Message 'The array contains an invalid item'
-              return $false
-            }
-          }
-        }
-        # If all checks pass, return $true
-        return $true
-      } else {
-        # If the input object is not of array type, return $false
-        Write-Warning -Message 'The input object is not of array type'
-        return $false
-      }
-    } elseif ($Schema.type -contains 'string') {
-      if ($null -eq $InputObject) {
-        # Check if the input object is null
-        Write-Warning -Message 'The input object is not nullable'
-        return $false
-      } elseif ($InputObject -is [string]) {
-        if ($Schema.Contains('enum') -and -not $Schema.enum.Contains($InputObject)) {
-          # Check if the input object is not in the enum list
-          Write-Warning -Message "The string `"${InputObject}`" is not in the enum list"
-          return $false
-        }
-        if ($Schema.Contains('pattern') -and $InputObject -notmatch $Schema.pattern) {
-          # Check if the input object does not match the pattern
-          Write-Warning -Message "The string `"${InputObject}`" does not match the pattern"
-          return $false
-        }
-        if ($Schema.Contains('minLength') -and $InputObject.Length -lt $Schema.minLength) {
-          # Check if the input object is shorter than the minimum length
-          Write-Warning -Message "The string `"${InputObject}`" has a length of $($InputObject.Length), shorter than the minimum length $($Schema.minLength)"
-          return $false
-        }
-        if ($Schema.Contains('maxLength') -and $InputObject.Length -gt $Schema.maxLength) {
-          # Check if the input object is longer than the maximum length
-          Write-Warning -Message "The string has a length of $($InputObject.Length), longer than the maximum length $($Schema.maxLength)"
-          return $false
-        }
-        # If all checks pass, return $true
-        return $true
-      } else {
-        # If the input object is not of string type, return $false
-        Write-Warning -Message 'The input object is not of string type'
-        return $false
-      }
-    } elseif ($Schema.type -contains 'number' -or $Schema.type -contains 'integer') {
-      if ($null -eq $InputObject) {
-        # Check if the input object is null
-        Write-Warning -Message 'The input object is not nullable'
-        return $false
-      } elseif ($InputObject -is [Int16] -or $InputObject -is [Int32] -or $InputObject -is [Int64] -or $InputObject -is [UInt16] -or $InputObject -is [UInt32] -or $InputObject -is [UInt64] -or $InputObject -is [Single] -or $InputObject -is [Double] -or $InputObject -is [Decimal]) {
-        if ($Schema.type -contains 'integer' -and -not [int]::TryParse($InputObject, [ref]$null)) {
-          # Check if the input object is not an integer
-          Write-Warning -Message "The number `"${InputObject}`" is not an integer"
-          return $false
-        }
-        if ($Schema.Contains('enum') -and -not $Schema.enum.Contains($InputObject)) {
-          # Check if the input object is not in the enum list
-          Write-Warning -Message "The number `"${InputObject}`" is not in the enum list"
-          return $false
-        }
-        if ($Schema.Contains('minimum') -and $InputObject -lt $Schema.minimum) {
-          # Check if the input object is smaller than the minimum value
-          Write-Warning -Message "The number `"${InputObject}`" is smaller than the minimum value $($Schema.minimum)"
-          return $false
-        }
-        if ($Schema.Contains('maximum') -and $InputObject -gt $Schema.maximum) {
-          # Check if the input object is larger than the maximum value
-          Write-Warning -Message "The number `"${InputObject}`" is larger than the maximum value $($Schema.maximum)"
-          return $false
-        }
-        # If all checks pass, return $true
-        return $true
-      } else {
-        # If the input object is not of number type, return $false
-        Write-Warning -Message 'The input object is not of number type or integer type'
-        return $false
-      }
-    } elseif ($Schema.type -contains 'boolean') {
-      if ($null -eq $InputObject) {
-        # Check if the input object is null
-        Write-Warning -Message 'The input object is not nullable'
-        return $false
-      } elseif ($InputObject -is [bool]) {
-        if ($Schema.Contains('enum') -and -not $Schema.enum.Contains($InputObject)) {
-          # Check if the input object is not in the enum list
-          Write-Warning -Message "The boolean `"${InputObject}`" is not in the enum list"
-          return $false
-        }
-        # If all checks pass, return $true
-        return $true
-      } else {
-        # If the input object is not of boolean type, return $false
-        Write-Warning -Message 'The input object is not of boolean type'
-        return $false
-      }
-    } else {
-      # If the schema type is not supported, return $true
-      throw "Unsupported schema type $($Schema.type)"
-    }
+    $Result = Get-YamlSchemaValidationResult -InputObject $InputObject -Schema $Schema -ValidatePropertyNames:$ValidatePropertyNames
+    if ($PassThru) { return $Result }
+    return $Result.IsValid
   }
 }
 
 function ConvertTo-SortedYamlObject {
   <#
   .SYNOPSIS
-    Sort the properties of a YAML object according to the schema
+    Order dictionary keys according to a schema without changing values.
+  .DESCRIPTION
+    Known keys follow schema order, unknown keys retain their input order, and
+    arrays retain their original order. Validation is intentionally separate.
   .PARAMETER InputObject
-    The YAML object to sort
+    The object to copy and order.
   .PARAMETER Schema
-    The YAML schema to use for sorting
+    The schema that supplies property ordering and child schemas.
   .PARAMETER Culture
-    The locale format to use for sorting
-  .EXAMPLE
-    ConvertTo-SortedYamlObject -InputObject $Object -Schema $Schema
-  .EXAMPLE
-    ConvertTo-SortedYamlObject -InputObject $Object -Schema $Schema -Culture 'en-US'
+    Retained for API compatibility; array sorting is no longer performed.
+  .PARAMETER RootSchema
+    Root schema used to resolve local references during recursive ordering.
   #>
   param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The YAML object to sort')]
-    [AllowNull()]
-    $InputObject,
-
-    [Parameter(Mandatory, HelpMessage = 'The YAML schema to use for sorting')]
-    $Schema,
-
-    [Parameter(HelpMessage = 'The locale format to use for sorting')]
-    [cultureinfo]$Culture = (Get-Culture)
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][AllowNull()]$InputObject,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Schema,
+    [cultureinfo]$Culture = (Get-Culture),
+    [Parameter(DontShow)][System.Collections.IDictionary]$RootSchema = $Schema
   )
 
   process {
-    if ($Schema.type -contains 'object') {
-      if (-not (Test-YamlObject -InputObject $InputObject -Schema $Schema)) {
-        throw 'The input object does not match the schema'
-      }
-      $OutputObject = [ordered]@{}
-      foreach ($Key in $Schema.properties.Keys) {
-        if ($InputObject.Contains($Key)) {
-          $OutputObject.$Key = ConvertTo-SortedYamlObject -InputObject $InputObject.$Key -Schema $Schema.properties.$Key -Culture $Culture
+    if ($Schema.Contains('$ref')) {
+      $Schema = Get-YamlSchemaValue -InputObject $RootSchema -Ref $Schema['$ref']
+    }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+      $Output = [ordered]@{}
+      if ($Schema.Contains('properties')) {
+        foreach ($Key in $Schema['properties'].Keys) {
+          if ($InputObject.Contains($Key)) {
+            $Output[$Key] = ConvertTo-SortedYamlObject -InputObject $InputObject[$Key] -Schema $Schema['properties'][$Key] -Culture $Culture -RootSchema $RootSchema
+          }
         }
       }
-      Write-Output -InputObject $OutputObject
-    } elseif ($Schema.type -contains 'array') {
-      if (-not (Test-YamlObject -InputObject $InputObject -Schema $Schema)) {
-        throw 'The input object does not match the schema'
+      # Formatting must never discard extension or misspelled fields; schema
+      # validation remains responsible for reporting them to the caller.
+      foreach ($Key in $InputObject.Keys) {
+        if (-not $Output.Contains($Key)) { $Output[$Key] = Copy-YamlSchemaObject -InputObject $InputObject[$Key] }
       }
-      Write-Output -InputObject @($InputObject | ForEach-Object -Process { ConvertTo-SortedYamlObject -InputObject $_ -Schema $Schema.items -Culture $Culture } | Sort-Object -Stable -Culture $Culture) -NoEnumerate
-    } else {
-      return $InputObject
+      return $Output
     }
+    if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+      $ItemSchema = $Schema.Contains('items') ? $Schema['items'] : [ordered]@{}
+      return , @($InputObject | ForEach-Object { ConvertTo-SortedYamlObject -InputObject $_ -Schema $ItemSchema -Culture $Culture -RootSchema $RootSchema })
+    }
+    return $InputObject
   }
 }
 
-Export-ModuleMember -Function *
+Export-ModuleMember -Function Get-YamlSchemaValue, Expand-YamlSchema, Get-YamlSchemaValidationResult, Test-YamlObject, ConvertTo-SortedYamlObject

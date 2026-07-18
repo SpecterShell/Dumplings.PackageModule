@@ -12,6 +12,7 @@ $WinGetUserAgent = 'Microsoft-Delivery-Optimization/10.0'
 $WinGetBackupUserAgent = 'winget-cli WindowsPackageManager/1.7.10661 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.22.10661.0'
 $WinGetTempInstallerFiles = [ordered]@{}
 $WinGetInstallerFiles = [ordered]@{}
+$Script:WinGetAuthoringManifestVersion = '1.12.0'
 
 filter UniqueItems {
   [string]$($_.Split(',').Trim() | Select-Object -Unique)
@@ -23,133 +24,6 @@ filter ToLower {
 
 filter NoWhitespace {
   [string]$_ -replace '\s+', '-'
-}
-
-function Move-KeysToInstallerLevel {
-  param (
-    [Parameter(Position = 0, Mandatory)]
-    [System.Collections.IDictionary]$Manifest,
-    [Parameter(Position = 1, Mandatory)]
-    [System.Collections.IDictionary[]]$Installers,
-    [Parameter(Position = 2)]
-    [string[]]$Property,
-    [Parameter()]
-    [int]$Depth = 2,
-    [Parameter(DontShow)]
-    [int]$CurrentDepth = 0
-  )
-
-  if ($CurrentDepth -ge $Depth) { return }
-  foreach ($Key in @($Manifest.Keys)) {
-    if ($Property -and $Key -cnotin $Property) { continue }
-    $ToRemove = $true
-    if ($Manifest.$Key -is [System.Collections.IDictionary]) {
-      $PreservedManifestKeys = [System.Collections.Generic.HashSet[string]]::new()
-      foreach ($Installer in $Installers) {
-        $ManifestEntry = $Manifest.$Key | Copy-Object
-        $InstallerEntry = $Installer.Contains($Key) -and $Installer.$Key ? $Installer.$Key : [ordered]@{}
-        Move-KeysToInstallerLevel -Manifest $ManifestEntry -Installers $InstallerEntry -Depth $Depth -CurrentDepth ($CurrentDepth + 1)
-        $PreservedManifestKeys.UnionWith([string[]]($ManifestEntry.Keys))
-        if ($InstallerEntry.Count -gt 0) { $Installer.$Key = $InstallerEntry }
-      }
-      if ($PreservedManifestKeys.Count -gt 0) {
-        $ToRemove = $false
-        foreach ($KeyToRemove in $Manifest.$Key.Keys.Where({ $_ -cnotin $PreservedManifestKeys })) { $Manifest.$Key.Remove($KeyToRemove) }
-      }
-    } elseif ($Manifest.$Key -is [System.Collections.IEnumerable] -and $Manifest.$Key -isnot [string]) {
-      $ManifestEntry = $Manifest.$Key
-      $ManifestEntryHash = ConvertTo-Json -InputObject $ManifestEntry -Depth 10 -Compress
-      foreach ($Installer in $Installers) {
-        if (-not $Installer.Contains($Key)) {
-          $Installer.$Key = $Manifest.$Key
-        } elseif ($Installer.Contains($Key) -and -not $Installer.$Key) {
-          $Installer.$Key = $Manifest.$Key
-        } elseif ($Installer.Contains($Key) -and (ConvertTo-Json -InputObject $Installer.$Key -Depth 10 -Compress) -cne $ManifestEntryHash) {
-          $ToRemove = $false
-        }
-      }
-    } else {
-      foreach ($Installer in $Installers) {
-        if (-not $Installer.Contains($Key)) {
-          $Installer.$Key = $Manifest.$Key
-        } elseif ($Installer.Contains($Key) -and -not $Installer.$Key) {
-          $Installer.$Key = $Manifest.$Key
-        } elseif ($Installer.Contains($Key) -and $Installer.$Key -cne $Manifest.$Key) {
-          $ToRemove = $false
-        }
-      }
-    }
-    if ($ToRemove) {
-      $Manifest.Remove($Key)
-    }
-  }
-}
-
-function Move-KeysToManifestLevel {
-  param (
-    [Parameter(Position = 0, Mandatory)]
-    [System.Collections.IDictionary[]]$Installers,
-    [Parameter(Position = 1, Mandatory)]
-    [System.Collections.IDictionary]$Manifest,
-    [Parameter(Position = 2)]
-    [string[]]$Property,
-    [Parameter()]
-    [int]$Depth = 2,
-    [Parameter(DontShow)]
-    [int]$CurrentDepth = 0
-  )
-
-  if ($CurrentDepth -ge $Depth) { return }
-  $AllKeys = @($Installers | ForEach-Object -Process { $_.Keys } | Select-Object -Unique)
-  foreach ($Key in $AllKeys) {
-    if ($Property -and $Key -cnotin $Property) { continue }
-    if ($Installers.Where({ $_.Contains($Key) -and $_.$Key -is [System.Collections.IDictionary] })) {
-      $InstallersEntry = @($Installers | ForEach-Object -Process { $_.Contains($Key) -and $_.$Key ? $_.$Key : [ordered]@{} })
-      $ManifestEntry = $Manifest.Contains($Key) -and $Manifest.$Key ? $Manifest.$Key : [ordered]@{}
-
-      # Move the same elements across all the objects to the manifest level
-      Move-KeysToManifestLevel -Installers $InstallersEntry -Manifest $ManifestEntry -Depth $Depth -CurrentDepth ($CurrentDepth + 1)
-
-      # If the manifest entry is not empty, add it to the manifest
-      if ($ManifestEntry.Count -gt 0) {
-        $Manifest.$Key = $ManifestEntry
-      }
-      # If the installer entry is empty, remove it from the installers
-      foreach ($Installer in $Installers) {
-        if ($Installer.Contains($Key) -and $Installer.$Key.Count -eq 0) {
-          $Installer.Remove($Key)
-        }
-      }
-    } elseif ($Installers.Where({ $_.Contains($Key) -and $_.$Key -is [System.Collections.IEnumerable] -and $_.$Key -isnot [string] })) {
-      if ($Manifest.Contains($Key)) {
-        $ManifestEntryHash = ConvertTo-Json -InputObject $Manifest.$Key -Depth 10 -Compress
-        foreach ($Installer in $Installers) {
-          $InstallersEntryHash = ConvertTo-Json -InputObject $Installer.$Key -Depth 10 -Compress
-          if ($ManifestEntryHash -ceq $InstallersEntryHash) {
-            $Installer.Remove($Key)
-          }
-        }
-      } elseif (-not $Manifest.Contains($Key) -and -not ($Installers.Where({ -not $_.Contains($Key) })) -and @($Installers | Sort-Object -Property { ConvertTo-Json -InputObject $_.$Key -Depth 10 -Compress } -Unique).Count -eq 1) {
-        $Manifest.$Key = $Installers[0].$Key
-        foreach ($Installer in $Installers) {
-          $Installer.Remove($Key)
-        }
-      }
-    } else {
-      if ($Manifest.Contains($Key)) {
-        foreach ($Installer in $Installers) {
-          if ($Installer.$Key -ceq $Manifest.$Key) {
-            $Installer.Remove($Key)
-          }
-        }
-      } elseif (-not $Manifest.Contains($Key) -and -not ($Installers.Where({ -not $_.Contains($Key) })) -and @($Installers | Sort-Object -Property { $_.$Key } -Unique).Count -eq 1) {
-        $Manifest.$Key = $Installers[0].$Key
-        foreach ($Installer in $Installers) {
-          $Installer.Remove($Key)
-        }
-      }
-    }
-  }
 }
 
 function Get-WinGetInstallerMetadataProperty {
@@ -784,7 +658,9 @@ function Update-WinGetInstallerManifestInstallers {
         throw "The installer entry has an invalid key: ${Key}"
       } else {
         try {
-          $null = Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType 'installer').properties.Installers.items.properties.$Key -WarningAction Stop
+          if (-not (Test-YamlObject -InputObject $MatchingInstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType 'installer').properties.Installers.items.properties.$Key)) {
+            throw "The installer property '${Key}' does not satisfy the manifest schema"
+          }
           $Installer.$Key = $MatchingInstallerEntry.$Key
         } catch {
           $Logger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
@@ -890,7 +766,9 @@ function Set-WinGetInstallerManifestInstallers {
         throw "The installer entry has an invalid key: ${Key}"
       } else {
         try {
-          $null = Test-YamlObject -InputObject $InstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType 'installer').properties.Installers.items.properties.$Key -WarningAction Stop
+          if (-not (Test-YamlObject -InputObject $InstallerEntry.$Key -Schema (Get-WinGetManifestSchema -ManifestType 'installer').properties.Installers.items.properties.$Key)) {
+            throw "The installer property '${Key}' does not satisfy the manifest schema"
+          }
           $Installer.$Key = $InstallerEntry.$Key
         } catch {
           $Logger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
@@ -911,80 +789,6 @@ function Set-WinGetInstallerManifestInstallers {
   $Script:WinGetTempInstallerFiles.Clear()
 
   return $Installers
-}
-
-function Update-WinGetVersionManifest {
-  <#
-  .SYNOPSIS
-    Update the version manifest
-  .DESCRIPTION
-    Update the version manifest using the provided package version
-  .PARAMETER OldVersionManifest
-    The old version manifest to update
-  .PARAMETER PackageVersion
-    The package version to use for updating the version manifest
-  #>
-  param (
-    [Parameter(Position = 0, Mandatory, HelpMessage = 'The old version manifest to update')]
-    [System.Collections.IDictionary]$OldVersionManifest,
-    [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the version manifest')]
-    [string]$PackageVersion
-  )
-
-  # Deep copy the old version manifest
-  $VersionManifest = $OldVersionManifest | Copy-Object
-
-  return ConvertTo-SortedYamlObject -InputObject $VersionManifest -Schema (Get-WinGetManifestSchema -ManifestType 'version') -Culture $Script:Culture
-}
-
-function Update-WinGetInstallerManifest {
-  <#
-  .SYNOPSIS
-    Update the installer manifest
-  .DESCRIPTION
-    Update the installer manifest using the provided installer entries
-  .PARAMETER OldInstallerManifest
-    The old installer manifest to update
-  .PARAMETER InstallerEntries
-    The installer entries to use for updating the installer manifest
-  .PARAMETER PackageVersion
-    The package version to use for updating the installer manifest
-  .PARAMETER Replace
-    Replace the installers rather than updating them
-  #>
-  param (
-    [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installer manifest to update')]
-    [System.Collections.IDictionary]$OldInstallerManifest,
-    [Parameter(Mandatory, HelpMessage = 'The installer entries to use for updating the installer manifest')]
-    [System.Collections.IDictionary[]]$InstallerEntries,
-    [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the installer manifest')]
-    [string]$PackageVersion,
-    [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
-    [System.Collections.IDictionary]$InstallerFiles,
-    [Parameter(HelpMessage = 'Replace the installers rather than updating them')]
-    [switch]$Replace = $false,
-    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
-    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
-    $Logger = { param($Message, $Level) Write-Host $Message }
-  )
-
-  # Deep copy the old installer manifest
-  $InstallerManifest = $OldInstallerManifest | Copy-Object
-
-  # Move Manifest Level Keys to installer Level
-  $InstallerSchema = Get-WinGetManifestSchema -ManifestType 'installer'
-  Move-KeysToInstallerLevel -Manifest $InstallerManifest -Installers $InstallerManifest.Installers -Property $InstallerSchema.definitions.Installer.properties.Keys.Where({ $_ -cin $InstallerSchema.properties.Keys })
-  # Update installer entries
-  if (-not $Replace) {
-    $InstallerManifest.Installers = Update-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger
-  } else {
-    $InstallerManifest.Installers = Set-WinGetInstallerManifestInstallers -OldInstallers $InstallerManifest.Installers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger
-  }
-  # Move Installer Level Keys to Manifest Level
-  $InstallerSchema = Get-WinGetManifestSchema -ManifestType 'installer'
-  Move-KeysToManifestLevel -Installers $InstallerManifest.Installers -Manifest $InstallerManifest -Property $InstallerSchema.definitions.Installer.properties.Keys.Where({ $_ -cin $InstallerSchema.properties.Keys })
-
-  return ConvertTo-SortedYamlObject -InputObject $InstallerManifest -Schema $InstallerSchema -Culture $Script:Culture
 }
 
 function Update-WinGetLocaleManifest {
@@ -1077,246 +881,98 @@ function Update-WinGetLocaleManifest {
   return $LocaleManifests
 }
 
-function Update-WinGetManifestPackageVersion {
+function Update-WinGetManifest {
   <#
   .SYNOPSIS
-    Update the package version in the manifests
+    Update a logical WinGet manifest from Dumplings installer and locale state.
   .DESCRIPTION
-    Update the package version in the installer, locale and version manifests
+    Mutates a detached copy of the logical model. Installer parsing operates on
+    effective authored entries; serialization later recomputes legal root-level
+    defaults and installer overrides without persisting WinGet runtime defaults.
   .PARAMETER Manifest
-    The manifests to update
-  .PARAMETER PackageVersion
-    The package version to use for updating the manifests
-  #>
-  [OutputType([System.Collections.Specialized.OrderedDictionary])]
-  param (
-    [Parameter(ValueFromPipeline, Position = 0, Mandatory, HelpMessage = 'The manifests to update')]
-    [System.Collections.IDictionary]$Manifest,
-    [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the manifests')]
-    [string]$PackageVersion
-  )
-
-  process {
-    $Manifest.PackageVersion = $PackageVersion
-    return $Manifest
-  }
-}
-
-function Update-WinGetManifestVersion {
-  <#
-  .SYNOPSIS
-    Update the manifest version in the manifests
-  .DESCRIPTION
-    Update the manifest version in the installer, locale and version manifests
-  .PARAMETER Manifest
-    The manifests to update
-  .PARAMETER ManifestVersion
-    The manifest version to use for updating the manifests
-  #>
-  param (
-    [Parameter(ValueFromPipeline, Position = 0, Mandatory, HelpMessage = 'The manifests to update')]
-    [System.Collections.IDictionary]$Manifest,
-    [Parameter(HelpMessage = 'The manifest version to use for updating the manifests')]
-    [string]$ManifestVersion = $ManifestVersion
-  )
-
-  process {
-    $Manifest.ManifestVersion = $ManifestVersion
-    return $Manifest
-  }
-}
-
-function Update-WinGetManifestPackageIdentifier {
-  <#
-  .SYNOPSIS
-    Update the package identifier in the manifests
-  .DESCRIPTION
-    Update the package identifier in the installer, locale and version manifests
-  .PARAMETER Manifest
-    The manifests to update
-  .PARAMETER PackageIdentifier
-    The package identifier to use for updating the manifests
-  #>
-  param (
-    [Parameter(ValueFromPipeline, Position = 0, Mandatory, HelpMessage = 'The manifests to update')]
-    [System.Collections.IDictionary]$Manifest,
-    [Parameter(Mandatory, HelpMessage = 'The package identifier to use for updating the manifests')]
-    [string]$PackageIdentifier
-  )
-
-  process {
-    $Manifest.PackageIdentifier = $PackageIdentifier
-    return $Manifest
-  }
-}
-
-function Update-WinGetManifests {
-  <#
-  .SYNOPSIS
-    Update WinGet package manifests
-  .DESCRIPTION
-    Update WinGet package manifests using the provided installer and locale entries
+    Logical manifest model returned by Read-WinGetManifest or
+    ConvertFrom-WinGetManifestYaml.
   .PARAMETER NewPackageIdentifier
-    The new package identifier of the manifests
+    Optional replacement package identifier.
   .PARAMETER PackageVersion
-    The package version of the manifest
-  .PARAMETER VersionManifest
-    The version manifest to update
-  .PARAMETER InstallerManifest
-    The installer manifest to update
-  .PARAMETER LocaleManifests
-    The locale manifests to update
+    Package version for the updated manifest.
   .PARAMETER InstallerEntries
-    The installer entries to be applied to the installer manifest
+    Dumplings current-state installer entries.
   .PARAMETER LocaleEntries
-    The locale entries to be applied to the locale manifest
+    Dumplings locale update entries.
+  .PARAMETER InstallerFiles
+    Already downloaded installer files keyed by installer URL.
   .PARAMETER ReplaceInstallers
-    Replace the installers rather than updating them
+    Replace instead of matching and updating existing installer entries.
+  .PARAMETER Logger
+    Dumplings logging callback.
   #>
-  [OutputType([System.Collections.Specialized.OrderedDictionary])]
+  [OutputType([pscustomobject])]
   param (
-    [Parameter(HelpMessage = 'The new package identifier of the manifests')]
+    [Parameter(Position = 0, Mandatory)]$Manifest,
     [string]$NewPackageIdentifier,
-    [Parameter(Mandatory, HelpMessage = 'The package version of the manifest')]
-    [string]$PackageVersion,
-    [Parameter(Mandatory, HelpMessage = 'The version manifest to update')]
-    [System.Collections.IDictionary]$VersionManifest,
-    [Parameter(Mandatory, HelpMessage = 'The installer manifest to update')]
-    [System.Collections.IDictionary]$InstallerManifest,
-    [Parameter(Mandatory, HelpMessage = 'The locale manifests to update')]
-    [System.Collections.IDictionary[]]$LocaleManifests,
-    [Parameter(Mandatory, HelpMessage = 'The installer entries to be applied to the installer manifest')]
-    [System.Collections.IDictionary[]]$InstallerEntries,
-    [Parameter(HelpMessage = 'The locale entries to be applied to the locale manifest')]
+    [Parameter(Mandatory)][string]$PackageVersion,
+    [Parameter(Mandatory)][System.Collections.IDictionary[]]$InstallerEntries,
     [System.Collections.IDictionary[]]$LocaleEntries = @(),
-    [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
-    [System.Collections.IDictionary]$InstallerFiles = @(),
-    [Parameter(HelpMessage = 'Replace the installers rather than updating them')]
-    [switch]$ReplaceInstallers = $false,
-    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
-    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    [System.Collections.IDictionary]$InstallerFiles = @{},
+    [switch]$ReplaceInstallers,
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType Method })]
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
-  return [ordered]@{
-    Installer = Update-WinGetInstallerManifest -OldInstallerManifest $InstallerManifest -InstallerEntries $InstallerEntries -PackageVersion $PackageVersion -InstallerFiles $InstallerFiles -Replace:$ReplaceInstallers -Logger $Logger | Update-WinGetManifestPackageVersion -PackageVersion $PackageVersion | Update-WinGetManifestVersion | Update-WinGetManifestPackageIdentifier -PackageIdentifier $NewPackageIdentifier
-    Locale    = Update-WinGetLocaleManifest -OldLocaleManifests $LocaleManifests -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -Logger $Logger | Update-WinGetManifestPackageVersion -PackageVersion $PackageVersion | Update-WinGetManifestVersion | Update-WinGetManifestPackageIdentifier -PackageIdentifier $NewPackageIdentifier
-    Version   = Update-WinGetVersionManifest -OldVersionManifest $VersionManifest -PackageVersion $PackageVersion | Update-WinGetManifestPackageVersion -PackageVersion $PackageVersion | Update-WinGetManifestVersion | Update-WinGetManifestPackageIdentifier -PackageIdentifier $NewPackageIdentifier
+  $PackageIdentifier = [string]::IsNullOrWhiteSpace($NewPackageIdentifier) ? [string]$Manifest.PackageIdentifier : $NewPackageIdentifier
+  $OldInstallers = [System.Collections.IDictionary[]]@($Manifest.Installers | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
+  if ($ReplaceInstallers) {
+    $UpdatedInstallers = @(Set-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger)
+  } else {
+    $UpdatedInstallers = @(Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger)
   }
-}
 
-function Convert-WinGetManifestsFromYaml {
-  <#
-  .SYNOPSIS
-    Read the manifests for a package
-  .DESCRIPTION
-    Read the installer, locale and version manifests for a package using the provided package identifier and manifests path
-  .PARAMETER Manifests
-    The manifest(s) to read
-  #>
-  [OutputType([System.Collections.Specialized.OrderedDictionary])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The manifest(s) to read')]
-    $Manifests
-  )
+  # Locale update behavior is retained, but identity/document fields are added
+  # only for that operation and removed again before storing logical locale data.
+  $LocaleDocuments = [System.Collections.Generic.List[object]]::new()
+  $DefaultLocaleDocument = [ordered]@{
+    PackageIdentifier = $PackageIdentifier
+    PackageVersion    = $PackageVersion
+  }
+  foreach ($Key in $Manifest.DefaultLocalization.Keys) {
+    $DefaultLocaleDocument[$Key] = Copy-WinGetManifestValue -Value $Manifest.DefaultLocalization[$Key]
+  }
+  $DefaultLocaleDocument['ManifestType'] = 'defaultLocale'
+  $DefaultLocaleDocument['ManifestVersion'] = $Script:WinGetAuthoringManifestVersion
+  $LocaleDocuments.Add($DefaultLocaleDocument)
+  foreach ($Localization in @($Manifest.Localizations)) {
+    $LocaleDocument = [ordered]@{
+      PackageIdentifier = $PackageIdentifier
+      PackageVersion    = $PackageVersion
+    }
+    foreach ($Key in $Localization.Keys) { $LocaleDocument[$Key] = Copy-WinGetManifestValue -Value $Localization[$Key] }
+    $LocaleDocument['ManifestType'] = 'locale'
+    $LocaleDocument['ManifestVersion'] = $Script:WinGetAuthoringManifestVersion
+    $LocaleDocuments.Add($LocaleDocument)
+  }
+  $UpdatedLocaleDocuments = @(Update-WinGetLocaleManifest -OldLocaleManifests ([System.Collections.IDictionary[]]$LocaleDocuments.ToArray()) -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -Logger $Logger)
 
-  process {
-    # Read the main manifest to check the manifest type
-    $MainManifest = $Manifests.Version | ConvertFrom-Yaml -Ordered
-    if ($MainManifest.ManifestType -ceq 'version') {
-      $ManifestType = 'MultiManifest'
-      $PackageLocale = $MainManifest.DefaultLocale
-    } elseif ($MainManifest.ManifestType -ceq 'singleton') {
-      $ManifestType = 'SingletonManifest'
-      $PackageLocale = $MainManifest.PackageLocale
+  $DefaultLocalization = [ordered]@{}
+  $Localizations = [System.Collections.Generic.List[object]]::new()
+  foreach ($LocaleDocument in $UpdatedLocaleDocuments) {
+    $Localization = [ordered]@{}
+    foreach ($Key in $LocaleDocument.Keys) {
+      if ($Key -cnotin @('PackageIdentifier', 'PackageVersion', 'ManifestType', 'ManifestVersion')) {
+        $Localization[$Key] = Copy-WinGetManifestValue -Value $LocaleDocument[$Key]
+      }
+    }
+    if ([string]$LocaleDocument['ManifestType'] -ceq 'defaultLocale') {
+      $DefaultLocalization = $Localization
     } else {
-      throw "Unrecognized manifest type $($MainManifest.ManifestType)"
-    }
-
-    if ($ManifestType -ceq 'MultiManifest') {
-      # If the manifest type is MultiManifest, read the remaining installer and locale manifests
-      $VersionManifest = $MainManifest
-      if ([string]::IsNullOrWhiteSpace($Manifests.Installer)) { throw 'The installer manifest is missing or empty' }
-      $InstallerManifest = $Manifests.Installer | ConvertFrom-Yaml -Ordered
-      if (-not $Manifests.Locale) { throw 'The locale manifest is missing' }
-      $LocaleManifests = $Manifests.Locale.GetEnumerator().ForEach({ if ([string]::IsNullOrWhiteSpace($_.Value)) { throw 'One of the locale manifests is empty' }; ConvertFrom-Yaml -Yaml $_.Value -Ordered })
-    } elseif ($ManifestType -ceq 'Singleton') {
-      $SingletonManifest = $MainManifest
-      # Parse version keys to version manifest
-      $VersionManifest = [ordered]@{}
-      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType 'version').properties.Keys })) {
-        $VersionManifest[$Key] = $SingletonManifest.$Key
-      }
-      $VersionManifest['DefaultLocale'] = $PackageLocale
-      $VersionManifest['ManifestType'] = 'version'
-      # Parse installer keys to installer manifest
-      $InstallerManifest = [ordered]@{}
-      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType 'installer').properties.Keys })) {
-        $InstallerManifest[$Key] = $SingletonManifest.$Key
-      }
-      $InstallerManifest['ManifestType'] = 'installer'
-      # Parse default locale keys to default locale manifest
-      $DefaultLocaleManifest = [ordered]@{}
-      foreach ($Key in $SingletonManifest.Keys.Where({ $_ -cin (Get-WinGetManifestSchema -ManifestType 'defaultLocale').properties.Keys })) {
-        $DefaultLocaleManifest[$Key] = $SingletonManifest.$Key
-      }
-      $DefaultLocaleManifest['ManifestType'] = 'defaultLocale'
-      # Create locale manifests
-      $LocaleManifests = @($DefaultLocaleManifest)
-    } else {
-      throw "Version ${LastVersion} does not contain the required manifests"
-    }
-
-    return [ordered]@{
-      Installer = $InstallerManifest
-      Locale    = $LocaleManifests
-      Version   = $VersionManifest
+      $Localizations.Add($Localization)
     }
   }
+
+  $UpdatedModel = New-WinGetManifestModel -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -Channel ([string]$Manifest.Channel) -Moniker ([string]$Manifest.Moniker) -ManifestVersion $Script:WinGetAuthoringManifestVersion -InstallerDefaults ([ordered]@{}) -Installers ([System.Collections.IDictionary[]]$UpdatedInstallers) -DefaultLocalization $DefaultLocalization -Localizations ([System.Collections.IDictionary[]]$Localizations.ToArray()) -SourceFormat Memory
+  $Compacted = Get-WinGetManifestCompactedInstallerData -Manifest $UpdatedModel
+  $UpdatedModel.InstallerDefaults = $Compacted.Defaults
+  return $UpdatedModel
 }
 
-function Convert-WinGetManifestContentToYaml {
-  param (
-    [Parameter(Position = 1, Mandatory)]
-    [System.Collections.IDictionary]$Manifest,
-    [Parameter(Position = 2, Mandatory)]
-    [string]$SchemaUri
-  )
-
-  @"
-${Script:ManifestHeader}
-# yaml-language-server: `$schema=${SchemaUri}
-
-$((ConvertTo-Yaml -Data $Manifest -Options DisableAliases).TrimEnd())
-
-"@
-}
-
-function Convert-WinGetManifestsToYaml {
-  <#
-  .SYNOPSIS
-    Write the new manifests for a WinGet package
-  .DESCRIPTION
-    Write the new manifests for a WinGet package using the provided version, installer and locale manifests
-  .PARAMETER Manifests
-    The manifest(s) to write
-  #>
-  [OutputType([System.Collections.Specialized.OrderedDictionary])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The manifest(s) to write')]
-    [System.Object[]]$Manifests
-  )
-
-  process {
-    $LocaleManifestContent = [System.Collections.Specialized.OrderedDictionary]::new()
-    $Manifests.Locale | ForEach-Object -Process { $LocaleManifestContent[$_.PackageLocale] = Convert-WinGetManifestContentToYaml -Manifest $_ -SchemaUri (Get-WinGetManifestSchemaUrl -ManifestType ($_.ManifestType -ceq 'defaultLocale' ? 'defaultLocale' : 'locale')) }
-
-    [ordered]@{
-      Installer = Convert-WinGetManifestContentToYaml -Manifest $Manifests.Installer -SchemaUri (Get-WinGetManifestSchemaUrl -ManifestType 'installer')
-      Locale    = $LocaleManifestContent
-      Version   = Convert-WinGetManifestContentToYaml -Manifest $Manifests.Version -Schema (Get-WinGetManifestSchemaUrl -ManifestType 'version')
-    }
-  }
-}
-
-Export-ModuleMember -Function '*' -Variable 'WinGetUserAgent', 'WinGetBackupUserAgent', 'WinGetInstallerFiles'
+Export-ModuleMember -Function Update-WinGetManifest -Variable 'WinGetUserAgent', 'WinGetBackupUserAgent', 'WinGetInstallerFiles'

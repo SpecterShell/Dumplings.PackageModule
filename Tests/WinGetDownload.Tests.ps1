@@ -3,6 +3,26 @@ BeforeAll {
 }
 
 Describe 'WinGet native download compatibility probe' {
+  It 'serializes WinGet CLI probes through the shared named mutex' {
+    InModuleScope WinGetDownload {
+      function Use-Mutex {
+        param ($Name, $TimeoutMilliseconds, $ScriptBlock)
+        $Script:ObservedMutexName = $Name
+        $Script:ObservedMutexTimeout = $TimeoutMilliseconds
+        $null = $ScriptBlock
+        'synthetic output'
+      }
+
+      try {
+        Invoke-WinGetDownloadWingetMutex -ScriptBlock { 'must be delegated' } | Should -BeExactly 'synthetic output'
+        $Script:ObservedMutexName | Should -BeExactly 'Local\Dumplings-WinGetCli'
+        $Script:ObservedMutexTimeout | Should -Be 120000
+      } finally {
+        Remove-Item -Path 'Function:\Use-Mutex' -Force -ErrorAction Ignore
+      }
+    }
+  }
+
   It 'Exposes Invoke-WebRequest-compatible timeout and retry parameters' {
     foreach ($Name in @('Invoke-WinGetWinINetDownload', 'Invoke-WinGetDeliveryOptimizationDownload', 'Test-WinGetInstallerDownload')) {
       $Command = Get-Command $Name
@@ -149,6 +169,58 @@ Describe 'WinGet native download compatibility probe' {
   It 'Builds the installed WinGet WinINet user agent' {
     $UserAgent = Get-WinGetDownloadUserAgent
     $UserAgent | Should -Match '^winget-cli WindowsPackageManager/\d+(?:\.\d+)+ DesktopAppInstaller/Microsoft\.DesktopAppInstaller v\d+(?:\.\d+){3}$'
+  }
+
+  It 'Caches WinGet version discovery in runner-shared storage' {
+    InModuleScope WinGetDownload {
+      $PreviousStorage = $Global:DumplingsStorage
+      $Global:DumplingsStorage = [hashtable]::Synchronized(@{})
+      try {
+        Mock Resolve-WinGetDownloadVersionInfo {
+          [pscustomobject]@{ ClientVersion = '9.8.7'; PackageVersion = '9.8.7.6' }
+        }
+
+        Get-WinGetDownloadUserAgent | Should -BeExactly 'winget-cli WindowsPackageManager/9.8.7 DesktopAppInstaller/Microsoft.DesktopAppInstaller v9.8.7.6'
+        Get-WinGetDownloadUserAgent | Should -BeExactly 'winget-cli WindowsPackageManager/9.8.7 DesktopAppInstaller/Microsoft.DesktopAppInstaller v9.8.7.6'
+        Should -Invoke Resolve-WinGetDownloadVersionInfo -Exactly 1
+      } finally {
+        $Global:DumplingsStorage = $PreviousStorage
+      }
+    }
+  }
+
+  It 'Resolves WinGet versions on each request when running independently' {
+    InModuleScope WinGetDownload {
+      $PreviousStorage = $Global:DumplingsStorage
+      $Global:DumplingsStorage = $null
+      try {
+        Mock Resolve-WinGetDownloadVersionInfo {
+          [pscustomobject]@{ ClientVersion = '9.8.7'; PackageVersion = '9.8.7.6' }
+        }
+
+        $null = Get-WinGetDownloadUserAgent
+        $null = Get-WinGetDownloadUserAgent
+        Should -Invoke Resolve-WinGetDownloadVersionInfo -Exactly 2
+      } finally {
+        $Global:DumplingsStorage = $PreviousStorage
+      }
+    }
+  }
+
+  It 'Uses a stable fallback when winget is unavailable' {
+    InModuleScope WinGetDownload {
+      $PreviousStorage = $Global:DumplingsStorage
+      $Global:DumplingsStorage = $null
+      try {
+        Mock Invoke-WinGetDownloadWingetCommand { throw 'winget is unavailable' }
+
+        Get-WinGetDownloadUserAgent | Should -BeExactly 'winget-cli WindowsPackageManager/1.0.0 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.0.0.0'
+        Should -Invoke Invoke-WinGetDownloadWingetCommand -Exactly 1 -ParameterFilter { $Query -ceq 'Version' }
+        Should -Invoke Invoke-WinGetDownloadWingetCommand -Exactly 0 -ParameterFilter { $Query -ceq 'Info' }
+      } finally {
+        $Global:DumplingsStorage = $PreviousStorage
+      }
+    }
   }
 
   It 'Propagates WinINet timeout values to the native operation' {

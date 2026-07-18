@@ -35,50 +35,6 @@ function Get-WinGetLocalRepoPath {
   }
 }
 
-function Test-WinGetManifest {
-  <#
-  .SYNOPSIS
-    Test the WinGet manifest
-  .DESCRIPTION
-    Test the WinGet manifest by validating it using the WinGet client.
-  .PARAMETER Path
-    The path to the new manifests to be validated.
-  #>
-  param (
-    [Parameter(Mandatory, Position = 0, HelpMessage = 'The path to the new manifests to be validated')]
-    [ValidateNotNullOrEmpty()]
-    [string]$Path
-  )
-
-  $WinGetOutput = ''
-  $WinGetMaximumRetryCount = 3
-  for ($i = 0; $i -lt $WinGetMaximumRetryCount; $i++) {
-    try {
-      winget.exe validate $Path | Out-String -Stream -OutVariable 'WinGetOutput'
-      break
-    } catch {
-      if ($_.FullyQualifiedErrorId -eq 'CommandNotFoundException') {
-        throw 'Failed to validate manifests: Could not locate WinGet client for validating manifests. Is it installed and added to PATH?'
-      } elseif ($_.FullyQualifiedErrorId -eq 'ProgramExitedWithNonZeroCode') {
-        # WinGet may throw warnings for, for example, not specifying the installer switches for EXE installers. Such warnings are ignored
-        if ($_.Exception.ExitCode -eq -1978335192) {
-          break
-        } else {
-          # WinGet may crash when multiple instances are initiated simultaneously. Retry the validation for a few times
-          if ($i -eq $WinGetMaximumRetryCount - 1) {
-            throw "Failed to pass manifests validation: $($WinGetOutput -join "`n")"
-          } else {
-            $Task.Log("WinGet exits with exitcode $($_.Exception.ExitCode)", 'Warning')
-          }
-        }
-      } else {
-        $Task.Log("Failed to validate manifests: ${_}", 'Error')
-        throw $_
-      }
-    }
-  }
-}
-
 $GitHubTokenUsername = $null
 
 function Send-WinGetManifest {
@@ -113,11 +69,11 @@ function Send-WinGetManifest {
     $LocalRepoPath = Get-WinGetLocalRepoPath -RepoName $OriginRepoName -RootPath $RootPath -ErrorAction 'SilentlyContinue'
 
     [string]$RefPackageIdentifier = $Task.Config['WinGetPackageIdentifier'] ?? $Task.Config.WinGetIdentifier
-    try { $null = Test-YamlObject -InputObject $RefPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier -WarningAction Stop } catch { throw "The PackageIdentifier `"${RefPackageIdentifier}`" is invalid: ${_}" }
+    if (-not (Test-YamlObject -InputObject $RefPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier)) { throw "The PackageIdentifier `"${RefPackageIdentifier}`" is invalid" }
     [string]$NewPackageIdentifier = $Task.Config['WinGetNewPackageIdentifier'] ?? $Task.Config['WinGetNewIdentifier'] ?? $RefPackageIdentifier
-    try { $null = Test-YamlObject -InputObject $NewPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier -WarningAction Stop } catch { throw "The PackageIdentifier `"${NewPackageIdentifier}`" is invalid: ${_}" }
+    if (-not (Test-YamlObject -InputObject $NewPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier)) { throw "The PackageIdentifier `"${NewPackageIdentifier}`" is invalid" }
     [string]$NewPackageVersion = $Task.CurrentState.Contains('RealVersion') ? $Task.CurrentState.RealVersion : $Task.CurrentState.Version
-    try { $null = Test-YamlObject -InputObject $NewPackageVersion -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageVersion -WarningAction Stop } catch { throw "The PackageVersion `"${NewPackageVersion}`" is invalid: ${_}" }
+    if (-not (Test-YamlObject -InputObject $NewPackageVersion -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageVersion)) { throw "The PackageVersion `"${NewPackageVersion}`" is invalid" }
     $RefPackageVersion = ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath)) | Select-Object -Last 1
     if (-not $RefPackageVersion) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
 
@@ -184,13 +140,13 @@ function Send-WinGetManifest {
     # Read the manifests
     if ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath)) {
       $Task.Log("Reading existing manifests from local repo at $LocalRepoPath", 'Verbose')
-      $RefManifestsObject = Read-WinGetLocalManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RootPath $LocalRepoPath | Convert-WinGetManifestsFromYaml
+      $RefManifest = Read-WinGetLocalManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RootPath $LocalRepoPath | ConvertFrom-WinGetManifestYaml
     } else {
-      $RefManifestsObject = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | Convert-WinGetManifestsFromYaml
+      $RefManifest = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | ConvertFrom-WinGetManifestYaml
     }
     # Update the manifests
-    $NewManifestsObject = Update-WinGetManifests -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -VersionManifest $RefManifestsObject.Version -InstallerManifest $RefManifestsObject.Installer -LocaleManifests $RefManifestsObject.Locale -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -Logger $Task.Log
-    $NewManifests = $NewManifestsObject | Convert-WinGetManifestsToYaml
+    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -Logger $Task.Log
+    $NewManifests = $NewManifest | ConvertTo-WinGetManifestYaml
     #endregion
 
     # Validate manifests using WinGet client
@@ -220,7 +176,7 @@ function Send-WinGetManifest {
     if ($Task.Config.Contains('RemoveLastVersion')) {
       if ($Task.Config.RemoveLastVersion) { $RemoveLastVersionReason = 'This task is configured to remove the last version' }
       # If RemoveLastVersion is set to 'false', do not remove the last version
-    } elseif (($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($RefPackageVersion -cne $NewPackageVersion) -and (Compare-Object -ReferenceObject $RefManifestsObject -DifferenceObject $NewManifestsObject -Property { $_.Installer.Installers.InstallerUrl } -ExcludeDifferent -IncludeEqual)) {
+    } elseif (($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($RefPackageVersion -cne $NewPackageVersion) -and (Compare-Object -ReferenceObject @($RefManifest.Installers) -DifferenceObject @($NewManifest.Installers) -Property InstallerUrl -ExcludeDifferent -IncludeEqual)) {
       $RemoveLastVersionReason = 'At least one of the installer URLs is unchanged compared with the old manifests while the version is updated'
     }
     if ($RemoveLastVersionReason) {

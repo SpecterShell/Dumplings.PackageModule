@@ -793,6 +793,26 @@ function Get-WinGetManifestBundleForMatching {
     $Manifest
   )
 
+  # The logical model already contains effective authored installers. Adapt it
+  # to the small internal view used by the matching helpers without rebuilding
+  # a physical installer/default-locale manifest set.
+  if ($Manifest.PSTypeNames -contains 'Dumplings.WinGet.ManifestModel') {
+    $DefaultLocale = Copy-WinGetManifestValue -Value $Manifest.DefaultLocalization
+    $DefaultLocale['ManifestType'] = 'defaultLocale'
+    $Locales = [System.Collections.Generic.List[object]]::new()
+    $Locales.Add($DefaultLocale)
+    foreach ($Localization in @($Manifest.Localizations)) {
+      $Locale = Copy-WinGetManifestValue -Value $Localization
+      $Locale['ManifestType'] = 'locale'
+      $Locales.Add($Locale)
+    }
+    return [pscustomobject]@{
+      Installer = [ordered]@{ Installers = @($Manifest.Installers) }
+      Locale    = $Locales.ToArray()
+      Version   = [ordered]@{ DefaultLocale = [string]$Manifest.DefaultLocalization['PackageLocale'] }
+    }
+  }
+
   $InstallerManifest = Get-WinGetDictionaryValue -InputObject $Manifest -Key 'Installer'
   $LocaleManifests = Get-WinGetDictionaryValue -InputObject $Manifest -Key 'Locale'
   $VersionManifest = Get-WinGetDictionaryValue -InputObject $Manifest -Key 'Version'
@@ -907,7 +927,8 @@ function Get-WinGetManifestMatchKey {
     Build WinGet-style exact-match keys from manifests
   .DESCRIPTION
     Build the ProductCode, UpgradeCode, PackageFamilyName, and NormalizedNameAndPublisher candidates used to match installed entries.
-    The input can be the ordered object returned by Convert-WinGetManifestsFromYaml or a singleton-like manifest object.
+    The input is the logical model returned by Read-WinGetManifest or
+    ConvertFrom-WinGetManifestYaml.
   .PARAMETER Manifest
     The manifest object to inspect
   #>

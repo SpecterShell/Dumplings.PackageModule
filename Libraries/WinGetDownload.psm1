@@ -9,6 +9,160 @@ if (-not ([System.Management.Automation.PSTypeName]'Dumplings.WinGetDownload.Win
   Add-Type -Path (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'WinGetDownloadProbe.cs')
 }
 
+$Script:WinGetDownloadFallbackClientVersion = '1.0.0'
+$Script:WinGetDownloadWingetMutexName = 'Local\Dumplings-WinGetCli'
+$Script:WinGetDownloadWingetMutexTimeoutMilliseconds = 120000
+
+function Invoke-WinGetDownloadWingetMutex {
+  <#
+  .SYNOPSIS
+    Execute a native WinGet operation under the process-wide CLI mutex.
+  .DESCRIPTION
+    Dumplings runner invocations use Core's scoped helper. PackageModule can
+    also be consumed independently, so a private equivalent is retained here
+    rather than importing files outside the submodule.
+  .PARAMETER ScriptBlock
+    The native WinGet operation to serialize.
+  #>
+  param ([Parameter(Mandatory)][ValidateNotNull()][scriptblock]$ScriptBlock)
+
+  $UseMutexCommand = Get-Command -Name Use-Mutex -CommandType Function -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($UseMutexCommand) {
+    return & $UseMutexCommand -Name $Script:WinGetDownloadWingetMutexName -TimeoutMilliseconds $Script:WinGetDownloadWingetMutexTimeoutMilliseconds -ScriptBlock $ScriptBlock
+  }
+
+  $Mutex = [System.Threading.Mutex]::new($false, $Script:WinGetDownloadWingetMutexName)
+  $Acquired = $false
+  try {
+    try {
+      $Acquired = $Mutex.WaitOne($Script:WinGetDownloadWingetMutexTimeoutMilliseconds)
+    } catch [System.Threading.AbandonedMutexException] {
+      $Acquired = $true
+    }
+    if (-not $Acquired) {
+      throw [System.TimeoutException]::new("Timed out waiting for the WinGet CLI mutex after $($Script:WinGetDownloadWingetMutexTimeoutMilliseconds) ms.")
+    }
+    & $ScriptBlock
+  } finally {
+    if ($Acquired) { $Mutex.ReleaseMutex() }
+    $Mutex.Dispose()
+  }
+}
+
+function Invoke-WinGetDownloadWingetCommand {
+  <#
+  .SYNOPSIS
+    Invoke one WinGet version-information query.
+  .PARAMETER Query
+    Select whether to request the client version or complete package information.
+  #>
+  [OutputType([string[]])]
+  param ([Parameter(Mandatory)][ValidateSet('Version', 'Info')][string]$Query)
+
+  $Arguments = $Query -ceq 'Version' ? @('--version') : @('--info')
+  Invoke-WinGetDownloadWingetMutex -ScriptBlock {
+    $WingetCommand = Get-Command -Name winget -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $Output = @(& $WingetCommand.Source @Arguments 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "winget $($Arguments -join ' ') exited with code $LASTEXITCODE." }
+    return $Output
+  }
+}
+
+function Resolve-WinGetDownloadVersionInfo {
+  <#
+  .SYNOPSIS
+    Resolve WinGet user-agent versions or return stable fallback versions.
+  #>
+  [OutputType([pscustomobject])]
+  param ()
+
+  $ClientVersion = $Script:WinGetDownloadFallbackClientVersion
+  $DetectedClientVersion = $false
+  try {
+    $VersionOutput = Invoke-WinGetDownloadWingetCommand -Query Version | Select-Object -First 1
+    $VersionMatch = [regex]::Match([string]$VersionOutput, '^\s*v?(?<Version>\d+(?:\.\d+){1,3})\s*$')
+    if (-not $VersionMatch.Success) { throw 'The installed winget client returned an invalid version.' }
+    $ClientVersion = $VersionMatch.Groups['Version'].Value
+    $DetectedClientVersion = $true
+  } catch {
+    Write-Verbose "The installed winget client version could not be determined; using fallback version $ClientVersion. $($_.Exception.Message)"
+  }
+
+  # Desktop App Installer versions have four numeric components. If --info is
+  # unavailable, derive a syntactically valid package version from the client.
+  $PackageVersion = ((@($ClientVersion.Split('.')) + @('0', '0', '0', '0')) | Select-Object -First 4) -join '.'
+  if ($DetectedClientVersion) {
+    try {
+      $Info = Invoke-WinGetDownloadWingetCommand -Query Info | Out-String
+      $Package = [regex]::Match($Info, 'Microsoft\.DesktopAppInstaller\s+v(?<Version>\d+(?:\.\d+){3})')
+      if ($Package.Success) { $PackageVersion = $Package.Groups['Version'].Value }
+    } catch {
+      Write-Verbose "The Desktop App Installer package version could not be determined; using $PackageVersion. $($_.Exception.Message)"
+    }
+  }
+
+  return [pscustomobject]@{
+    ClientVersion  = $ClientVersion
+    PackageVersion = $PackageVersion
+  }
+}
+
+function Get-WinGetDownloadVersionInfo {
+  <#
+  .SYNOPSIS
+    Read runner-shared WinGet versions or resolve them directly when standalone.
+  #>
+  [OutputType([pscustomobject])]
+  param ()
+
+  # PackageModule can be consumed without Core\Index.ps1. In that case there
+  # is no shared runner lifecycle, so resolve the installed version directly.
+  $StorageVariable = Get-Variable -Name DumplingsStorage -Scope Global -ErrorAction SilentlyContinue
+  if ($null -eq $StorageVariable -or
+    $StorageVariable.Value -isnot [hashtable] -or
+    -not $StorageVariable.Value.IsSynchronized) {
+    return Resolve-WinGetDownloadVersionInfo
+  }
+
+  $Storage = $StorageVariable.Value
+  $CacheKey = '__DumplingsWinGetDownloadVersionInfo'
+  $GateKey = '__DumplingsWinGetDownloadVersionInfoGate'
+
+  # Only hold the synchronized hashtable lock long enough to inspect or create
+  # state. The winget process runs behind a dedicated gate without blocking
+  # unrelated DumplingsStorage readers and writers.
+  [Threading.Monitor]::Enter($Storage.SyncRoot)
+  try {
+    if ($Storage.ContainsKey($CacheKey)) { return $Storage[$CacheKey] }
+    if (-not $Storage.ContainsKey($GateKey)) { $Storage[$GateKey] = [Threading.SemaphoreSlim]::new(1, 1) }
+    $Gate = $Storage[$GateKey]
+  } finally {
+    [Threading.Monitor]::Exit($Storage.SyncRoot)
+  }
+
+  $null = $Gate.Wait()
+  try {
+    # Another worker may have populated the value while this worker waited.
+    [Threading.Monitor]::Enter($Storage.SyncRoot)
+    try {
+      if ($Storage.ContainsKey($CacheKey)) { return $Storage[$CacheKey] }
+    } finally {
+      [Threading.Monitor]::Exit($Storage.SyncRoot)
+    }
+
+    $VersionInfo = Resolve-WinGetDownloadVersionInfo
+    [Threading.Monitor]::Enter($Storage.SyncRoot)
+    try {
+      $Storage[$CacheKey] = $VersionInfo
+    } finally {
+      [Threading.Monitor]::Exit($Storage.SyncRoot)
+    }
+    return $VersionInfo
+  } finally {
+    $null = $Gate.Release()
+  }
+}
+
 function Get-WinGetDownloadUserAgent {
   <#
   .SYNOPSIS
@@ -19,14 +173,8 @@ function Get-WinGetDownloadUserAgent {
   [OutputType([string])]
   param ()
 
-  $VersionOutput = & winget --version 2>$null | Select-Object -First 1
-  if ([string]::IsNullOrWhiteSpace($VersionOutput)) { throw 'The installed winget client version could not be determined.' }
-  $ClientVersion = $VersionOutput.Trim().TrimStart('v')
-  if ([string]::IsNullOrWhiteSpace($ClientVersion)) { throw 'The installed winget client version could not be determined.' }
-  $Info = & winget --info 2>$null | Out-String
-  $Package = [regex]::Match($Info, 'Microsoft\.DesktopAppInstaller\s+v(?<Version>\d+(?:\.\d+){3})')
-  $PackageVersion = if ($Package.Success) { $Package.Groups['Version'].Value } else { "$ClientVersion.0" }
-  return "winget-cli WindowsPackageManager/$ClientVersion DesktopAppInstaller/Microsoft.DesktopAppInstaller v$PackageVersion"
+  $VersionInfo = Get-WinGetDownloadVersionInfo
+  return "winget-cli WindowsPackageManager/$($VersionInfo.ClientVersion) DesktopAppInstaller/Microsoft.DesktopAppInstaller v$($VersionInfo.PackageVersion)"
 }
 
 function ConvertTo-WinGetDownloadHeaderDictionary {

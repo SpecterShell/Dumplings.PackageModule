@@ -7,6 +7,12 @@ Source: <https://github.com/microsoft/winget-cli>
 The native call sequence in `WinGetDownloadProbe.cs` follows the MIT-licensed
 `Downloader.cpp` and `DODownloader.cpp` implementations.
 
+The vendored files in `WinGetManifestSchemas` are the official manifest JSON
+schemas. The PowerShell manifest validator follows the MIT-licensed
+`YamlParser.cpp`, `ManifestSchemaValidation.cpp`, `ManifestYamlPopulator.cpp`,
+`ManifestValidation.cpp`, `ManifestCommon.cpp`, `MsiExecArguments.cpp`, and `Locale.cpp`
+implementations.
+
 Copyright (c) Microsoft Corporation
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

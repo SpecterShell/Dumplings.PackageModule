@@ -1,4 +1,7 @@
 BeforeAll {
+  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'YamlSchema.psm1') -Force
+  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'WinGetManifestSchema.psm1') -Force
+  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'WinGetManifestModel.psm1') -Force
   Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'WinGetARP.psm1') -Force
 
   $Script:Manifest = [ordered]@{
@@ -44,6 +47,15 @@ BeforeAll {
       }
     )
   }
+  $Script:LogicalManifest = New-WinGetManifestModel -PackageIdentifier 'Contoso.App' -PackageVersion '1.2.3' -ManifestVersion '1.12.0' -InstallerDefaults ([ordered]@{}) -Installers @(
+    [ordered]@{
+      Architecture = 'x64'; InstallerType = 'msi'; ProductCode = '{11111111-1111-1111-1111-111111111111}'
+      AppsAndFeaturesEntries = @([ordered]@{ DisplayName = 'Contoso Desktop'; Publisher = 'Contoso, Ltd.'; UpgradeCode = '{22222222-2222-2222-2222-222222222222}' })
+    },
+    [ordered]@{ Architecture = 'arm64'; InstallerType = 'msix'; PackageFamilyName = 'Contoso.App_1234567890abc'; ProductCode = '{33333333-3333-3333-3333-333333333333}' }
+  ) -DefaultLocalization ([ordered]@{ PackageLocale = 'en-US'; PackageName = 'Contoso App'; Publisher = 'Contoso, Ltd.' }) -Localizations @(
+    [ordered]@{ PackageLocale = 'fr-FR'; PackageName = 'Contoso Application' }
+  )
 }
 
 Describe 'WinGet installed-entry matching helpers' {
@@ -64,6 +76,15 @@ Describe 'WinGet installed-entry matching helpers' {
     $Keys.PackageFamilyNames | Should -Contain 'Contoso.App_1234567890abc'
     $Keys.NormalizedNameAndPublisher.NormalizedNameAndPublisher | Should -Contain 'Contoso.ContosoApp'
     $Keys.NormalizedNameAndPublisher.NormalizedNameAndPublisher | Should -Contain 'Contoso.ContosoDesktop'
+  }
+
+  It 'Should build the same keys directly from the logical manifest model' {
+    $Keys = Get-WinGetManifestMatchKey -Manifest $Script:LogicalManifest
+
+    $Keys.ProductCodes | Should -Contain '{11111111-1111-1111-1111-111111111111}'
+    $Keys.UpgradeCodes | Should -Contain '{22222222-2222-2222-2222-222222222222}'
+    $Keys.PackageFamilyNames | Should -Contain 'Contoso.App_1234567890abc'
+    $Keys.NormalizedNameAndPublisher.NormalizedNameAndPublisher | Should -Contain 'Contoso.ContosoApp'
   }
 
   It 'Should match an ARP entry by ProductCode' {

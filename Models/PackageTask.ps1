@@ -448,7 +448,30 @@ class PackageTask: System.IDisposable {
   [void] Submit() {
     if ($Global:DumplingsPreference.Contains('EnableSubmit') -and $Global:DumplingsPreference.EnableSubmit) {
       #region WinGet
-      if ($this.Config.Contains('WinGetIdentifier')) {
+      if ($this.Config.Contains('WinGetPackageIdentifier') -or $this.Config.Contains('WinGetIdentifier')) {
+        # Claim the effective destination identifier before repository or network work begins.
+        # The concurrent dictionary is shared by all worker runspaces for this runner invocation.
+        [string]$TargetIdentifier = $this.Config['WinGetNewPackageIdentifier'] ??
+        $this.Config['WinGetNewIdentifier'] ??
+        $this.Config['WinGetPackageIdentifier'] ??
+        $this.Config['WinGetIdentifier']
+        if ([string]::IsNullOrWhiteSpace($TargetIdentifier)) {
+          throw 'The effective WinGet submission identifier is null or empty'
+        }
+        $Claims = $Global:DumplingsStorage['__DumplingsWinGetSubmissionClaims']
+        if ($Claims -isnot [System.Collections.Concurrent.ConcurrentDictionary[string, string]]) {
+          throw 'The runner-wide WinGet submission claim registry is unavailable or invalid'
+        }
+
+        [string]$ExistingOwner = $null
+        if (-not $Claims.TryAdd($TargetIdentifier, $this.Name)) {
+          $null = $Claims.TryGetValue($TargetIdentifier, [ref]$ExistingOwner)
+          if ($ExistingOwner -cne $this.Name) {
+            $this.Log("Skipping WinGet submission for ${TargetIdentifier}; task '${ExistingOwner}' already owns the submission claim", 'Warning')
+            return
+          }
+        }
+
         $this.Log('Submitting WinGet manifests', 'Info')
         Send-WinGetManifest -Task $this
       }

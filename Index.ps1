@@ -20,9 +20,22 @@ if (Test-Path -Path $LibraryPath) {
   foreach ($InfrastructureModule in $InfrastructureModules) {
     Import-Module (Join-Path $LibraryPath $InfrastructureModule) -Force
   }
+
+  # Manifest parsing has an explicit dependency chain. Load general helpers and
+  # the schema/model/serialization boundary first, then parser libraries, and
+  # finally validation, update, and submission orchestration.
+  $Private:ManifestFoundationModules = @('General.psm1', 'YamlSchema.psm1', 'WinGetManifestSchema.psm1', 'WinGetManifestModel.psm1', 'WinGetManifestSerialization.psm1')
+  foreach ($ManifestModule in $ManifestFoundationModules) {
+    Import-Module (Join-Path $LibraryPath $ManifestModule) -Force
+  }
+  $Private:ManifestConsumerModules = @('WinGetManifestValidation.psm1', 'WinGetManifestUpdate.psm1', 'WinGetSubmission.psm1')
+  $Private:OrderedModules = @($InfrastructureModules) + @($ManifestFoundationModules) + @($ManifestConsumerModules)
   Get-ChildItem -LiteralPath $LibraryPath -Filter '*.psm1' -Recurse -File |
-    Where-Object Name -NotIn $InfrastructureModules |
+    Where-Object Name -NotIn $OrderedModules |
     Import-Module -Force
+  foreach ($ManifestModule in $ManifestConsumerModules) {
+    Import-Module (Join-Path $LibraryPath $ManifestModule) -Force
+  }
 }
 
 # Import models
