@@ -2,6 +2,18 @@
 # Static DeployMaster parser derived from controlled DeployMaster 7.7 builds,
 # validated legacy packages, and the documented installer command-line behavior.
 # Reference: https://www.deploymaster.com/manual.html
+#
+# Binary structure consumed here (absolute offsets, LE integers):
+#
+#   [0x80] PackageOffset:u32 -> package
+#   [0x84] IntegrityLength:u32  [0x88] CRC32:u32
+#   [0x8C] ExpectedFileSize:u64 [0x94] Reserved/observed:u32
+#   package -> LZMA properties[5] -> 70/74-byte observed control header
+#           -> bounded metadata and file-data streams
+#
+# The CRC covers only the declared integrity range. Undocumented header fields
+# remain observed evidence; scope/architecture fields are decoded only for
+# controlled layouts whose size and record boundaries validate.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -13,6 +25,8 @@ function Get-DeployMasterScopeInfo {
   .NOTES
     Controlled current-user, all-users, and dual-scope builds encode 0, 1,
     and 2 respectively at the normalized package-header scope offset.
+  .PARAMETER Value
+    Format-specific field or value interpreted according to the current record/version.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][ValidateRange(0, 255)][int]$Value)
@@ -29,6 +43,10 @@ function Get-DeployMasterPackageLocator {
   <#
   .SYNOPSIS
     Read and validate the fixed DeployMaster package locator at file offset 0x80
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER MaximumIntegrityBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -36,6 +54,8 @@ function Get-DeployMasterPackageLocator {
     [ValidateRange(74, [long]::MaxValue)][long]$MaximumIntegrityBytes = 1073741824
   )
 
+  # The locator is a fixed absolute structure in the PE stub. Validate all declared ranges and the
+  # complete-file size before hashing or following the package pointer.
   if (-not $Stream.CanSeek -or $Stream.Length -lt 0x98) { throw 'The file is too small for a DeployMaster package locator.' }
   $PackageOffset = [long](Read-BinaryInteger -Stream $Stream -Offset 0x80 -Size 4)
   $IntegrityLength = [long](Read-BinaryInteger -Stream $Stream -Offset 0x84 -Size 4)
@@ -49,6 +69,7 @@ function Get-DeployMasterPackageLocator {
   if ($PackageOffset + $IntegrityLength -gt $Stream.Length) { throw 'The DeployMaster integrity region is truncated.' }
   if ($ExpectedFileSize -ne [uint64]$Stream.Length) { throw 'The DeployMaster package locator file-size check failed.' }
 
+  # CRC32 authenticates only the declared package-control region, not trailing file payloads.
   $IntegrityStream = New-BoundedReadStream -Stream $Stream -Offset $PackageOffset -Length $IntegrityLength -LeaveOpen
   try { $ActualCrc32 = [uint32](Get-BinaryCrc32 -Stream $IntegrityStream -MaximumBytes $IntegrityLength) }
   finally { $IntegrityStream.Dispose() }
@@ -74,6 +95,12 @@ function Get-DeployMasterPackageHeader {
     Current packages have a 74-byte control header. Older packages omit one
     four-byte platform field and therefore use the same fields shifted by four
     bytes in a 70-byte header. Candidate core ranges select the valid layout.
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Locator
+    Current structured format node or record being interpreted.
+  .PARAMETER MaximumCoreBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -88,6 +115,8 @@ function Get-DeployMasterPackageHeader {
     throw 'The DeployMaster package has invalid LZMA properties.'
   }
 
+  # Probe both controlled layouts through their range invariants. Never select a generation from
+  # PE version strings alone because the four-byte shift changes every following field.
   $Layouts = @(
     [pscustomobject]@{ Name = 'Current'; Shift = 0; HeaderSize = 74; Version = '7.7+' },
     [pscustomobject]@{ Name = 'Legacy'; Shift = -4; HeaderSize = 70; Version = 'Legacy' }
@@ -104,6 +133,7 @@ function Get-DeployMasterPackageHeader {
     $LanguageOffset = [long](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x2E + $Layout.Shift) -Size 4)
     $IntegrityEnd = $Locator.PackageOffset + $Locator.IntegrityLength
     $CoreEntries = [Collections.Generic.List[object]]::new()
+    # Core offsets are absolute and must remain within the CRC-protected integrity region.
     if ($PrimaryOffset -ne 0) {
       if ($PrimaryOffset -lt $Locator.PackageOffset + $Layout.HeaderSize -or $PrimaryCompressedSize -le 0 -or
         $PrimaryUncompressedSize -le 0 -or $PrimaryUncompressedSize -gt $MaximumCoreBytes -or
@@ -138,6 +168,8 @@ function Get-DeployMasterPackageHeader {
   $ScopeInfo = Get-DeployMasterScopeInfo -Value $Candidate.ScopeValue
   $PrimaryCore = @($Candidate.CoreEntries | Where-Object Architecture -EQ 'x86' | Select-Object -First 1)
   $SecondaryCore = @($Candidate.CoreEntries | Where-Object Architecture -EQ 'x64' | Select-Object -First 1)
+  # A missing x64 core and the x86-only sentinel distinguish OS support from the architecture of
+  # the installer stub itself.
   $ApplicationArchitectureMode = if ($PrimaryCore.Count -and $SecondaryCore.Count) {
     'x86AndX64Application'
   } elseif ($SecondaryCore.Count) {
@@ -180,6 +212,16 @@ function Read-DeployMasterCompressedBlock {
   <#
   .SYNOPSIS
     Decode one size-prefixed raw LZMA block within the integrity region
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Offset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER Properties
+    Format-specific field or value interpreted according to the current record/version.
+  .PARAMETER Limit
+    Absolute end offset of the integrity/package region. The complete size-prefixed block must end at or before this boundary.
+  .PARAMETER MaximumBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -197,6 +239,8 @@ function Read-DeployMasterCompressedBlock {
     throw 'The DeployMaster compressed block contains invalid size values.'
   }
 
+  # Give the decoder only the declared compressed bytes and require its output to match the record
+  # header exactly.
   $InputStream = New-BoundedReadStream -Stream $Stream -Offset ($Offset + 8) -Length $CompressedSize -LeaveOpen
   $OutputStream = [IO.MemoryStream]::new()
   try {
@@ -221,6 +265,10 @@ function ConvertFrom-DeployMasterIdentity {
   <#
   .SYNOPSIS
     Convert the structured DeployMaster identity block to package metadata
+  .PARAMETER Bytes
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
+  .PARAMETER ScopeValue
+    Scope or elevation evidence used to classify user, machine, or conditional installation.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -228,6 +276,8 @@ function ConvertFrom-DeployMasterIdentity {
     [Parameter(Mandatory)][int]$ScopeValue
   )
 
+  # Form-feed delimiters define the identity schema. Strict UTF-8 prevents replacement characters
+  # from silently changing paths or ARP values.
   $Utf8 = [Text.UTF8Encoding]::new($false, $true)
   try { $Fields = $Utf8.GetString($Bytes).Split([char]12) }
   catch { throw 'The DeployMaster identity block is not valid UTF-8.' }
@@ -240,6 +290,7 @@ function ConvertFrom-DeployMasterIdentity {
   $LicenseFileName = ([string]$Fields[8]).TrimStart('*')
   $ReleaseDate = $null
   $ReleaseDateValue = 0.0
+  # Release dates are stored as OLE Automation dates; invalid values remain absent evidence.
   if ([double]::TryParse([string]$Fields[5], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$ReleaseDateValue)) {
     try { $ReleaseDate = [datetime]::FromOADate($ReleaseDateValue).Date } catch {}
   }
@@ -281,6 +332,22 @@ function Get-DeployMasterFileEntry {
     The file table stores a run of absolute offsets followed by parallel raw
     and stored-size arrays. File names immediately precede the arrays; the
     mandatory license file name is carried by the identity block.
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Identity
+    Installer identity value used to select or report the matching static metadata record.
+  .PARAMETER IdentityEnd
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER PackageDataOffset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER Properties
+    Format-specific field or value interpreted according to the current record/version.
+  .PARAMETER TableKind
+    Detected format variant controlling version-specific parsing rules.
+  .PARAMETER MaximumEntries
+    Declared record count or parser count limit; malformed or excessive counts are rejected.
+  .PARAMETER MaximumMetadataBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -298,6 +365,8 @@ function Get-DeployMasterFileEntry {
   if ($MetadataLength -le 0 -or $MetadataLength -gt $MaximumMetadataBytes -or $MetadataLength -gt [int]::MaxValue) {
     throw 'The DeployMaster file-table region is outside the configured bounds.'
   }
+  # Search only the bounded metadata gap between identity and package data for parallel offset and
+  # size arrays. Structural agreement across all arrays identifies the table.
   $Metadata = Read-BinaryBytes -Stream $Stream -Offset $IdentityEnd -Count ([int]$MetadataLength)
   $Candidates = [Collections.Generic.List[object]]::new()
   for ($Index = 0; $Index + 48 -le $Metadata.Length; $Index++) {
@@ -307,6 +376,7 @@ function Get-DeployMasterFileEntry {
 
     $Boundaries = [Collections.Generic.List[long]]::new()
     $Cursor = $Index
+    # Absolute payload offsets form a strictly increasing run terminated by the first non-offset.
     while ($Boundaries.Count -lt $MaximumEntries -and $Cursor + 8 -le $Metadata.Length) {
       $Value = [uint64][BitConverter]::ToUInt64($Metadata, $Cursor)
       if ($Value -lt [uint64]$IdentityEnd -or $Value -ge [uint64]$Stream.Length -or ($Boundaries.Count -and $Value -le [uint64]$Boundaries[$Boundaries.Count - 1])) { break }
@@ -315,6 +385,8 @@ function Get-DeployMasterFileEntry {
     }
     if ($Boundaries.Count -lt 2 -or $Boundaries -notcontains $PackageDataOffset) { continue }
 
+    # Current tables have one size per boundary; legacy tables prepend a separately located license
+    # block and therefore have one additional record.
     foreach ($CandidateTableKind in $TableKind) {
       $EntryCount = if ($CandidateTableKind -eq 'Current') { $Boundaries.Count } else { $Boundaries.Count + 1 }
       if ($EntryCount -gt $MaximumEntries -or $Cursor + (16 * $EntryCount) -gt $Metadata.Length) { continue }
@@ -378,6 +450,7 @@ function Get-DeployMasterFileEntry {
   # Smaller current packages keep the CRLF-delimited payload names directly
   # before the arrays. Multi-architecture and legacy packages compress them.
   try {
+    # Prefer the simple CRLF-delimited name table used by smaller current packages.
     $NameCursor = $Candidate.TableOffset
     $ReverseNames = [Collections.Generic.List[string]]::new()
     for ($NameIndex = 0; $NameIndex -lt $RemainingNameCount; $NameIndex++) {
@@ -398,6 +471,8 @@ function Get-DeployMasterFileEntry {
   } catch { $PayloadNames = @() }
 
   if ($PayloadNames.Count -ne $RemainingNameCount) {
+    # Multi-architecture and legacy packages compress the name list immediately before the arrays.
+    # Require one and only one decodable candidate with the expected number of names.
     $DecodedNameLists = [Collections.Generic.List[object]]::new()
     $MinimumHeaderOffset = [Math]::Max(0, $Candidate.TableOffset - 1048576)
     for ($BlockOffset = $MinimumHeaderOffset; $BlockOffset + 8 -le $Candidate.TableOffset; $BlockOffset++) {
@@ -441,10 +516,14 @@ function ConvertFrom-DeployMasterFileAssociationBlock {
   <#
   .SYNOPSIS
     Parse a structured DeployMaster file-type metadata record
+  .PARAMETER Bytes
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
   #>
   [OutputType([pscustomobject[]])]
   param ([Parameter(Mandatory)][byte[]]$Bytes)
 
+  # The block begins with a bounded association count followed by sequential
+  # variable-length records. Any trailing or truncated data rejects the block.
   if ($Bytes.Length -lt 2) { throw 'The DeployMaster file-type record is too small.' }
   $Utf8 = [Text.UTF8Encoding]::new($false, $true)
   $Cursor = 0
@@ -452,18 +531,36 @@ function ConvertFrom-DeployMasterFileAssociationBlock {
   if ($Count -lt 1 -or $Count -gt 64) { throw 'The DeployMaster file-type count is invalid.' }
 
   function ReadAssociationUInt16([ref]$Position) {
+    <#
+    .SYNOPSIS
+      Read a sequential unsigned 16-bit little-endian association field.
+    .PARAMETER Position
+      Mutable block-relative byte cursor advanced by two after a bounded read.
+    #>
     if ($Position.Value + 2 -gt $Bytes.Length) { throw 'The DeployMaster file-type record is truncated.' }
     $Value = [uint16][BitConverter]::ToUInt16($Bytes, $Position.Value)
     $Position.Value += 2
     return $Value
   }
   function ReadAssociationInt16([ref]$Position) {
+    <#
+    .SYNOPSIS
+      Read a sequential signed 16-bit little-endian association field.
+    .PARAMETER Position
+      Mutable block-relative byte cursor advanced by two after a bounded read.
+    #>
     if ($Position.Value + 2 -gt $Bytes.Length) { throw 'The DeployMaster file-type record is truncated.' }
     $Value = [int16][BitConverter]::ToInt16($Bytes, $Position.Value)
     $Position.Value += 2
     return $Value
   }
   function ReadAssociationString([ref]$Position) {
+    <#
+    .SYNOPSIS
+      Read a uint16-length-prefixed UTF-8 association string.
+    .PARAMETER Position
+      Mutable block-relative cursor advanced across the length field and string bytes.
+    #>
     $Length = [int](ReadAssociationUInt16 -Position $Position)
     if ($Position.Value + $Length -gt $Bytes.Length) { throw 'The DeployMaster file-type string is truncated.' }
     $Value = $Utf8.GetString($Bytes, $Position.Value, $Length)
@@ -472,6 +569,8 @@ function ConvertFrom-DeployMasterFileAssociationBlock {
   }
 
   $Associations = [Collections.Generic.List[object]]::new()
+  # Each association contains architecture-specific icon references and a nested
+  # action list. Preserve file indexes for later catalog resolution.
   for ($AssociationIndex = 0; $AssociationIndex -lt $Count; $AssociationIndex++) {
     if ($Cursor -ge $Bytes.Length -or $Bytes[$Cursor] -notin 0, 1) { throw 'The DeployMaster file-type default flag is invalid.' }
     $CreateByDefault = [bool]$Bytes[$Cursor++]
@@ -488,6 +587,8 @@ function ConvertFrom-DeployMasterFileAssociationBlock {
     $ActionCount = [int]$Bytes[$Cursor++]
     if ($ActionCount -gt 64) { throw 'The DeployMaster file-type action count is invalid.' }
     $Actions = [Collections.Generic.List[object]]::new()
+    # Actions carry separate x86/x64 executable indexes plus literal parameters;
+    # parsing records them as evidence and never invokes the commands.
     for ($ActionIndex = 0; $ActionIndex -lt $ActionCount; $ActionIndex++) {
       $Actions.Add([pscustomobject]@{
           Name                  = ReadAssociationString -Position ([ref]$Cursor)
@@ -508,6 +609,8 @@ function ConvertFrom-DeployMasterFileAssociationBlock {
         Actions             = $Actions.ToArray()
       })
   }
+  # Exact consumption authenticates the candidate found by the outer scanner and
+  # prevents a valid prefix in unrelated package data from being accepted.
   if ($Cursor -ne $Bytes.Length) { throw 'The DeployMaster file-type record has trailing data.' }
   $Associations.ToArray()
 }
@@ -516,6 +619,16 @@ function Get-DeployMasterFileAssociation {
   <#
   .SYNOPSIS
     Locate and decode structured file-type records in package metadata
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER IdentityEnd
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER PackageDataOffset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER Properties
+    Format-specific field or value interpreted according to the current record/version.
+  .PARAMETER MaximumBlocks
+    Declared record count or parser count limit; malformed or excessive counts are rejected.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -556,6 +669,8 @@ function Read-DeployMasterPackageData {
   <#
   .SYNOPSIS
     Parse one DeployMaster package from an already-open installer stream
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][IO.Stream]$Stream)
@@ -595,6 +710,12 @@ function ConvertTo-DeployMasterRegistryWrite {
   <#
   .SYNOPSIS
     Build the explicit built-in DeployMaster uninstall-entry evidence
+  .PARAMETER PackageData
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER Value
+    Format-specific field or value interpreted according to the current record/version.
   #>
   param (
     [Parameter(Mandatory)][psobject]$PackageData,
@@ -617,6 +738,8 @@ function Get-DeployMasterInfo {
   <#
   .SYNOPSIS
     Read structured DeployMaster identity, scope, ARP, and payload evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -625,6 +748,8 @@ function Get-DeployMasterInfo {
     $File = Get-Item -LiteralPath $Path -Force
     $Stream = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite')
     try {
+      # Parse the complete package model while one stream is open, then separately corroborate the
+      # overlay location and PE runtime identity.
       $PackageData = Read-DeployMasterPackageData -Stream $Stream
       $OverlayOffset = Get-PEOverlayOffset -Stream $Stream
       $PELayout = Get-PELayout -Stream $Stream
@@ -643,6 +768,8 @@ function Get-DeployMasterInfo {
       1 { $Identity.MachineInstallLocation }
       default { $null }
     }
+    # Built-in uninstall fields come from the structured identity block; custom registry actions
+    # remain explicitly unsupported and are not guessed from strings.
     $RegistryWrites = @(
       ConvertTo-DeployMasterRegistryWrite -PackageData $PackageData -Name DisplayName -Value $Identity.DisplayName
       ConvertTo-DeployMasterRegistryWrite -PackageData $PackageData -Name DisplayVersion -Value $Identity.DisplayVersion
@@ -666,6 +793,7 @@ function Get-DeployMasterInfo {
       $Warnings.Add('One or more DeployMaster file-type actions do not resolve to packaged executable indexes and will not create an open command.')
     }
     $InstallerArchitecture = switch ($PELayout.MachineName) { 'I386' { 'x86' } 'AMD64' { 'x64' } 'ARM64' { 'arm64' } default { $null } }
+    # Distinguish a pure x64 installer from an x86 bootstrapper that deploys a 64-bit application.
     $ApplicationArchitectureMode = if ($PackageData.Header.ApplicationArchitectureMode -eq 'x64Application') {
       if ($InstallerArchitecture -eq 'x86') { 'x64ApplicationWithX86InstallerStub' } else { 'x64ApplicationWithX64Installer' }
     } else { $PackageData.Header.ApplicationArchitectureMode }
@@ -727,6 +855,16 @@ function Export-DeployMasterRange {
   <#
   .SYNOPSIS
     Export one stored or raw-LZMA DeployMaster range
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Entry
+    Validated archive or catalog entry whose bounded content is read or exported.
+  .PARAMETER Properties
+    Format-specific field or value interpreted according to the current record/version.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER MaximumBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   param (
     [Parameter(Mandatory)][IO.Stream]$Stream,
@@ -736,6 +874,7 @@ function Export-DeployMasterRange {
     [Parameter(Mandatory)][long]$MaximumBytes
   )
 
+  # A bounded source range prevents the decoder from consuming the next package record.
   $Output = [IO.File]::Open($DestinationPath, 'CreateNew', 'Write', 'None')
   $InputStream = New-BoundedReadStream -Stream $Stream -Offset $Entry.Offset -Length $Entry.CompressedSize -LeaveOpen
   try {
@@ -755,6 +894,14 @@ function Expand-DeployMasterInstaller {
   <#
   .SYNOPSIS
     Expand validated DeployMaster runtime, metadata, and payload files
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
@@ -772,6 +919,8 @@ function Expand-DeployMasterInstaller {
     $ExpandedBytes = 0L
     try {
       $PackageData = Read-DeployMasterPackageData -Stream $Stream
+      # Normalize runtime cores, decoded metadata blocks, and application files into one extraction
+      # catalog so selection and accounting follow the same path.
       $Items = [Collections.Generic.List[object]]::new()
       foreach ($Core in $PackageData.Header.CoreEntries) {
         $Items.Add([pscustomobject]@{ FullName = "Runtime/DeployMasterCore-$($Core.Architecture).exe"; Kind = 'Compressed'; Offset = $Core.Offset; CompressedSize = $Core.CompressedSize; UncompressedSize = $Core.UncompressedSize; Compression = 'Lzma' })
@@ -782,6 +931,7 @@ function Expand-DeployMasterInstaller {
         $Items.Add([pscustomobject]@{ FullName = "Payload/$($Entry.FullName)"; Kind = 'Compressed'; Offset = $Entry.Offset; CompressedSize = $Entry.CompressedSize; UncompressedSize = $Entry.UncompressedSize; Compression = $Entry.Compression })
       }
 
+      # Check the aggregate uncompressed size and destination identity before writing each item.
       foreach ($Item in $Items) {
         if (-not (Test-ExtractionPattern -Path $Item.FullName -Pattern $Name)) { continue }
         if ($ExpandedBytes + $Item.UncompressedSize -gt $MaximumExpandedBytes) { throw "The DeployMaster expansion exceeds the $MaximumExpandedBytes-byte output limit." }
@@ -807,6 +957,8 @@ function Test-DeployMaster {
   <#
   .SYNOPSIS
     Test whether a file contains a validated DeployMaster package
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -817,6 +969,8 @@ function Read-ProtocolsFromDeployMaster {
   <#
   .SYNOPSIS
     Read literal URL protocol names from DeployMaster registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -827,6 +981,8 @@ function Read-FileExtensionsFromDeployMaster {
   <#
   .SYNOPSIS
     Read literal file extensions from DeployMaster registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -837,6 +993,8 @@ function Read-ProductVersionFromDeployMaster {
   <#
   .SYNOPSIS
     Read the structured DeployMaster product version
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-DeployMasterInfo -Path $Path).DisplayVersion }
@@ -846,6 +1004,8 @@ function Read-ProductNameFromDeployMaster {
   <#
   .SYNOPSIS
     Read the structured DeployMaster package display name
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-DeployMasterInfo -Path $Path).DisplayName }
@@ -855,6 +1015,8 @@ function Read-PublisherFromDeployMaster {
   <#
   .SYNOPSIS
     Read the structured DeployMaster publisher
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-DeployMasterInfo -Path $Path).Publisher }
@@ -864,6 +1026,8 @@ function Read-ProductCodeFromDeployMaster {
   <#
   .SYNOPSIS
     Read the built-in DeployMaster uninstall-key identity
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-DeployMasterInfo -Path $Path).ProductCode }
@@ -873,6 +1037,8 @@ function Read-ScopeFromDeployMaster {
   <#
   .SYNOPSIS
     Read the structured DeployMaster installation scope
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-DeployMasterInfo -Path $Path).Scope }

@@ -8,6 +8,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSerialization.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerBridge.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\MSI.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Burn.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\NSIS.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Inno.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\AdvancedInstaller.psm1') -Force
@@ -182,6 +183,32 @@ Describe 'WinGet installer manifest metadata updates' {
       { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
         Should -Throw '*does not write a visible Apps & Features entry*'
       Should -Invoke Get-InnoInfo -Exactly 1
+    }
+
+    It 'Preserves existing ARP metadata for a source-backed NSIS nested-payload wrapper' {
+      Mock Get-NSISInfo {
+        [pscustomobject]@{
+          InstallerType                 = 'Nullsoft'
+          WritesAppsAndFeaturesEntry    = $false
+          DelegatesAppsAndFeaturesEntry = $true
+          ExtractedFiles                = @('$PLUGINSDIR\setup.exe')
+          Warnings                      = @('Nested installer owns ARP registration')
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'nullsoft'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = 'Nested.Product'
+        AppsAndFeaturesEntries = @([ordered]@{ DisplayVersion = '1.0.0'; InstallerType = 'exe' })
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Nested.Product'
+      $Result.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '1.0.0'
+      $Script:LogMessages.Message | Should -Contain 'NSIS: Nested installer owns ARP registration'
+      $Script:LogMessages.Message | Should -Contain 'NSIS reports that the outer installer does not write a visible Apps & Features entry; existing ARP metadata belongs to a nested payload or custom registration'
     }
 
     It 'Validates NSIS even when the task explicitly supplies matching fields' {
@@ -454,6 +481,50 @@ Describe 'WinGet installer manifest metadata updates' {
 
       { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
         Should -Throw "*builder is 'InstallShield', not WiX*"
+    }
+
+    It 'Accepts a manifest-declared WiX installer when builder evidence is inconclusive' {
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                   = '{PRODUCT}'
+          ProductName                   = 'Inconclusive WiX Product'
+          ProductVersion                = '1.0.0'
+          AllUsers                      = '1'
+          InstallerBuilder              = 'Unknown'
+          AppsAndFeaturesInstallerType  = 'msi'
+          HasCustomAppsAndFeaturesEntry = $false
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'wix'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = '{OLD-PRODUCT}'
+        AppsAndFeaturesEntries = @([ordered]@{ InstallerType = 'msi' })
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be '{PRODUCT}'
+      $Result.AppsAndFeaturesEntries[0].Contains('InstallerType') | Should -BeFalse
+    }
+
+    It 'parses Burn registrations that omit the optional PerMachine attribute' {
+      Mock Get-BurnInfo { [pscustomobject]@{ BundleCode = [guid]::NewGuid() } }
+      Mock Get-BurnManifest {
+        [xml]'<BurnManifest><Registration Code="{BUNDLE}"><Arp DisplayName="Servo" DisplayVersion="1.0" Publisher="Servo" /></Registration><RelatedBundle Code="{UPGRADE}" /></BurnManifest>'
+      }
+      Mock Get-BurnScopeInfo { [pscustomobject]@{ DefaultScope = $null; SupportedScopes = @(); SupportsDualScope = $false } }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'burn'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = '{OLD-BUNDLE}'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be '{BUNDLE}'
     }
 
     It 'Updates generic EXE metadata from a detected Advanced Installer parser result' {
@@ -737,6 +808,35 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -BeExactly 'BraveSoftware Brave-Origin-Nightly'
+      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
+    }
+
+    It 'preserves an existing Chromium ProductCode when static evidence cannot resolve the ARP identity' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
+              Name    = 'Chromium Setup'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Variant          = 'ChromiumUpdater'
+                ProductCode      = $null
+                UnresolvedFields = @('ProductCode')
+                Warnings         = @()
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'exe'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Zoho Ulaa'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -BeExactly 'Zoho Ulaa'
       @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
     }
 

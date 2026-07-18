@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: MIT
 # This module only bridges to the independently licensed InstallerParsers CLI.
+#
+# Process boundary (the GPL-2.0 byte parser remains in InstallerParsers):
+#
+#   Advanced Installer PE path
+#      -> InstallerBridge -> AdvancedInstaller.GetInfo/Expand
+#      <- catalog-selected payload paths, configuration, and MSI evidence
+#      -> this MIT module matches the configured architecture/name to an MSI
+#
+# See Modules/InstallerParsers/Libraries/AdvancedInstaller.psm1 and the focused
+# installer reference for the ADVINSTSFX footer and 24-byte catalog layout.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -73,17 +83,23 @@ function Resolve-AdvancedInstallerMsiFile {
     [bool]$NameWasSpecified
   )
 
+  # Selection evidence is produced by the GPL parser from the SFX catalog and
+  # configuration. A downloaded MainAppURL has no equivalent embedded MSI.
   $SelectionProperty = $Installer.PSObject.Properties['MsiPayloadSelection']
   $Selection = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value
   if ($Selection -and $Selection.SourceKind -eq 'Download') {
     throw "Advanced Installer obtains its main payload from MainAppURL '$($Selection.MainAppUrl)'; no embedded MSI represents the runtime selection"
   }
 
+  # The caller pattern narrows extracted files but cannot replace a configured
+  # architecture path when one is available.
   $Candidates = @($Item | Where-Object {
       $_.Name -like $Pattern -or $_.FullName -like $Pattern -or ([System.IO.Path]::GetRelativePath($ExtractionPath, $_.FullName)) -like $Pattern
     })
   if (-not $Candidates) { throw "No Advanced Installer MSI matched the pattern: $Pattern" }
 
+  # Reproduce the SFX branch for the requested host architecture. All-platform
+  # packages remain ambiguous until the caller supplies that architecture.
   $SelectedRelativePath = if ($Selection -and $Architecture) {
     $ArchitecturePropertyName = "$($Architecture.Substring(0, 1).ToUpperInvariant())$($Architecture.Substring(1))MsiPath"
     $ArchitecturePathProperty = $Selection.PSObject.Properties[$ArchitecturePropertyName]
@@ -101,6 +117,8 @@ function Resolve-AdvancedInstallerMsiFile {
     $null
   }
 
+  # Resolve the configured path relative to the extraction root and require one
+  # exact case-insensitive match; never fall through to a wildcard on mismatch.
   if (-not [string]::IsNullOrWhiteSpace($SelectedRelativePath)) {
     $Selected = @($Candidates | Where-Object {
         [System.IO.Path]::GetRelativePath($ExtractionPath, $_.FullName).Equals($SelectedRelativePath, [System.StringComparison]::OrdinalIgnoreCase)
@@ -110,6 +128,8 @@ function Resolve-AdvancedInstallerMsiFile {
     throw "The bootstrapper-selected MSI path was not extracted: $SelectedRelativePath"
   }
 
+  # Only packages without usable SFX selection metadata reach the reviewed
+  # deterministic matcher.
   return Resolve-AdvancedInstallerMatch -Item $Candidates -Pattern $Pattern
 }
 

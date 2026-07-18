@@ -1,4 +1,12 @@
 # SPDX-License-Identifier: MIT
+# IExpress/WExtract binary structure consumed here:
+#
+#   PE/.rsrc
+#   +-- RUNPROGRAM, POSTRUNPROGRAM, ADMQCMD, USRQCMD text resources
+#   `-- CABINET* -> 4D 53 43 46 ("MSCF") cabinets and payload catalogs
+#
+# Text may be UTF-16LE, code page 1252, or BOM-marked. The selected command maps
+# to a catalog entry and arguments; resource or CAB order alone does not.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -7,10 +15,14 @@ function ConvertFrom-IExpressResourceText {
   <#
   .SYNOPSIS
     Decode a bounded IExpress text resource
+  .PARAMETER Bytes
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
   #>
   [OutputType([string])]
   param ([Parameter(Mandatory)][byte[]]$Bytes)
 
+  # Prefer an explicit UTF-16LE BOM, then use the high NUL-byte density emitted
+  # by unmarked wide resources before falling back to the historical ANSI code page.
   if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
     return [Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2).TrimEnd([char]0)
   }
@@ -36,6 +48,9 @@ function Get-IExpressInfo {
     $Resources = @(Get-PEResourceInfo -Path $Installer.FullName)
     $ResourceNames = @($Resources | Where-Object Name | ForEach-Object { $_.Name.ToUpperInvariant() })
     $OriginalName = [Diagnostics.FileVersionInfo]::GetVersionInfo($Installer.FullName).OriginalFilename
+
+    # Accept either the canonical WExtract version identity or the paired
+    # CABINET/RUNPROGRAM resources used by rebuilt IExpress stubs.
     $IsWExtract = $OriginalName -match '^(?i)wextract(?:\.exe)?$' -or
     ($ResourceNames -contains 'CABINET' -and $ResourceNames -contains 'RUNPROGRAM')
     if (-not $IsWExtract) { throw 'The file does not contain the expected IExpress/WExtract resources.' }
@@ -45,6 +60,9 @@ function Get-IExpressInfo {
       'USERQUIETINSTCMD', 'INSTALLPROMPT', 'DISPLAYLICENSE', 'FINISHMESSAGE', 'TARGETNAME'
     )
     $Configuration = [ordered]@{}
+
+    # Decode only known configuration resources; arbitrary resource text must
+    # not become command-line evidence.
     foreach ($Resource in $Resources) {
       if (-not $Resource.Name -or $Resource.Name.ToUpperInvariant() -notin $TextResourceNames) { continue }
       $Value = ConvertFrom-IExpressResourceText -Bytes (Read-PEResourceData -Resource $Resource -MaximumBytes 1048576)
@@ -55,6 +73,9 @@ function Get-IExpressInfo {
     if ($CabinetResources.Count -eq 0) { throw 'The IExpress cabinet resource was not found.' }
     $CabinetEvidence = [Collections.Generic.List[psobject]]::new()
     $NestedFiles = [Collections.Generic.List[string]]::new()
+
+    # Export each CAB resource to a temporary bounded file because the cabinet
+    # reader requires a path, then retain only catalog metadata.
     foreach ($CabinetResource in $CabinetResources) {
       $CabinetPath = New-TempFile
       try {
@@ -73,6 +94,9 @@ function Get-IExpressInfo {
     }
 
     $Commands = [Collections.Generic.List[psobject]]::new()
+
+    # Resolve configured commands against the combined CAB catalogs. Physical
+    # resource order does not identify which nested executable WExtract launches.
     foreach ($Name in @('RUNPROGRAM', 'POSTRUNPROGRAM', 'ADMQCMD', 'USRQCMD', 'ADMINQUIETINSTCMD', 'USERQUIETINSTCMD')) {
       if (-not $Configuration[$Name]) { continue }
       $Commands.Add([pscustomobject]@{
@@ -104,6 +128,14 @@ function Expand-IExpressInstaller {
   <#
   .SYNOPSIS
     Expand selected files from an IExpress cabinet resource without executing it
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([string[]])]
   param (
@@ -117,6 +149,9 @@ function Expand-IExpressInstaller {
     $Resources = @(Get-PEResourceInfo -Path (Get-Item -LiteralPath $Path -Force).FullName)
     $CabinetResources = @($Resources | Where-Object { $_.Name -and $_.Name.ToUpperInvariant() -like 'CABINET*' })
     if ($CabinetResources.Count -eq 0) { throw 'The IExpress cabinet resource was not found.' }
+
+    # Preserve cabinet boundaries and extraction limits while applying the same
+    # caller pattern to each resource catalog.
     foreach ($CabinetResource in $CabinetResources) {
       $CabinetPath = New-TempFile
       try {
@@ -133,6 +168,8 @@ function Test-IExpress {
   <#
   .SYNOPSIS
     Test whether a file is an IExpress/WExtract package
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)

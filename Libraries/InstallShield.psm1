@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Format sources: https://github.com/lifenjoiner/ISx
 # Setup.ini source: https://docs.revenera.com/installshield26helplib/helplibrary/SetupIniExe.htm
+# Supported InstallShield binary structures:
+#
+#   PE launcher -> overlay -> optional "NB10" prefix
+#     +-- encoded "InstallShield"/"ISSetupStream" 46-byte header
+#     |   -> old 0x138-byte or stream attributes -> transformed/zlib ranges
+#     `-- plain ANSI/UTF-16 records -> adjacent bounded payloads
+#
+# File names and lengths come from decoded records. A nested MSI path is selected
+# from catalog/setup metadata, never a recursive wildcard. Unsupported generation
+# fields remain observed, and malformed next offsets or output paths are rejected.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -13,6 +23,14 @@ $Script:InstallShieldPreferredBlockSize = 4096 * 64
 $Script:InstallShieldOldAttributeSize = 0x138
 
 function ConvertFrom-InstallShieldCString {
+  <#
+  .SYNOPSIS
+    Decode a NUL-terminated string from an InstallShield record field.
+  .PARAMETER Bytes
+    Fixed-size record field bytes. Decoding stops at the first NUL sequence.
+  .PARAMETER Encoding
+    Encoding used by the current record generation; defaults to the Windows ANSI code page.
+  #>
   [OutputType([string])]
   param (
     [Parameter(Mandatory)]
@@ -31,6 +49,14 @@ function Save-InstallShieldRange {
   <#
   .SYNOPSIS
     Save a byte range from the installer stream to a destination file
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Offset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER Length
+    Declared size or parser bound in bytes or characters, as named by the field; ranges are validated before reading.
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string])]
   param (
@@ -64,6 +90,10 @@ function Join-InstallShieldSafePath {
   <#
   .SYNOPSIS
     Join a payload relative path under an extraction root without allowing path escape
+  .PARAMETER Root
+    Current structured format node or record being interpreted.
+  .PARAMETER RelativePath
+    Installer-relative path resolved without allowing traversal outside the selected root.
   #>
   [OutputType([string])]
   param (
@@ -81,6 +111,8 @@ function Test-InstallShieldZlibStream {
   <#
   .SYNOPSIS
     Test the decoded payload prefix for a structurally valid zlib header
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
   #>
   [OutputType([bool])]
   param (
@@ -95,6 +127,14 @@ function Test-InstallShieldZlibStream {
 }
 
 function Get-InstallShieldHeader {
+  <#
+  .SYNOPSIS
+    Validate and decode a 46-byte InstallShield stream header.
+  .PARAMETER Stream
+    Seekable installer stream owned by the caller. Its position is restored by shared random-access reads.
+  .PARAMETER Offset
+    Absolute file offset of the candidate InstallShield or ISSetupStream header.
+  #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)]
@@ -104,11 +144,15 @@ function Get-InstallShieldHeader {
     [long]$Offset
   )
 
+  # Reject truncated candidates before interpreting the fixed stream header. A
+  # textual signature alone is not sufficient evidence of an archive record.
   if ($Offset + 46 -gt $Stream.Length) { return $null }
   $Bytes = Read-PEFileBytes -Stream $Stream -Offset $Offset -Count 46
   $Signature = ConvertFrom-InstallShieldCString -Bytes $Bytes[0..13] -Encoding ([System.Text.Encoding]::ASCII)
   if ($Signature -notin @('InstallShield', 'ISSetupStream')) { return $null }
 
+  # Only the observed record-layout variants are accepted. This prevents an
+  # incidental signature in payload data from driving variable-length reads.
   $Type = [System.BitConverter]::ToUInt32($Bytes, 16)
   if ($Type -gt 4) { return $null }
 
@@ -122,6 +166,14 @@ function Get-InstallShieldHeader {
 }
 
 function Get-InstallShieldOldAttribute {
+  <#
+  .SYNOPSIS
+    Decode one legacy 0x138-byte InstallShield file attribute record.
+  .PARAMETER Stream
+    Seekable installer stream owned by the caller.
+  .PARAMETER Offset
+    Absolute file offset of the fixed attribute record; payload data follows the record.
+  #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)]
@@ -131,6 +183,8 @@ function Get-InstallShieldOldAttribute {
     [long]$Offset
   )
 
+  # Legacy records use a fixed 0x138-byte attribute block followed immediately
+  # by the encoded file bytes, so both ranges can be validated without seeking.
   if ($Offset + $Script:InstallShieldOldAttributeSize -gt $Stream.Length) { return $null }
   $Bytes = Read-PEFileBytes -Stream $Stream -Offset $Offset -Count $Script:InstallShieldOldAttributeSize
   $FileName = ConvertFrom-InstallShieldCString -Bytes $Bytes[0..259]
@@ -150,6 +204,16 @@ function Get-InstallShieldOldAttribute {
 }
 
 function Get-InstallShieldStreamAttribute {
+  <#
+  .SYNOPSIS
+    Decode one ISSetupStream variable-name file attribute record.
+  .PARAMETER Stream
+    Seekable installer stream owned by the caller.
+  .PARAMETER Offset
+    Absolute file offset of the 24-byte fixed attribute prefix.
+  .PARAMETER Type
+    Stream header record type. Type 4 inserts an additional 24-byte field before the name.
+  #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)]
@@ -162,6 +226,8 @@ function Get-InstallShieldStreamAttribute {
     [uint32]$Type
   )
 
+  # ISSetupStream records separate a fixed prefix from a bounded UTF-16 name.
+  # Type 4 inserts another fixed field before that name.
   if ($Offset + 24 -gt $Stream.Length) { return $null }
   $Bytes = Read-PEFileBytes -Stream $Stream -Offset $Offset -Count 24
   $FileNameLength = [System.BitConverter]::ToUInt32($Bytes, 0)
@@ -189,6 +255,14 @@ function Get-InstallShieldStreamAttribute {
 }
 
 function Skip-InstallShieldNb10Prefix {
+  <#
+  .SYNOPSIS
+    Skip the optional bounded NB10/debug prefix before InstallShield records.
+  .PARAMETER Stream
+    Seekable installer stream owned by the caller.
+  .PARAMETER Offset
+    Absolute overlay offset to probe. The returned value is an absolute candidate record offset.
+  #>
   [OutputType([long])]
   param (
     [Parameter(Mandatory)]
@@ -202,6 +276,9 @@ function Skip-InstallShieldNb10Prefix {
   $Prefix = [System.Text.Encoding]::ASCII.GetString((Read-PEFileBytes -Stream $Stream -Offset $Offset -Count 4))
   if ($Prefix -ne 'NB10') { return $Offset }
 
+  # Some launchers retain a short CodeView/debug prefix at the overlay start.
+  # Scan only its bounded printable fields rather than searching arbitrarily
+  # for a later archive signature that might belong to embedded content.
   $Scan = $Offset + 4
   $PrintableRuns = 0
   $InPrintable = $false
@@ -224,6 +301,18 @@ function Skip-InstallShieldNb10Prefix {
 }
 
 function Export-InstallShieldDecodedFile {
+  <#
+  .SYNOPSIS
+    Decode and export one bounded InstallShield catalog entry.
+  .PARAMETER Stream
+    Seekable installer stream containing the encoded payload range; caller retains ownership.
+  .PARAMETER Attribute
+    Validated record with absolute DataOffset, FileLength, and file-name evidence.
+  .PARAMETER DestinationPath
+    Extraction root. The record name is resolved beneath this root with traversal checks.
+  .PARAMETER StreamMode
+    Select the ISSetupStream block transform instead of the legacy transform.
+  #>
   [OutputType([string])]
   param (
     [Parameter(Mandatory)]
@@ -239,6 +328,8 @@ function Export-InstallShieldDecodedFile {
     [switch]$StreamMode
   )
 
+  # The record flags select the InstallShield byte transform independently of
+  # the optional zlib layer applied by Unicode launcher records.
   $HasType2Or4 = ($Attribute.EncodedFlags -band 6) -ne 0
   $HasType4 = ($Attribute.EncodedFlags -band 4) -ne 0
   $OutputPath = Join-InstallShieldSafePath -Root $DestinationPath -RelativePath $Attribute.FileName
@@ -266,6 +357,8 @@ function Export-InstallShieldDecodedFile {
     }
 
     $Output = [System.IO.File]::Open($OutputPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    # Probe the transformed stream for a valid zlib header before decoding;
+    # launcher flags alone are not trusted to imply compressed data.
     if ($Attribute.IsUnicodeLauncher -ne 0 -and (Test-InstallShieldZlibStream -Stream $PayloadStream)) {
       $null = Expand-InstallerCompressedStream -Algorithm Zlib -Stream $PayloadStream -Destination $Output -MaximumBytes 1073741824
     } else {
@@ -282,6 +375,16 @@ function Export-InstallShieldDecodedFile {
 }
 
 function Expand-InstallShieldEncryptedPayload {
+  <#
+  .SYNOPSIS
+    Iterate an encoded InstallShield stream catalog and export its files.
+  .PARAMETER Stream
+    Seekable installer stream owned by the caller.
+  .PARAMETER Offset
+    Absolute offset of the decoded InstallShield/ISSetupStream header candidate.
+  .PARAMETER DestinationPath
+    Safe extraction root for decoded entries.
+  #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)]
@@ -294,6 +397,8 @@ function Expand-InstallShieldEncryptedPayload {
     [string]$DestinationPath
   )
 
+  # Authenticate the catalog header before selecting the generation-specific
+  # attribute reader. Each successful record advances over its adjacent data.
   $Header = Get-InstallShieldHeader -Stream $Stream -Offset $Offset
   if (-not $Header) { return $null }
 
@@ -305,6 +410,8 @@ function Expand-InstallShieldEncryptedPayload {
     } else {
       Get-InstallShieldOldAttribute -Stream $Stream -Offset $Cursor
     }
+    # Stop at the first malformed or non-advancing record. Continuing would
+    # reinterpret payload bytes as catalog entries and could amplify output.
     if (-not $Attribute -or $Attribute.NextOffset -le $Cursor) { break }
 
     $Files.Add((Export-InstallShieldDecodedFile -Stream $Stream -Attribute $Attribute -DestinationPath $DestinationPath -StreamMode:$Header.IsSetupStream))
@@ -321,6 +428,18 @@ function Expand-InstallShieldEncryptedPayload {
 }
 
 function Read-InstallShieldTextToken {
+  <#
+  .SYNOPSIS
+    Read one bounded text token from a plain InstallShield record.
+  .PARAMETER Stream
+    Seekable installer stream owned by the caller.
+  .PARAMETER Cursor
+    Mutable absolute file cursor advanced past the token and record padding.
+  .PARAMETER Unicode
+    Decode UTF-16LE code units instead of ANSI bytes.
+  .PARAMETER MaximumCharacters
+    Maximum characters accepted for this token before the candidate is rejected.
+  #>
   [OutputType([string])]
   param (
     [Parameter(Mandatory)]
@@ -336,6 +455,8 @@ function Read-InstallShieldTextToken {
     [int]$MaximumCharacters
   )
 
+  # Plain records have no explicit token lengths. Read a bounded printable run
+  # using the generation-selected character width, then consume its delimiter.
   $Bytes = [System.Collections.Generic.List[byte]]::new()
   $Stream.Position = $Cursor.Value
   while ($Stream.Position -lt $Stream.Length -and $Bytes.Count -lt $MaximumCharacters * $(if ($Unicode) { 2 } else { 1 })) {
@@ -359,6 +480,8 @@ function Read-InstallShieldTextToken {
     }
   }
 
+  # Advance across non-printable separator/padding bytes so the next token begins
+  # at the first printable ANSI byte or non-control UTF-16 code unit.
   $Cursor.Value = $Stream.Position
   while ($Cursor.Value -lt $Stream.Length) {
     $Stream.Position = $Cursor.Value
@@ -374,6 +497,8 @@ function Read-InstallShieldTextToken {
     }
   }
 
+  # Decode only after the cursor has been advanced, preserving sequential record
+  # parsing even when the token itself is empty.
   if ($Unicode) {
     return [System.Text.Encoding]::Unicode.GetString($Bytes.ToArray()).TrimEnd([char]0)
   }
@@ -381,6 +506,16 @@ function Read-InstallShieldTextToken {
 }
 
 function Get-InstallShieldPlainRecord {
+  <#
+  .SYNOPSIS
+    Decode one plain ANSI or UTF-16 InstallShield file record.
+  .PARAMETER Stream
+    Seekable installer stream owned by the caller.
+  .PARAMETER Offset
+    Absolute record offset. Returned DataOffset points to the adjacent payload bytes.
+  .PARAMETER Unicode
+    Interpret text tokens as UTF-16LE rather than ANSI.
+  #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)]
@@ -393,6 +528,8 @@ function Get-InstallShieldPlainRecord {
     [switch]$Unicode
   )
 
+  # Plain records encode four bounded text tokens followed immediately by the
+  # payload. The decimal length token is part of the format, not a file guess.
   $Cursor = $Offset
   $FileName = Read-InstallShieldTextToken -Stream $Stream -Cursor ([ref]$Cursor) -Unicode:$Unicode -MaximumCharacters 260
   $DestinationName = Read-InstallShieldTextToken -Stream $Stream -Cursor ([ref]$Cursor) -Unicode:$Unicode -MaximumCharacters 260
@@ -415,6 +552,18 @@ function Get-InstallShieldPlainRecord {
 }
 
 function Expand-InstallShieldPlainPayload {
+  <#
+  .SYNOPSIS
+    Export sequential plain InstallShield records from an overlay.
+  .PARAMETER Stream
+    Seekable installer stream owned by the caller.
+  .PARAMETER Offset
+    Absolute offset of the first plain record; Unicode layouts skip their four-byte prefix.
+  .PARAMETER DestinationPath
+    Safe extraction root for record destination names.
+  .PARAMETER Unicode
+    Select the UTF-16LE plain-record layout.
+  #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)]
@@ -430,10 +579,14 @@ function Expand-InstallShieldPlainPayload {
     [switch]$Unicode
   )
 
+  # The Unicode layout has a four-byte prefix before its first UTF-16 token;
+  # ANSI records begin directly at the candidate overlay offset.
   $Cursor = if ($Unicode) { $Offset + 4 } else { $Offset }
   $Files = [System.Collections.Generic.List[string]]::new()
   while ($Cursor -lt $Stream.Length) {
     $Record = Get-InstallShieldPlainRecord -Stream $Stream -Offset $Cursor -Unicode:$Unicode
+    # A failed record terminates this layout attempt. The caller can then try
+    # another known layout without scanning through untrusted payload bytes.
     if (-not $Record) { break }
     $OutputPath = Join-InstallShieldSafePath -Root $DestinationPath -RelativePath $Record.DestinationName
     $Files.Add((Save-InstallShieldRange -Stream $Stream -Offset $Record.DataOffset -Length $Record.FileLength -Path $OutputPath))
@@ -471,6 +624,8 @@ function Invoke-InstallShieldExtraction {
   $null = New-Item -Path $DestinationPath -ItemType Directory -Force
   $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   try {
+    # InstallShield records live after the complete PE image. Preserve the PE
+    # launcher separately, then parse only the bounded overlay as archive data.
     $DataOffset = Get-PEOverlayOffset -Stream $Stream
     if ($DataOffset -le 0) { throw 'Not a PE InstallShield file.' }
     if ($DataOffset -ge $Stream.Length) { throw 'No InstallShield overlay data found.' }
@@ -479,6 +634,8 @@ function Invoke-InstallShieldExtraction {
     $LauncherPath = Save-InstallShieldRange -Stream $Stream -Offset 0 -Length $DataOffset -Path $LauncherPath
     $CandidateOffset = Skip-InstallShieldNb10Prefix -Stream $Stream -Offset $DataOffset
 
+    # Prefer authenticated encoded catalogs. Plain Unicode and ANSI records are
+    # generation-specific fallbacks attempted only from the same overlay start.
     $Result = Expand-InstallShieldEncryptedPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath
     if (-not $Result) {
       $Result = Expand-InstallShieldPlainPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath -Unicode
@@ -538,6 +695,8 @@ function Read-InstallShieldIniConfiguration {
   <#
   .SYNOPSIS
     Read a bounded extracted InstallShield Setup.ini file
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([System.Collections.IDictionary])]
   param (
@@ -573,6 +732,12 @@ function Get-InstallShieldIniValue {
   <#
   .SYNOPSIS
     Read one case-insensitive value from parsed InstallShield INI metadata
+  .PARAMETER Configuration
+    Parsed format configuration used to resolve static installer metadata and payload selection.
+  .PARAMETER Section
+    Current structured format node or record being interpreted.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
   #>
   param (
     [Parameter(Mandatory)]
@@ -598,6 +763,8 @@ function ConvertTo-InstallShieldPayloadPath {
   <#
   .SYNOPSIS
     Normalize a Setup.ini payload path for comparison with extracted records
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string])]
   param (
@@ -633,6 +800,8 @@ function Get-InstallShieldMsiPayloadSelection {
   )
 
   $Warnings = [System.Collections.Generic.List[string]]::new()
+  # The root Setup.ini is the bootstrapper's primary configuration. A sole
+  # nested copy is accepted, but multiple copies are deliberately ambiguous.
   $SetupIniFiles = @(Get-ChildItem -LiteralPath $ExtractedPath -Filter 'Setup.ini' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName)
   $RootSetupIni = @($SetupIniFiles | Where-Object {
       [System.IO.Path]::GetRelativePath($ExtractedPath, $_.FullName) -ieq 'Setup.ini'
@@ -650,6 +819,8 @@ function Get-InstallShieldMsiPayloadSelection {
   $PackageName = $null
   $PackageLocation = $null
   if ($SetupIni) {
+    # Startup.PackageName names a package section; that section's Location can
+    # provide the exact embedded path used by the launcher.
     $Configuration = Read-InstallShieldIniConfiguration -Path $SetupIni.FullName
     $PackageName = [string](Get-InstallShieldIniValue -Configuration $Configuration -Section 'Startup' -Name 'PackageName')
     if (-not [string]::IsNullOrWhiteSpace($PackageName)) {
@@ -668,6 +839,8 @@ function Get-InstallShieldMsiPayloadSelection {
     } | Select-Object -Unique)
 
   $Selected = $null
+  # Match configured paths before considering any fallback. Basename matching
+  # is allowed only when Setup.ini did not include a directory component.
   foreach ($ConfiguredPath in $ConfiguredPaths) {
     if ([System.Uri]::IsWellFormedUriString($ConfiguredPath, [System.UriKind]::Absolute)) { continue }
     $HasDirectory = $ConfiguredPath.Contains('\')
@@ -694,6 +867,8 @@ function Get-InstallShieldMsiPayloadSelection {
     $SourceKind = 'ExternalOrMissing'
     $Warnings.Add("Setup.ini selects '$PackageName', but that MSI path was not extracted.")
   } elseif ($RelativeMsiFiles.Count -eq 1) {
+    # A single MSI is a bounded, reviewable fallback. Multiple MSI files cannot
+    # be selected by wildcard because the launcher may apply product logic.
     $Selected = $RelativeMsiFiles[0]
     $SelectionMethod = 'SingleExtractedMsi'
     $SourceKind = 'Embedded'
@@ -719,6 +894,14 @@ function Resolve-InstallShieldMsiFile {
   <#
   .SYNOPSIS
     Resolve the exact MSI path selected by the InstallShield bootstrapper
+  .PARAMETER Installer
+    Parsed context or metadata object produced by the corresponding format reader.
+  .PARAMETER Item
+    MSI files extracted from validated InstallShield records and considered for the configured payload path.
+  .PARAMETER Pattern
+    Selection expression applied to validated records without executing installer logic.
+  .PARAMETER NameWasSpecified
+    Indicates whether the caller explicitly constrained payload selection by name.
   #>
   [OutputType([System.IO.FileInfo])]
   param (
@@ -739,6 +922,8 @@ function Resolve-InstallShieldMsiFile {
   $Selection = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value
   $SelectedRelativePath = $null -eq $Selection ? $null : [string]$Selection.SelectedMsiPath
 
+  # A parser-derived Setup.ini selection remains authoritative even when the
+  # caller supplied a wildcard; the wildcard is only a review constraint.
   if (-not [string]::IsNullOrWhiteSpace($SelectedRelativePath)) {
     $Selected = @($Item | Where-Object {
         [System.IO.Path]::GetRelativePath($Installer.ExtractedPath, $_.FullName).Equals($SelectedRelativePath, [System.StringComparison]::OrdinalIgnoreCase)
@@ -750,6 +935,8 @@ function Resolve-InstallShieldMsiFile {
     return $Selected[0]
   }
 
+  # Never silently choose among unresolved MSI payloads. An explicit name is a
+  # caller-reviewed override and uses the deterministic exact-match helper.
   if (-not $NameWasSpecified) {
     $Reason = $null -eq $Selection ? 'no Setup.ini selection metadata is available' : "selection method '$($Selection.SelectionMethod)' did not resolve an embedded MSI"
     throw "InstallShield MSI selection is ambiguous because $Reason; specify -Name for a reviewed manual override"
@@ -810,6 +997,8 @@ function Get-InstallShieldInfo {
     $InstallerPath = (Get-Item -Path $Path -Force).FullName
     $ExtractedPath = Expand-InstallShieldInstaller -Path $InstallerPath -DestinationPath $DestinationPath
 
+    # Classify the extracted payload from format artifacts rather than launcher
+    # branding, which is shared by Basic MSI and InstallScript variants.
     $MsiFiles = @(Get-ChildItem -Path $ExtractedPath -Filter '*.msi' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName)
     $InxFiles = @(Get-ChildItem -Path $ExtractedPath -Include '*.inx', '*.ins' -Recurse -File -ErrorAction SilentlyContinue)
     $CabFiles = @(Get-ChildItem -Path $ExtractedPath -Include '*.cab', '*.hdr' -Recurse -File -ErrorAction SilentlyContinue)
@@ -882,6 +1071,8 @@ function Get-InstallShieldMsiInfo {
     }
 
     try {
+      # Resolve the same MSI the bootstrapper names, then delegate database
+      # semantics to the canonical MSI reader instead of duplicating table logic.
       $MsiFiles = @($Installer.MsiFiles | ForEach-Object { Get-Item -Path $_ -Force })
       $MsiFile = Resolve-InstallShieldMsiFile -Installer $Installer -Item $MsiFiles -Pattern $Name -NameWasSpecified $NameWasSpecified
       $MsiInfo = Get-MsiInstallerInfo -Path $MsiFile.FullName
@@ -922,6 +1113,12 @@ function Read-ProductVersionFromInstallShield {
   <#
   .SYNOPSIS
     Read ProductVersion from the MSI payload inside an InstallShield executable
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER Installer
+    Parsed context or metadata object produced by the corresponding format reader.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
   #>
   [OutputType([string])]
   param (
@@ -941,6 +1138,12 @@ function Read-ProductCodeFromInstallShield {
   <#
   .SYNOPSIS
     Read ProductCode from the MSI payload inside an InstallShield executable
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER Installer
+    Parsed context or metadata object produced by the corresponding format reader.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
   #>
   [OutputType([string])]
   param (
@@ -960,6 +1163,12 @@ function Read-UpgradeCodeFromInstallShield {
   <#
   .SYNOPSIS
     Read UpgradeCode from the MSI payload inside an InstallShield executable
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER Installer
+    Parsed context or metadata object produced by the corresponding format reader.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
   #>
   [OutputType([string])]
   param (

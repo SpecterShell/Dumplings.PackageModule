@@ -10,6 +10,32 @@ $Script:WebDriverPoolStorageKey = '__DumplingsWebDriverLeasePool'
 $Script:WebDriverLeaseDurationSeconds = 30
 $Script:StandaloneWebDriverPool = $null
 $Script:WebDriverLeases = $null
+$Script:WebDriverBlockedUrlPatterns = [string[]]@(
+  # Avoid downloading ordinary media that is not needed for page extraction.
+  '*.jpg*'
+  '*.jpeg*'
+  '*.bmp*'
+  '*.png*'
+  '*.webp*'
+  '*.gif*'
+  '*.svg*'
+  '*.mp4*'
+  '*.webm*'
+  '*.flv*'
+
+  # YouTube media delivery commonly uses extensionless googlevideo.com URLs.
+  # Keep these service-specific so unrelated Google resources remain usable.
+  '*://youtube.com/*'
+  '*://*.youtube.com/*'
+  '*://youtu.be/*'
+  '*://*.youtu.be/*'
+  '*://youtube-nocookie.com/*'
+  '*://*.youtube-nocookie.com/*'
+  '*://youtube.googleapis.com/*'
+  '*://youtubei.googleapis.com/*'
+  '*://*.ytimg.com/*'
+  '*://*.googlevideo.com/*'
+)
 
 function Get-WebDriverAssembly {
   <#
@@ -230,7 +256,7 @@ function Initialize-EdgeDriver {
 
   $Driver.Manage().Window.Size = [Drawing.Size]::new(1920, 1080)
   $Parameters = [Collections.Generic.Dictionary[string, object]]::new()
-  $Parameters.Add('urls', @('*.jpg*', '*.jpeg*', '*.bmp*', '*.png*', '*.webp*', '*.gif*', '*.svg*', '*.mp4*', '*.webm*', '*.flv*'))
+  $Parameters.Add('urls', $Script:WebDriverBlockedUrlPatterns)
   $null = $Driver.ExecuteCdpCommand('Network.setBlockedURLs', $Parameters)
   $null = $Driver.ExecuteCdpCommand('Network.enable', [Collections.Generic.Dictionary[string, object]]::new())
 }

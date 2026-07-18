@@ -132,7 +132,10 @@ namespace Dumplings.Versioning
                 int result = left.CompareTo(right);
                 if (result != 0)
                 {
-                    return result;
+                    // PowerShell's Sort-Object Top/Bottom heap compares against exactly -1 and
+                    // 1 instead of checking only the sign. Keep the public IComparable result
+                    // canonical even when an inner string comparer returns another magnitude.
+                    return result < 0 ? -1 : 1;
                 }
             }
 
@@ -289,6 +292,10 @@ namespace Dumplings.Versioning
         {
             ArgumentNullException.ThrowIfNull(value);
             Value = value.Trim();
+            if (Value.Length == 0)
+            {
+                throw new ArgumentException("A chunk version cannot be empty.", nameof(value));
+            }
             _groups = ParseGroups(Value);
         }
 
@@ -302,8 +309,16 @@ namespace Dumplings.Versioning
                 return false;
             }
 
-            version = new ChunkVersion(value);
-            return true;
+            try
+            {
+                version = new ChunkVersion(value);
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                version = null;
+                return false;
+            }
         }
 
         public int CompareTo(ChunkVersion? other)
@@ -321,7 +336,8 @@ namespace Dumplings.Versioning
                 int result = left.CompareTo(right);
                 if (result != 0)
                 {
-                    return result;
+                    // Sort-Object's optimized heap path expects canonical comparison values.
+                    return result < 0 ? -1 : 1;
                 }
             }
 
@@ -369,7 +385,7 @@ namespace Dumplings.Versioning
             int start = 0;
             for (int index = 0; index <= value.Length; index++)
             {
-                if (index == value.Length || value[index] == '-' || value[index] == '+')
+                if (index == value.Length || value[index] == '-' || value[index] == '+' || value[index] == '_')
                 {
                     groups.Add(Group.Parse(value, start, index - start));
                     start = index + 1;

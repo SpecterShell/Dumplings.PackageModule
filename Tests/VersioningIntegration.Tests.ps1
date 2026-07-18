@@ -14,6 +14,7 @@ Describe 'PackageTask chunk version state comparison' {
     @{ LastVersion = '1.2.3'; CurrentVersion = '1.2.3+1'; ExpectedStatus = 'Updated' }
     @{ LastVersion = '1.2.3-0.0.0'; CurrentVersion = '1.2.3'; ExpectedStatus = '' }
     @{ LastVersion = '1.2.3+2'; CurrentVersion = '1.2.3+1'; ExpectedStatus = 'Rollbacked' }
+    @{ LastVersion = '6.8.7_130258'; CurrentVersion = '6.8.7.1_130597'; ExpectedStatus = 'Updated' }
   ) {
     $TaskPath = Join-Path $TestDrive ([guid]::NewGuid().ToString())
     $null = New-Item -Path $TaskPath -ItemType Directory

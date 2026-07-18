@@ -93,21 +93,22 @@ function ConvertTo-WinGetInstallerManifestMetadata {
   # Scope, associations, dependencies, and locale identity remain author-controlled.
   # Publisher here is used only for an existing AppsAndFeaturesEntries.Publisher field.
   $PropertyMap = [ordered]@{
-    ProductCode                  = @('AppsAndFeaturesProductCode', 'ProductCode')
-    UpgradeCode                  = @('UpgradeCode')
-    DisplayName                  = @('DisplayName', 'ProductName')
-    DisplayVersion               = @('DisplayVersion', 'ProductVersion', 'Version')
-    Publisher                    = $InstallerType -cin @('msix', 'appx') ? @('PublisherDisplayName') : @('Publisher', 'Manufacturer', 'Authors')
-    DefaultInstallLocation       = @('DefaultInstallLocation')
-    AppsAndFeaturesInstallerType = @('AppsAndFeaturesInstallerType')
-    WritesAppsAndFeaturesEntry   = @('WritesAppsAndFeaturesEntry')
-    SignatureSha256              = @('SignatureSha256')
-    PackageFamilyName            = @('PackageFamilyName')
-    Platform                     = @('Platform')
-    MinimumOSVersion             = @('MinimumOSVersion')
-    Capabilities                 = @('Capabilities')
-    RestrictedCapabilities       = @('RestrictedCapabilities')
-    UnresolvedFields             = @('UnresolvedFields')
+    ProductCode                   = @('AppsAndFeaturesProductCode', 'ProductCode')
+    UpgradeCode                   = @('UpgradeCode')
+    DisplayName                   = @('DisplayName', 'ProductName')
+    DisplayVersion                = @('DisplayVersion', 'ProductVersion', 'Version')
+    Publisher                     = $InstallerType -cin @('msix', 'appx') ? @('PublisherDisplayName') : @('Publisher', 'Manufacturer', 'Authors')
+    DefaultInstallLocation        = @('DefaultInstallLocation')
+    AppsAndFeaturesInstallerType  = @('AppsAndFeaturesInstallerType')
+    WritesAppsAndFeaturesEntry    = @('WritesAppsAndFeaturesEntry')
+    SignatureSha256               = @('SignatureSha256')
+    PackageFamilyName             = @('PackageFamilyName')
+    Platform                      = @('Platform')
+    MinimumOSVersion              = @('MinimumOSVersion')
+    Capabilities                  = @('Capabilities')
+    RestrictedCapabilities        = @('RestrictedCapabilities')
+    UnresolvedFields              = @('UnresolvedFields')
+    DelegatesAppsAndFeaturesEntry = @('DelegatesAppsAndFeaturesEntry')
   }
 
   foreach ($TargetProperty in $PropertyMap.Keys) {
@@ -141,44 +142,60 @@ function Get-WinGetKnownInstallerManifestInfo {
     switch ($InstallerType) {
       { $_ -cin @('msi', 'wix') } {
         $Info = Get-MsiInstallerInfo -Path $Path
-        if ($InstallerType -ceq 'wix' -and $Info.InstallerBuilder -cne 'WiX') {
+        # Unknown means the MSI retained no source-backed authoring signature; it is not positive
+        # evidence that contradicts a manifest-declared WiX type.
+        if ($InstallerType -ceq 'wix' -and $Info.InstallerBuilder -cnotin @('WiX', 'Unknown')) {
           throw "The MSI builder is '$($Info.InstallerBuilder)', not WiX"
         }
         $ScopeInfo = [pscustomobject]@{ Scope = $Info.AllUsers -ceq '1' ? 'machine' : $null }
-        return [pscustomobject]@{ ParserName = 'Windows Installer'; InputObject = @($ScopeInfo, $Info) }
+        $TypeInfo = $null
+        if ($InstallerType -ceq 'wix' -and $Info.InstallerBuilder -ceq 'Unknown' -and $Info.AppsAndFeaturesInstallerType -ceq 'msi' -and -not $Info.HasCustomAppsAndFeaturesEntry) {
+          # An unknown builder is inconclusive rather than contradictory. For a normal MSI ARP
+          # entry, retain the manifest-declared WiX family so AppsAndFeaturesEntries does not gain
+          # a redundant `InstallerType: msi` solely because authoring signatures were stripped.
+          $TypeInfo = [pscustomobject]@{ AppsAndFeaturesInstallerType = 'wix' }
+        }
+        $ParserInput = [System.Collections.Generic.List[psobject]]::new()
+        $ParserInput.Add($ScopeInfo)
+        if ($TypeInfo) { $ParserInput.Add($TypeInfo) }
+        $ParserInput.Add($Info)
+        return [pscustomobject]@{ ParserName = 'Windows Installer'; InputObject = $ParserInput.ToArray() }
       }
       'burn' {
         $null = Get-BurnInfo -Path $Path
         $Manifest = Get-BurnManifest -Path $Path
-        $Registration = $Manifest.BurnManifest.Registration
-        $Arp = $Registration.Arp
-        $RelatedBundle = $Manifest.BurnManifest.RelatedBundle | Select-Object -First 1
-        $ProductCode = $Registration.HasAttribute('Code') ? [string]$Registration.Code : [string]$Registration.Id
-        $UpgradeCode = if ($RelatedBundle) { $RelatedBundle.HasAttribute('Code') ? [string]$RelatedBundle.Code : [string]$RelatedBundle.Id } else { $null }
-        $Scope = switch -Regex ([string]$Registration.PerMachine) {
-          '^(?i)(yes|1|true)$' { 'machine'; break }
-          '^(?i)(no|0|false)$' { 'user'; break }
-          default { $null }
-        }
+        $Registration = @($Manifest.GetElementsByTagName('Registration') | Select-Object -First 1)
+        if ($Registration.Count -eq 0) { throw 'The Burn manifest does not contain a Registration element' }
+        $Registration = $Registration[0]
+        $Arp = @($Registration.ChildNodes | Where-Object LocalName -EQ 'Arp' | Select-Object -First 1)
+        $RelatedBundle = @($Manifest.GetElementsByTagName('RelatedBundle') | Select-Object -First 1)
+        $ProductCode = $Registration.GetAttribute('Code')
+        if ([string]::IsNullOrWhiteSpace($ProductCode)) { $ProductCode = $Registration.GetAttribute('Id') }
+        $UpgradeCode = if ($RelatedBundle.Count -gt 0) {
+          $Value = $RelatedBundle[0].GetAttribute('Code')
+          [string]::IsNullOrWhiteSpace($Value) ? $RelatedBundle[0].GetAttribute('Id') : $Value
+        } else { $null }
+        $ScopeInfo = Get-BurnScopeInfo -Path $Path
         $Info = [pscustomobject]@{
           InstallerType  = 'Burn'
           ProductCode    = $ProductCode
           UpgradeCode    = $UpgradeCode
-          DisplayName    = [string]$Arp.DisplayName
-          DisplayVersion = [string]$Arp.DisplayVersion
-          Publisher      = [string]$Arp.Publisher
-          Scope          = $Scope
+          DisplayName    = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayName') : $null
+          DisplayVersion = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayVersion') : $null
+          Publisher      = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('Publisher') : $null
+          Scope          = $ScopeInfo.DefaultScope
         }
         if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { $Info.DisplayName = Read-ProductNameFromBurn -Path $Path }
         if ([string]::IsNullOrWhiteSpace($Info.DisplayVersion)) { $Info.DisplayVersion = Read-ProductVersionFromExe -Path $Path }
-        return [pscustomobject]@{ ParserName = 'Burn'; InputObject = @($Info) }
+        return [pscustomobject]@{ ParserName = 'Burn'; InputObject = @($ScopeInfo, $Info) }
       }
       'nullsoft' {
         $Info = Get-NSISInfo -Path $Path
         if ($Info.PSObject.Properties.Name -contains 'InstallerType' -and $Info.InstallerType -cne 'Nullsoft') {
           throw "The parser identified '$($Info.InstallerType)', not Nullsoft"
         }
-        return [pscustomobject]@{ ParserName = 'NSIS'; InputObject = @($Info) }
+        $WarningsProperty = $Info.PSObject.Properties['Warnings']
+        return [pscustomobject]@{ ParserName = 'NSIS'; InputObject = @($Info); Warnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value) }
       }
       'inno' {
         $Info = Get-InnoInfo -Path $Path
@@ -352,7 +369,10 @@ function Set-WinGetInstallerManifestMetadata {
   $NeedsAppsAndFeaturesMetadata = ($Installer.Contains('ProductCode') -and -not $InstallerEntry.Contains('ProductCode')) -or ([bool]$Installer['AppsAndFeaturesEntries'] -and -not $InstallerEntry.Contains('AppsAndFeaturesEntries'))
   if ($Metadata.Contains('WritesAppsAndFeaturesEntry') -and -not [bool]$Metadata.WritesAppsAndFeaturesEntry -and $NeedsAppsAndFeaturesMetadata) {
     $Message = "$ParserName reports that the outer installer does not write a visible Apps & Features entry; existing ARP metadata belongs to a nested payload or custom registration"
-    if ($Strict) { throw $Message }
+    # Source-backed NSIS nested-payload evidence identifies wrappers such as Mozilla's 7z+NSIS
+    # layout. The outer stub cannot authoritatively replace the nested/custom ARP metadata, so
+    # preserve existing fields instead of failing a known-family update.
+    if ($Strict -and -not ($ParserName -ceq 'NSIS' -and [bool]$Metadata['DelegatesAppsAndFeaturesEntry'])) { throw $Message }
     $Logger.Invoke($Message, 'Warning')
     return
   }
@@ -635,7 +655,7 @@ function Update-WinGetInstallerManifestInstallers {
     }
     # If no matching installer entry is found, throw an error
     if (-not $MatchingInstallerEntry) {
-      throw "No matching installer entry for [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['tNestedInstallerType']), $($OldInstaller['Scope'])]"
+      throw "No matching installer entry for [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]"
     }
 
     # Deep copy the old installer

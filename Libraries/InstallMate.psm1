@@ -2,6 +2,16 @@
 # Static Tarma InstallMate parser. TIZ packages use raw LZMA followed by tzf3
 # records. This module decodes bounded records without executing setup or
 # probing arbitrary strings from payload files.
+# Binary structure consumed here (LE integers unless stated otherwise):
+#
+#   PE overlay before certificate table
+#   +-- "tiz1".."tiz4" header: version@+0x04, size@+0x10
+#   +-- LZMA properties[5]@+0x38
+#   `-- raw LZMA@+0x3D -> 64-byte "tzf3" segment -> "tin?" database
+#
+# Header and segment integers are LE. The first tzf3 segment type must be 2 and
+# supplies its uint64 length at +0x10. Format-specific install-level and file
+# records are read only at validated offsets under count/output limits.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -16,6 +26,10 @@ function Get-InstallMateScopeInfo {
   <#
   .SYNOPSIS
     Interpret InstallMate install-level behavior and PE fallback evidence
+  .PARAMETER RequestedExecutionLevel
+    Scope or elevation evidence used to classify user, machine, or conditional installation.
+  .PARAMETER InstallLevel
+    Scope or elevation evidence used to classify user, machine, or conditional installation.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -23,6 +37,8 @@ function Get-InstallMateScopeInfo {
     [AllowNull()][Nullable[byte]]$InstallLevel
   )
 
+  # Structured install-level metadata is more precise than the PE manifest and
+  # captures InstallMate's two elevation-dependent dual-scope modes.
   if ($null -ne $InstallLevel) {
     switch ([int]$InstallLevel) {
       0 {
@@ -64,6 +80,8 @@ function Get-InstallMateScopeInfo {
     }
   }
 
+  # Older or ambiguous databases fall back to the launcher's requested
+  # execution level; this is evidence about behavior, not a registry probe.
   switch -Regex ($RequestedExecutionLevel) {
     '^(?i:requireAdministrator)$' {
       return [pscustomobject]@{
@@ -96,6 +114,10 @@ function Read-InstallMateSequentialRecord {
   <#
   .SYNOPSIS
     Read an exact bounded InstallMate record from a sequential decoder
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Count
+    Declared record count or parser count limit; malformed or excessive counts are rejected.
   #>
   [OutputType([byte[]])]
   param (
@@ -114,6 +136,10 @@ function Open-InstallMateDecoderContext {
   <#
   .SYNOPSIS
     Open one bounded raw-LZMA decoder over an InstallMate TIZ archive
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER ArchiveInfo
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -125,6 +151,9 @@ function Open-InstallMateDecoderContext {
   $DataStream = $null
   $Decoder = $null
   try {
+    # TIZ stores LZMA properties in the archive header and the raw compressed
+    # stream immediately after them. The certificate table is excluded by the
+    # previously validated DataEndOffset.
     $Properties = Read-BinaryBytes -Stream $InstallerStream -Offset ($ArchiveInfo.ArchiveOffset + 0x38) -Count 5
     $DataOffset = $ArchiveInfo.ArchiveOffset + 0x3D
     $CompressedSize = $ArchiveInfo.DataEndOffset - $DataOffset
@@ -150,6 +179,8 @@ function Close-InstallMateDecoderContext {
   <#
   .SYNOPSIS
     Dispose all streams owned by an InstallMate decoder context
+  .PARAMETER Context
+    Parsed context or metadata object produced by the corresponding format reader.
   #>
   param ([Parameter(Mandatory)][psobject]$Context)
 
@@ -162,10 +193,14 @@ function Read-InstallMateDatabaseSegment {
   <#
   .SYNOPSIS
     Read and validate the first tzf3 installer-database segment
+  .PARAMETER Decoder
+    Compression framing or bounded decoder selected from validated format metadata.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][IO.Stream]$Decoder)
 
+  # The first decoded tzf3 segment must be the bounded installer database;
+  # later segments contain file bodies and are consumed only during expansion.
   $Header = Read-InstallMateSequentialRecord -Stream $Decoder -Count 64
   if ([Text.Encoding]::ASCII.GetString($Header, 0, 4) -cne 'tzf3') { throw 'The decoded InstallMate stream does not begin with a tzf3 record.' }
   $SegmentType = [BitConverter]::ToUInt16($Header, 8)
@@ -190,12 +225,16 @@ function Get-InstallMateFileRecord {
   <#
   .SYNOPSIS
     Read structured file records from an InstallMate setup database
+  .PARAMETER Database
+    Windows Installer database or related transform path queried read-only.
   #>
   [OutputType([pscustomobject[]])]
   param ([Parameter(Mandatory)][byte[]]$Database)
 
   $Marker = [Text.Encoding]::ASCII.GetBytes("file`0`0`0`0")
   $Records = [Collections.Generic.List[object]]::new()
+  # Marker matches become records only after validating the complete fixed
+  # fields, bounded name, file size, and path-free leaf-name invariant.
   foreach ($Offset in @(Find-BinaryPattern -Bytes $Database -Pattern $Marker -Maximum $Script:InstallMateMaximumFileRecords)) {
     if ($Offset + 0x58 -gt $Database.Length) { continue }
     $FileSize = [BitConverter]::ToUInt64($Database, [int]$Offset + 0x3C)
@@ -224,6 +263,10 @@ function Read-InstallMateDatabaseInfo {
   <#
   .SYNOPSIS
     Decode InstallMate scope and file-table evidence from the first tzf3 record
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER ArchiveInfo
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -237,6 +280,8 @@ function Read-InstallMateDatabaseInfo {
 
   $InstallLevel = $null
   $InstallRecordOffset = $null
+  # The install-level byte is mapped only for database generations whose record
+  # layout has been corroborated. Exactly one valid candidate is required.
   if ($ArchiveInfo.FormatMajor -ge 15) {
     $Marker = [Text.Encoding]::ASCII.GetBytes("inst`0`0`0`0")
     $Candidates = @(
@@ -266,6 +311,8 @@ function Get-InstallMateArchiveInfo {
     InstallMate 9 and later identify internal archives with tiz1 through tiz4.
     Only signatures after the PE image are considered, which avoids matching
     format-name strings compiled into the setup stub.
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -278,6 +325,8 @@ function Get-InstallMateArchiveInfo {
     if ($OverlayOffset -le 0 -or $OverlayOffset + $Script:InstallMateMinimumHeaderBytes -gt $Stream.Length) {
       throw 'The InstallMate PE has no package overlay'
     }
+    # Authenticode data can follow the TIZ stream but is not package content;
+    # use its file offset as the upper archive boundary when present.
     $CertificateDirectory = $Layout.DataDirectories['Certificate']
     $DataEnd = if ($CertificateDirectory -and $CertificateDirectory.Rva -gt $OverlayOffset -and $CertificateDirectory.Rva -le $Stream.Length) {
       [long]$CertificateDirectory.Rva
@@ -286,6 +335,8 @@ function Get-InstallMateArchiveInfo {
 
   $MaximumScanBytes = [Math]::Min($Script:InstallMateMaximumHeaderScanBytes, $DataEnd - $OverlayOffset)
   if ($MaximumScanBytes -lt $Script:InstallMateMinimumHeaderBytes) { throw 'The InstallMate package data is truncated' }
+  # Search only a bounded overlay prefix and authenticate every signature with
+  # version, reserved-field, and declared-size invariants.
   foreach ($SignatureText in @('tiz4', 'tiz3', 'tiz2', 'tiz1')) {
     $Signature = [Text.Encoding]::ASCII.GetBytes($SignatureText)
     foreach ($Offset in @(Find-BinaryPattern -Path $File.FullName -Pattern $Signature -StartOffset $OverlayOffset -Length $MaximumScanBytes -Maximum 32)) {
@@ -321,6 +372,8 @@ function Get-InstallMateInfo {
   <#
   .SYNOPSIS
     Read static InstallMate identity and TIZ archive evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -328,6 +381,8 @@ function Get-InstallMateInfo {
   process {
     $File = Get-Item -LiteralPath $Path -Force
     $ArchiveInfo = Get-InstallMateArchiveInfo -Path $File.FullName
+    # Identity values are named PE resources produced by InstallMate. They are
+    # kept separate from the compressed database evidence used for scope/files.
     $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
     $VersionStrings = Get-PEVersionStringTable -Path $File.FullName -ErrorAction SilentlyContinue
     $ProductCode = ([string]$VersionStrings.ProductCode).Trim()
@@ -341,6 +396,8 @@ function Get-InstallMateInfo {
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
     $Warnings = [System.Collections.Generic.List[string]]::new()
     $DatabaseInfo = $null
+    # Metadata remains useful when a newer database layout cannot be decoded;
+    # expose the limitation as a warning and retain conservative PE evidence.
     try { $DatabaseInfo = Read-InstallMateDatabaseInfo -Path $File.FullName -ArchiveInfo $ArchiveInfo }
     catch { $Warnings.Add("The InstallMate setup database could not be decoded: $($_.Exception.Message)") }
     $ScopeInfo = Get-InstallMateScopeInfo -RequestedExecutionLevel $ExecutionLevel -InstallLevel $DatabaseInfo.InstallLevel
@@ -403,6 +460,14 @@ function Expand-InstallMateInstaller {
     InstallMate file records do not directly expose their resolved installation
     folders. Files are exported under Payload/<record-key>/<file-name> so
     duplicate names remain distinct and no inferred paths are presented as real.
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
@@ -418,6 +483,8 @@ function Expand-InstallMateInstaller {
     $Context = Open-InstallMateDecoderContext -Path $File.FullName -ArchiveInfo $ArchiveInfo
     $Results = [Collections.Generic.List[object]]::new()
     try {
+      # Decode the catalog once, then match sequential tzf3 payload segments by
+      # their structured type and uncompressed size rather than physical names.
       $Database = Read-InstallMateDatabaseSegment -Decoder $Context.Decoder
       $Outstanding = [Collections.Generic.List[object]]::new()
       foreach ($Record in @(Get-InstallMateFileRecord -Database $Database.Bytes)) { $Outstanding.Add($Record) }
@@ -426,6 +493,8 @@ function Expand-InstallMateInstaller {
       $DecodedBytes = $Database.Length + 64L
       $SegmentCount = 1
 
+      # Raw LZMA is sequential: unselected segments must still be drained to
+      # preserve decoder history, but they are copied to Stream.Null.
       while ($RemainingSelected -gt 0) {
         if (++$SegmentCount -gt $Script:InstallMateMaximumFileRecords + 256) { throw 'The InstallMate package exceeds the segment-count limit.' }
         $Header = Read-InstallMateSequentialRecord -Stream $Context.Decoder -Count 64
@@ -435,6 +504,8 @@ function Expand-InstallMateInstaller {
         if ($SegmentLength -gt $Script:InstallMateMaximumSegmentBytes -or $SegmentLength -gt [long]::MaxValue) { throw 'The InstallMate payload segment exceeds the size limit.' }
         if ($DecodedBytes + 64L + [long]$SegmentLength -gt $MaximumExpandedBytes) { throw "The InstallMate decoded stream exceeds the $MaximumExpandedBytes-byte output limit." }
 
+        # Consume each catalog record at most once so repeated type/size pairs
+        # retain their original stream order instead of aliasing one output.
         $Record = $Outstanding | Where-Object { $_.SegmentType -eq $SegmentType -and $_.UncompressedSize -eq [long]$SegmentLength } | Select-Object -First 1
         $IsSelected = $null -ne $Record -and (Test-ExtractionPattern -Path "Payload/$($Record.Key)/$($Record.FileName)" -Pattern $Name)
         if ($IsSelected) {
@@ -463,6 +534,8 @@ function Test-InstallMate {
   <#
   .SYNOPSIS
     Test whether a file contains a supported InstallMate TIZ header
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -473,6 +546,8 @@ function Read-ProtocolsFromInstallMate {
   <#
   .SYNOPSIS
     Read protocols when explicit InstallMate registry evidence is available
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -483,6 +558,8 @@ function Read-FileExtensionsFromInstallMate {
   <#
   .SYNOPSIS
     Read file extensions when explicit InstallMate registry evidence is available
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -493,6 +570,8 @@ function Read-ProductVersionFromInstallMate {
   <#
   .SYNOPSIS
     Read the InstallMate PE product version
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallMateInfo -Path $Path).DisplayVersion }
@@ -502,6 +581,8 @@ function Read-ProductNameFromInstallMate {
   <#
   .SYNOPSIS
     Read the InstallMate PE product name
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallMateInfo -Path $Path).DisplayName }
@@ -511,6 +592,8 @@ function Read-PublisherFromInstallMate {
   <#
   .SYNOPSIS
     Read the InstallMate PE publisher
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallMateInfo -Path $Path).Publisher }
@@ -520,6 +603,8 @@ function Read-ProductCodeFromInstallMate {
   <#
   .SYNOPSIS
     Read a literal InstallMate uninstall key when available
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallMateInfo -Path $Path).ProductCode }
@@ -529,6 +614,8 @@ function Read-ScopeFromInstallMate {
   <#
   .SYNOPSIS
     Read InstallMate scope from explicit static evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallMateInfo -Path $Path).Scope }

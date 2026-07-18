@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: MIT
 # This module only bridges to the independently licensed InstallerParsers CLI.
+# Process boundary:
+#
+#   Inno installer path -> InstallerBridge -> Inno.GetInfo/Expand
+#                         <- structured setup tables and ARP evidence
+#
+# The GPL parser owns the #11111 offset table, chunk/CRC/LZMA decoding, and
+# version-specific record layouts. This MIT bridge neither copies those internals
+# nor opens the installer. See Modules/InstallerParsers/Libraries/Inno.psm1.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }

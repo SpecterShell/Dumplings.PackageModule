@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Format sources: https://github.com/wixtoolset/wix
+# Burn binary structure consumed here (section-relative, LE integers):
+#
+#   PE bundle
+#   +-- .wixburn: magic 00 43 F1 00 (uint32 LE 0x00F14300), version,
+#   |   bundle GUID, StubSize,
+#   |   signature fields, container format/count, container-size[u32]*
+#   `-- [StubSize] UX CAB -> entry "0" BurnManifest XML -> attached containers
+#
+# Container sizes frame exact sequential ranges. The XML chain, package
+# conditions, and registration records determine scope and visible ARP ownership;
+# physical package order alone does not.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -98,6 +109,8 @@ function Get-BurnInfo {
     $Reader = [System.IO.BinaryReader]::new($Stream)
 
     try {
+      # Validate the PE structure in file order before locating the format-specific section.
+      # Every following offset is absolute in the original bundle stream.
       # DOS header
       $Stream.Seek(0, 'Begin') | Out-Null
       $DosHeader = $Reader.ReadBytes($Script:IMAGE_DOS_HEADER_SIZE)
@@ -113,7 +126,8 @@ function Get-BurnInfo {
       $OptionalHeaderSize = [System.BitConverter]::ToUInt16($NTHeader, $Script:IMAGE_NT_HEADER_OFFSET_SIZEOFOPTIONALHEADER)
       $FirstSectionOffset = $PEOffset + $Script:IMAGE_NT_HEADER_SIZE + $OptionalHeaderSize
 
-      # Find ".wixburn" section
+      # Find exactly the section whose eight-byte name is .wixburn; payload strings elsewhere are
+      # not sufficient Burn evidence.
       $WixBurnSectionIndex = -1
       $WixBurnSectionBytes = $null
       $Stream.Seek($FirstSectionOffset, 'Begin') | Out-Null
@@ -137,7 +151,8 @@ function Get-BurnInfo {
       $Stream.Seek($WixBurnDataOffset, 'Begin') | Out-Null
       $WixBurnBytes = $Reader.ReadBytes($WixBurnRawDataSize)
 
-      # Validate magic/version/format
+      # Validate the Burn section generation and container format before reading its variable-size
+      # container-size array.
       $magic = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_MAGIC)
       if ($magic -ne $Script:BURN_SECTION_MAGIC) { throw 'Invalid WiX Burn magic number.' }
       $Version = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_VERSION)
@@ -164,6 +179,8 @@ function Get-BurnInfo {
         $UXSize = $AttachedContainers[0].Size
       }
 
+      # Prefer the original Authenticode boundary. Unsigned/single-container bundles fall back to
+      # the source-defined stub plus UX extent.
       # Calculate Engine Size
       $EngineSize = 0
       if ($OriginalSignatureOffset -gt 0) {
@@ -228,6 +245,8 @@ function Get-BurnStub {
     $CabStream = [System.IO.File]::OpenWrite($CabPath)
 
     try {
+      # Container zero is the UX cabinet and begins exactly at StubSize. Copy only its declared
+      # range rather than the remainder of the bundle.
       $BurnInfo = Get-BurnInfo -Stream $BurnStream
       $null = $BurnStream.Seek($BurnInfo.StubSize, 'Begin')
       $BurnStream.CopyTo($CabStream, $BurnInfo.AttachedContainers[0].Size)
@@ -312,6 +331,8 @@ function Get-BurnUXPayload {
       'StubPath' { (Test-Path -Path $StubPath) ? $StubPath : (throw "The specified Burn stub path '$StubPath' is invalid.") }
       default { throw 'Invalid parameter set.' }
     }
+    # BurnManifest maps logical UX FilePath values to cabinet SourcePath entries; use that mapping
+    # instead of searching cabinet names heuristically.
     $Manifest = Get-BurnManifest -StubPath $StubPath
     $Stub = [Microsoft.Deployment.Compression.Cab.CabInfo]::new($StubPath)
 
@@ -413,6 +434,8 @@ function Test-BurnArchitectureCondition {
     NativeMachine = $NativeMachine
   }
 
+  # Translate only Burn's common architecture-condition subset into PowerShell operators. Unknown
+  # variables are made permissive to avoid incorrectly excluding a supported architecture.
   $Expression = $Condition
   $Expression = [regex]::Replace($Expression, '(?i)\b(NOT|AND|OR)\b', { param($Match) $Match.Value.ToLowerInvariant() })
   foreach ($Name in $Values.Keys) {
@@ -464,6 +487,8 @@ function Get-BurnPackageArchitectureInfo {
       $PackageNodes = @($BootstrapperApplicationData.GetElementsByTagName('WixPackageProperties'))
     }
 
+    # Exclude the synthetic Bundle row and evaluate only executable package types that can constrain
+    # the host architecture.
     $RelevantPackageNodes = @($PackageNodes | Where-Object {
         $_.Package -ne 'Bundle' -and (
           -not $_.PackageType -or
@@ -493,6 +518,8 @@ function Get-BurnPackageArchitectureInfo {
     }
 
     if ($Supported.Count -eq 3) {
+      # Conditions that omit architecture can appear universal. Corroborate with explicit payload
+      # folder/name markers only when they consistently indicate one native family.
       $Manifest = Get-BurnManifest -Path $Path
       $ManifestText = $Manifest.OuterXml
       $HasX64Marker = $ManifestText -match '(?i)(ProgramFiles64Folder|System64Folder|\bx64\b|_x64\b|x64Setup|SetupX64|amd64)'
@@ -561,6 +588,8 @@ function Get-BurnScopeInfo {
     }
     $Manifest = Get-BurnManifest -Path $Path
 
+    # BootstrapperApplicationData provides the authored BA view; fall back to the engine manifest's
+    # Registration element when BA data is unavailable.
     $BundlePerMachine = $null
     if ($BootstrapperApplicationData) {
       $BundleProperties = @($BootstrapperApplicationData.GetElementsByTagName('WixBundleProperties') | Select-Object -First 1)
@@ -572,6 +601,8 @@ function Get-BurnScopeInfo {
     }
 
     $DefaultScope = Convert-BurnPerMachineToScope -PerMachine $BundlePerMachine
+    # Non-permanent chain packages provide supporting scope evidence but do not replace the bundle's
+    # registration scope.
     $PackageScopes = @(
       $Manifest.GetElementsByTagName('*') |
         Where-Object { $_.Name -match 'Package$' -and $_.GetAttribute('Permanent') -ne 'yes' -and $_.HasAttribute('PerMachine') } |

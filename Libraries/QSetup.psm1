@@ -1,6 +1,15 @@
 # SPDX-License-Identifier: MIT
 # Static QSetup parser. QSetup EXE packages store length-prefixed zlib records
 # after the PE image; Setup.txt contains explicit project and ARP directives.
+# Binary structure consumed here (overlay-relative, LE integers):
+#
+#   PE overlay: Version:u32 LE, Format:u8, PreambleLength:u32 LE,
+#               UTF-8 |...exe| preamble
+#   records:    [CompressedLength:u32 LE][zlib -> |Name[*]?|Stamp| + bytes]*
+#
+# Every record advances by exactly 4 + CompressedLength. Setup.txt is interpreted
+# only from a complete framed record. Preamble, count, header, input/output, next
+# offset, and extraction path limits reject malformed packages.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -13,6 +22,8 @@ function Get-QSetupRecordStartOffset {
   <#
   .SYNOPSIS
     Validate the QSetup overlay preamble and return its first record offset
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -20,6 +31,8 @@ function Get-QSetupRecordStartOffset {
   $File = Get-Item -LiteralPath $Path -Force
   $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
+    # QSetup starts its package at the PE overlay. Validate every preamble field
+    # and its executable-name marker before trusting the first record offset.
     $OverlayOffset = Get-PEOverlayOffset -Stream $Stream
     if ($OverlayOffset -le 0 -or $OverlayOffset + 13 -gt $Stream.Length) { throw 'The QSetup PE has no valid package overlay' }
     $Version = [uint32](Read-BinaryInteger -Stream $Stream -Offset $OverlayOffset -Size 4)
@@ -44,6 +57,14 @@ function Read-QSetupRecord {
   <#
   .SYNOPSIS
     Read one bounded QSetup zlib record header and optional content
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER Offset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER ReadContent
+    Controls whether bounded entry content is decoded in addition to catalog metadata.
+  .PARAMETER MaximumContentBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -57,11 +78,15 @@ function Read-QSetupRecord {
   $Source = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
     if ($Offset -lt 0 -or $Offset + 4 -gt $Source.Length) { throw 'The QSetup record length is truncated' }
+    # Each record is independently framed by a compressed length, so malformed
+    # data cannot make the decoder consume the next record.
     $CompressedLength = [uint32](Read-BinaryInteger -Stream $Source -Offset $Offset -Size 4)
     if ($CompressedLength -eq 0 -or $CompressedLength -gt $Source.Length - $Offset - 4) { throw 'The QSetup record data is truncated' }
     $CompressedRange = New-BoundedReadStream -Stream $Source -Offset ($Offset + 4) -Length $CompressedLength -LeaveOpen
     $Decoder = New-InstallerDecompressionStream -Algorithm Zlib -Stream $CompressedRange -LeaveOpen
     try {
+      # Decode only through the third pipe delimiter to enumerate a record. The
+      # potentially large body is materialized only when the caller requests it.
       $HeaderBytes = [System.Collections.Generic.List[byte]]::new()
       $PipeCount = 0
       while ($HeaderBytes.Count -lt 4096 -and $PipeCount -lt 3) {
@@ -77,6 +102,8 @@ function Read-QSetupRecord {
       $Content = $null
       $ContentLength = $null
       if ($ReadContent) {
+        # Setup.txt and other requested bodies are accumulated under an explicit
+        # expanded-size limit to reject zlib bombs deterministically.
         $Output = [IO.MemoryStream]::new()
         try {
           $Buffer = [byte[]]::new(1048576)
@@ -108,6 +135,10 @@ function Get-QSetupLayout {
   <#
   .SYNOPSIS
     Enumerate bounded QSetup record headers without expanding payload bodies
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER MaximumRecords
+    Declared record count or parser count limit; malformed or excessive counts are rejected.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -120,6 +151,8 @@ function Get-QSetupLayout {
   $Records = [System.Collections.Generic.List[object]]::new()
   $Warnings = [System.Collections.Generic.List[string]]::new()
   $Offset = $Preamble.RecordStartOffset
+  # Records are physically adjacent; advance by the declared compressed extent
+  # and stop at the first malformed or non-advancing frame.
   while ($Offset + 4 -le $File.Length -and $Records.Count -lt $MaximumRecords) {
     try { $Record = Read-QSetupRecord -Path $File.FullName -Offset $Offset } catch { $Warnings.Add($_.Exception.Message); break }
     $Records.Add($Record)
@@ -140,11 +173,15 @@ function ConvertFrom-QSetupDirectiveText {
   <#
   .SYNOPSIS
     Parse literal SET_* directives from QSetup Setup.txt
+  .PARAMETER Content
+    Raw text to parse as format metadata without executing embedded commands.
   #>
   [OutputType([hashtable])]
   param ([Parameter(Mandatory)][string]$Content)
 
   $Result = @{}
+  # Parse only literal SET_* statements. QSetup expressions or executable
+  # actions are not evaluated by the static parser.
   foreach ($Line in ($Content.TrimStart([char]0, [char]0xFEFF) -split "`r?`n")) {
     $Trimmed = $Line.Trim()
     if (-not $Trimmed -or $Trimmed.StartsWith('//')) { continue }
@@ -162,6 +199,10 @@ function Get-QSetupDirectiveValue {
   <#
   .SYNOPSIS
     Return the first literal value for a parsed QSetup directive
+  .PARAMETER Directive
+    Format-specific field or value interpreted according to the current record/version.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
   #>
   param ([Parameter(Mandatory)][hashtable]$Directive, [Parameter(Mandatory)][string]$Name)
   if (-not $Directive.ContainsKey($Name)) { return $null }
@@ -172,6 +213,10 @@ function ConvertTo-QSetupRegistryEvidence {
   <#
   .SYNOPSIS
     Convert explicit QSetup ARP and association directives to registry evidence
+  .PARAMETER Directive
+    Format-specific field or value interpreted according to the current record/version.
+  .PARAMETER Scope
+    Scope or elevation evidence used to classify user, machine, or conditional installation.
   #>
   [OutputType([pscustomobject[]])]
   param ([Parameter(Mandatory)][hashtable]$Directive, [AllowNull()][string]$Scope)
@@ -180,6 +225,8 @@ function ConvertTo-QSetupRegistryEvidence {
   if (-not $Root) { return }
   $Writes = [System.Collections.Generic.List[object]]::new()
   $DisplayName = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_ADD_REMOVE_PROGRAMS_DISPLAY_NAME'
+  # An ARP entry exists only when both uninstall generation and Add/Remove
+  # registration are enabled; a display-name directive alone is insufficient.
   $WritesArp = $Directive.ContainsKey('SET_CREATE_UNINSTALL') -and $Directive.ContainsKey('SET_ADD_UNINSTALL_TO_ADD_REMOVE_PROGRAMS') -and $DisplayName
   if ($WritesArp) {
     $UninstallKey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$DisplayName"
@@ -193,6 +240,8 @@ function ConvertTo-QSetupRegistryEvidence {
     }
   }
 
+  # Association records are pipe-delimited structured directives. Emit only
+  # literal, syntactically valid extensions and their explicit ProgID command.
   foreach ($Association in @($Directive['SET_ADD_ASSOCIATION_ITEM'])) {
     $Fields = @($Association -split '\|')
     if ($Fields.Count -lt 7) { continue }
@@ -212,6 +261,8 @@ function Get-QSetupInfo {
   <#
   .SYNOPSIS
     Read QSetup project, ARP, scope, architecture, and association metadata
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -219,6 +270,8 @@ function Get-QSetupInfo {
   process {
     $File = Get-Item -LiteralPath $Path -Force
     $Layout = Get-QSetupLayout -Path $File.FullName
+    # Setup.txt is the authoritative project metadata record. Generic payload
+    # strings never participate in identity, scope, or ARP inference.
     $SetupRecord = $Layout.Records | Where-Object Name -ieq 'Setup.txt' | Select-Object -First 1
     if (-not $SetupRecord) { throw 'The QSetup package does not contain Setup.txt in its parsed records' }
     $SetupData = Read-QSetupRecord -Path $File.FullName -Offset $SetupRecord.Offset -ReadContent -MaximumContentBytes $Script:QSetupMaximumConfigurationBytes
@@ -226,6 +279,8 @@ function Get-QSetupInfo {
     $Directive = ConvertFrom-QSetupDirectiveText -Content $SetupText
     if (-not $Directive.ContainsKey('SET_COMPOSER_BUILD')) { throw 'The Setup.txt record does not contain QSetup composer evidence' }
 
+    # Scope and ARP behavior come from explicit composer directives; unresolved
+    # behavior is returned as null for VM review rather than guessed from paths.
     $Scope = if ($Directive.ContainsKey('SET_ALL_USERS')) { 'machine' } elseif ($Directive.ContainsKey('SET_CURRENT_USER')) { 'user' } else { $null }
     $DisplayName = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_ADD_REMOVE_PROGRAMS_DISPLAY_NAME'
     if (-not $DisplayName) { $DisplayName = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_NAME' }
@@ -233,6 +288,8 @@ function Get-QSetupInfo {
     $ProductCode = if ($WritesAppsAndFeaturesEntry) { Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_ADD_REMOVE_PROGRAMS_DISPLAY_NAME' } else { $null }
     $RegistryWrites = @(ConvertTo-QSetupRegistryEvidence -Directive $Directive -Scope $Scope)
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
+    # Architecture evidence is deliberately conservative: only an exclusively
+    # 64-bit OS list proves x64 support in this metadata vocabulary.
     $AllowedOs = [string](Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_ALLOWED_OS')
     $SupportedArchitectures = if ($AllowedOs -match '(?i)\.64' -and $AllowedOs -notmatch '(?i)(?:^|,)(?:XP|Vista|7|8|10|11)(?:,|$)') { @('x64') } else { @() }
     $Warnings = [System.Collections.Generic.List[string]]::new()
@@ -277,6 +334,14 @@ function Export-QSetupRecord {
   <#
   .SYNOPSIS
     Export one QSetup record body to a validated destination
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER Record
+    Current structured format node or record being interpreted.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER MaximumBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([System.IO.FileInfo])]
   param (
@@ -293,6 +358,8 @@ function Export-QSetupRecord {
     try {
       $PipeCount = 0
       $HeaderLength = 0
+      # Consume the metadata prefix before exporting the remaining decoded bytes
+      # as the actual file body named by the validated catalog record.
       while ($HeaderLength -lt 4096 -and $PipeCount -lt 3) { $Value = $Decoder.ReadByte(); if ($Value -lt 0) { break }; $HeaderLength++; if ($Value -eq 0x7C) { $PipeCount++ } }
       if ($PipeCount -ne 3) { throw 'The QSetup record header is invalid during extraction' }
       $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Record.Name
@@ -311,6 +378,14 @@ function Expand-QSetupInstaller {
   <#
   .SYNOPSIS
     Extract QSetup zlib records without executing the installer
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -327,6 +402,8 @@ function Expand-QSetupInstaller {
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
     $Written = 0L
     $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    # Enforce one aggregate output budget across all selected records, not a new
+    # full allowance for each independently compressed member.
     foreach ($Record in $Layout.Records) {
       if (-not (Test-ExtractionPattern -Path $Record.Name -Pattern $Name)) { continue }
       $Remaining = $MaximumExpandedBytes - $Written
@@ -344,6 +421,8 @@ function Test-QSetup {
   <#
   .SYNOPSIS
     Test whether a file contains a parseable QSetup project
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -354,6 +433,8 @@ function Read-ProtocolsFromQSetup {
   <#
   .SYNOPSIS
     Read literal URL protocol names from QSetup registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -364,6 +445,8 @@ function Read-FileExtensionsFromQSetup {
   <#
   .SYNOPSIS
     Read literal file extensions from QSetup association directives
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -374,6 +457,8 @@ function Read-ProductVersionFromQSetup {
   <#
   .SYNOPSIS
     Read the QSetup project version
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-QSetupInfo -Path $Path).DisplayVersion }
@@ -383,6 +468,8 @@ function Read-ProductNameFromQSetup {
   <#
   .SYNOPSIS
     Read the QSetup project display name
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-QSetupInfo -Path $Path).DisplayName }
@@ -392,6 +479,8 @@ function Read-PublisherFromQSetup {
   <#
   .SYNOPSIS
     Read the QSetup project publisher
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-QSetupInfo -Path $Path).Publisher }
@@ -401,6 +490,8 @@ function Read-ProductCodeFromQSetup {
   <#
   .SYNOPSIS
     Read the explicit QSetup Apps & Features key name
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-QSetupInfo -Path $Path).ProductCode }
@@ -410,6 +501,8 @@ function Read-ScopeFromQSetup {
   <#
   .SYNOPSIS
     Read scope from explicit QSetup all-users/current-user directives
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-QSetupInfo -Path $Path).Scope }

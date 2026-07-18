@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Format sources: https://github.com/microsoft/msix-packaging
+# MSIX/AppX binary structure consumed here:
+#
+#   ZIP/OPC -> [Content_Types].xml, AppxManifest.xml, AppxBlockMap.xml,
+#              AppxSignature.p7x, payload files
+#   bundle  -> AppxMetadata/AppxBundleManifest.xml -> nested packages
+#
+# Type detection uses required entries, not filename extension. ZIP paths and
+# sizes are bounded; XML supplies identity/dependencies/capabilities. Signature
+# presence/hash and Windows trust validation are separate checks.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -79,6 +88,8 @@ function Get-MSIXManifestXmlList {
     $Archive = Get-MSIXZipArchive -Path $Path
 
     try {
+      # A direct package contributes one manifest. A bundle contributes its bundle manifest plus
+      # each nested package manifest needed for architecture/dependency evidence.
       $ManifestText = Read-MSIXZipEntryText -Archive $Archive -Name 'AppxManifest.xml'
       if ($ManifestText) {
         [xml]$ManifestText
@@ -89,6 +100,8 @@ function Get-MSIXManifestXmlList {
       if ($BundleManifestText) { [xml]$BundleManifestText }
 
       # Bundles store real package metadata in nested appx/msix payloads.
+      # Nested package entries may be non-seekable; use the shared spill-to-disk context instead of
+      # loading multi-gigabyte bundle members into a PowerShell byte array.
       foreach ($Entry in $Archive.Entries | Where-Object { $_.FullName -match '\.(appx|msix)$' }) {
         $EntryStream = $Entry.Open()
         $SeekableContext = $null
@@ -128,6 +141,8 @@ function Get-MSIXPackageLayout {
   process {
     $Archive = Get-MSIXZipArchive -Path $Path
     try {
+      # Package-vs-bundle classification comes from mutually exclusive OPC manifest paths, not the
+      # local filename extension.
       $EntryNames = @($Archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/').TrimStart('/') })
       $HasPackageManifest = @($EntryNames | Where-Object { $_ -ieq 'AppxManifest.xml' }).Count -gt 0
       $HasBundleManifest = @($EntryNames | Where-Object { $_ -ieq 'AppxMetadata/AppxBundleManifest.xml' }).Count -gt 0
@@ -140,6 +155,8 @@ function Get-MSIXPackageLayout {
       $Warnings = [System.Collections.Generic.List[string]]::new()
       $PayloadInstallerTypes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
       if ($HasBundleManifest) {
+        # Bundle package declarations are primary type evidence; nested root filenames are retained
+        # only as a fallback for incomplete bundle metadata.
         $BundleManifestText = Read-MSIXZipEntryText -Archive $Archive -Name 'AppxMetadata/AppxBundleManifest.xml'
         try {
           [xml]$BundleManifest = $BundleManifestText
@@ -224,6 +241,8 @@ function Get-MSIXPackageTypeInfo {
     $Layout = if (Test-Path -LiteralPath $Path -PathType Leaf) { Get-MSIXPackageLayout -Path $Path } else { $null }
     if ($Layout) { foreach ($Warning in $Layout.Warnings) { $Warnings.Add($Warning) } }
 
+    # Extension and content type distinguish AppX from MSIX when available. Their physical OPC
+    # structures are otherwise equivalent, so content alone can prove only package/bundle.
     $PathForExtension = if ([uri]::IsWellFormedUriString($Path, [System.UriKind]::Absolute)) { ([uri]$Path).AbsolutePath } else { $Path }
     $Extension = [System.IO.Path]::GetExtension($PathForExtension).ToLowerInvariant()
     $ExtensionInstallerType = switch ($Extension) {
@@ -248,6 +267,8 @@ function Get-MSIXPackageTypeInfo {
     $InstallerType = $null
     $Evidence = $null
     $IsAmbiguous = $false
+    # Prefer the authored URL/path extension, then a manifest hint, HTTP type, and finally bundle
+    # member names. Direct ambiguous packages use WinGet's compatible msix path with a warning.
     if ($ExtensionInstallerType) {
       $InstallerType = $ExtensionInstallerType
       $Evidence = 'PathExtension'
@@ -365,6 +386,8 @@ function Get-MSIXPublisherHash {
   }
 
   process {
+    # Package family names encode the first 64 SHA-256 bits of the UTF-16 publisher using Microsoft's
+    # 32-character alphabet; the padded 65th bit completes thirteen groups.
     $PublisherNameSha256 = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::Unicode.GetBytes($PublisherName))
     $PublisherNameSha256First8Binary = $PublisherNameSha256[0..7] | ForEach-Object { [System.Convert]::ToString($_, 2).PadLeft(8, '0') }
     $PublisherNameSha256Fisrt8BinaryPadded = [System.String]::Concat($PublisherNameSha256First8Binary).PadRight(65, '0')
@@ -472,6 +495,14 @@ function Test-MSIXAllowedDependencyPackage {
 }
 
 function Compare-MSIXDependencyMinimumVersion {
+  <#
+  .SYNOPSIS
+    Compare two MSIX framework dependency minimum-version strings.
+  .PARAMETER Left
+    First version string. A missing value sorts before a present value.
+  .PARAMETER Right
+    Second version string. Valid System.Version values use numeric ordering; malformed values use ordinal ordering.
+  #>
   param (
     [Parameter()]
     [string]$Left,
@@ -509,6 +540,8 @@ function ConvertTo-MSIXManifestDependencyInfo {
   $AllowedById = [ordered]@{}
   $UnknownById = [ordered]@{}
 
+  # Keep only the framework package families accepted by the authoring workflow. Unknown identities
+  # remain explicit warnings rather than silently becoming manifest dependencies.
   foreach ($Dependency in $PackageDependencies) {
     if ([string]::IsNullOrWhiteSpace($Dependency.PackageIdentifier)) { continue }
 
@@ -561,6 +594,8 @@ function ConvertTo-MSIXManifestAssociationInfo {
   <#
   .SYNOPSIS
     Extract protocol and file-extension declarations from AppX/MSIX manifests
+  .PARAMETER Manifest
+    Parsed context or metadata object produced by the corresponding format reader.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][xml[]]$Manifest)
@@ -571,6 +606,8 @@ function ConvertTo-MSIXManifestAssociationInfo {
   $SeenProtocols = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $SeenExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
+  # Namespace prefixes vary across manifest schema revisions, so classify extension declarations by
+  # LocalName and Category instead of hard-coding one XML namespace.
   foreach ($Item in $Manifest) {
     foreach ($Extension in @($Item.GetElementsByTagName('*') | Where-Object { $_.LocalName -eq 'Extension' })) {
       $Category = [string]$Extension.GetAttribute('Category')
@@ -628,6 +665,8 @@ function Get-MSIXAssociationInfo {
   <#
   .SYNOPSIS
     Read declared protocol and file-extension associations from an MSIX/AppX package
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -660,6 +699,8 @@ function Get-MSIXInfo {
     $Manifests = @(Get-MSIXManifestXmlList -Path $File.FullName)
     if ($Manifests.Count -eq 0) { throw 'No AppX/MSIX manifest could be read from the package' }
 
+    # The first complete package identity supplies family-name fields; all manifests still
+    # contribute platform, dependency, capability, and association evidence.
     $Identity = $Manifests | ForEach-Object { $_.GetElementsByTagName('Identity')[0] } | Where-Object { $_ -and $_.Name -and $_.Publisher } | Select-Object -First 1
     if (-not $Identity) { throw 'No package identity could be read from the AppX/MSIX manifest' }
 
@@ -684,6 +725,8 @@ function Get-MSIXInfo {
     $DependencyInfo = ConvertTo-MSIXManifestDependencyInfo -PackageDependencies @($PackageDependencies)
     $AssociationInfo = ConvertTo-MSIXManifestAssociationInfo -Manifest $Manifests
 
+    # Separate restricted capabilities by the rescap prefix while retaining ordinary and device
+    # capabilities in the normal manifest field.
     $Capabilities = foreach ($Manifest in $Manifests) {
       foreach ($Element in $Manifest.GetElementsByTagName('*')) {
         if ($Element.LocalName -notin @('Capability', 'DeviceCapability')) { continue }
@@ -740,6 +783,8 @@ function Read-ProtocolsFromMSIX {
   <#
   .SYNOPSIS
     Read declared URL protocol names from an MSIX/AppX package
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -750,6 +795,8 @@ function Read-FileExtensionsFromMSIX {
   <#
   .SYNOPSIS
     Read declared file extensions from an MSIX/AppX package
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -860,11 +907,15 @@ function Get-AppInstallerInfo {
   )
 
   process {
+    # Preserve the document URI so relative MainPackage/MainBundle references can
+    # be resolved exactly as an App Installer client would resolve them.
     $BaseUri = $null
     $XmlContent = switch ($PSCmdlet.ParameterSetName) {
       'Uri' {
         $BaseUri = $Uri
         $Response = Invoke-WebRequest -Uri $Uri
+        # Prefer response bytes/stream over implicit string conversion so XML
+        # encoding declarations and BOMs remain available to the XML parser.
         if ($Response.RawContentStream) {
           $Response.RawContentStream.Position = 0
           $Reader = [System.IO.StreamReader]::new($Response.RawContentStream)
@@ -888,6 +939,8 @@ function Get-AppInstallerInfo {
       default { throw 'Invalid parameter set.' }
     }
 
+    # AppInstaller itself is not a WinGet-supported installer. It is a signed-
+    # package locator, so require one explicit main package or bundle element.
     [xml]$Xml = $XmlContent
     $AppInstaller = $Xml.GetElementsByTagName('AppInstaller')[0]
     if (-not $AppInstaller) { throw 'The AppInstaller element does not exist in the .appinstaller file' }
@@ -895,6 +948,8 @@ function Get-AppInstallerInfo {
     $MainElement = ($Xml.GetElementsByTagName('MainPackage') | Select-Object -First 1) ?? ($Xml.GetElementsByTagName('MainBundle') | Select-Object -First 1)
     if (-not $MainElement) { throw 'The .appinstaller file does not contain MainPackage or MainBundle' }
 
+    # Resolve relative URIs against the source document; raw Content input has no
+    # trustworthy base and therefore leaves the authored value unchanged.
     $InstallerUri = if ($BaseUri -and -not [uri]::IsWellFormedUriString($MainElement.Uri, [System.UriKind]::Absolute)) {
       [uri]::new($BaseUri, [string]$MainElement.Uri).AbsoluteUri
     } else {
@@ -905,6 +960,8 @@ function Get-AppInstallerInfo {
       Version       = [string]($AppInstaller.Version ?? $MainElement.Version)
       MainKind      = $MainElement.LocalName
       InstallerUrl  = $InstallerUri
+      # Get-MSIXInstallerType may inspect content when the URL suffix is absent or
+      # misleading, avoiding extension-only package classification.
       InstallerType = Get-MSIXInstallerType -Path $InstallerUri
       Name          = [string]$MainElement.Name
       Publisher     = [string]$MainElement.Publisher

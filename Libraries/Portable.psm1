@@ -1,3 +1,17 @@
+# SPDX-License-Identifier: MIT
+# Static PE architecture and dependency analyzer for portable packages. This
+# module consumes PE/COFF and CLR metadata exposed by PE.psm1, plus the following
+# .NET host structures without loading or executing the binary:
+#
+#   native apphost PE
+#   +-- patched UTF-8 managed-DLL path (or unbound SHA-256 placeholder)
+#   `-- optional single-file bundle
+#       +-- [HeaderOffset:i64 LE][32-byte bundle signature]
+#       `-- header -> bundle ID, deps.json range, runtimeconfig.json range
+#
+# Sidecar runtimeconfig.json and imported-DLL tables remain separate evidence.
+# No filename extension is trusted as proof that a file is a PE.
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -50,6 +64,8 @@ function Get-PEArchitectureInfo {
       throw "The file is not a valid PE file: $($File.FullName)"
     }
 
+    # PE machine and CLR flags jointly determine architecture. A managed x86
+    # machine header can represent AnyCPU when IL-only and no native entry point.
     $FileKind = Get-PEFileKind -Layout $Layout
     $MachineInfo = Resolve-PortablePEMachineArchitecture -Machine $Layout.Machine
     $ClrHeader = Get-PEClrHeader -Path $File.FullName
@@ -81,6 +97,8 @@ function Get-PEArchitectureInfo {
     }
 
     $SupportedArchitectures = @($SupportedArchitectures | Where-Object { $_ -in $Script:PortableWinGetArchitectures } | Sort-Object -Unique)
+    # Adjacent native DLLs can narrow AnyCPU deployment support, but conflicting
+    # related architectures are warnings rather than arbitrary selection.
     $RelatedArchitectureInfo = foreach ($Related in @($RelatedFile | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
       try {
         Get-PEArchitectureInfo -Path $Related
@@ -360,6 +378,8 @@ function Get-PEDotNetBundleInfo {
 
   $BundleHeaders = [System.Collections.Generic.List[psobject]]::new()
   try {
+    # The signature is only a locator. Authenticate the preceding header pointer,
+    # supported bundle version, bounded file count, and embedded JSON ranges.
     foreach ($SignatureOffset in @(Find-BinaryPattern -Stream $Stream -Pattern $Script:DotNetBundleHeaderSignature -Maximum 16)) {
       if ($SignatureOffset -lt 8) { continue }
       $HeaderOffset = [BitConverter]::ToInt64((Read-BinaryBytes -Stream $Stream -Offset ($SignatureOffset - 8) -Count 8), 0)
@@ -413,6 +433,8 @@ function Get-PEDotNetBundleInfo {
   }
 
   if ($BundleHeaders.Count -eq 0) { return $null }
+  # Prefer the latest valid header in case stale publish artifacts or signatures
+  # remain earlier in the native host image.
   @($BundleHeaders | Sort-Object -Property HeaderOffset -Descending | Select-Object -First 1)[0]
 }
 
@@ -440,6 +462,8 @@ function Get-PERuntimeConfigPath {
     [string]$AppPath
   )
 
+  # A bound managed assembly determines the preferred sidecar basename. The
+  # outer host basename remains a fallback for conventional apphost layouts.
   $CandidateBases = [System.Collections.Generic.List[psobject]]::new()
   if (-not [string]::IsNullOrWhiteSpace($AppPath)) {
     try {
@@ -506,6 +530,8 @@ function Resolve-PEDotNetAppHostBoundAssemblyPath {
     [string[]]$RelatedFile = @()
   )
 
+  # Apphost bindings are application-relative paths. Reject rooted values before
+  # resolving adjacent or caller-supplied related files.
   if ([string]::IsNullOrWhiteSpace($BoundAssemblyRelativePath)) { return $null }
   if ([System.IO.Path]::IsPathRooted($BoundAssemblyRelativePath)) { return $null }
 
@@ -549,6 +575,8 @@ function Get-PEDotNetAppHostBindingCandidate {
 
   $Candidates = [System.Collections.Generic.List[string]]::new()
   $DllNeedle = [System.Text.Encoding]::ASCII.GetBytes('.dll')
+  # Recover only bounded NUL-terminated UTF-8 strings around .dll suffixes. Path
+  # syntax checks remove imports and arbitrary binary strings from candidates.
   foreach ($DllOffset in @(Find-PEBytePattern -Bytes $Bytes -Pattern $DllNeedle)) {
     $Start = $DllOffset
     while ($Start -gt 0 -and $Bytes[$Start - 1] -ne 0 -and ($DllOffset - $Start) -lt $Script:DotNetAppHostMaximumBindingLength) {
@@ -595,6 +623,8 @@ function Get-PEDotNetAppHostInfo {
   )
 
   $File = Get-Item -LiteralPath $Path -Force
+  # Apphost is a native executable. Managed DLLs and oversized binaries use
+  # their direct CLR/runtimeconfig evidence instead of a full host scan.
   if ($ArchitectureInfo.FileKind -ne 'Executable' -or $ArchitectureInfo.IsManaged -or $File.Length -gt 536870912) {
     return [pscustomobject]@{
       IsAppHost                   = $false
@@ -611,6 +641,8 @@ function Get-PEDotNetAppHostInfo {
 
   $HostStream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
+    # Inspect the host once for template placeholder, single-file bundle, and
+    # patched managed-DLL binding evidence.
     $PlaceholderBytes = [System.Text.Encoding]::UTF8.GetBytes($Script:DotNetAppHostPlaceholder)
     $PlaceholderOffset = @(Find-BinaryPattern -Stream $HostStream -Pattern $PlaceholderBytes -Maximum 1 | Select-Object -First 1)[0]
     $BundleInfo = Get-PEDotNetBundleInfo -Stream $HostStream
@@ -781,6 +813,8 @@ function ConvertFrom-PERuntimeConfigFramework {
     $Major = [int]$Matches.Major
   }
 
+  # Map only framework names and major versions represented by public WinGet
+  # runtime packages; retain unsupported entries as explicit review warnings.
   $PackagePrefix = $Script:DotNetRuntimeFrameworkPackageMap[$Name]
   $PackageIdentifier = if ($PackagePrefix -and $Major -in $Script:DotNetSupportedDependencyMajors) { "$PackagePrefix.$Major" } else { $null }
   if (-not $PackagePrefix) {
@@ -824,6 +858,8 @@ function Get-PEDotNetRuntimeInfo {
 
   $Warnings = [System.Collections.Generic.List[string]]::new()
   $File = Get-Item -LiteralPath $Path -Force
+  # Runtimeconfig is authoritative whether adjacent to a bound app DLL, beside
+  # the host, or embedded in a validated single-file bundle.
   $AppHostInfo = Get-PEDotNetAppHostInfo -Path $File.FullName -RelatedFile $RelatedFile -ArchitectureInfo $ArchitectureInfo
   $RuntimeConfigPath = Get-PERuntimeConfigPath -Path $File.FullName -RelatedFile $RelatedFile -AppPath $AppHostInfo.BoundAssemblyPath
   $RuntimeConfig = if ($RuntimeConfigPath) {
@@ -865,8 +901,12 @@ function Get-PEDotNetRuntimeInfo {
     }
   }
 
+  # includedFrameworks and core host/runtime files prove self-contained output;
+  # recommending a shared runtime in that case would be redundant.
   $IsRuntimeBundled = $BundledRuntimeFiles.Count -gt 0 -or $IncludedFrameworks.Count -gt 0
   $DependencyCandidates = if ($IsRuntimeBundled) { @() } else { @($Frameworks | Where-Object { $_.PackageIdentifier }) }
+  # Desktop and ASP.NET runtime packages include the base runtime of the same
+  # major, so suppress the weaker Microsoft.NETCore.App recommendation.
   $SpecificMajorVersions = @($DependencyCandidates | Where-Object { $_.Name -in @('Microsoft.WindowsDesktop.App', 'Microsoft.AspNetCore.App') } | Select-Object -ExpandProperty MajorVersion -Unique)
   $DependencyCandidates = @($DependencyCandidates | Where-Object {
       -not ($_.Name -eq 'Microsoft.NETCore.App' -and $_.MajorVersion -in $SpecificMajorVersions)
@@ -952,6 +992,8 @@ function Get-PEDependencyInfo {
     $PrimaryFile = Get-Item -LiteralPath $Path -Force
     $InputFiles = @($Path) + @($RelatedFile)
     $Files = @($InputFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object -Process { (Get-Item -LiteralPath $_ -Force).FullName } | Sort-Object -Unique)
+    # Sidecar JSON stays in CheckedFiles but only validated PE files participate
+    # in import and architecture analysis.
     $PEFiles = @($Files | ForEach-Object -Process {
         $PEFile = Get-PEFileIfValid -Path $_
         if ($PEFile) { $PEFile.FullName }
@@ -974,6 +1016,8 @@ function Get-PEDependencyInfo {
         $Warnings.Add("Could not determine concrete architecture for $FilePath; VCRedist package mapping may be incomplete.")
       }
 
+      # Direct and delay imports are equivalent dependency evidence, but retain
+      # their source directory so authors can inspect why a mapping was made.
       $Imports = @(
         Get-PEImportedDll -Path $FilePath
         Get-PEDelayImportedDll -Path $FilePath
@@ -987,6 +1031,8 @@ function Get-PEDependencyInfo {
         }
         $AllImports.Add($ImportRecord)
 
+        # Runtime DLL names map to a VC generation; concrete PE architecture then
+        # selects the corresponding WinGet redistributable package identifier.
         $RuntimeVersion = Resolve-PortableVCRedistRuntime -DllName $Import.DllName
         if ($RuntimeVersion) {
           foreach ($Architecture in $FileArchitectures) {

@@ -8,6 +8,8 @@ function ConvertTo-InstallerClassRegistryWrite {
   <#
   .SYNOPSIS
     Normalize an explicit registry write beneath Windows Classes roots
+  .PARAMETER RegistryWrite
+    Static registry-write evidence containing Root, Key, Name, Value, and Type fields; the input object is not modified.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][psobject]$RegistryWrite)
@@ -46,12 +48,28 @@ function ConvertTo-InstallerClassRegistryWrite {
 }
 
 function Test-InstallerDefaultRegistryValueName {
+  <#
+  .SYNOPSIS
+    Test whether a registry-write name denotes the key's default value.
+  .PARAMETER Name
+    Registry value name. Null, empty, `(Default)`, `@`, and `*` are treated as the default value.
+  #>
   [OutputType([bool])]
   param([AllowNull()][object]$Name)
   return $null -eq $Name -or [string]::IsNullOrWhiteSpace([string]$Name) -or [string]$Name -in @('(Default)', '@', '*')
 }
 
 function Get-InstallerClassDefaultValue {
+  <#
+  .SYNOPSIS
+    Read the last explicit default-value write for one normalized Classes key.
+  .PARAMETER RegistryWrite
+    Normalized explicit class registry writes; the input collection is not modified.
+  .PARAMETER Root
+    Normalized HKCR, HKCU, or HKLM root to match.
+  .PARAMETER RelativeKey
+    Path relative to the selected Classes root.
+  #>
   [OutputType([string])]
   param (
     [Parameter(Mandatory)][object[]]$RegistryWrite,

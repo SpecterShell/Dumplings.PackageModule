@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Static InstallAware parser. It validates the embedded 7z project archive and
 # reads PE metadata without executing either the wrapper or nested setup files.
+# Binary structure consumed here:
+#
+#   PE launcher -> overlay -> one or more standard 7z archives
+#     37 7A BC AF 27 1C -> catalog -> mia.lib/*.mia/_setup.exe/data entries
+#
+# InstallAware identity is established by structured archive entries, not a raw
+# product string. Each candidate archive and extracted path/byte count is bounded;
+# nested MSI/EXE payloads are returned for independent analysis.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -11,6 +19,8 @@ function Get-InstallAwareArchiveData {
   <#
   .SYNOPSIS
     Locate the validated InstallAware project archive after the PE image
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -20,6 +30,8 @@ function Get-InstallAwareArchiveData {
   try { $OverlayOffset = Get-PEOverlayOffset -Stream $Stream } finally { $Stream.Dispose() }
   if ($OverlayOffset -le 0 -or $OverlayOffset -ge $File.Length) { throw 'The InstallAware PE has no project overlay' }
 
+  # Restrict archive discovery to the PE overlay and require structured project
+  # names; a standard 7z signature alone is not InstallAware identification.
   foreach ($Range in @(Get-EmbeddedSevenZipArchiveRange -Path $File.FullName -StartOffset $OverlayOffset -MaximumArchives 16 -MaximumArchiveBytes $Script:InstallAwareMaximumArchiveBytes)) {
     $Context = $null
     try {
@@ -34,6 +46,7 @@ function Get-InstallAwareArchiveData {
       if (-not $HasProjectEvidence) { continue }
       return [pscustomobject]@{ SourcePath = $File.FullName; Range = $Range; Entries = $Entries }
     } catch {
+      # Continue past malformed or unrelated embedded archives in the overlay.
       continue
     } finally {
       if ($Context) { Close-InstallerArchiveRange -Context $Context }
@@ -46,6 +59,8 @@ function Get-InstallAwareInfo {
   <#
   .SYNOPSIS
     Read static InstallAware metadata and nested payload evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -58,7 +73,13 @@ function Get-InstallAwareInfo {
     $DisplayVersion = ([string]$VersionInfo.ProductVersion).Trim()
     $Publisher = ([string]$VersionInfo.CompanyName).Trim()
     $ExecutionLevel = Get-PERequestedExecutionLevel -Path $File.FullName
+
+    # Requested execution level proves only an unconditional machine request;
+    # delegated payloads may still implement different scope behavior.
     $Scope = if ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
+
+    # Surface nested installers for recursive analysis without assuming which
+    # payload owns the final visible Apps & Features registration.
     $NestedInstallers = @($ArchiveData.Entries | Where-Object { $_.FullName -match '(?i)\.(?:exe|msi|msp|msix|appx)$' } | Select-Object -ExpandProperty FullName)
     $MsiPayloads = @($NestedInstallers | Where-Object { $_ -match '(?i)\.(?:msi|msp)$' })
     $RegistryWrites = @()
@@ -104,6 +125,14 @@ function Expand-InstallAwareInstaller {
   <#
   .SYNOPSIS
     Extract files from the validated InstallAware project archive
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -122,6 +151,9 @@ function Expand-InstallAwareInstaller {
       $Archive = $Context.Archive
       $Written = 0L
       $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+
+      # Apply selection to catalog paths, enforce aggregate output limits, and
+      # resolve every destination beneath the extraction root.
       foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
         if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
         $Written += $Entry.Length
@@ -139,6 +171,8 @@ function Test-InstallAware {
   <#
   .SYNOPSIS
     Test whether a file contains a parseable InstallAware project archive
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -149,6 +183,8 @@ function Read-ProtocolsFromInstallAware {
   <#
   .SYNOPSIS
     Read literal URL protocol names from InstallAware registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -159,6 +195,8 @@ function Read-FileExtensionsFromInstallAware {
   <#
   .SYNOPSIS
     Read literal file extensions from InstallAware registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -169,6 +207,8 @@ function Read-ProductVersionFromInstallAware {
   <#
   .SYNOPSIS
     Read the InstallAware PE product version
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAwareInfo -Path $Path).DisplayVersion }
@@ -178,6 +218,8 @@ function Read-ProductNameFromInstallAware {
   <#
   .SYNOPSIS
     Read the InstallAware PE product name
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAwareInfo -Path $Path).DisplayName }
@@ -187,6 +229,8 @@ function Read-PublisherFromInstallAware {
   <#
   .SYNOPSIS
     Read the InstallAware PE publisher
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAwareInfo -Path $Path).Publisher }
@@ -196,6 +240,8 @@ function Read-ProductCodeFromInstallAware {
   <#
   .SYNOPSIS
     Read a literal InstallAware uninstall key when available
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAwareInfo -Path $Path).ProductCode }
@@ -205,6 +251,8 @@ function Read-ScopeFromInstallAware {
   <#
   .SYNOPSIS
     Read InstallAware scope from explicit elevation evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAwareInfo -Path $Path).Scope }

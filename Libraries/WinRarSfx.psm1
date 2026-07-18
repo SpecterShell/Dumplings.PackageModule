@@ -1,4 +1,12 @@
 # SPDX-License-Identifier: MIT
+# WinRAR GUI SFX binary structure consumed here:
+#
+#   PE stub -> RAR4 52 61 72 21 1A 07 00 or RAR5 ... 01 00 archive
+#     -> compressed archive comment with Presetup=/Setup= commands
+#     -> catalog and compressed entries
+#
+# Commands are resolved against archive entry names; the first EXE is not assumed
+# to run. SharpCompress supplies bounded comment/catalog access and safe extraction.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -21,6 +29,9 @@ function ConvertFrom-WinRarSfxConfiguration {
   $Values = [ordered]@{}
   $SetupCommands = [Collections.Generic.List[string]]::new()
   $PresetupCommands = [Collections.Generic.List[string]]::new()
+
+  # Preserve repeated Setup/Presetup records in archive-comment order while
+  # treating unrelated directives as ordinary key/value configuration.
   foreach ($Line in Split-LineEndings -Content $Content) {
     $Trimmed = $Line.Trim()
     if (-not $Trimmed -or $Trimmed.StartsWith(';')) { continue }
@@ -35,6 +46,9 @@ function ConvertFrom-WinRarSfxConfiguration {
   }
 
   $Commands = [Collections.Generic.List[psobject]]::new()
+
+  # Presetup commands run before Setup commands. Resolve both stages against
+  # the archive catalog instead of guessing that the first executable runs.
   foreach ($CommandLine in $PresetupCommands) {
     $Commands.Add([pscustomobject]@{ Stage = 'Presetup'; Command = Resolve-BootstrapperCommand -CommandLine $CommandLine -CandidatePath $ArchiveEntry })
   }
@@ -64,11 +78,16 @@ function Get-WinRarSfxInfo {
     $Rar4Marker = [byte[]](0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00)
     $Rar5Marker = [byte[]](0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00)
     $ScanLength = [Math]::Min([long]$Installer.Length, 16777216)
+
+    # Scan the bounded SFX prefix for both generations and select the earliest
+    # validated archive signature when compatibility markers coexist.
     $Rar4Offset = @(Find-BinaryPattern -Path $Installer.FullName -Pattern $Rar4Marker -Length $ScanLength -Maximum 1)[0]
     $Rar5Offset = @(Find-BinaryPattern -Path $Installer.FullName -Pattern $Rar5Marker -Length $ScanLength -Maximum 1)[0]
     $ArchiveOffset = @($Rar4Offset, $Rar5Offset | Where-Object { $null -ne $_ } | Sort-Object | Select-Object -First 1)[0]
     if ($null -eq $ArchiveOffset) { throw 'The embedded RAR archive marker was not found.' }
 
+    # Copy the embedded range to an offset-zero temporary archive for catalog
+    # and comment parsing; no SFX code or configured command is invoked.
     $ArchivePath = New-TempFile
     $InputStream = [IO.File]::OpenRead($Installer.FullName)
     $OutputStream = [IO.File]::Open($ArchivePath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -81,6 +100,9 @@ function Get-WinRarSfxInfo {
     try {
       $Archive = Get-InstallerArchive -Path $ArchivePath
       try { $Entries = @(Get-InstallerArchiveEntry -Archive $Archive) } finally { $Archive.Dispose() }
+
+      # The decompressed archive comment is authoritative for execution order
+      # and arguments; catalog order alone is not meaningful.
       $Comment = Read-RarArchiveComment -Path $ArchivePath
       if ([string]::IsNullOrWhiteSpace($Comment)) { throw 'The WinRAR SFX comment/configuration was not found.' }
       $Config = ConvertFrom-WinRarSfxConfiguration -Content $Comment -ArchiveEntry $Entries.FullName
@@ -111,6 +133,14 @@ function Expand-WinRarSfx {
   <#
   .SYNOPSIS
     Expand selected files from a WinRAR GUI SFX without executing it
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([string[]])]
   param (
@@ -135,6 +165,8 @@ function Expand-WinRarSfx {
     try {
       $Archive = Get-InstallerArchive -Path $ArchivePath
       try {
+        # Enforce the aggregate declared-size limit before exporting any selected
+        # entry, then apply traversal-safe path resolution per result.
         $Entries = @(Get-InstallerArchiveEntry -Archive $Archive | Where-Object { Test-ExtractionPattern -Path $_.FullName -Pattern $Name })
         $Total = [long](($Entries | Measure-Object Length -Sum).Sum)
         if ($Total -gt $MaximumExpandedBytes) { throw 'The selected RAR entries exceed the configured output limit.' }
@@ -155,6 +187,8 @@ function Test-WinRarSfx {
   <#
   .SYNOPSIS
     Test whether a file is a supported WinRAR GUI SFX
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)

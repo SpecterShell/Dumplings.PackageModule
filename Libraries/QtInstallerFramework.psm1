@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: MIT
 # This module only bridges to the independently licensed InstallerParsers CLI.
+# Process boundary:
+#
+#   Qt IFW installer path -> InstallerBridge -> QtInstallerFramework.GetInfo/Expand
+#                           <- trailer ranges, RCC metadata, archives, scope evidence
+#
+# The GPL parser owns the F8/F9 cookie, int64 segment table, RCC, and archive
+# layouts. This MIT bridge only transports path/arguments/results. See
+# Modules/InstallerParsers/Libraries/QtInstallerFramework.psm1.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }

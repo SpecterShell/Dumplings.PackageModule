@@ -38,6 +38,28 @@ Describe 'Shared installer infrastructure parity' {
     }
   }
 
+  It 'loads process-wide C# types safely from concurrent runspaces' {
+    $RuntimeModule = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1'))
+    $ScriptPath = Join-Path $TestDrive 'ConcurrentRuntimeLoad.ps1'
+    @'
+param([string]$RuntimeModule)
+$Jobs = 1..8 | ForEach-Object {
+  Start-ThreadJob -ScriptBlock {
+    param($ModulePath)
+    Import-Module -Name $ModulePath -Force
+    Import-InstallerInfrastructure
+    if (-not ([System.Management.Automation.PSTypeName]'Dumplings.InstallerInfrastructure.PEImageReader').Type) {
+      throw 'The shared PEImageReader type was not loaded'
+    }
+  } -ArgumentList $RuntimeModule
+}
+$Jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction Stop
+'@ | Set-Content -LiteralPath $ScriptPath
+
+    & (Get-Process -Id $PID).Path -NoProfile -File $ScriptPath -RuntimeModule $RuntimeModule
+    $LASTEXITCODE | Should -Be 0
+  }
+
   It 'prevents parser-local whole-file buffers and decoder constructors' {
     $Roots = @(
       [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries')),

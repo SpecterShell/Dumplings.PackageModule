@@ -1,6 +1,18 @@
 # SPDX-License-Identifier: MIT
 # Static CreateInstall parser for Gentee GEA v2 archives. The container logic
 # is PowerShell; the adaptive-Huffman LZGE decoder is an attributed MIT asset.
+# Binary structure consumed here (overlay-relative, LE integers):
+#
+#   PE setup -> GEA overlay
+#     +00 47 45 41 00 ("GEA\0")
+#     +04 volume:u16, +06 id:u32, +0A/+0B version bytes
+#     +14 flags:u32, +1A header-size:u32, +1E summary-size:i64
+#     +26 info-size:u32, +2A/+32/+3A archive/volume sizes:i64
+#     +42 moved-size:u32, +46 memory/block/solid multipliers
+#     `-- catalog -> [order:u8][packed-size:u32/u64][packed data]*
+#
+# Integers are LE. GEA v1 uses 32-bit file/block sizes; v2 uses 64-bit sizes.
+# Password and unsupported PPMd records are reported rather than bypassed.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -34,6 +46,12 @@ function Read-CreateInstallNullTerminatedString {
   <#
   .SYNOPSIS
     Read one bounded UTF-8 null-terminated string from a byte array
+  .PARAMETER Bytes
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
+  .PARAMETER Offset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER MaximumBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -52,6 +70,12 @@ function Read-CreateInstallArchiveLogicalRange {
   <#
   .SYNOPSIS
     Read a logical GEA data range across normal and moved data regions
+  .PARAMETER Layout
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
+  .PARAMETER Offset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER Count
+    Declared record count or parser count limit; malformed or excessive counts are rejected.
   #>
   [OutputType([byte[]])]
   param (
@@ -61,6 +85,8 @@ function Read-CreateInstallArchiveLogicalRange {
   )
 
   if ($Offset -lt 0 -or $Offset + $Count -gt $Layout.SummarySize) { throw 'The requested GEA logical range is outside the compressed data stream' }
+  # GEA exposes one logical compressed stream even though moved bytes are physically stored before
+  # ordinary data. Translate each requested slice without joining the complete archive in memory.
   $Result = [byte[]]::new($Count)
   if ($Count -eq 0) { return , $Result }
   $Stream = [IO.File]::Open($Layout.Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
@@ -70,6 +96,7 @@ function Read-CreateInstallArchiveLogicalRange {
     $DestinationOffset = 0
     while ($Remaining -gt 0) {
       if ($LogicalOffset -lt $Layout.OrdinaryDataLength) {
+        # Logical data starts in the ordinary region and wraps into the moved prefix at its end.
         $Available = $Layout.OrdinaryDataLength - $LogicalOffset
         $PhysicalOffset = $Layout.ArchiveOffset + $Layout.HeaderSize + $Layout.MovedSize + $LogicalOffset
       } else {
@@ -93,6 +120,10 @@ function ConvertFrom-CreateInstallFileTable {
   <#
   .SYNOPSIS
     Parse packed GEA v1/v2 file descriptors from an expanded metadata table
+  .PARAMETER Bytes
+    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
+  .PARAMETER MajorVersion
+    Detected format variant controlling version-specific parsing rules.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -107,12 +138,15 @@ function ConvertFrom-CreateInstallFileTable {
   $CurrentPassword = 0
   $CurrentFolder = ''
   $Entries = [System.Collections.Generic.List[object]]::new()
+  # Descriptor flags make several fields stateful: omitted attributes, groups, passwords, and
+  # folders inherit the most recently declared value.
   while ($Offset -lt $Bytes.Length) {
     if ($Entries.Count -ge $Script:CreateInstallMaximumEntries) { throw 'The GEA metadata exceeds the configured entry-count limit' }
     $BaseSize = if ($MajorVersion -ge 2) { 30 } else { 22 }
     if ($Offset + $BaseSize -gt $Bytes.Length) { throw 'The GEA file descriptor table is truncated' }
     $Flags = [BitConverter]::ToUInt16($Bytes, $Offset); $Offset += 2
     $FileTime = [BitConverter]::ToInt64($Bytes, $Offset); $Offset += 8
+    # GEA v2 widens both file sizes to 64 bits; the surrounding descriptor remains the same.
     if ($MajorVersion -ge 2) {
       $Size = [BitConverter]::ToUInt64($Bytes, $Offset); $Offset += 8
       $CompressedSize = [BitConverter]::ToUInt64($Bytes, $Offset); $Offset += 8
@@ -130,6 +164,7 @@ function ConvertFrom-CreateInstallFileTable {
     if (($Flags -band $Script:CreateInstallFileFlagFolder) -ne 0) { $FolderData = Read-CreateInstallNullTerminatedString -Bytes $Bytes -Offset $Offset; $CurrentFolder = $FolderData.Value; $Offset = $FolderData.NextOffset }
     if ([string]::IsNullOrWhiteSpace($Name)) { throw 'The GEA metadata contains an empty file name' }
     $RelativePath = if ($CurrentFolder) { Join-Path $CurrentFolder $Name } else { $Name }
+    # DataOffset is in the logical compressed stream, not an absolute file position.
     $Entries.Add([pscustomobject]@{
         Index          = $Entries.Count
         Flags          = [uint16]$Flags
@@ -157,6 +192,8 @@ function Get-CreateInstallArchiveLayout {
   <#
   .SYNOPSIS
     Locate and parse the self-extracting CreateInstall GEA archive
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -166,6 +203,8 @@ function Get-CreateInstallArchiveLayout {
   $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try { $OverlayOffset = Get-PEOverlayOffset -Stream $Stream } finally { $Stream.Dispose() }
   $Signature = [byte[]](0x47, 0x45, 0x41, 0x00)
+  # Search only after the PE image and validate every GEA candidate through its complete size map;
+  # compiled signature strings in the setup stub are not archive evidence.
   foreach ($ArchiveOffset in @(Find-BinaryPattern -Path $File.FullName -Pattern $Signature -StartOffset $OverlayOffset -Maximum 16)) {
     $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
@@ -188,12 +227,16 @@ function Get-CreateInstallArchiveLayout {
       $Memory = $Header[70]
       $BlockMultiplier = $Header[71]
       $SolidMultiplier = $Header[72]
+      # Dumplings supports self-contained single-volume SFX archives only. Multi-volume patterns
+      # are reported by rejection rather than followed outside the installer.
       if ($VolumeCount -ne 1 -or $HeaderSize -lt 74 -or $HeaderSize -gt $Script:CreateInstallMaximumHeaderBytes -or $InfoSize -gt $Script:CreateInstallMaximumInfoBytes) { continue }
       if ($ArchiveFileSize -le $ArchiveOffset -or $ArchiveFileSize -gt $File.Length -or $HeaderSize -gt $ArchiveFileSize - $ArchiveOffset) { continue }
       if ($SummarySize -lt 0 -or $MovedSize -gt $SummarySize) { continue }
       $OrdinaryDataLength = $ArchiveFileSize - $MovedSize - $HeaderSize - $ArchiveOffset
       if ($OrdinaryDataLength -lt 0 -or $OrdinaryDataLength + $MovedSize -ne $SummarySize) { continue }
 
+      # Variable header data starts with the volume pattern, then optional password IDs, then the
+      # compressed or stored file descriptor table.
       $HeaderBytes = Read-BinaryBytes -Stream $Stream -Offset $ArchiveOffset -Count ([int]$HeaderSize)
       $PatternData = Read-CreateInstallNullTerminatedString -Bytes $HeaderBytes -Offset 73
       $MetadataOffset = $PatternData.NextOffset
@@ -212,6 +255,8 @@ function Get-CreateInstallArchiveLayout {
         $Metadata = [byte[]]::new([int]$InfoSize)
         [Array]::Copy($HeaderBytes, $MetadataOffset, $Metadata, 0, [int]$InfoSize)
       }
+      # Require the catalog's final logical data extent to equal SummarySize before accepting the
+      # candidate archive.
       $Entries = @(ConvertFrom-CreateInstallFileTable -Bytes $Metadata -MajorVersion $MajorVersion)
       if ($Entries.Count -eq 0 -or ($Entries[-1].DataOffset + [long]$Entries[-1].CompressedSize) -ne $SummarySize) { continue }
       return [pscustomobject]@{
@@ -238,6 +283,7 @@ function Get-CreateInstallArchiveLayout {
         Entries            = $Entries
       }
     } catch {
+      # A structurally invalid candidate may be payload data containing GEA\0; continue scanning.
       continue
     } finally { $Stream.Dispose() }
   }
@@ -248,6 +294,10 @@ function Get-CreateInstallBlockInfo {
   <#
   .SYNOPSIS
     Enumerate compression block headers for one GEA file entry
+  .PARAMETER Layout
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
+  .PARAMETER Entry
+    Validated archive or catalog entry whose bounded content is read or exported.
   #>
   [OutputType([pscustomobject[]])]
   param ([Parameter(Mandatory)][psobject]$Layout, [Parameter(Mandatory)][psobject]$Entry)
@@ -256,6 +306,8 @@ function Get-CreateInstallBlockInfo {
   $CompressedRemaining = [long]$Entry.CompressedSize
   $OutputRemaining = [long]$Entry.Size
   $HeaderSize = if ($Layout.MajorVersion -ge 2) { 9 } else { 5 }
+  # Walk each entry's complete block stream and verify that compressed and expanded totals converge
+  # exactly at the declared file boundaries.
   while ($OutputRemaining -gt 0) {
     if ($CompressedRemaining -lt $HeaderSize) { throw "The GEA data for '$($Entry.FullName)' is truncated" }
     $Header = Read-CreateInstallArchiveLogicalRange -Layout $Layout -Offset $LogicalOffset -Count $HeaderSize
@@ -263,6 +315,7 @@ function Get-CreateInstallBlockInfo {
     $StoredOrder = $RawOrder -band 0x7F
     $CompressedSize = if ($Layout.MajorVersion -ge 2) { [uint64][BitConverter]::ToUInt64($Header, 1) } else { [uint64][BitConverter]::ToUInt32($Header, 1) }
     if ($CompressedSize -gt [long]::MaxValue -or $CompressedSize -gt $CompressedRemaining - $HeaderSize) { throw "The GEA block for '$($Entry.FullName)' exceeds its file data range" }
+    # The high nibble selects Store/LZGE/PPMd; the low nibble carries the compression-order mode.
     $CompressionType = $StoredOrder -shr 4
     $CompressionOrder = ($StoredOrder -band 0x0F) + 1
     $OutputSize = if ($CompressionType -eq 0) { [long]$CompressedSize } else { [Math]::Min([long]$Layout.BlockSize, $OutputRemaining) }
@@ -288,6 +341,8 @@ function Get-CreateInstallInfo {
   <#
   .SYNOPSIS
     Read static CreateInstall identity and GEA payload evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -298,6 +353,7 @@ function Get-CreateInstallInfo {
     $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
     $ExecutionLevel = Get-PERequestedExecutionLevel -Path $File.FullName
     $CompressionMethods = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    # Enumerate block headers without expanding payloads so capability warnings remain inexpensive.
     foreach ($Entry in $Layout.Entries) { foreach ($Block in @(Get-CreateInstallBlockInfo -Layout $Layout -Entry $Entry)) { $null = $CompressionMethods.Add($Block.CompressionName) } }
     $RegistryWrites = @()
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
@@ -337,6 +393,14 @@ function Expand-CreateInstallInstaller {
   <#
   .SYNOPSIS
     Extract stored and LZGE-compressed files from a CreateInstall GEA archive
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -355,6 +419,8 @@ function Expand-CreateInstallInstaller {
     $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $ExpandedBytes = 0L
     $SolidHistory = [byte[]]::new(0)
+    # Solid history must advance through every preceding entry, including unselected entries, so a
+    # later selected file receives the same dictionary state as the original extractor.
     foreach ($Entry in $Layout.Entries) {
       if ($Entry.PasswordId -gt 0) { throw "The CreateInstall entry '$($Entry.FullName)' is password-protected and cannot be extracted" }
       if (-not $Entry.IsSolid) { $SolidHistory = [byte[]]::new(0) }
@@ -371,11 +437,14 @@ function Expand-CreateInstallInstaller {
         foreach ($Block in @(Get-CreateInstallBlockInfo -Layout $Layout -Entry $Entry)) {
           if ($Block.CompressedSize -gt $Script:CreateInstallMaximumBlockBytes -or $Block.OutputSize -gt $Script:CreateInstallMaximumBlockBytes) { throw "The CreateInstall block for '$($Entry.FullName)' exceeds the configured block limit" }
           $InputBytes = Read-CreateInstallArchiveLogicalRange -Layout $Layout -Offset $Block.DataOffset -Count ([int]$Block.CompressedSize)
+          # Decode one bounded block at a time; unsupported methods fail before partial metadata is
+          # presented as a complete extracted file.
           switch ($Block.CompressionType) {
             0 { $Decoded = $InputBytes; $SolidHistory = [byte[]]::new(0) }
             1 {
               $Prefix = if ($Block.CompressionOrder -eq 1) { $SolidHistory } else { [byte[]]::new(0) }
               $Decoded = [Dumplings.Gentee.LzgeDecoder]::Decode($InputBytes, [int]$Block.OutputSize, $Prefix)
+              # Retain only the configured solid window rather than accumulating all prior output.
               $Combined = if ($Prefix.Length -gt 0) { $Prefix + $Decoded } else { $Decoded }
               $Keep = [int][Math]::Min($Layout.SolidSize, $Combined.Length)
               $SolidHistory = [byte[]]::new($Keep)
@@ -398,6 +467,8 @@ function Test-CreateInstall {
   <#
   .SYNOPSIS
     Test whether a file contains a parseable CreateInstall GEA archive
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -408,6 +479,8 @@ function Read-ProtocolsFromCreateInstall {
   <#
   .SYNOPSIS
     Read literal URL protocol names from CreateInstall registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -418,6 +491,8 @@ function Read-FileExtensionsFromCreateInstall {
   <#
   .SYNOPSIS
     Read literal file extensions from CreateInstall registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -428,6 +503,8 @@ function Read-ProductVersionFromCreateInstall {
   <#
   .SYNOPSIS
     Read the CreateInstall PE product version
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-CreateInstallInfo -Path $Path).DisplayVersion }
@@ -437,6 +514,8 @@ function Read-ProductNameFromCreateInstall {
   <#
   .SYNOPSIS
     Read the CreateInstall PE product name
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-CreateInstallInfo -Path $Path).DisplayName }
@@ -446,6 +525,8 @@ function Read-PublisherFromCreateInstall {
   <#
   .SYNOPSIS
     Read the CreateInstall PE publisher
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-CreateInstallInfo -Path $Path).Publisher }
@@ -455,6 +536,8 @@ function Read-ProductCodeFromCreateInstall {
   <#
   .SYNOPSIS
     Read a literal CreateInstall uninstall key when available
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-CreateInstallInfo -Path $Path).ProductCode }
@@ -464,6 +547,8 @@ function Read-ScopeFromCreateInstall {
   <#
   .SYNOPSIS
     Read CreateInstall scope from explicit elevation evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-CreateInstallInfo -Path $Path).Scope }

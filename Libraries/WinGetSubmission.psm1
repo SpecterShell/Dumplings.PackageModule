@@ -37,6 +37,35 @@ function Get-WinGetLocalRepoPath {
 
 $GitHubTokenUsername = $null
 
+function Select-WinGetReferencePackageVersion {
+  <#
+  .SYNOPSIS
+    Select the existing manifest version to use as the update template
+  .DESCRIPTION
+    Prefer an exact version match for rolling channels and pseudo-versions such as
+    master. Fall back to the latest version from the already WinGet-sorted input.
+  .PARAMETER AvailableVersion
+    Existing package versions in WinGet comparison order
+  .PARAMETER PackageVersion
+    The version that the task will author
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'Existing package versions in WinGet comparison order')]
+    [AllowEmptyString()]
+    [string[]]$AvailableVersion,
+
+    [Parameter(Mandatory, HelpMessage = 'The package version that the task will author')]
+    [string]$PackageVersion
+  )
+
+  end {
+    $ExactVersion = @($AvailableVersion | Where-Object { $_ -ceq $PackageVersion } | Select-Object -First 1)
+    if ($ExactVersion.Count -gt 0) { return $ExactVersion[0] }
+    return $AvailableVersion | Select-Object -Last 1
+  }
+}
+
 function Send-WinGetManifest {
   <#
   .SYNOPSIS
@@ -74,7 +103,8 @@ function Send-WinGetManifest {
     if (-not (Test-YamlObject -InputObject $NewPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier)) { throw "The PackageIdentifier `"${NewPackageIdentifier}`" is invalid" }
     [string]$NewPackageVersion = $Task.CurrentState.Contains('RealVersion') ? $Task.CurrentState.RealVersion : $Task.CurrentState.Version
     if (-not (Test-YamlObject -InputObject $NewPackageVersion -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageVersion)) { throw "The PackageVersion `"${NewPackageVersion}`" is invalid" }
-    $RefPackageVersion = ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath)) | Select-Object -Last 1
+    $AvailablePackageVersions = @($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath))
+    $RefPackageVersion = Select-WinGetReferencePackageVersion -AvailableVersion $AvailablePackageVersions -PackageVersion $NewPackageVersion
     if (-not $RefPackageVersion) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
 
     $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName

@@ -122,6 +122,14 @@ Describe 'WinGetVersion' {
       Sort-Object -Property { [Dumplings.Versioning.WinGetVersion]$_ }
     $Versions | Should -Be @('1.2-rc', '1.2', '1.2.0.1', '1.10')
   }
+
+  It 'supports the optimized Sort-Object Top and Bottom heap paths' {
+    $Versions = @('1.2-rc', '1.2', '1.2.0.1', '1.10')
+    $Versions | Sort-Object -Property { [Dumplings.Versioning.WinGetVersion]$_ } -Bottom 1 |
+      Should -Be '1.10'
+    $Versions | Sort-Object -Property { [Dumplings.Versioning.WinGetVersion]$_ } -Descending -Top 1 |
+      Should -Be '1.10'
+  }
 }
 
 Describe 'ChunkVersion' {
@@ -154,6 +162,17 @@ Describe 'ChunkVersion' {
     Assert-VersionLessThan -Type ([Dumplings.Versioning.ChunkVersion]) -Left '1.1.8' -Right '1.1.8+1'
   }
 
+  It 'treats underscore-delimited vendor revisions as a separate group' {
+    Assert-VersionLessThan -Type ([Dumplings.Versioning.ChunkVersion]) -Left '6.8.7_130258' -Right '6.8.7.1_130597'
+  }
+
+  It 'rejects empty values instead of allowing them to participate in optimized sorting' {
+    { [Dumplings.Versioning.ChunkVersion]'' } | Should -Throw '*cannot be empty*'
+    $Parsed = $null
+    [Dumplings.Versioning.ChunkVersion]::TryParse('', [ref]$Parsed) | Should -BeFalse
+    $Parsed | Should -BeNullOrEmpty
+  }
+
   It 'compares numeric runs without a fixed-width or integer-size limit' {
     Assert-VersionLessThan -Type ([Dumplings.Versioning.ChunkVersion]) -Left '1.999999999999999999999999999999' -Right '1.1000000000000000000000000000000'
     Assert-VersionEqual -Type ([Dumplings.Versioning.ChunkVersion]) -Left '1.0000000000000000000002' -Right '1.2'
@@ -171,6 +190,19 @@ Describe 'ChunkVersion' {
     $Builds = @(@{ distro_version = @(21, 0, 5) }, @{ distro_version = @(21, 0, 12) }) |
       Sort-Object -Property { [Dumplings.Versioning.ChunkVersion]($_.distro_version -join '.') }
     $Builds[-1].distro_version | Should -Be @(21, 0, 12)
+  }
+
+  It 'selects the latest value through the optimized Sort-Object heap path' {
+    $Versions = @(
+      '1.0.1', '1.0.2', '1.0.3', '1.0.4', '1.0.5', '1.1.0', '1.2.0', '1.2.1',
+      '2.0.0', '2.2.0', '2.3.0', '2.4.0', '2.4.1', '2.5.0', '2.5.1', '2.5.2',
+      '2.6.0', '4.13.1', '4.14.2', '4.15.0', '4.16.3', '4.17.2', '4.18.0', '4.19.0'
+    )
+
+    $Versions | Sort-Object -Property { [Dumplings.Versioning.ChunkVersion]$_ } -Bottom 1 |
+      Should -Be '4.19.0'
+    $Versions | Sort-Object -Property { [Dumplings.Versioning.ChunkVersion]$_ } -Descending -Top 1 |
+      Should -Be '4.19.0'
   }
 }
 

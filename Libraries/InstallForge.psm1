@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Static InstallForge parser. InstallForge stores project configuration in a
 # named PE resource and payload files in a 7z archive after the PE image.
+# Binary structure consumed here:
+#
+#   PE/.rsrc/RCDATA/SETUPCONFIGURATION -> 7z -> SC.dat
+#   PE overlay                         -> independent 7z payload archive
+#
+# Both containers use the standard 37 7A BC AF 27 1C signature and are bounded
+# separately. SC.dat supplies configuration semantics. Encoded path segments are
+# decoded only in structured fields; archive traversal and duplicate paths fail.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -13,11 +21,16 @@ function ConvertFrom-InstallForgeEncodedPathSegment {
   <#
   .SYNOPSIS
     Decode one base64-encoded UTF-16LE InstallForge archive path segment
+  .PARAMETER Segment
+    Current structured format node or record being interpreted.
   #>
   [OutputType([string])]
   param ([Parameter(Mandatory)][string]$Segment)
 
   if ($Segment -ieq 'empty.empty') { return $Segment }
+
+  # Encoded names are UTF-16LE base64 segments. Any invalid or ambiguous value
+  # remains literal so normal filenames are never corrupted by heuristic decode.
   try {
     $Bytes = [Convert]::FromBase64String($Segment)
     if ($Bytes.Length -eq 0 -or ($Bytes.Length % 2) -ne 0) { return $Segment }
@@ -33,6 +46,8 @@ function ConvertFrom-InstallForgeEncodedPath {
   <#
   .SYNOPSIS
     Decode every segment of an InstallForge archive path
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -45,12 +60,17 @@ function ConvertFrom-InstallForgeIni {
   <#
   .SYNOPSIS
     Parse an InstallForge project INI without evaluating project variables
+  .PARAMETER Content
+    Raw text to parse as format metadata without executing embedded commands.
   #>
   [OutputType([hashtable])]
   param ([Parameter(Mandatory)][string]$Content)
 
   $Result = @{}
   $Section = $null
+
+  # Parse project data literally; do not expand InstallForge variables or run
+  # commands embedded in SC.dat.
   foreach ($Line in ($Content -split "`r?`n")) {
     $Trimmed = $Line.Trim()
     if (-not $Trimmed -or $Trimmed.StartsWith(';') -or $Trimmed.StartsWith('#')) { continue }
@@ -70,6 +90,8 @@ function Get-InstallForgeConfigurationArchiveData {
   <#
   .SYNOPSIS
     Open the named InstallForge configuration resource and locate SC.dat
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -77,6 +99,9 @@ function Get-InstallForgeConfigurationArchiveData {
   $Resource = Get-PEResourceInfo -Path $Path |
     Where-Object { $_.TypeId -eq 10 -and $_.Name -ieq 'SETUPCONFIGURATION' } |
     Select-Object -First 1
+
+  # The named RCDATA resource is the only accepted configuration container;
+  # arbitrary 7z signatures in resources are not InstallForge evidence.
   if (-not $Resource) { throw 'The PE does not contain an InstallForge SETUPCONFIGURATION resource' }
   if ($Resource.Size -le 0 -or $Resource.Size -gt $Script:InstallForgeMaximumConfigurationBytes) {
     throw 'The InstallForge configuration resource exceeds the configured size limit'
@@ -85,6 +110,8 @@ function Get-InstallForgeConfigurationArchiveData {
   $TemporaryPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallForge-$([guid]::NewGuid().ToString('N')).7z")
   $Archive = $null
   try {
+    # Decode catalog path segments for matching while retaining encoded names
+    # required to reopen the native archive entries.
     $null = Export-PEResourceData -Resource $Resource -DestinationPath $TemporaryPath -MaximumBytes $Script:InstallForgeMaximumConfigurationBytes
     $Archive = Get-InstallerArchive -Path $TemporaryPath
     $Entries = @(Get-InstallerArchiveEntry -Archive $Archive | ForEach-Object {
@@ -115,6 +142,8 @@ function Get-InstallForgePayloadArchiveData {
   <#
   .SYNOPSIS
     Locate and validate the InstallForge payload 7z archive after the PE image
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -124,6 +153,8 @@ function Get-InstallForgePayloadArchiveData {
   try { $OverlayOffset = Get-PEOverlayOffset -Stream $Stream } finally { $Stream.Dispose() }
   if ($OverlayOffset -le 0 -or $OverlayOffset -ge $File.Length) { throw 'The InstallForge PE has no payload overlay' }
 
+  # Inspect only validated 7z ranges after the PE image. At least one encoded
+  # path distinguishes the InstallForge payload from unrelated embedded archives.
   foreach ($Range in @(Get-EmbeddedSevenZipArchiveRange -Path $File.FullName -StartOffset $OverlayOffset -MaximumArchives 16 -MaximumArchiveBytes $Script:InstallForgeMaximumArchiveBytes)) {
     $Offset = $Range.Offset
     $Length = $Range.Length
@@ -140,6 +171,7 @@ function Get-InstallForgePayloadArchiveData {
       if ($Entries.Count -eq 0 -or -not ($Entries | Where-Object { $_.EncodedName -ne $_.FullName } | Select-Object -First 1)) { continue }
       return [pscustomobject]@{ SourcePath = $File.FullName; Range = $Range; Entries = $Entries; Offset = [long]$Offset; Length = [long]$Length }
     } catch {
+      # An unrelated or damaged overlay archive does not prevent checking later ranges.
       continue
     } finally {
       if ($Context) { Close-InstallerArchiveRange -Context $Context }
@@ -152,6 +184,10 @@ function Read-InstallForgeConfigurationText {
   <#
   .SYNOPSIS
     Read a bounded decoded file from the InstallForge configuration archive
+  .PARAMETER ArchiveData
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
   #>
   [OutputType([string])]
   param (
@@ -178,6 +214,8 @@ function Resolve-InstallForgeScope {
   <#
   .SYNOPSIS
     Resolve scope from explicit InstallForge installation-directory tokens
+  .PARAMETER InstallDirectory
+    Installer-relative path resolved without allowing traversal outside the selected root.
   #>
   [OutputType([string])]
   param ([AllowNull()][string]$InstallDirectory)
@@ -191,6 +229,8 @@ function Get-InstallForgeInfo {
   <#
   .SYNOPSIS
     Read explicit metadata from an InstallForge setup configuration
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -203,6 +243,9 @@ function Get-InstallForgeInfo {
       $Configuration = ConvertFrom-InstallForgeIni -Content (Read-InstallForgeConfigurationText -ArchiveData $ConfigurationData -Name 'SC.dat')
       $Setup = $Configuration['Setup']
       if (-not $Setup -or [string]::IsNullOrWhiteSpace($Setup['Appname'])) { throw 'The InstallForge SC.dat file does not contain a usable Setup/Appname value' }
+
+      # Configuration metadata remains useful when payload extraction is not
+      # supported by a particular generation; retain that limitation as a warning.
       try { $PayloadData = Get-InstallForgePayloadArchiveData -Path $File.FullName } catch { $PayloadData = $null }
 
       $Warnings = [System.Collections.Generic.List[string]]::new()
@@ -253,6 +296,14 @@ function Expand-InstallForgeInstaller {
   <#
   .SYNOPSIS
     Extract decoded InstallForge payload files without executing the installer
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -271,6 +322,9 @@ function Expand-InstallForgeInstaller {
       $Archive = $Context.Archive
       $Written = 0L
       $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+
+      # Match decoded logical names, reopen by encoded catalog identity, and
+      # account output cumulatively before writing traversal-safe destinations.
       foreach ($EntryData in $ArchiveData.Entries) {
         if ([IO.Path]::GetFileName($EntryData.FullName) -ieq 'empty.empty' -or -not (Test-ExtractionPattern -Path $EntryData.FullName -Pattern $Name)) { continue }
         $Written += $EntryData.Length
@@ -290,6 +344,8 @@ function Test-InstallForge {
   <#
   .SYNOPSIS
     Test whether a file contains a parseable InstallForge project
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -300,6 +356,8 @@ function Read-ProtocolsFromInstallForge {
   <#
   .SYNOPSIS
     Read literal URL protocol names from InstallForge registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -310,6 +368,8 @@ function Read-FileExtensionsFromInstallForge {
   <#
   .SYNOPSIS
     Read literal file extensions from InstallForge registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -320,6 +380,8 @@ function Read-ProductVersionFromInstallForge {
   <#
   .SYNOPSIS
     Read the InstallForge project version
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallForgeInfo -Path $Path).DisplayVersion }
@@ -329,6 +391,8 @@ function Read-ProductNameFromInstallForge {
   <#
   .SYNOPSIS
     Read the InstallForge project name
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallForgeInfo -Path $Path).DisplayName }
@@ -338,6 +402,8 @@ function Read-PublisherFromInstallForge {
   <#
   .SYNOPSIS
     Read the InstallForge project publisher
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallForgeInfo -Path $Path).Publisher }
@@ -347,6 +413,8 @@ function Read-ProductCodeFromInstallForge {
   <#
   .SYNOPSIS
     Read a literal InstallForge uninstall key when available
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallForgeInfo -Path $Path).ProductCode }
@@ -356,6 +424,8 @@ function Read-ScopeFromInstallForge {
   <#
   .SYNOPSIS
     Read InstallForge scope from explicit project configuration
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallForgeInfo -Path $Path).Scope }

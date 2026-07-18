@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: MIT
 # Format source: https://github.com/dotnetinstaller/dotnetinstaller
+# Binary structure consumed here; dotNetInstaller is a PE resource wrapper:
+#
+#   .rsrc/CUSTOM/RES_CONFIGURATION -> UTF-8 or BOM-marked UTF-16 XML
+#   .rsrc/RES_CAB/*                -> bounded MSCF cabinet resources
+#   XML component conditions/commands -> named CAB payload + arguments
+#
+# Resource RVAs are mapped through PE sections. XML controls execution order and
+# architecture/OS selection; CAB entry order is not execution evidence.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -8,6 +16,10 @@ function Get-DotNetInstallerXmlAttribute {
   <#
   .SYNOPSIS
     Read one optional dotNetInstaller XML attribute
+  .PARAMETER Element
+    Current structured format node or record being interpreted.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
   #>
   [OutputType([string])]
   param (
@@ -22,6 +34,10 @@ function Get-DotNetInstallerComponentCommand {
   <#
   .SYNOPSIS
     Build source-accurate install commands for one dotNetInstaller component
+  .PARAMETER Component
+    Current structured format node or record being interpreted.
+  .PARAMETER ArchiveEntry
+    Validated archive or catalog entry whose bounded content is read or exported.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -35,9 +51,15 @@ function Get-DotNetInstallerComponentCommand {
     Basic       = '_basic'
     Silent      = '_silent'
   }
+
+  # Build each execution mode independently. Mode-specific attributes fall back
+  # to the unsuffixed command exactly as the bootstrapper configuration does.
   foreach ($Mode in $Modes.GetEnumerator()) {
     $Suffix = $Mode.Value
     $CommandLine = $null
+
+    # Normalize component-specific XML attributes into the real command line
+    # that would be passed to MSI, MSP, MSU, EXE, shell, or open-file handlers.
     switch ($Type) {
       'msi' {
         $Package = Get-DotNetInstallerXmlAttribute -Element $Component -Name 'package'
@@ -100,6 +122,8 @@ function ConvertFrom-DotNetInstallerConfiguration {
   )
 
   $Settings = [Xml.XmlReaderSettings]::new()
+
+  # Disable DTD and external entity resolution before loading untrusted embedded XML.
   $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
   $Settings.XmlResolver = $null
   $StringReader = [IO.StringReader]::new($Content)
@@ -116,6 +140,9 @@ function ConvertFrom-DotNetInstallerConfiguration {
 
   $Components = [Collections.Generic.List[psobject]]::new()
   $ConfigurationIndex = 0
+
+  # Non-install configurations describe maintenance/uninstall paths and must not
+  # be reported as payloads executed during installation.
   foreach ($Configuration in @($Document.DocumentElement.SelectNodes('configuration'))) {
     if ($Configuration.GetAttribute('type') -ne 'install') {
       $ConfigurationIndex++
@@ -175,9 +202,15 @@ function Get-DotNetInstallerInfo {
     $ConfigurationResource = $Resources | Where-Object {
       $_.TypeName -eq 'CUSTOM' -and $_.Name -eq 'RES_CONFIGURATION'
     } | Select-Object -First 1
+
+    # Require the canonical named configuration resource rather than accepting
+    # arbitrary XML strings compiled into the launcher.
     if (-not $ConfigurationResource) { throw 'The dotNetInstaller RES_CONFIGURATION resource was not found.' }
 
     $ConfigurationBytes = Read-PEResourceData -Resource $ConfigurationResource -MaximumBytes 16777216
+
+    # dotNetInstaller projects are normally UTF-8 but older builders may emit a
+    # UTF-16LE BOM; decode only these source-backed representations.
     $ConfigurationText = if ($ConfigurationBytes.Length -ge 2 -and $ConfigurationBytes[0] -eq 0xFF -and $ConfigurationBytes[1] -eq 0xFE) {
       [Text.Encoding]::Unicode.GetString($ConfigurationBytes, 2, $ConfigurationBytes.Length - 2)
     } else {
@@ -190,6 +223,9 @@ function Get-DotNetInstallerInfo {
     $CabinetFolder = New-TempFolder
     try {
       $CabinetPaths = [Collections.Generic.List[string]]::new()
+
+      # Preserve RES_CAB order because split cabinets can span multiple resources;
+      # safe temporary names prevent a resource name from escaping the staging root.
       foreach ($Resource in @($CabinetResources | Sort-Object Offset)) {
         $CabinetPath = Resolve-SafeExtractionPath -DestinationPath $CabinetFolder -RelativePath $Resource.Name
         $null = Export-PEResourceData -Resource $Resource -DestinationPath $CabinetPath -MaximumBytes 1073741824
@@ -208,6 +244,7 @@ function Get-DotNetInstallerInfo {
       Remove-Item -LiteralPath $CabinetFolder -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    # Resolve XML command references only after the complete cabinet catalog is known.
     $Config = ConvertFrom-DotNetInstallerConfiguration -Content $ConfigurationText -ArchiveEntry @($NestedFiles)
     $Commands = @($Config.Components | ForEach-Object { $_.Commands })
     [pscustomobject]@{
@@ -240,6 +277,14 @@ function Expand-DotNetInstaller {
   <#
   .SYNOPSIS
     Expand selected files from dotNetInstaller RES_CAB resources
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([string[]])]
   param (
@@ -255,6 +300,9 @@ function Expand-DotNetInstaller {
     $CabinetFolder = New-TempFolder
     try {
       $CabinetPaths = [Collections.Generic.List[string]]::new()
+
+      # Reassemble ordered cabinet resources without interpreting any component
+      # command, then delegate bounded selection/extraction to the CAB helper.
       foreach ($Resource in @($Resources | Sort-Object Offset)) {
         $CabinetPath = Resolve-SafeExtractionPath -DestinationPath $CabinetFolder -RelativePath $Resource.Name
         $null = Export-PEResourceData -Resource $Resource -DestinationPath $CabinetPath -MaximumBytes 1073741824
@@ -271,6 +319,8 @@ function Test-DotNetInstaller {
   <#
   .SYNOPSIS
     Test whether a file is a dotNetInstaller bootstrapper
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)

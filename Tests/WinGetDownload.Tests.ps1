@@ -36,6 +36,130 @@ Describe 'WinGet native download compatibility probe' {
     }
   }
 
+  It 'Resolves a final URL through a bodyless WinINet HEAD request' {
+    InModuleScope WinGetDownload {
+      $Script:RedirectMethod = $null
+      Mock Open-WinGetWinINetRedirectOperation {
+        param($Uri, $Method, $UserAgent, $Header, $Proxy, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds)
+        $null = $Uri, $UserAgent, $Header, $Proxy, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds
+        $Script:RedirectMethod = $Method
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'WinINet'
+        $Result.HttpStatusCode = 200
+        $Result.FinalUri = 'https://cdn.example.com/installer.exe'
+        $Result.ResponseAccepted = $true
+        $Result.Success = $true
+        $Operation = [pscustomobject]@{ IsCompleted = $true; Result = $Result }
+        $Operation | Add-Member ScriptMethod Wait { param($Milliseconds) $null = $Milliseconds; return $true }
+        $Operation | Add-Member ScriptMethod Cancel { }
+        $Operation | Add-Member ScriptMethod Dispose { }
+        return $Operation
+      }
+
+      Get-WinGetWinINetRedirectedUrl -Uri 'https://example.com/download' -Method HEAD -UserAgent 'Dumplings-Test' |
+        Should -BeExactly 'https://cdn.example.com/installer.exe'
+      $Script:RedirectMethod | Should -BeExactly 'HEAD'
+      Should -Invoke Open-WinGetWinINetRedirectOperation -Exactly 1
+    }
+  }
+
+  It 'Returns final WinINet response headers with duplicate values preserved' {
+    InModuleScope WinGetDownload {
+      Mock Open-WinGetWinINetRedirectOperation {
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'WinINet'
+        $Result.HttpStatusCode = 200
+        $Result.FinalUri = 'https://cdn.example.com/installer.exe'
+        $Result.ResponseHeaders = "HTTP/1.1 200 OK`r`nContent-Type: application/octet-stream`r`nSet-Cookie: first=1`r`nSet-Cookie: second=2`r`nX-Long: first`r`n continued`r`n"
+        $Operation = [pscustomobject]@{ IsCompleted = $true; Result = $Result }
+        $Operation | Add-Member ScriptMethod Wait { param($Milliseconds) $null = $Milliseconds; return $true }
+        $Operation | Add-Member ScriptMethod Cancel { }
+        $Operation | Add-Member ScriptMethod Dispose { }
+        return $Operation
+      }
+
+      $Response = Get-WinGetWinINetResponseHeader -Uri 'https://example.com/download' -Method HEAD -UserAgent 'Dumplings-Test'
+
+      $Response.StatusCode | Should -Be 200
+      $Response.ReasonPhrase | Should -BeExactly 'OK'
+      $Response.RequestUri | Should -BeExactly 'https://cdn.example.com/installer.exe'
+      $Response.Headers['content-type'] | Should -Be @('application/octet-stream')
+      $Response.Headers['SET-COOKIE'] | Should -Be @('first=1', 'second=2')
+      $Response.Headers['x-long'] | Should -Be @('first continued')
+    }
+  }
+
+  It 'Uses only the final native HTTP header block' {
+    InModuleScope WinGetDownload {
+      $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+      $Result.HttpStatusCode = 302
+      $Result.ResponseHeaders = "HTTP/1.1 302 Found`r`nLocation: https://cdn.example.com/file`r`nX-Old: discard`r`n`r`nHTTP/2 200 Final Response`r`nX-New: keep`r`n"
+
+      $Response = ConvertFrom-WinGetDownloadResponseHeader -Result $Result -Uri 'https://example.com/download'
+
+      $Response.StatusCode | Should -Be 200
+      $Response.ReasonPhrase | Should -BeExactly 'Final Response'
+      $Response.Headers.ContainsKey('X-Old') | Should -BeFalse
+      $Response.Headers['X-New'] | Should -Be @('keep')
+    }
+  }
+
+  It 'Resolves a Delivery Optimization redirect and removes its partial transfer file' {
+    InModuleScope WinGetDownload {
+      $Script:RedirectTemporaryPath = $null
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        $Script:RedirectTemporaryPath = $DestinationPath
+        [IO.File]::WriteAllBytes($DestinationPath, [byte[]](1, 2, 3))
+        [pscustomobject]@{
+          Method = 'DeliveryOptimization'; FinalUri = 'https://cdn.example.com/installer.exe'
+          ResponseAccepted = $true; HttpStatusCode = 206
+        }
+      }
+
+      Get-WinGetDeliveryOptimizationRedirectedUrl -Uri 'https://example.com/download' |
+        Should -BeExactly 'https://cdn.example.com/installer.exe'
+      Test-Path -LiteralPath $Script:RedirectTemporaryPath | Should -BeFalse
+      Should -Invoke Invoke-WinGetDeliveryOptimizationDownload -Exactly 1 -ParameterFilter { $ResponseOnly }
+    }
+  }
+
+  It 'Returns the original URL when Delivery Optimization reports no redirect' {
+    InModuleScope WinGetDownload {
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        [pscustomobject]@{
+          Method = 'DeliveryOptimization'; FinalUri = $null
+          ResponseAccepted = $true; HttpStatusCode = 206
+        }
+      }
+
+      Get-WinGetDeliveryOptimizationRedirectedUrl -Uri 'https://example.com/installer.exe' |
+        Should -BeExactly 'https://example.com/installer.exe'
+    }
+  }
+
+  It 'Returns Delivery Optimization response headers and removes partial data' {
+    InModuleScope WinGetDownload {
+      $Script:HeaderTemporaryPath = $null
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        $Script:HeaderTemporaryPath = $DestinationPath
+        [IO.File]::WriteAllBytes($DestinationPath, [byte[]](1, 2, 3))
+        [pscustomobject]@{
+          Method = 'DeliveryOptimization'; FinalUri = 'https://cdn.example.com/installer.exe'
+          ResponseAccepted = $true; HttpStatusCode = 206
+          ResponseHeaders = "HTTP/1.1 206 Partial Content`r`nContent-Type: application/octet-stream`r`nAccept-Ranges: bytes`r`n"
+        }
+      }
+
+      $Response = Get-WinGetDeliveryOptimizationResponseHeader -Uri 'https://example.com/download'
+
+      $Response.StatusCode | Should -Be 206
+      $Response.ReasonPhrase | Should -BeExactly 'Partial Content'
+      $Response.RequestUri | Should -BeExactly 'https://cdn.example.com/installer.exe'
+      $Response.Headers['Accept-Ranges'] | Should -Be @('bytes')
+      Test-Path -LiteralPath $Script:HeaderTemporaryPath | Should -BeFalse
+    }
+  }
+
   It 'Uses bounded timeout and retry defaults internally' {
     InModuleScope WinGetDownload {
       Mock Invoke-WinGetDownloadOperation {

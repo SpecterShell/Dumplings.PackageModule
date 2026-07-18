@@ -171,7 +171,11 @@ namespace Dumplings.WinGetDownload
     {
         private const uint INTERNET_OPEN_TYPE_PRECONFIG = 0;
         private const uint INTERNET_OPEN_TYPE_PROXY = 3;
+        private const uint INTERNET_SERVICE_HTTP = 3;
         private const uint INTERNET_FLAG_IGNORE_REDIRECT_TO_HTTPS = 0x00004000;
+        private const uint INTERNET_FLAG_SECURE = 0x00800000;
+        private const uint INTERNET_FLAG_NO_CACHE_WRITE = 0x04000000;
+        private const uint INTERNET_FLAG_RELOAD = 0x80000000;
         private const uint INTERNET_OPTION_CONNECT_TIMEOUT = 2;
         private const uint INTERNET_OPTION_SEND_TIMEOUT = 5;
         private const uint INTERNET_OPTION_RECEIVE_TIMEOUT = 6;
@@ -190,6 +194,16 @@ namespace Dumplings.WinGetDownload
 
         [DllImport("wininet.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr InternetOpenUrlW(IntPtr internet, string url, string headers, uint headersLength, uint flags, UIntPtr context);
+
+        [DllImport("wininet.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr InternetConnectW(IntPtr internet, string serverName, ushort serverPort, string userName, string password, uint service, uint flags, UIntPtr context);
+
+        [DllImport("wininet.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr HttpOpenRequestW(IntPtr connect, string verb, string objectName, string version, string referrer, IntPtr acceptTypes, uint flags, UIntPtr context);
+
+        [DllImport("wininet.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool HttpSendRequestW(IntPtr request, string headers, uint headersLength, IntPtr optional, uint optionalLength);
 
         [DllImport("wininet.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -241,25 +255,44 @@ namespace Dumplings.WinGetDownload
         {
             private readonly object sync = new object();
             private IntPtr session;
+            private IntPtr connection;
             private IntPtr request;
 
             internal void SetSession(IntPtr value) { lock (sync) session = value; }
+            internal void SetConnection(IntPtr value) { lock (sync) connection = value; }
             internal void SetRequest(IntPtr value) { lock (sync) request = value; }
 
             internal void Close()
             {
                 IntPtr requestToClose;
+                IntPtr connectionToClose;
                 IntPtr sessionToClose;
                 lock (sync)
                 {
                     requestToClose = request;
+                    connectionToClose = connection;
                     sessionToClose = session;
                     request = IntPtr.Zero;
+                    connection = IntPtr.Zero;
                     session = IntPtr.Zero;
                 }
                 if (requestToClose != IntPtr.Zero) InternetCloseHandle(requestToClose);
+                if (connectionToClose != IntPtr.Zero) InternetCloseHandle(connectionToClose);
                 if (sessionToClose != IntPtr.Zero) InternetCloseHandle(sessionToClose);
             }
+        }
+
+        private static string BuildHeaders(IDictionary<string, string> requestHeaders)
+        {
+            StringBuilder headerBuilder = new StringBuilder();
+            if (requestHeaders != null)
+            {
+                foreach (KeyValuePair<string, string> header in requestHeaders)
+                {
+                    headerBuilder.Append(header.Key).Append(": ").Append(header.Value).Append("\r\n");
+                }
+            }
+            return headerBuilder.ToString();
         }
 
         private static string QueryString(IntPtr request, uint query)
@@ -300,6 +333,108 @@ namespace Dumplings.WinGetDownload
             using (DownloadOperation operation = StartDownload(uri, destinationPath, userAgent, requestHeaders, proxy, responseOnly, 0, 0)) return operation.Result;
         }
 
+        public static DownloadOperation StartRedirectResolution(string uri, string method, string userAgent, IDictionary<string, string> requestHeaders, string proxy, int connectionTimeoutSeconds, int operationTimeoutSeconds)
+        {
+            return DownloadOperation.Start(operation => ResolveRedirectCore(uri, method, userAgent, requestHeaders, proxy, connectionTimeoutSeconds, operationTimeoutSeconds, operation));
+        }
+
+        private static DownloadResult ResolveRedirectCore(string uri, string method, string userAgent, IDictionary<string, string> requestHeaders, string proxy, int connectionTimeoutSeconds, int operationTimeoutSeconds, DownloadOperation operation)
+        {
+            DownloadResult result = new DownloadResult
+            {
+                Method = "WinINet",
+                Uri = uri,
+                UserAgent = userAgent,
+            };
+
+            NativeHandleState handles = new NativeHandleState();
+            string stage = "ValidateRequest";
+            try
+            {
+                string normalizedMethod = (method ?? string.Empty).ToUpperInvariant();
+                if (normalizedMethod != "GET" && normalizedMethod != "HEAD") throw new ArgumentException("WinINet redirect resolution supports only GET and HEAD.", "method");
+                Uri requestUri = new Uri(uri, UriKind.Absolute);
+                if (requestUri.Scheme != Uri.UriSchemeHttp && requestUri.Scheme != Uri.UriSchemeHttps) throw new ArgumentException("WinINet redirect resolution requires an HTTP or HTTPS URI.", "uri");
+
+                operation.UpdateProgress(0, null, "Connecting");
+                operation.SetCancellationAction(handles.Close);
+                operation.ThrowIfCancellationRequested();
+
+                stage = "OpenSession";
+                uint accessType = string.IsNullOrEmpty(proxy) ? INTERNET_OPEN_TYPE_PRECONFIG : INTERNET_OPEN_TYPE_PROXY;
+                IntPtr session = InternetOpenW(userAgent, accessType, string.IsNullOrEmpty(proxy) ? null : proxy, null, 0);
+                if (session == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "InternetOpenW failed.");
+                handles.SetSession(session);
+                SetTimeout(session, INTERNET_OPTION_CONNECT_TIMEOUT, connectionTimeoutSeconds);
+                SetTimeout(session, INTERNET_OPTION_SEND_TIMEOUT, operationTimeoutSeconds);
+                SetTimeout(session, INTERNET_OPTION_RECEIVE_TIMEOUT, operationTimeoutSeconds);
+
+                stage = "Connect";
+                operation.ThrowIfCancellationRequested();
+                IntPtr connection = InternetConnectW(session, requestUri.DnsSafeHost, checked((ushort)requestUri.Port), null, null, INTERNET_SERVICE_HTTP, 0, UIntPtr.Zero);
+                if (connection == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "InternetConnectW failed.");
+                handles.SetConnection(connection);
+
+                stage = "OpenRequest";
+                uint flags = INTERNET_FLAG_IGNORE_REDIRECT_TO_HTTPS | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD;
+                if (requestUri.Scheme == Uri.UriSchemeHttps) flags |= INTERNET_FLAG_SECURE;
+                IntPtr request = HttpOpenRequestW(connection, normalizedMethod, requestUri.PathAndQuery, null, null, IntPtr.Zero, flags, UIntPtr.Zero);
+                if (request == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "HttpOpenRequestW failed.");
+                handles.SetRequest(request);
+                SetTimeout(request, INTERNET_OPTION_RECEIVE_TIMEOUT, operationTimeoutSeconds);
+
+                stage = "SendRequest";
+                operation.ThrowIfCancellationRequested();
+                string headers = BuildHeaders(requestHeaders);
+                if (!HttpSendRequestW(request, headers.Length == 0 ? null : headers, checked((uint)headers.Length), IntPtr.Zero, 0))
+                {
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "HttpSendRequestW failed.");
+                }
+
+                stage = "ReadResponseHeaders";
+                string statusText = QueryString(request, HTTP_QUERY_STATUS_CODE);
+                int status;
+                if (!int.TryParse(statusText, out status)) throw new InvalidOperationException("WinINet did not return an HTTP status code.");
+                result.HttpStatusCode = status;
+                result.FinalUri = QueryOptionString(request, INTERNET_OPTION_URL);
+                result.ContentType = QueryString(request, HTTP_QUERY_CONTENT_TYPE);
+                result.ResponseHeaders = QueryString(request, HTTP_QUERY_RAW_HEADERS_CRLF);
+                long contentLength;
+                if (long.TryParse(QueryString(request, HTTP_QUERY_CONTENT_LENGTH), out contentLength)) result.ContentLength = contentLength;
+                result.ResponseAccepted = status >= 200 && status < 300;
+                result.Success = true;
+                result.Completed = true;
+                operation.UpdateProgress(0, result.ContentLength, "ResponseReceived");
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                result.HResult = HResultFromWin32(ERROR_CANCELLED);
+                result.NativeErrorCode = ERROR_CANCELLED;
+                result.FailureStage = stage;
+                result.ErrorMessage = "The WinINet redirect request was cancelled.";
+                result.Cancelled = true;
+                operation.UpdateProgress(0, result.ContentLength, "Cancelled");
+                return result;
+            }
+            catch (Exception exception)
+            {
+                int nativeError = exception is System.ComponentModel.Win32Exception ? ((System.ComponentModel.Win32Exception)exception).NativeErrorCode : 0;
+                result.HResult = exception.HResult;
+                result.NativeErrorCode = nativeError;
+                result.FailureStage = stage;
+                result.ErrorMessage = exception.Message;
+                result.Cancelled = nativeError == ERROR_CANCELLED || nativeError == ERROR_INTERNET_OPERATION_CANCELLED;
+                result.TimedOut = exception is TimeoutException;
+                return result;
+            }
+            finally
+            {
+                operation.ClearCancellationAction();
+                handles.Close();
+            }
+        }
+
         private static DownloadResult DownloadCore(string uri, string destinationPath, string userAgent, IDictionary<string, string> requestHeaders, string proxy, bool responseOnly, int connectionTimeoutSeconds, int operationTimeoutSeconds, DownloadOperation operation)
         {
             DownloadResult result = new DownloadResult
@@ -326,15 +461,7 @@ namespace Dumplings.WinGetDownload
                 SetTimeout(session, INTERNET_OPTION_SEND_TIMEOUT, operationTimeoutSeconds);
                 SetTimeout(session, INTERNET_OPTION_RECEIVE_TIMEOUT, operationTimeoutSeconds);
 
-                StringBuilder headerBuilder = new StringBuilder();
-                if (requestHeaders != null)
-                {
-                    foreach (KeyValuePair<string, string> header in requestHeaders)
-                    {
-                        headerBuilder.Append(header.Key).Append(": ").Append(header.Value).Append("\r\n");
-                    }
-                }
-                string headers = headerBuilder.ToString();
+                string headers = BuildHeaders(requestHeaders);
                 stage = "OpenRequest";
                 operation.ThrowIfCancellationRequested();
                 IntPtr request = InternetOpenUrlW(session, uri, headers.Length == 0 ? null : headers, checked((uint)headers.Length), INTERNET_FLAG_IGNORE_REDIRECT_TO_HTTPS, UIntPtr.Zero);

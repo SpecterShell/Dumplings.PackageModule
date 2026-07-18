@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: MIT
 # This module only bridges to the independently licensed InstallerParsers CLI.
+# Process boundary:
+#
+#   NSIS installer path -> InstallerBridge -> NSIS.GetInfo/Expand
+#                         <- compiled-command, payload, and ARP evidence
+#
+# The GPL parser owns the aligned DEADBEEF/NullsoftInst header, compression,
+# opcode normalization, and command simulation. This MIT bridge does not duplicate
+# those internals. See Modules/InstallerParsers/Libraries/NSIS.psm1.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -152,6 +160,8 @@ function Read-ProtocolsFromNSIS {
   <#
   .SYNOPSIS
     Read literal URL protocol names written by an NSIS installer
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -162,6 +172,8 @@ function Read-FileExtensionsFromNSIS {
   <#
   .SYNOPSIS
     Read literal file extensions written by an NSIS installer
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)

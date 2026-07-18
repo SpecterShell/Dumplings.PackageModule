@@ -340,6 +340,24 @@ Describe 'Scoped WebDriver PowerShell API' {
     Remove-Module -ModuleInfo $Script:WebDriverModule -Force -ErrorAction SilentlyContinue
   }
 
+  It 'blocks ordinary media and YouTube-specific request hosts' {
+    $Patterns = @(& $Script:WebDriverModule { $Script:WebDriverBlockedUrlPatterns })
+
+    foreach ($MediaPattern in '*.jpg*', '*.png*', '*.mp4*', '*.webm*') {
+      $Patterns | Should -Contain $MediaPattern
+    }
+    foreach ($YouTubePattern in '*://youtube.com/*', '*://*.youtube.com/*', '*://youtu.be/*',
+      '*://*.youtube-nocookie.com/*', '*://youtube.googleapis.com/*',
+      '*://youtubei.googleapis.com/*', '*://*.ytimg.com/*', '*://*.googlevideo.com/*') {
+      $Patterns | Should -Contain $YouTubePattern
+    }
+
+    # General Google services must remain available to extraction tasks.
+    $Patterns | Should -Not -Contain '*://*.google.com/*'
+    $Patterns | Should -Not -Contain '*://*.googleapis.com/*'
+    $Patterns.Count | Should -Be ($Patterns | Select-Object -Unique).Count
+  }
+
   It 'returns script output unchanged and releases a successful lease' {
     Mock Get-EdgeDriver { 'fake-driver' } -ModuleName WebDriver
     Mock Save-WebDriverScreenshot {} -ModuleName WebDriver

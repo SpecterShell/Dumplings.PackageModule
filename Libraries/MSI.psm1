@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Format sources: https://github.com/wixtoolset/wix
+# Binary structure consumed here; MSI/MSP/MST are CFB containers:
+#
+#   D0 CF 11 E0 A1 B1 1A E1 header -> FAT/DIFAT/mini-FAT
+#     -> directory/root CLSID -> _StringPool/_StringData/table streams
+#
+# Root CLSID 000C1084 identifies an installer database, 000C1086 a patch, and
+# 000C1082 a transform. This module uses Windows Installer/DTF to read logical
+# tables after storage validation; WiX/Advanced Installer/InstallShield are
+# authoring classifications over the same database structure.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -128,6 +137,8 @@ function Read-MsiProperty {
       default { throw 'Invalid parameter set.' }
     }
 
+    # Apply authored transforms and patch transforms to the in-memory database view before querying;
+    # the original package remains opened read-only.
     # Apply the transform if specified
     if ($TransformPath) {
       $TransformPath = Convert-Path -Path $TransformPath
@@ -162,6 +173,16 @@ function Read-MsiProperty {
 }
 
 function Get-MsiQueryRow {
+  <#
+  .SYNOPSIS
+    Materialize rows from one read-only MSI SQL query.
+  .PARAMETER Database
+    Open caller-owned Windows Installer database. This function closes its view/records, not the database.
+  .PARAMETER Query
+    SQL query over MSI logical tables.
+  .PARAMETER FieldNames
+    Output property names corresponding positionally to one-based query fields.
+  #>
   param (
     [Parameter(Mandatory)]
     [Microsoft.Deployment.WindowsInstaller.Database]$Database,
@@ -203,6 +224,14 @@ function Get-MsiQueryRow {
 }
 
 function Expand-MsiFormattedPropertyValue {
+  <#
+  .SYNOPSIS
+    Resolve literal bracketed MSI property references in a formatted value.
+  .PARAMETER Value
+    Formatted MSI string. Unknown references remain unchanged.
+  .PARAMETER Properties
+    Property table values keyed by case-sensitive MSI property name.
+  #>
   param (
     [AllowNull()]
     [string]$Value,
@@ -225,11 +254,19 @@ function Expand-MsiFormattedPropertyValue {
 }
 
 function Get-MsiStaticTableInfo {
+  <#
+  .SYNOPSIS
+    Read the MSI table projection shared by builder, architecture, ARP, location, and association analysis.
+  .PARAMETER Database
+    Open caller-owned Windows Installer database. Optional absent tables produce empty row sets.
+  #>
   param (
     [Parameter(Mandatory)]
     [Microsoft.Deployment.WindowsInstaller.Database]$Database
   )
 
+  # Materialize one immutable projection so builder, architecture, ARP, install-location, and
+  # association analysis do not reopen or repeatedly query the database.
   $Properties = @{}
   foreach ($Row in (Get-MsiQueryRow -Database $Database -Query 'SELECT `Property`, `Value` FROM `Property`' -FieldNames @('Property', 'Value'))) {
     $Properties[$Row.Property] = $Row.Value
@@ -239,6 +276,8 @@ function Get-MsiStaticTableInfo {
   $DirectoryRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' -FieldNames @('Directory', 'DirectoryParent', 'DefaultDir'))
   $ComponentRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Component`, `Directory_`, `KeyPath` FROM `Component`' -FieldNames @('Component', 'Directory', 'KeyPath'))
   $CustomActionRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Action`, `Type`, `Source`, `Target` FROM `CustomAction`' -FieldNames @('Action', 'Type', 'Source', 'Target'))
+  # Resolve only literal Property-table substitutions in Registry rows. Other MSI formatted-string
+  # constructs remain intact rather than being evaluated outside Windows Installer.
   $RegistryRows = foreach ($Row in (Get-MsiQueryRow -Database $Database -Query 'SELECT `Registry`, `Root`, `Key`, `Name`, `Value`, `Component_` FROM `Registry`' -FieldNames @('Registry', 'Root', 'Key', 'Name', 'Value', 'Component'))) {
     $ResolvedKey = Expand-MsiFormattedPropertyValue -Value $Row.Key -Properties $Properties
     $ResolvedValue = Expand-MsiFormattedPropertyValue -Value $Row.Value -Properties $Properties
@@ -278,6 +317,8 @@ function Get-MsiAssociationInfoFromStaticTableInfo {
   <#
   .SYNOPSIS
     Read protocol and file-extension evidence from MSI registry and association tables
+  .PARAMETER StaticTableInfo
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][psobject]$StaticTableInfo)
@@ -289,6 +330,8 @@ function Get-MsiAssociationInfoFromStaticTableInfo {
   $Warnings = [System.Collections.Generic.List[string]]::new()
   foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add($Warning) }
 
+  # Merge explicit Registry-table associations with MSI's normalized Extension/ProgId/Verb/MIME
+  # tables, deduplicating by literal extension.
   foreach ($ExtensionRow in @($StaticTableInfo.ExtensionRows)) {
     $Extension = ([string]$ExtensionRow.Extension).Trim().TrimStart('.')
     if ($Extension -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$') {
@@ -442,6 +485,12 @@ function Test-MsiArchitectureCondition {
 }
 
 function Get-MsiArchitectureInfoFromStaticTableInfo {
+  <#
+  .SYNOPSIS
+    Derive supported and package architectures from MSI summary and launch-condition evidence.
+  .PARAMETER StaticTableInfo
+    Immutable table projection returned by Get-MsiStaticTableInfo.
+  #>
   param (
     [Parameter(Mandatory)]
     [psobject]$StaticTableInfo
@@ -459,6 +508,8 @@ function Get-MsiArchitectureInfoFromStaticTableInfo {
     }
   }
 
+  # Summary Template provides the baseline platform; simple architecture launch conditions may
+  # narrow that set but never widen it.
   foreach ($Row in @($StaticTableInfo.LaunchConditionRows)) {
     foreach ($Architecture in @($Supported.ToArray())) {
       if (-not (Test-MsiArchitectureCondition -Condition $Row.Condition -Architecture $Architecture)) {
@@ -476,6 +527,12 @@ function Get-MsiArchitectureInfoFromStaticTableInfo {
 }
 
 function Get-MsiBuilderFromStaticTableInfo {
+  <#
+  .SYNOPSIS
+    Classify the MSI authoring system from structured tables, properties, actions, and summary data.
+  .PARAMETER StaticTableInfo
+    Immutable table projection returned by Get-MsiStaticTableInfo. Unknown evidence returns Unknown rather than guessing.
+  #>
   param (
     [Parameter(Mandatory)]
     [psobject]$StaticTableInfo
@@ -493,6 +550,8 @@ function Get-MsiBuilderFromStaticTableInfo {
     $CustomActionNames
   ) -join "`n"
 
+  # Prefer tool-owned tables/properties/actions over free-form summary text. Return Unknown when no
+  # source-backed signature survives compilation.
   if ($Tables | Where-Object { $_ -like 'AI_*' }) { return 'AdvancedInstaller' }
   if ($Properties.Keys | Where-Object { $_ -like 'AI_*' -or $_ -in @('AI_PACKAGE_TYPE', 'AI_PRODUCTNAME_ARP') }) { return 'AdvancedInstaller' }
   if ($CustomActionNames | Where-Object { $_ -like 'AI_*' }) { return 'AdvancedInstaller' }
@@ -520,6 +579,12 @@ function Get-MsiBuilderFromStaticTableInfo {
 }
 
 function Get-MsiInstallLocationInfoFromStaticTableInfo {
+  <#
+  .SYNOPSIS
+    Select an MSI public install-directory property that is connected to installed components.
+  .PARAMETER StaticTableInfo
+    Immutable table projection returned by Get-MsiStaticTableInfo, including Property, Directory, and Component rows.
+  #>
   param (
     [Parameter(Mandatory)]
     [psobject]$StaticTableInfo
@@ -530,6 +595,7 @@ function Get-MsiInstallLocationInfoFromStaticTableInfo {
   $ComponentDirectoryIds = @($StaticTableInfo.ComponentRows.Directory | Where-Object { $_ })
   $UsedDirectoryIds = @($ComponentDirectoryIds + @($StaticTableInfo.DirectoryRows.DirectoryParent | Where-Object { $_ }) | Sort-Object -Unique)
 
+  # Consider known public properties first, followed by authored all-uppercase directory IDs.
   $Candidates = [System.Collections.Generic.List[string]]::new()
   if ($Properties['WIXUI_INSTALLDIR']) { $Candidates.Add($Properties['WIXUI_INSTALLDIR']) }
   foreach ($Name in @('APPDIR', 'INSTALLDIR', 'INSTALLLOCATION', 'APPLICATIONROOTDIRECTORY', 'INSTALL_ROOT')) {
@@ -617,6 +683,8 @@ function Get-MsiAppsAndFeaturesInfo {
         }
       }
 
+      # Compute visible ARP ownership from one table snapshot after all requested transforms have
+      # been applied.
       $StaticTableInfo = Get-MsiStaticTableInfo -Database $Database
       $Properties = $StaticTableInfo.Properties
 
@@ -638,6 +706,8 @@ function Get-MsiAppsAndFeaturesInfo {
           $_.Key -match "(?i)(^|\\)Microsoft\\Windows\\CurrentVersion\\Uninstall\\$EscapedProductCode$"
         })
 
+      # Some bootstrap-style MSIs hide their native ProductCode registration and write a parallel
+      # <ProductCode>.msq or custom uninstall key.
       $HasMsqAppsAndFeaturesEntry = [bool]($MsqRegistryRows | Where-Object {
           $_.Name -in @('DisplayName', 'UninstallString', 'ModifyPath', 'DisplayVersion')
         })
@@ -664,6 +734,7 @@ function Get-MsiAppsAndFeaturesInfo {
       } else {
         $null
       }
+      # Explicit visible custom keys outrank .msq, which in turn outranks the native MSI ProductCode.
       $AppsAndFeaturesProductCode = if ($CustomAppsAndFeaturesProductCode) {
         $CustomAppsAndFeaturesProductCode
       } elseif ($HasMsqAppsAndFeaturesEntry) {
@@ -679,6 +750,8 @@ function Get-MsiAppsAndFeaturesInfo {
       } else {
         @()
       }
+      # WinGet classifies an ARP entry as MSI only when WindowsInstaller is 1. Native MSI
+      # registration implies that value even when no custom Registry-table row exists.
       $AppsAndFeaturesWindowsInstaller = if ($VisibleAppsAndFeaturesRegistryRows.Count -gt 0) {
         [bool]($VisibleAppsAndFeaturesRegistryRows | Where-Object { $_.Name -eq 'WindowsInstaller' -and $_.Value -match '^(#)?1$' })
       } else {
@@ -876,6 +949,8 @@ function Get-MsiInstallerInfo {
         }
       }
 
+      # Read all dependent evidence from one logical table projection; this keeps fields mutually
+      # consistent and avoids repeated DTF queries.
       $StaticTableInfo = Get-MsiStaticTableInfo -Database $Database
       $Properties = $StaticTableInfo.Properties
       $InstallLocationInfo = Get-MsiInstallLocationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
@@ -946,6 +1021,8 @@ function Read-ProtocolsFromMsi {
   <#
   .SYNOPSIS
     Read literal URL protocol names registered by an MSI
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -956,6 +1033,8 @@ function Read-FileExtensionsFromMsi {
   <#
   .SYNOPSIS
     Read literal file extensions registered by an MSI
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -1360,6 +1439,16 @@ function Test-WiXInstaller {
 
     # Keep this local to avoid changing Read-MsiProperty's strict scalar behavior.
     function Test-QueryStringMatch {
+      <#
+      .SYNOPSIS
+        Test whether any string field from an optional MSI query satisfies a predicate.
+      .PARAMETER Database
+        Open caller-owned Windows Installer database.
+      .PARAMETER Query
+        SQL query whose first field is converted to string.
+      .PARAMETER Predicate
+        Script block receiving each string. A truthy result stops enumeration.
+      #>
       param (
         [Microsoft.Deployment.WindowsInstaller.Database]$Database,
         [string]$Query,

@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: MIT
 # Static InstallAnywhere parser. It reads embedded ZIP/XML project data and
 # never starts the installer or its Java launcher.
+# Binary structure consumed here:
+#
+#   native PE launcher -> self-contained ZIP range
+#     +-- InstallerData/Execute.zip -> InstallScript.iap_xml
+#     +-- IAClasses.zip
+#     `-- Resource1.zip and payload entries
+#
+# The archive base is derived from a matching EOCD and central-directory offset,
+# not the first PK local-header marker. Nested ZIPs receive independent bounds,
+# safe-path checks, and entry limits. XML product/action records supply metadata.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -12,11 +22,16 @@ function Get-InstallAnywhereArchiveData {
   <#
   .SYNOPSIS
     Locate the InstallAnywhere ZIP archive and enumerate its payload names
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
 
   $File = Get-Item -LiteralPath $Path -Force
+
+  # Test each independently validated ZIP range because launchers may append
+  # signatures or auxiliary archives around the InstallAnywhere payload.
   foreach ($Range in @(Get-EmbeddedZipArchiveRange -Path $Path)) {
     if ($Range.Length -gt $Script:InstallAnywhereMaximumArchiveBytes) { continue }
     $Context = $null
@@ -26,9 +41,13 @@ function Get-InstallAnywhereArchiveData {
           [pscustomobject]@{ FullName = $_.FullName; Length = $_.Length }
         })
       $Names = @($Entries.FullName)
+
+      # Require InstallAnywhere-specific project/runtime names instead of
+      # classifying an arbitrary embedded ZIP by container type alone.
       if ($Names -notcontains 'InstallerData/Execute.zip' -and $Names -notcontains 'InstallerData/IAClasses.zip' -and -not ($Names -match 'InstallScript\.iap_xml$')) { continue }
       return [pscustomobject]@{ SourcePath = $File.FullName; Range = $Range; Entries = $Entries; EntryNames = $Names }
     } catch {
+      # Continue to later ranges when a candidate central directory or entry is malformed.
       continue
     } finally {
       if ($Context) { Close-InstallerArchiveRange -Context $Context }
@@ -38,10 +57,18 @@ function Get-InstallAnywhereArchiveData {
 }
 
 function Get-InstallAnywhereProjectXml {
+  <#
+  .SYNOPSIS
+    Read InstallScript.iap_xml from the outer archive or nested Execute.zip.
+  .PARAMETER ArchiveData
+    Validated outer ZIP range and catalog returned by Get-InstallAnywhereArchiveData. Nested streams are disposed internally.
+  #>
   [OutputType([string])]
   param ([Parameter(Mandatory)]$ArchiveData)
   $Context = Open-InstallerArchiveRange -Path $ArchiveData.SourcePath -Range $ArchiveData.Range
   try {
+    # Newer installers place the project XML inside Execute.zip. Convert the
+    # nested entry to a bounded seekable stream before opening its ZIP directory.
     $NestedEntry = Get-InstallerArchiveEntry -Archive $Context.Archive | Where-Object { $_.FullName -ieq 'InstallerData/Execute.zip' } | Select-Object -First 1
     if ($NestedEntry) {
       if ($NestedEntry.Length -gt $Script:InstallAnywhereMaximumEntryBytes) { throw 'The InstallAnywhere Execute.zip entry exceeds the configured size limit' }
@@ -63,6 +90,7 @@ function Get-InstallAnywhereProjectXml {
       }
     }
 
+    # Older generations expose InstallScript.iap_xml directly in the outer archive.
     $ProjectName = $ArchiveData.EntryNames | Where-Object { $_ -match 'InstallScript\.iap_xml$' } | Select-Object -First 1
     if (-not $ProjectName) { return $null }
     $ProjectEntry = Get-InstallerArchiveEntry -Archive $Context.Archive | Where-Object { $_.FullName -ieq $ProjectName } | Select-Object -First 1
@@ -76,6 +104,14 @@ function Get-InstallAnywhereProjectXml {
 }
 
 function Get-InstallAnywherePropertyText {
+  <#
+  .SYNOPSIS
+    Read one non-empty named property from InstallAnywhere project XML.
+  .PARAMETER Xml
+    Parsed InstallScript.iap_xml document.
+  .PARAMETER Name
+    Exact Java-bean property name to query.
+  #>
   [OutputType([string])]
   param ([Parameter(Mandatory)][xml]$Xml, [Parameter(Mandatory)][string]$Name)
   $Property = $Xml.SelectSingleNode("//property[@name='$Name']")
@@ -86,10 +122,19 @@ function Get-InstallAnywherePropertyText {
 }
 
 function Get-InstallAnywhereVersion {
+  <#
+  .SYNOPSIS
+    Assemble the structured InstallAnywhere productVersion components.
+  .PARAMETER Xml
+    Parsed InstallScript.iap_xml document containing productVersion properties.
+  #>
   [OutputType([string])]
   param ([Parameter(Mandatory)][xml]$Xml)
   $Property = $Xml.SelectSingleNode("//property[@name='productVersion']")
   if (-not $Property) { return $null }
+
+  # InstallAnywhere serializes version components as child bean properties;
+  # omit absent trailing components rather than manufacturing zero values.
   $Parts = foreach ($Name in @('major', 'minor', 'revision', 'subRevision')) {
     $Value = $Property.SelectSingleNode(".//property[@name='$Name']/*")
     if ($Value) { $Value.InnerText.Trim() } else { $null }
@@ -100,6 +145,12 @@ function Get-InstallAnywhereVersion {
 }
 
 function Get-InstallAnywhereRegistryWrite {
+  <#
+  .SYNOPSIS
+    Return only literal uninstall registry paths present in project XML.
+  .PARAMETER ProjectXml
+    Raw InstallScript.iap_xml text. Built-in computed uninstall registration is intentionally not inferred.
+  #>
   [OutputType([pscustomobject[]])]
   param ([Parameter(Mandatory)][string]$ProjectXml)
   # Built-in InstallAnywhere uninstall registration is not represented as a
@@ -116,6 +167,8 @@ function Get-InstallAnywhereInfo {
   .DESCRIPTION
     Parses the embedded InstallAnywhere project XML. Product identity is
     explicit, while built-in uninstall registration may require VM validation.
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
@@ -156,6 +209,14 @@ function Expand-InstallAnywhereInstaller {
   <#
   .SYNOPSIS
     Extract InstallAnywhere outer ZIP payload files without executing the installer
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -189,6 +250,8 @@ function Test-InstallAnywhereInstaller {
   <#
   .SYNOPSIS
     Test whether a file contains a parseable InstallAnywhere project
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])] param([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
   process { try { $null = Get-InstallAnywhereInfo -Path $Path; $true } catch { $false } }
@@ -197,6 +260,8 @@ function Read-ProtocolsFromInstallAnywhere {
   <#
   .SYNOPSIS
     Read literal URL protocol names from InstallAnywhere registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -207,6 +272,8 @@ function Read-FileExtensionsFromInstallAnywhere {
   <#
   .SYNOPSIS
     Read literal file extensions from InstallAnywhere registry evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([string[]])]
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
@@ -217,6 +284,8 @@ function Read-ProductVersionFromInstallAnywhere {
   <#
   .SYNOPSIS
     Read the explicit InstallAnywhere product version
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAnywhereInfo -Path $Path).DisplayVersion }
@@ -225,6 +294,8 @@ function Read-ProductNameFromInstallAnywhere {
   <#
   .SYNOPSIS
     Read the explicit InstallAnywhere product name
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAnywhereInfo -Path $Path).DisplayName }
@@ -233,6 +304,8 @@ function Read-PublisherFromInstallAnywhere {
   <#
   .SYNOPSIS
     Read the explicit InstallAnywhere publisher
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAnywhereInfo -Path $Path).Publisher }
@@ -241,6 +314,8 @@ function Read-ProductCodeFromInstallAnywhere {
   <#
   .SYNOPSIS
     Read the InstallAnywhere project product identifier
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallAnywhereInfo -Path $Path).ProductCode }

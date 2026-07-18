@@ -2,6 +2,14 @@
 # Static Wise Installation System wrapper parser. Wise has several product
 # generations; this module handles the validated Wise-for-Windows-Installer
 # variant that embeds a Windows Installer database without executing setup.
+# Binary structure consumed here:
+#
+#   Wise PE launcher -> embedded CFB range
+#     D0 CF 11 E0 A1 B1 1A E1 -> FAT/directory -> Root Entry CLSID
+#     000C1084-0000-0000-C000-000000000046 -> MSI table streams
+#
+# Wise engine markers establish the outer family; CFB/root validation establishes
+# the nested MSI. The carved range ends before the certificate table or EOF.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -13,6 +21,10 @@ function Read-WiseCfbRootStorageClassId {
   <#
   .SYNOPSIS
     Read an embedded CFB root-storage CLSID relative to its file offset
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Offset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
   #>
   [OutputType([guid])]
   param (
@@ -22,6 +34,9 @@ function Read-WiseCfbRootStorageClassId {
 
   if ($Offset + 512 -gt $Stream.Length) { return $null }
   $Header = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count 512
+
+  # Validate the CFB signature, little-endian marker, and supported sector size
+  # before resolving any sector-relative pointer.
   if ([Convert]::ToHexString($Header, 0, 8) -ne 'D0CF11E0A1B11AE1') { return $null }
   if ([BitConverter]::ToUInt16($Header, 0x1C) -ne 0xFFFE) { return $null }
 
@@ -34,6 +49,9 @@ function Read-WiseCfbRootStorageClassId {
   $RootOffset = $Offset + (([long]$DirectorySector + 1) * $SectorSize)
   if ($RootOffset + 128 -gt $Stream.Length) { return $null }
   $Root = Read-BinaryBytes -Stream $Stream -Offset $RootOffset -Count 128
+
+  # Directory object type 5 identifies the CFB root storage whose CLSID
+  # distinguishes MSI databases from other compound documents.
   if ($Root[0x42] -ne 5) { return $null }
   $ClassIdBytes = [byte[]]::new(16)
   [Array]::Copy($Root, 0x50, $ClassIdBytes, 0, 16)
@@ -44,6 +62,8 @@ function Get-WiseEmbeddedMsiInfo {
   <#
   .SYNOPSIS
     Locate and validate the MSI database embedded by a Wise wrapper
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -53,6 +73,9 @@ function Get-WiseEmbeddedMsiInfo {
 
   $WiseMarkers = @('.WISE', 'WiseForWindowsInstaller', 'Wise for Windows Installer', 'WISE_SETUP_EXE_PATH')
   $StrongWiseMarkers = @('WiseForWindowsInstaller', 'Wise for Windows Installer', 'WISE_SETUP_EXE_PATH')
+
+  # Require a strong engine marker; the short .WISE token alone is too common
+  # to classify an arbitrary PE as a supported Wise wrapper.
   $MatchedMarkers = foreach ($Marker in $WiseMarkers) {
     if (Find-BinaryPattern -Path $File.FullName -Pattern ([Text.Encoding]::ASCII.GetBytes($Marker)) -Maximum 1) { $Marker }
   }
@@ -61,12 +84,16 @@ function Get-WiseEmbeddedMsiInfo {
   $CfbMagic = [byte[]](0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1)
   $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
+    # Examine each bounded CFB signature and accept only an MSI root CLSID.
     foreach ($Offset in @(Find-BinaryPattern -Path $File.FullName -Pattern $CfbMagic -Maximum 32)) {
       $ClassId = Read-WiseCfbRootStorageClassId -Stream $Stream -Offset $Offset
       if ($ClassId -and $ClassId.ToString('B').ToUpperInvariant() -eq $Script:WiseMsiClassId) {
         $Layout = Get-PELayout -Path $File.FullName
         $Certificate = $Layout.DataDirectories.Certificate
         # IMAGE_DIRECTORY_ENTRY_SECURITY stores a file offset rather than an RVA.
+
+        # Exclude Authenticode data from the carved MSI range when it follows the
+        # embedded database; otherwise stop at physical EOF.
         $EndOffset = if ($Certificate -and $Certificate.Rva -gt $Offset -and $Certificate.Rva -le $File.Length) { [long]$Certificate.Rva } else { [long]$File.Length }
         $Length = $EndOffset - $Offset
         if ($Length -le 0 -or $Length -gt $Script:WiseMaximumEmbeddedMsiBytes) { throw 'The embedded Wise MSI range exceeds the configured size limit.' }
@@ -124,10 +151,14 @@ function Get-WiseInfo {
     $TemporaryFolder = New-TempFolder
     $MsiPath = Join-Path $TemporaryFolder 'embedded.msi'
     try {
+      # The nested MSI is authoritative for product identity, associations, and
+      # architecture. Outer PE version resources remain secondary evidence only.
       $null = Expand-WiseInstaller -Path $File.FullName -DestinationPath $MsiPath
       $MsiInfo = Get-MsiInstallerInfo -Path $MsiPath
       $Publisher = try { Read-MsiProperty -Path $MsiPath -Query "SELECT `Value` FROM `Property` WHERE `Property`='Manufacturer'" } catch { $null }
       $AllUsers = try { Read-MsiProperty -Path $MsiPath -Query "SELECT `Value` FROM `Property` WHERE `Property`='ALLUSERS'" } catch { $null }
+
+      # Only an explicit ALLUSERS=1 authoring value proves machine scope here.
       $Scope = if ($AllUsers -eq '1') { 'machine' } else { $null }
       $VersionStrings = @(Get-PEVersionStringTable -Path $File.FullName)[0]
 
@@ -178,6 +209,8 @@ function Test-WiseInstaller {
   <#
   .SYNOPSIS
     Test whether a PE is a supported Wise MSI wrapper
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)

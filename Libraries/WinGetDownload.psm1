@@ -358,6 +358,39 @@ function Open-WinGetWinINetDownloadOperation {
     $Uri.AbsoluteUri, $DestinationPath, $UserAgent, $Header, $Proxy, $ResponseOnly, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds)
 }
 
+function Open-WinGetWinINetRedirectOperation {
+  <#
+  .SYNOPSIS
+    Start one cancellable bodyless WinINet redirect request
+  .PARAMETER Uri
+    The HTTP or HTTPS URL to resolve
+  .PARAMETER Method
+    GET or HEAD; neither method reads a response body
+  .PARAMETER UserAgent
+    The user agent sent through WinINet
+  .PARAMETER Header
+    Additional request headers
+  .PARAMETER Proxy
+    An optional explicit proxy URI
+  .PARAMETER ConnectionTimeoutSeconds
+    Maximum time allowed before response headers arrive
+  .PARAMETER OperationTimeoutSeconds
+    Native send and receive operation timeout
+  #>
+  param (
+    [Parameter(Mandatory)][uri]$Uri,
+    [Parameter(Mandatory)][ValidateSet('GET', 'HEAD')][string]$Method,
+    [Parameter(Mandatory)][string]$UserAgent,
+    [Parameter(Mandatory)][Collections.Generic.IDictionary[string, string]]$Header,
+    [AllowEmptyString()][string]$Proxy,
+    [int]$ConnectionTimeoutSeconds,
+    [int]$OperationTimeoutSeconds
+  )
+
+  return [Dumplings.WinGetDownload.WinInetDownloader]::StartRedirectResolution(
+    $Uri.AbsoluteUri, $Method, $UserAgent, $Header, $Proxy, $ConnectionTimeoutSeconds, $OperationTimeoutSeconds)
+}
+
 function Open-WinGetDeliveryOptimizationDownloadOperation {
   <#
   .SYNOPSIS
@@ -507,6 +540,374 @@ function Invoke-WinGetDeliveryOptimizationDownload {
   } -OperationArgument $OperationArgument -Activity 'Downloading installer with Delivery Optimization' -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
     -MaximumRetryDelaySeconds $MaximumRetryDelaySeconds -MaximumTotalRetryDelaySeconds $MaximumTotalRetryDelaySeconds `
     -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
+}
+
+function ConvertFrom-WinGetDownloadResponseHeader {
+  <#
+  .SYNOPSIS
+    Convert native raw response headers to the Get-WebResponseHeader contract
+  .PARAMETER Result
+    Native WinINet or Delivery Optimization response evidence
+  .PARAMETER Uri
+    Original request URI used when the transport reports no redirected URI
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]$Result,
+    [Parameter(Mandatory)][uri]$Uri
+  )
+
+  $Headers = [hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+  $StatusCode = $Result.HttpStatusCode
+  $ReasonPhrase = $null
+  $CurrentHeader = $null
+  foreach ($Line in @([string]$Result.ResponseHeaders -split '\r?\n')) {
+    # WinINet may expose more than one HTTP block after proxy negotiation or
+    # redirection. Clear prior fields whenever a later status line begins.
+    $StatusMatch = [regex]::Match($Line, '^HTTP/\S+\s+(?<Status>\d{3})(?:\s+(?<Reason>.*?))?\s*$')
+    if ($StatusMatch.Success) {
+      $Headers.Clear()
+      $StatusCode = [int]$StatusMatch.Groups['Status'].Value
+      $ReasonPhrase = $StatusMatch.Groups['Reason'].Value
+      $CurrentHeader = $null
+      continue
+    }
+    if ([string]::IsNullOrWhiteSpace($Line)) { continue }
+
+    # Preserve obsolete folded values when encountered rather than exposing a
+    # continuation as an invalid standalone header.
+    if ($Line -match '^\s+' -and $CurrentHeader) {
+      $Values = @($Headers[$CurrentHeader])
+      $Values[-1] = "$($Values[-1]) $($Line.Trim())"
+      $Headers[$CurrentHeader] = [string[]]$Values
+      continue
+    }
+
+    $Separator = $Line.IndexOf(':')
+    if ($Separator -le 0) { continue }
+    $Name = $Line.Substring(0, $Separator).Trim()
+    $Value = $Line.Substring($Separator + 1).Trim()
+    if ($Headers.ContainsKey($Name)) {
+      $Headers[$Name] = [string[]](@($Headers[$Name]) + $Value)
+    } else {
+      $Headers[$Name] = [string[]]@($Value)
+    }
+    $CurrentHeader = $Name
+  }
+
+  return [pscustomobject][ordered]@{
+    StatusCode   = $StatusCode
+    ReasonPhrase = $ReasonPhrase
+    RequestUri   = [string]($Result.FinalUri ? $Result.FinalUri : $Uri.AbsoluteUri)
+    Headers      = $Headers
+  }
+}
+
+function Invoke-WinGetWinINetResponseRequest {
+  <#
+  .SYNOPSIS
+    Send one retryable WinINet request without reading its response body
+  #>
+  [OutputType([Dumplings.WinGetDownload.DownloadResult])]
+  param (
+    [Parameter(Mandatory)][uri]$Uri,
+    [ValidateSet('GET', 'HEAD')][string]$Method = 'HEAD',
+    [Collections.IDictionary]$Header,
+    [string]$Proxy,
+    [string]$UserAgent = (Get-WinGetDownloadUserAgent),
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60
+  )
+
+  $OperationArgument = @{
+    Uri                      = $Uri
+    Method                   = $Method
+    UserAgent                = $UserAgent
+    Header                   = ConvertTo-WinGetDownloadHeaderDictionary -Header $Header
+    Proxy                    = $Proxy
+    ConnectionTimeoutSeconds = $ConnectionTimeoutSeconds
+    OperationTimeoutSeconds  = $OperationTimeoutSeconds
+  }
+  return Invoke-WinGetDownloadOperation -StartOperation {
+    param($Attempt, $Argument)
+    $null = $Attempt
+    Open-WinGetWinINetRedirectOperation @Argument
+  } -OperationArgument $OperationArgument -Activity 'Reading response metadata with WinINet' `
+    -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
+    -MaximumRetryDelaySeconds $MaximumRetryDelaySeconds -MaximumTotalRetryDelaySeconds $MaximumTotalRetryDelaySeconds `
+    -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
+}
+
+function Invoke-WinGetDeliveryOptimizationResponseRequest {
+  <#
+  .SYNOPSIS
+    Read Delivery Optimization response metadata and remove partial transfer data
+  #>
+  [OutputType([Dumplings.WinGetDownload.DownloadResult])]
+  param (
+    [Parameter(Mandatory)][uri]$Uri,
+    [ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
+    [Collections.IDictionary]$Header,
+    [ValidateRange(1, 3600)][int]$NoProgressTimeoutSeconds = 60,
+    [ValidateRange(0, 86400)][int]$MaximumDurationSeconds = 3600,
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60
+  )
+
+  # IDODownload requires a local path even when it is aborted after receiving
+  # response metadata. Keep that implementation detail outside caller paths.
+  $TemporaryPath = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath "Dumplings-Response-$([guid]::NewGuid().ToString('N')).tmp"
+  try {
+    $Arguments = @{
+      Uri                           = $Uri
+      DestinationPath               = $TemporaryPath
+      Header                        = $Header
+      NoProgressTimeoutSeconds      = $NoProgressTimeoutSeconds
+      MaximumDurationSeconds        = $MaximumDurationSeconds
+      ConnectionTimeoutSeconds      = $ConnectionTimeoutSeconds
+      OperationTimeoutSeconds       = $OperationTimeoutSeconds
+      MaximumRetryCount             = $MaximumRetryCount
+      RetryIntervalSec              = $RetryIntervalSec
+      MaximumRetryDelaySeconds      = $MaximumRetryDelaySeconds
+      MaximumTotalRetryDelaySeconds = $MaximumTotalRetryDelaySeconds
+      ResponseOnly                  = $true
+    }
+    if ($ExpectedSha256) { $Arguments.ExpectedSha256 = $ExpectedSha256 }
+    return Invoke-WinGetDeliveryOptimizationDownload @Arguments
+  } finally {
+    Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Get-WinGetWinINetRedirectedUrl {
+  <#
+  .SYNOPSIS
+    Resolve the final URL through WinINet without downloading the response body
+  .DESCRIPTION
+    Sends a native WinINet GET or HEAD request with automatic redirection. The
+    effective URL is read from the request handle after redirects complete. A
+    GET request sends no Range header and deliberately leaves its response body
+    unread, while HEAD asks the server not to return a body.
+  .PARAMETER Uri
+    The HTTP or HTTPS URL to resolve
+  .PARAMETER Method
+    GET for maximum server compatibility or HEAD to request headers only
+  .PARAMETER Header
+    Optional request headers
+  .PARAMETER Proxy
+    Optional explicit proxy URI
+  .PARAMETER UserAgent
+    Optional WinINet user agent override
+  .PARAMETER ConnectionTimeoutSeconds
+    Maximum time for connection and response headers; TimeoutSec is an alias
+  .PARAMETER OperationTimeoutSeconds
+    Maximum time for each native send or receive operation
+  .PARAMETER MaximumRetryCount
+    Number of retries for HTTP 304 and 400 through 599 responses
+  .PARAMETER RetryIntervalSec
+    Delay between retries; HTTP 429 Retry-After takes precedence
+  .PARAMETER MaximumRetryDelaySeconds
+    Maximum delay permitted before any single retry
+  .PARAMETER MaximumTotalRetryDelaySeconds
+    Maximum cumulative delay permitted across all retries
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][uri]$Uri,
+    [ValidateSet('GET', 'HEAD')][string]$Method = 'HEAD',
+    [Collections.IDictionary]$Header,
+    [string]$Proxy,
+    [string]$UserAgent = (Get-WinGetDownloadUserAgent),
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60
+  )
+
+  process {
+    $Result = Invoke-WinGetWinINetResponseRequest @PSBoundParameters
+
+    if (-not [string]::IsNullOrWhiteSpace($Result.FinalUri)) { return $Result.FinalUri }
+    $Failure = Format-WinGetDownloadFailure -Method 'WinINet' -Result $Result
+    throw [IO.IOException]::new("Failed to resolve the redirected URL. $Failure")
+  }
+}
+
+function Get-WinGetWinINetResponseHeader {
+  <#
+  .SYNOPSIS
+    Get final response headers through WinINet without reading the response body
+  .PARAMETER Uri
+    The HTTP or HTTPS URL to request
+  .PARAMETER Method
+    GET for maximum server compatibility or HEAD to request headers only
+  .PARAMETER Header
+    Optional request headers
+  .PARAMETER Proxy
+    Optional explicit proxy URI
+  .PARAMETER UserAgent
+    Optional WinINet user agent override
+  .PARAMETER ConnectionTimeoutSeconds
+    Maximum time for connection and response headers; TimeoutSec is an alias
+  .PARAMETER OperationTimeoutSeconds
+    Maximum time for each native send or receive operation
+  .PARAMETER MaximumRetryCount
+    Number of retries for HTTP 304 and 400 through 599 responses
+  .PARAMETER RetryIntervalSec
+    Delay between retries; HTTP 429 Retry-After takes precedence
+  .PARAMETER MaximumRetryDelaySeconds
+    Maximum delay permitted before any single retry
+  .PARAMETER MaximumTotalRetryDelaySeconds
+    Maximum cumulative delay permitted across all retries
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][uri]$Uri,
+    [ValidateSet('GET', 'HEAD')][string]$Method = 'HEAD',
+    [Collections.IDictionary]$Header,
+    [string]$Proxy,
+    [string]$UserAgent = (Get-WinGetDownloadUserAgent),
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60
+  )
+
+  process {
+    $Result = Invoke-WinGetWinINetResponseRequest @PSBoundParameters
+    if ($null -ne $Result.HttpStatusCode -or -not [string]::IsNullOrWhiteSpace($Result.ResponseHeaders)) {
+      return ConvertFrom-WinGetDownloadResponseHeader -Result $Result -Uri $Uri
+    }
+    $Failure = Format-WinGetDownloadFailure -Method 'WinINet' -Result $Result
+    throw [IO.IOException]::new("Failed to read response headers. $Failure")
+  }
+}
+
+function Get-WinGetDeliveryOptimizationRedirectedUrl {
+  <#
+  .SYNOPSIS
+    Resolve the final URL exposed by Delivery Optimization
+  .DESCRIPTION
+    Delivery Optimization has no HTTP HEAD or metadata-only operation. This
+    function starts its normal GET transfer, reads HttpRedirectionTarget as soon
+    as response metadata becomes available, aborts the transfer, and removes
+    any partial local file. The service may transfer a small initial block before
+    exposing response metadata, but it does not finalize or retain the installer.
+  .PARAMETER Uri
+    The HTTP or HTTPS URL to resolve
+  .PARAMETER ExpectedSha256
+    Optional WinGet installer hash used as the Delivery Optimization ContentId
+  .PARAMETER Header
+    Optional request headers
+  .PARAMETER NoProgressTimeoutSeconds
+    Maximum interval without Delivery Optimization progress
+  .PARAMETER MaximumDurationSeconds
+    Maximum total duration of each response-only transfer
+  .PARAMETER ConnectionTimeoutSeconds
+    Maximum time before Delivery Optimization receives a response
+  .PARAMETER OperationTimeoutSeconds
+    Maximum interval between response progress updates
+  .PARAMETER MaximumRetryCount
+    Number of retries for HTTP 304 and 400 through 599 responses
+  .PARAMETER RetryIntervalSec
+    Delay between retries; HTTP 429 Retry-After takes precedence
+  .PARAMETER MaximumRetryDelaySeconds
+    Maximum delay permitted before any single retry
+  .PARAMETER MaximumTotalRetryDelaySeconds
+    Maximum cumulative delay permitted across all retries
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][uri]$Uri,
+    [ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
+    [Collections.IDictionary]$Header,
+    [ValidateRange(1, 3600)][int]$NoProgressTimeoutSeconds = 60,
+    [ValidateRange(0, 86400)][int]$MaximumDurationSeconds = 3600,
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60
+  )
+
+  process {
+    $Result = Invoke-WinGetDeliveryOptimizationResponseRequest @PSBoundParameters
+    if (-not [string]::IsNullOrWhiteSpace($Result.FinalUri)) { return $Result.FinalUri }
+    # A missing redirection target means Delivery Optimization accepted the
+    # original URL without redirecting it.
+    if ($Result.ResponseAccepted -or $null -ne $Result.HttpStatusCode) { return $Uri.AbsoluteUri }
+    $Failure = Format-WinGetDownloadFailure -Method 'Delivery Optimization' -Result $Result
+    throw [IO.IOException]::new("Failed to resolve the redirected URL. $Failure")
+  }
+}
+
+function Get-WinGetDeliveryOptimizationResponseHeader {
+  <#
+  .SYNOPSIS
+    Get final response headers exposed by Delivery Optimization
+  .DESCRIPTION
+    Delivery Optimization starts a GET transfer and may receive a small initial
+    block before exposing headers. The transfer is then aborted and its partial
+    local file is removed.
+  .PARAMETER Uri
+    The HTTP or HTTPS URL to request
+  .PARAMETER ExpectedSha256
+    Optional WinGet installer hash used as the Delivery Optimization ContentId
+  .PARAMETER Header
+    Optional request headers
+  .PARAMETER NoProgressTimeoutSeconds
+    Maximum interval without Delivery Optimization progress
+  .PARAMETER MaximumDurationSeconds
+    Maximum total duration of each response-only transfer
+  .PARAMETER ConnectionTimeoutSeconds
+    Maximum time before Delivery Optimization receives a response
+  .PARAMETER OperationTimeoutSeconds
+    Maximum interval between response progress updates
+  .PARAMETER MaximumRetryCount
+    Number of retries for HTTP 304 and 400 through 599 responses
+  .PARAMETER RetryIntervalSec
+    Delay between retries; HTTP 429 Retry-After takes precedence
+  .PARAMETER MaximumRetryDelaySeconds
+    Maximum delay permitted before any single retry
+  .PARAMETER MaximumTotalRetryDelaySeconds
+    Maximum cumulative delay permitted across all retries
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][uri]$Uri,
+    [ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSha256,
+    [Collections.IDictionary]$Header,
+    [ValidateRange(1, 3600)][int]$NoProgressTimeoutSeconds = 60,
+    [ValidateRange(0, 86400)][int]$MaximumDurationSeconds = 3600,
+    [Alias('TimeoutSec')][ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryCount = 3,
+    [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60
+  )
+
+  process {
+    $Result = Invoke-WinGetDeliveryOptimizationResponseRequest @PSBoundParameters
+    if ($null -ne $Result.HttpStatusCode -or -not [string]::IsNullOrWhiteSpace($Result.ResponseHeaders)) {
+      return ConvertFrom-WinGetDownloadResponseHeader -Result $Result -Uri $Uri
+    }
+    $Failure = Format-WinGetDownloadFailure -Method 'Delivery Optimization' -Result $Result
+    throw [IO.IOException]::new("Failed to read response headers. $Failure")
+  }
 }
 
 function Test-WinGetDownloadCancellation {
@@ -816,4 +1217,4 @@ function Test-WinGetInstallerDownload {
   }
 }
 
-Export-ModuleMember -Function Get-WinGetDownloadUserAgent, Invoke-WinGetWinINetDownload, Invoke-WinGetDeliveryOptimizationDownload, Invoke-WinGetInstallerDownload, Test-WinGetInstallerDownload
+Export-ModuleMember -Function Get-WinGetDownloadUserAgent, Get-WinGetWinINetRedirectedUrl, Get-WinGetDeliveryOptimizationRedirectedUrl, Get-WinGetWinINetResponseHeader, Get-WinGetDeliveryOptimizationResponseHeader, Invoke-WinGetWinINetDownload, Invoke-WinGetDeliveryOptimizationDownload, Invoke-WinGetInstallerDownload, Test-WinGetInstallerDownload

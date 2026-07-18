@@ -7,6 +7,18 @@
 # Static Chromium installer parser. It distinguishes the bare Chromium mini
 # installer, Chromium/Google Updater, and legacy Google Update/Omaha wrappers.
 # No installer payload or update command is executed.
+#
+# Binary structures consumed here:
+#
+#   mini-installer: PE resources B7 setup*.7z > BL setup.ex_ > BN setup.exe,
+#                   plus the product archive
+#   Updater:        B7 updater.packed.7z -> updater.7z/bin/updater.exe
+#   Omaha:          B resource 102 -> LZMA -> BCJ2 -> TAR/offline manifest
+#   certificate:    "Gact2.0Omaha" + uint16 BE length + UTF-8 query, or
+#                   bounded UTF-16LE start/end markers (Updater/Edge)
+#
+# Resource RVAs are mapped through PE sections. Tags are read only inside the
+# certificate-table file range. Decoders receive declared input/output bounds.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -38,6 +50,14 @@ function ConvertFrom-ChromiumQueryTag {
   <#
   .SYNOPSIS
     Convert one updater query string into normalized tag evidence
+  .PARAMETER RawTag
+    Raw text to parse as format metadata without executing embedded commands.
+  .PARAMETER Offset
+    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
+  .PARAMETER Length
+    Declared size or parser bound in bytes or characters, as named by the field; ranges are validated before reading.
+  .PARAMETER TagFormat
+    Detected format variant controlling version-specific parsing rules.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -81,6 +101,8 @@ function ConvertFrom-ChromiumUpdaterTagData {
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
 
+  # Probe the source-defined certificate-tag encodings in precedence order. Each candidate must be
+  # completely bounded by the certificate table before query parameters are decoded.
   foreach ($Offset in (Find-BinaryPattern -Bytes $Bytes -Pattern $Script:ChromiumUpdaterTagMarker -Maximum 32)) {
     $LengthOffset = $Offset + $Script:ChromiumUpdaterTagMarker.Length
     if ($LengthOffset + 2 -gt $Bytes.Length) { continue }
@@ -138,6 +160,12 @@ function Read-ChromiumInstallerTagFromStream {
   <#
   .SYNOPSIS
     Read a certificate tag from an already parsed PE stream
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Layout
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
+  .PARAMETER FileLength
+    Declared size or parser bound in bytes or characters, as named by the field; ranges are validated before reading.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -186,6 +214,10 @@ function Get-ChromiumSetupResourceEvidence {
   <#
   .SYNOPSIS
     Normalize Chromium named-resource evidence for classification
+  .PARAMETER Stream
+    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
+  .PARAMETER Layout
+    Previously validated layout evidence containing the coordinate ranges needed by this operation.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -193,6 +225,8 @@ function Get-ChromiumSetupResourceEvidence {
     [Parameter(Mandatory)][psobject]$Layout
   )
 
+  # Keep only Chromium's named binary resource types; ordinary RCDATA is too broad and causes
+  # unrelated installers to be classified from nested payload names.
   foreach ($Resource in (Get-PEResourceInfo -Stream $Stream -Layout $Layout)) {
     $Type = if ($Resource.TypeName) { [string]$Resource.TypeName } else { [string]$Resource.TypeId }
     $Name = if ($Resource.Name) { [string]$Resource.Name } else { [string]$Resource.Id }
@@ -213,6 +247,12 @@ function Get-ChromiumSetupLayoutEvidence {
   <#
   .SYNOPSIS
     Select the source-defined Chromium payload resources in one pass
+  .PARAMETER Resources
+    Validated PE resource evidence with file-relative offsets and bounded lengths.
+  .PARAMETER Tag
+    Detected format variant controlling version-specific parsing rules.
+  .PARAMETER VersionInfo
+    Detected format variant controlling version-specific parsing rules.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -228,6 +268,8 @@ function Get-ChromiumSetupLayoutEvidence {
   $UpdaterArchive = $null
   $OmahaResource = $null
 
+  # Apply Chromium's resource-name precedence rather than selecting the largest archive. Packed
+  # patch resources outrank compressed CAB and raw setup forms.
   foreach ($Resource in $Resources) {
     if (-not $UpdaterArchive -and $Resource.Type -eq 'B7' -and $Resource.Name -match '(?i)^updater(?:\.packed)?\.7z$') {
       $UpdaterArchive = $Resource
@@ -258,6 +300,8 @@ function Get-ChromiumSetupLayoutEvidence {
     }
   }
 
+  # Classification requires a complete source-backed resource combination. Omaha additionally
+  # needs tag or updater identity evidence because resource 102 alone is not unique enough.
   $Variant = if ($UpdaterArchive) {
     'ChromiumUpdater'
   } elseif ($MiniArchive -and $MiniSetup) {
@@ -287,6 +331,8 @@ function Open-ChromiumSetupContext {
   <#
   .SYNOPSIS
     Open one installer stream and cache its PE, resource, tag, and layout evidence
+  .PARAMETER Path
+    Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][string]$Path)
@@ -294,6 +340,7 @@ function Open-ChromiumSetupContext {
   $File = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
   $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
+    # Parse PE layout, named resources, certificate tag, and variant once while sharing one stream.
     $Layout = Get-PELayout -Stream $Stream
     if (-not $Layout) { throw 'The file is not a valid PE image.' }
     $Resources = [Collections.Generic.List[object]]::new()
@@ -323,6 +370,8 @@ function Close-ChromiumSetupContext {
   <#
   .SYNOPSIS
     Close a context returned by Open-ChromiumSetupContext
+  .PARAMETER Context
+    Parsed context or metadata object produced by the corresponding format reader.
   #>
   param ([Parameter(Mandatory)][psobject]$Context)
   $Context.Stream.Dispose()
@@ -374,6 +423,8 @@ function ConvertFrom-ChromiumOmahaOfflineManifest {
     The path to an extracted Omaha offline manifest
   .PARAMETER ApplicationId
     The tagged application identity used to select the matching app element
+  .PARAMETER Text
+    Raw text to parse as format metadata without executing embedded commands.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -382,6 +433,7 @@ function ConvertFrom-ChromiumOmahaOfflineManifest {
     [string]$ApplicationId
   )
 
+  # OfflineManifest.gup is untrusted embedded XML. Disable DTDs and external entity resolution.
   $Settings = [Xml.XmlReaderSettings]::new()
   $Settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
   $Settings.XmlResolver = $null
@@ -395,6 +447,8 @@ function ConvertFrom-ChromiumOmahaOfflineManifest {
   } finally { $Reader.Dispose(); if ($TextReader) { $TextReader.Dispose() } }
 
   $Application = $null
+  # A multi-app response is selected by the signed tag appid; an untagged payload uses its first
+  # application only because no stronger outer identity exists.
   foreach ($Candidate in $Document.SelectNodes('/response/app')) {
     if ([string]::IsNullOrWhiteSpace($ApplicationId) -or $Candidate.GetAttribute('appid').Equals($ApplicationId, [StringComparison]::OrdinalIgnoreCase)) {
       $Application = $Candidate
@@ -413,6 +467,7 @@ function ConvertFrom-ChromiumOmahaOfflineManifest {
   }
 
   $Packages = [Collections.Generic.List[object]]::new()
+  # Preserve package hashes and required flags as execution evidence without downloading anything.
   foreach ($Package in $Manifest.SelectNodes('packages/package')) {
     $Size = 0L
     $HasSize = [long]::TryParse($Package.GetAttribute('size'), [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$Size)
@@ -426,6 +481,7 @@ function ConvertFrom-ChromiumOmahaOfflineManifest {
 
   $Actions = [Collections.Generic.List[object]]::new()
   $InstallAction = $null
+  # The install action, not TAR entry order alone, is authoritative when an offline manifest exists.
   foreach ($Action in $Manifest.SelectNodes('actions/action')) {
     $ActionInfo = [pscustomobject]@{
       Event      = $Action.GetAttribute('event')
@@ -450,6 +506,10 @@ function Get-ChromiumOmahaOfflineManifestInfo {
   <#
   .SYNOPSIS
     Extract and parse a tagged Omaha wrapper's embedded offline manifest
+  .PARAMETER Resource
+    Validated PE resource evidence with file-relative offsets and bounded lengths.
+  .PARAMETER ApplicationId
+    Installer identity value used to select or report the matching static metadata record.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -496,6 +556,8 @@ function Get-ChromiumSetupInfoFromContext {
 
   $OfflineManifest = $null
   $OfflineManifestError = $null
+  # Decode Omaha's expensive LZMA/BCJ2 payload only when a signed application identity makes the
+  # enclosed manifest useful, unless the caller explicitly asks for layout-only evidence.
   $OfflineManifestChecked = $Variant -eq 'Omaha' -and $Tag.IsTagged -and -not $SkipOfflineManifest
   if ($OfflineManifestChecked) {
     try {
@@ -515,6 +577,8 @@ function Get-ChromiumSetupInfoFromContext {
   $SupportsDualScope = $false
   $UserScopeSwitch = $null
   $MachineScopeSwitch = $null
+  # Scope switches differ among bare mini-installers, untagged Omaha runtime installers, and tagged
+  # updater metainstallers; do not apply one family's switch to another.
   if ($Variant -eq 'ChromiumMiniInstaller') {
     $SupportedScopes = @('user', 'machine')
     $SupportsDualScope = $true
@@ -543,6 +607,7 @@ function Get-ChromiumSetupInfoFromContext {
 
   $NestedFiles = [Collections.Generic.List[string]]::new()
   $ExecutedPayloads = [Collections.Generic.List[string]]::new()
+  # Report the configured execution target separately from files that are merely physically nested.
   switch ($Variant) {
     'ChromiumMiniInstaller' {
       $NestedFiles.Add('setup.exe')
@@ -610,6 +675,12 @@ function Get-ChromiumSetupInfoFromContext {
     Protocols                  = @()
     FileExtensions             = @()
     CanExpand                  = $true
+    # A tagged updater application ID is not necessarily the visible uninstall key. Preserve an
+    # existing manifest ProductCode when source-backed vendor/channel mapping cannot resolve it.
+    UnresolvedFields           = @(
+      if ([string]::IsNullOrWhiteSpace($ProductCode)) { 'ProductCode' }
+      if ($Tag.IsTagged -and -not $OfflineManifest) { 'DisplayVersion' }
+    )
     Warnings                   = $Warnings.ToArray()
     ParserVersionInfo          = [pscustomobject]@{
       Parser      = 'Dumplings.PackageModule.ChromiumSetup'
@@ -660,6 +731,8 @@ function Resolve-ChromiumSetupProductCode {
     [Parameter(Mandatory)][System.Collections.IDictionary]$InstallerSwitches
   )
 
+  # Prefer explicit parser identity. Product-specific channel rules are used only for bare
+  # mini-installers whose ARP key is selected by command-line switches.
   $MetadataProperty = $Info.PSObject.Properties['Metadata']
   $IdentityInfo = if ($MetadataProperty -and $MetadataProperty.Value) { $MetadataProperty.Value } else { $Info }
   $ProductCodeProperty = $IdentityInfo.PSObject.Properties['ProductCode']
@@ -682,6 +755,7 @@ function Resolve-ChromiumSetupProductCode {
   $SwitchValues = [Collections.Generic.List[string]]::new()
   foreach ($Value in $InstallerSwitches.Values) { if ($Value -is [string]) { $SwitchValues.Add($Value) } }
   $CommandLine = [string]::Join(' ', $SwitchValues)
+  # Multiple channel selectors are contradictory, so return no ProductCode instead of choosing one.
   $Channels = @(
     [pscustomobject]@{ Switch = '--chrome-sxs'; ProductCode = 'Google Chrome SxS' }
     [pscustomobject]@{ Switch = '--chrome-beta'; ProductCode = 'Google Chrome Beta' }
@@ -703,6 +777,10 @@ function Open-ChromiumOmahaArchive {
   <#
   .SYNOPSIS
     Decode one source-backed Omaha resource into a bounded TAR archive context
+  .PARAMETER Resource
+    Validated PE resource evidence with file-relative offsets and bounded lengths.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -721,6 +799,8 @@ function Open-ChromiumOmahaArchive {
   for ($Index = 0; $Index -lt $PartPaths.Length; $Index++) { $PartPaths[$Index] = Join-Path $TemporaryFolder "bcj2-$Index.bin" }
   $Archive = $null
   try {
+    # Read directly from the original PE resource range when possible; bridge callers may instead
+    # provide standalone resource bytes, which are materialized in the temporary workspace.
     $SourcePath = $Resource.Path
     $ResourceOffset = [long]$Resource.Offset
     if (-not $SourcePath) {
@@ -730,6 +810,7 @@ function Open-ChromiumOmahaArchive {
     }
     $Source = [IO.File]::Open($SourcePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
+      # Omaha resource layer 1 is LZMA-alone: five properties bytes and an eight-byte BCJ2 size.
       $Header = Read-BinaryBytes -Stream $Source -Offset $ResourceOffset -Count 13
       $Properties = [byte[]]::new(5)
       [Array]::Copy($Header, 0, $Properties, 0, $Properties.Length)
@@ -749,6 +830,8 @@ function Open-ChromiumOmahaArchive {
     } finally { $Source.Dispose() }
     if ((Get-Item -LiteralPath $Bcj2Path -Force).Length -ne $Bcj2Size) { throw 'The Omaha LZMA output does not match its declared size.' }
 
+    # Layer 2 begins with original TAR size and four BCJ2 stream sizes. Require their exact sum to
+    # consume the decoded container before splitting streams.
     $Bcj2 = [IO.File]::OpenRead($Bcj2Path)
     try {
       if ($Bcj2.Length -lt 20) { throw 'The Omaha BCJ2 container is truncated.' }
@@ -771,6 +854,7 @@ function Open-ChromiumOmahaArchive {
       }
     } finally { $Bcj2.Dispose() }
 
+    # Recombine the four BCJ2 streams into a bounded TAR file suitable for the shared archive API.
     $PartStreams = [IO.Stream[]]::new(4)
     for ($Index = 0; $Index -lt $PartStreams.Length; $Index++) { $PartStreams[$Index] = [IO.File]::OpenRead($PartPaths[$Index]) }
     $Bcj2Decoder = $null
@@ -799,6 +883,8 @@ function Close-ChromiumOmahaArchive {
   <#
   .SYNOPSIS
     Close a context returned by Open-ChromiumOmahaArchive
+  .PARAMETER Context
+    Parsed context or metadata object produced by the corresponding format reader.
   #>
   param ([Parameter(Mandatory)][psobject]$Context)
   try { $Context.Archive.Dispose() }
@@ -809,6 +895,14 @@ function Expand-ChromiumOmahaPayload {
   <#
   .SYNOPSIS
     Decode and extract an Omaha LZMA, BCJ2, and TAR resource
+  .PARAMETER Resource
+    Validated PE resource evidence with file-relative offsets and bounded lengths.
+  .PARAMETER DestinationPath
+    Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER Name
+    Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -835,6 +929,8 @@ function Expand-ChromiumSetupInstaller {
     The extraction directory
   .PARAMETER Name
     A wildcard matching full payload paths or file names
+  .PARAMETER MaximumExpandedBytes
+    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -850,6 +946,8 @@ function Expand-ChromiumSetupInstaller {
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = New-TempFolder }
       $null = New-Item -Path $DestinationPath -ItemType Directory -Force
       $Results = [Collections.Generic.List[System.IO.FileInfo]]::new(); $Expanded = 0L
+      # Each variant has a distinct physical encoding path: raw resources, CAB/LZMA resources,
+      # ordinary 7z archives, or Omaha's LZMA+BCJ2+TAR stack.
       foreach ($Evidence in $Context.Evidence.SelectedResources) {
         $Resource = $Evidence.Resource
         if ($Context.Evidence.Variant -eq 'Omaha') {
@@ -865,6 +963,7 @@ function Expand-ChromiumSetupInstaller {
           continue
         }
         if ($Evidence.Type -eq 'BL') {
+          # BL setup.ex_ resources are cabinet streams rather than 7z archives.
           $TemporaryPath = New-TempFile
           try {
             $null = Export-PEResourceData -Resource $Resource -DestinationPath $TemporaryPath -MaximumBytes $Script:ChromiumMaximumResourceBytes
@@ -877,12 +976,16 @@ function Expand-ChromiumSetupInstaller {
           continue
         }
 
+        # Restrict archive readers to the selected PE resource so they cannot consume adjacent
+        # resources or the certificate table.
         $ResourceStream = New-BoundedReadStream -Stream $Context.Stream -Offset $Evidence.Offset -Length $Evidence.Size -LeaveOpen
         $Archive = $null
         try {
           $Archive = Get-InstallerArchive -Stream $ResourceStream
           foreach ($Entry in (Get-InstallerArchiveEntry -Archive $Archive)) {
             if ($Context.Evidence.Variant -eq 'ChromiumUpdater' -and $Entry.FullName -ieq 'updater.7z') {
+              # Current updater resources contain a second archive. Spill it through the shared
+              # seekable-stream helper and apply the same aggregate output limit.
               $NestedInput = Open-InstallerArchiveEntry -Entry $Entry
               $NestedContext = $null
               $NestedArchive = $null

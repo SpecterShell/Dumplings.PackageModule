@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Format sources: https://github.com/Squirrel/Squirrel.Windows and https://github.com/velopack/velopack
+# Squirrel/Velopack binary structures consumed here:
+#
+#   Squirrel PE/.rsrc/DATA/#131 -> ZIP -> nupkg -> nuspec
+#   Velopack PE -> [PayloadOffset:i64 LE][PayloadLength:i64 LE]
+#     -> 32-byte 94 F0 B1 7B ... 94 ED 7D signature -> bounded nupkg/ZIP
+#
+# PE resource RVAs and Velopack locator offsets become absolute file ranges.
+# A candidate is accepted only when ZIP/nupkg/nuspec structure validates; bare
+# ZIP markers or --silent strings are insufficient.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -30,6 +39,8 @@ function Get-SquirrelPeResourceZipCandidate {
     [string]$Path
   )
 
+  # Classic Squirrel embeds its release archive in one documented DATA/#131 PE
+  # resource; other ZIP-looking resources are not promoted by this path.
   foreach ($Resource in Get-PEResourceInfo -Path $Path) {
     if ($Resource.TypeName -eq $Script:SquirrelResourceType -and $Resource.Id -eq $Script:SquirrelResourceId -and $Resource.Size -gt 0) {
       [pscustomobject]@{ Offset = [long]$Resource.Offset; Length = [long]$Resource.Size }
@@ -90,6 +101,8 @@ function Get-SquirrelBundleHeader {
     try {
       $HeaderBytes = Read-BinaryBytes -Stream $Stream -Offset ($SignatureOffset - 16) -Count 16
 
+      # The two little-endian values immediately preceding the placeholder are
+      # authoritative only when their complete range lies in the setup file.
       $Offset = [System.BitConverter]::ToInt64($HeaderBytes, 0)
       $Length = [System.BitConverter]::ToInt64($HeaderBytes, 8)
       if ($Offset -gt 0 -and $Length -gt 0 -and $Offset + $Length -le $File.Length) {
@@ -155,6 +168,8 @@ function Copy-SquirrelEmbeddedZip {
   $InputStream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   $Output = [System.IO.File]::Open($DestinationPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
   try {
+    # Materialize exactly the resource/bundle extent when known. Legacy ZIP
+    # candidates use the bounded remainder and rely on archive validation next.
     $Available = $InputStream.Length - $Offset
     if ($Offset -lt 0 -or $Available -lt 0) { throw 'The Squirrel ZIP offset is outside the installer.' }
     $RangeLength = if ($Length -gt 0) { $Length } else { $Available }
@@ -186,6 +201,8 @@ function Read-SquirrelNuspecFromZipArchive {
     $Archive
   )
 
+  # Nuspec is structured package identity. No filename or arbitrary string
+  # probing is used when the archive does not contain one.
   $Entry = Get-InstallerArchiveEntry -Archive $Archive | Where-Object { $_.FullName.EndsWith('.nuspec', [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
   if (-not $Entry) { return $null }
 
@@ -222,6 +239,8 @@ function Read-SquirrelNuspecFromNupkgEntry {
     [string]$DestinationPath
   )
 
+  # A nupkg is a nested ZIP requiring seekable access, so materialize only that
+  # bounded entry rather than expanding the outer installer archive.
   $null = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $DestinationPath -MaximumBytes 1073741824
   $NestedArchive = Get-InstallerArchive -Path $DestinationPath
   try {
@@ -332,6 +351,8 @@ function ConvertFrom-SquirrelReleases {
     $Result += $Content | Split-LineEndings | Where-Object -FilterScript { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object -Process {
       $Entry = $_
 
+      # Preserve staged rollout metadata before removing the trailing comment;
+      # it changes eligibility but is not part of the filename/hash record.
       $StagingPercentage = $Entry -match $StagingRegex ? $Matches[1] / 100 : $null
 
       $Entry = $Entry -replace $CommentRegex
@@ -350,6 +371,8 @@ function ConvertFrom-SquirrelReleases {
       $Query = $null
 
       $Uri = [uri]$null
+      # RELEASES permits either a leaf filename or an absolute HTTP(S) URL.
+      # Split URLs without dropping query parameters required by the feed.
       if ([uri]::TryCreate($Filename, [System.UriKind]::Absolute, [ref]$Uri) -and $Uri.Scheme -in @([uri]::UriSchemeHttp, [uri]::UriSchemeHttps)) {
         $Path = $Uri.LocalPath
         $Authority = $Uri.GetLeftPart([System.UriPartial]::Authority)
@@ -420,6 +443,8 @@ function Get-SquirrelInfoFromZipCandidate {
 
   $Archive = Get-InstallerArchive -Path $ZipPath
   try {
+    # Classic setup archives wrap a nupkg; some Velopack-derived candidates are
+    # themselves nupkg-shaped and therefore expose nuspec directly.
     $NupkgEntry = Get-InstallerArchiveEntry -Archive $Archive | Where-Object { $_.FullName.EndsWith('.nupkg', [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
     if ($NupkgEntry) {
       $NupkgPath = Join-Path $TemporaryPath ([System.IO.Path]::GetFileName($NupkgEntry.FullName))
@@ -462,6 +487,8 @@ function Get-SquirrelInfo {
     $File = Get-Item -Path $Path -Force
     $TemporaryPath = New-TempFolder
     try {
+      # Candidate precedence follows format authority: documented PE resource,
+      # validated Velopack locator, then generic ZIP headers as a last fallback.
       $Candidates = [System.Collections.Generic.List[psobject]]::new()
       foreach ($ResourceCandidate in Get-SquirrelPeResourceZipCandidate -Path $File.FullName) {
         $Candidates.Add([pscustomobject]@{ Offset = [long]$ResourceCandidate.Offset; Length = [long]$ResourceCandidate.Length })
@@ -480,6 +507,8 @@ function Get-SquirrelInfo {
         }
       }
 
+      # Every weak ZIP candidate must open successfully and yield structured
+      # nuspec identity. Parser failures are isolated so later offsets can run.
       foreach ($Candidate in $Candidates) {
         try {
           $Info = Get-SquirrelInfoFromZipCandidate -Path $File.FullName -Offset $Candidate.Offset -Length $Candidate.Length -TemporaryPath $TemporaryPath
