@@ -37,6 +37,11 @@ $A = 'A-Za-z\u0080-\u00ff\u0370-\u03ff'
 $N = '0-9'
 # All kinds of invisible characters except newline characters (CRLF and LF)
 $INVISIBLE_EXCEPT_NEWLINE = '\f\t\v\u0085\p{Z}'
+# Control characters rejected by WinGet's YAML parser. Tab, LF, and CR are allowed.
+$WINGET_UNSUPPORTED_CONTROL_CHARACTERS = '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
+# Blank and invisible characters that should behave as ordinary spaces in manifest text.
+# ZWNJ and ZWJ are intentionally excluded because they affect script shaping and emoji sequences.
+$UNICODE_BLANK_OR_INVISIBLE_CHARACTERS = '[\t\u0080-\u0084\u0086-\u009F\u00A0\u00AD\u034F\u061C\u115F\u1160\u1680\u17B4\u17B5\u180E\u2000-\u200B\u200E\u200F\u202A-\u202F\u205F\u2060-\u2064\u2066-\u206F\u2800\u3000\u3164\uFEFF\uFFA0\uFFF9-\uFFFB]'
 
 # Dot based ellipsis after CJK characters. They should be replace by character based ellipsis "……"
 $HALFWIDTH_ELLIPSIS = "([${CJK}])(\.{3,})[${INVISIBLE_EXCEPT_NEWLINE}]*"
@@ -79,16 +84,18 @@ function Format-Text {
     This function applies a set of regular expressions to the text to make it neat and easy to read.
 
     Generally, it does the following:
-    1. Replace line ending characters with LF
-    2. Decode HTML escape characters
-    3. Convert dot-based ellipsis after CJK characters to ellipsis symbol
-    4. Convert half-width symbols after CJK characters to full-width symbols
-    5. Insert a white space between CJK characters and alphabets + numbers and vice versa
-    6. Remove invisible characters around the whole text and at the end of each line
+    1. Remove control characters rejected by the WinGet manifest parser
+    2. Replace line ending characters with LF
+    3. Decode HTML escape characters
+    4. Replace Unicode blank and invisible characters with regular spaces
+    5. Convert dot-based ellipsis after CJK characters to ellipsis symbol
+    6. Convert half-width symbols after CJK characters to full-width symbols
+    7. Insert a white space between CJK characters and alphabets + numbers and vice versa
+    8. Remove invisible characters around the whole text and at the end of each line
        (Those at the beginning of each line are ignored to avoid losing the cascading style)
-    7. Shrink 2+ continuous line endings into 2
-    8. Format the prefix (ordered and unordered) of the list
-    9. Replace ";" or "；" at the end of the whole text with "." or "。", respectively
+    9. Shrink 2+ continuous line endings into 2
+    10. Format the prefix (ordered and unordered) of the list
+    11. Replace ";" or "；" at the end of the whole text with "." or "。", respectively
 
     If multiple texts are piped to the function, they will be merged into one.
   .PARAMETER Text
@@ -132,8 +139,8 @@ function Format-Text {
   }
 
   process {
-    # Replace line ending characters with LF
-    $Result.Add($Text.ReplaceLineEndings("`n"))
+    # Remove unsupported controls before line normalization so form-feed is not converted to LF.
+    $Result.Add(($Text -creplace $WINGET_UNSUPPORTED_CONTROL_CHARACTERS).ReplaceLineEndings("`n"))
   }
 
   end {
@@ -141,6 +148,11 @@ function Format-Text {
 
     # Decode HTML escape characters
     $Result = [System.Web.HttpUtility]::HtmlDecode($Result)
+
+    # HTML entities can introduce controls or Unicode line endings after the first pass.
+    $Result = ($Result -creplace $WINGET_UNSUPPORTED_CONTROL_CHARACTERS).ReplaceLineEndings("`n")
+    # Normalize non-ASCII blanks and common invisible formatting characters before trimming.
+    $Result = $Result -creplace $UNICODE_BLANK_OR_INVISIBLE_CHARACTERS, ' '
 
     # Convert dot-based ellipsis after CJK characters to ellipsis symbol
     $Result = $Result -creplace $HALFWIDTH_ELLIPSIS, '$1……'
@@ -156,9 +168,6 @@ function Format-Text {
     $Result = $Result.Trim()
     # Remove invisible characters at the end of each line
     $Result = $Result -creplace "(?m)[${INVISIBLE_EXCEPT_NEWLINE}]+$"
-    # Remove null characters
-    $Result = $Result -creplace '\x00'
-
     # Shrink 2+ continuous line endings into 2
     $Result = $Result -creplace '(\r\n|\n){3,}', "`n`n"
 
