@@ -67,6 +67,7 @@ class PackageTask: System.IDisposable {
   [System.Collections.IDictionary]$InstallerFiles = [ordered]@{}
   [bool]$MessageEnabled = $false
   [System.Collections.Generic.List[System.Tuple[string, Int64]]]$MessageSession = @()
+  [long]$MessageSessionGeneration = 0
   [bool]$InvocationSucceeded = $false
   [bool]$InvocationSkipped = $false
   #endregion
@@ -420,7 +421,10 @@ class PackageTask: System.IDisposable {
     if (-not $this.MessageEnabled) { $this.MessageEnabled = $true }
     if ($Global:DumplingsPreference.Contains('EnableMessage') -and $Global:DumplingsPreference.EnableMessage) {
       try {
-        $null = Send-TelegramMessage -Message $this.ToTelegramMarkdown() -AsMarkdown -Session $this.MessageSession
+        $Identifier = $this.GetMessageQueueIdentifier()
+        $SessionKey = "PackageState:${Identifier}:$($this.MessageSessionGeneration)"
+        $null = Send-QueuedTelegramMessage -Message $this.ToTelegramMarkdown() -AsMarkdown `
+          -QueueKey $SessionKey -SessionKey $SessionKey
       } catch {
         Write-Log -Object "Failed to send default message: ${_}" -Level Error
         $this.Logs.Add($_.ToString())
@@ -432,7 +436,8 @@ class PackageTask: System.IDisposable {
   [void] Message([string]$Message) {
     if ($Global:DumplingsPreference.Contains('EnableMessage') -and $Global:DumplingsPreference.EnableMessage) {
       try {
-        $null = Send-TelegramMessage -Message $Message
+        # Custom notifications remain independent FIFO entries unless a caller uses the queue API directly.
+        $null = Send-QueuedTelegramMessage -Message $Message
       } catch {
         Write-Log -Object "Failed to send custom message: ${_}" -Level Error
         $this.Logs.Add($_.ToString())
@@ -441,7 +446,18 @@ class PackageTask: System.IDisposable {
   }
 
   [void] ResetMessage() {
+    # Start a fresh queue-owned session while preserving already queued generations.
+    $this.MessageSessionGeneration++
     $this.MessageSession = [System.Collections.Generic.List[System.Tuple[string, Int64]]]@()
+  }
+
+  [string] GetMessageQueueIdentifier() {
+    foreach ($Key in @('WinGetNewPackageIdentifier', 'WinGetNewIdentifier', 'WinGetPackageIdentifier', 'WinGetIdentifier')) {
+      if ($this.Config.Contains($Key) -and -not [string]::IsNullOrWhiteSpace([string]$this.Config[$Key])) {
+        return [string]$this.Config[$Key]
+      }
+    }
+    return $this.Name
   }
 
   # Generate manifests and upload them to the origin repository, and then create pull request in the upstream repository

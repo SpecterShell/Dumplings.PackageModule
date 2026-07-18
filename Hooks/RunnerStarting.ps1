@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-  Dispose and remove the process-wide WebDriver pool at runner shutdown.
+  Initialize the shared message queue before Dumplings workers start.
 #>
 param (
   [Parameter(Mandatory)]
@@ -12,8 +12,5 @@ param (
 $QueueModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'MessageQueue.psm1') -Force -PassThru
 & $QueueModule {
   param ($Storage)
-  Stop-MessageQueue -Storage $Storage
+  Initialize-MessageQueue -Storage $Storage
 } $Context.Storage
-
-. (Join-Path $PSScriptRoot 'WebDriver.Common.ps1')
-Close-DumplingsWebDriverHookPool -Storage $Context.Storage

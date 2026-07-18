@@ -1,3 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Telegram Bot API behavior: https://core.telegram.org/bots/api
+# Long-message and Markdown failure behavior was independently implemented after reviewing
+# https://github.com/NousResearch/hermes-agent under its repository license.
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -5,298 +10,454 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 $ErrorActionPreference = 'Stop'
 
 filter ConvertTo-TelegramEscapedText {
+  <#
+  .SYNOPSIS
+    Escape plain text for Telegram MarkdownV2.
+  #>
   $_ -replace '([_*\[\]()~`>#+\-=|{}.!\\])', '\$1'
 }
 
 filter ConvertTo-TelegramEscapedCode {
+  <#
+  .SYNOPSIS
+    Escape inline or fenced code for Telegram MarkdownV2.
+  #>
   $_ -replace '([`\\])', '\$1'
+}
+
+function ConvertFrom-TelegramMarkdownV2 {
+  <#
+  .SYNOPSIS
+    Convert Telegram MarkdownV2 to readable plain text for parse-error fallback.
+  .PARAMETER Text
+    Telegram MarkdownV2 text.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, ValueFromPipeline)]
+    [AllowEmptyString()]
+    [string]$Text
+  )
+
+  process {
+    $Result = $Text
+    $Result = $Result -replace '(?m)^```[^\r\n]*\r?\n?', '' -replace '```', ''
+    $Result = $Result -replace '\[([^\]]+)\]\(([^)]+)\)', '$1 ($2)'
+    $Result = $Result -replace '\*\*([^*]+)\*\*', '$1'
+    $Result = $Result -replace '\*([^*]+)\*', '$1'
+    $Result = $Result -replace '(?<!\w)_([^_]+)_(?!\w)', '$1'
+    $Result = $Result -replace '~([^~]+)~', '$1'
+    $Result = $Result -replace '\|\|([^|]+)\|\|', '$1'
+    return $Result -replace '\\([_*\[\]()~`>#+\-=|{}.!\\])', '$1'
+  }
+}
+
+function Get-TelegramApiException {
+  [OutputType([System.InvalidOperationException])]
+  param (
+    [Parameter(Mandatory)]
+    [int]$ErrorCode,
+
+    [Parameter(Mandatory)]
+    [AllowEmptyString()]
+    [string]$Description
+  )
+
+  $Exception = [System.InvalidOperationException]::new("Telegram API error ${ErrorCode}: ${Description}")
+  $Exception.Data['TelegramErrorCode'] = $ErrorCode
+  $Exception.Data['TelegramDescription'] = $Description
+  return $Exception
 }
 
 function Invoke-TelegramApi {
   <#
   .SYNOPSIS
-    Invoke Telegram bot API
-  .LINK
-    https://core.telegram.org/bots/api
+    Invoke the Telegram Bot API with bounded, operation-aware retry handling.
   .PARAMETER Method
-    The Telegram method to be invoked, e.g., sendMessage
+    Telegram method to invoke, for example sendMessage.
   .PARAMETER Body
-    The request body
+    JSON request body.
   .PARAMETER Token
-    Telegram bot token
+    Telegram bot token.
+  .PARAMETER Idempotent
+    Permit transient transport and server retries for an idempotent operation.
+  .PARAMETER ConnectionTimeoutSeconds
+    Maximum time to establish the connection and receive response headers.
+  .PARAMETER OperationTimeoutSeconds
+    Maximum time without response progress.
+  .PARAMETER MaximumRetryCount
+    Maximum number of retries after the initial request.
+  .PARAMETER RetryIntervalSec
+    Default retry delay when Telegram does not provide retry_after.
+  .PARAMETER MaximumRetryDelaySeconds
+    Maximum accepted delay for one retry.
+  .PARAMETER MaximumTotalRetryDelaySeconds
+    Maximum cumulative retry delay for one API operation.
   #>
+  [CmdletBinding()]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The Telegram method to be invoked, e.g., sendMessage')]
+    [Parameter(Mandatory)]
     [ValidateNotNullOrWhiteSpace()]
     [string]$Method,
 
-    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The request body')]
+    [Parameter(ValueFromPipeline, Mandatory)]
     [System.Collections.IDictionary]$Body,
 
-    [Parameter(HelpMessage = 'Telegram bot token')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
-    [string]$Token = $Env:TG_BOT_TOKEN
+    [string]$Token = $Env:TG_BOT_TOKEN,
+
+    [switch]$Idempotent,
+
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$ConnectionTimeoutSeconds = 15,
+
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$OperationTimeoutSeconds = 15,
+
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$MaximumRetryCount = 3,
+
+    [ValidateRange(1, [int]::MaxValue)]
+    [int]$RetryIntervalSec = 3,
+
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$MaximumRetryDelaySeconds = 30,
+
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$MaximumTotalRetryDelaySeconds = 60,
+
+    [Parameter(DontShow)]
+    [AllowNull()]
+    [object]$RateLimitContext
   )
 
-  $Params = @{
-    Uri                = "https://api.telegram.org/bot${Token}/${Method}"
-    Method             = 'Post'
-    Body               = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Body -Compress -EscapeHandling EscapeNonAscii))
-    ContentType        = 'application/json'
-    SkipHttpErrorCheck = $true
+  process {
+    if ($RateLimitContext) {
+      $MaximumRetryDelaySeconds = $RateLimitContext.MaximumRetryDelaySeconds
+      $MaximumTotalRetryDelaySeconds = $RateLimitContext.MaximumTotalRetryDelaySeconds
+    }
+    $Uri = "https://api.telegram.org/bot${Token}/${Method}"
+    $Attempt = 0
+    $TotalDelay = 0
+
+    while ($true) {
+      $Attempt++
+      try {
+        if ($RateLimitContext) { $RateLimitContext.Wait() }
+        try {
+          # Disable PowerShell's generic retry behavior. Retrying sendMessage after an ambiguous
+          # transport failure can create duplicate messages.
+          $Response = Invoke-RestMethod -Uri $Uri -Method Post `
+            -Body ([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Body -Compress -EscapeHandling EscapeNonAscii))) `
+            -ContentType 'application/json' -SkipHttpErrorCheck -MaximumRetryCount 0 `
+            -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
+        } finally {
+          if ($RateLimitContext) { $RateLimitContext.MarkAttemptCompleted() }
+        }
+      } catch [OperationCanceledException] {
+        throw
+      } catch {
+        $SanitizedMessage = $_.Exception.Message.Replace($Token, '<redacted>')
+        if (-not $Idempotent -or $Attempt -gt $MaximumRetryCount) {
+          throw [System.InvalidOperationException]::new("Telegram ${Method} transport failure: ${SanitizedMessage}")
+        }
+
+        $Delay = $RetryIntervalSec
+        if ($Delay -gt $MaximumRetryDelaySeconds -or $TotalDelay + $Delay -gt $MaximumTotalRetryDelaySeconds) {
+          throw [System.InvalidOperationException]::new("Telegram ${Method} transport failure exceeded the retry-delay limit: ${SanitizedMessage}")
+        }
+        if ($RateLimitContext) { $RateLimitContext.SetRetryAfter([timespan]::FromSeconds($Delay)) } else { Start-Sleep -Seconds $Delay }
+        $TotalDelay += $Delay
+        continue
+      }
+
+      if ($Response.ok -ne $false) { return $Response }
+
+      $ErrorCode = [int]$Response.error_code
+      $Description = [string]$Response.description
+      $CanRetry = $Attempt -le $MaximumRetryCount -and ($ErrorCode -eq 429 -or ($Idempotent -and $ErrorCode -ge 500))
+      if (-not $CanRetry) { throw (Get-TelegramApiException -ErrorCode $ErrorCode -Description $Description) }
+
+      $RequestedDelay = if ($ErrorCode -eq 429 -and $Response.parameters.retry_after) {
+        [int][Math]::Ceiling([double]$Response.parameters.retry_after)
+      } else {
+        $RetryIntervalSec
+      }
+      if ($RequestedDelay -gt $MaximumRetryDelaySeconds -or $TotalDelay + $RequestedDelay -gt $MaximumTotalRetryDelaySeconds) {
+        throw (Get-TelegramApiException -ErrorCode $ErrorCode -Description "${Description} (requested retry delay ${RequestedDelay}s exceeds the configured limit)")
+      }
+
+      if ($RateLimitContext) { $RateLimitContext.SetRetryAfter([timespan]::FromSeconds($RequestedDelay)) } else { Start-Sleep -Seconds $RequestedDelay }
+      $TotalDelay += $RequestedDelay
+    }
   }
-  Invoke-RestMethod @Params
 }
 
 function New-TelegramMessage {
   <#
   .SYNOPSIS
-    Send a new message to a Telegram user or a Telegram group chat
-  .PARAMETER Message
-    The message content to be sent
-  .PARAMETER AsHtml
-    Parse the message content as HTML
-  .PARAMETER AsMarkdown
-    Parse the message content as Markdown (Telegram format, see https://core.telegram.org/bots/api#markdownv2-style)
-  .PARAMETER ChatID
-    The ID of the group chat or the user
-  .PARAMETER Token
-    Telegram bot token
+    Send a new message to a Telegram chat.
   #>
   [CmdletBinding(DefaultParameterSetName = 'PlainText')]
   param (
-    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The message content to be sent')]
+    [Parameter(ValueFromPipeline, Mandatory)]
     [string]$Message,
 
-    [Parameter(DontShow, ParameterSetName = 'PlainText', HelpMessage = 'Parse the message content as plain text')]
+    [Parameter(DontShow, ParameterSetName = 'PlainText')]
     [switch]$AsPlainText,
 
-    [Parameter(ParameterSetName = 'HTML', HelpMessage = 'Parse the message content as HTML')]
+    [Parameter(ParameterSetName = 'HTML')]
     [switch]$AsHtml,
 
-    [Parameter(ParameterSetName = 'Markdown', HelpMessage = 'Parse the message content as Markdown (Telegram format)')]
+    [Parameter(ParameterSetName = 'Markdown')]
     [switch]$AsMarkdown,
 
-    [Parameter(HelpMessage = 'The ID of the group chat or the user')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
     [string]$ChatID = $Env:TG_CHAT_ID,
 
-    [Parameter(HelpMessage = 'Telegram bot token')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
-    [string]$Token = $Env:TG_BOT_TOKEN
+    [string]$Token = $Env:TG_BOT_TOKEN,
+
+    [Parameter(DontShow)]
+    [AllowNull()]
+    [object]$RateLimitContext
   )
 
-  $Params = @{
-    Method = 'sendMessage'
-    Body   = @{
+  process {
+    $null = $AsPlainText.IsPresent
+    $Body = @{
       chat_id                  = $ChatID
       text                     = $Message
       disable_web_page_preview = $true
     }
-    Token  = $Token
+    if ($AsHtml) { $Body.parse_mode = 'HTML' }
+    if ($AsMarkdown) { $Body.parse_mode = 'MarkdownV2' }
+    Invoke-TelegramApi -Method 'sendMessage' -Body $Body -Token $Token -RateLimitContext $RateLimitContext
   }
-  if ($AsHtml) { $Params.Body.parse_mode = 'HTML' }
-  if ($AsMarkdown) { $Params.Body.parse_mode = 'MarkdownV2' }
-  Invoke-TelegramApi @Params
 }
 
 function Remove-TelegramMessage {
   <#
   .SYNOPSIS
-    Delete a message from a chat
-  .PARAMETER MessageID
-    The ID of the messages to be deleted
-  .PARAMETER ChatID
-    The ID of the group chat or the user
-  .PARAMETER Token
-    Telegram bot token
+    Delete a message from a Telegram chat.
   #>
   param (
-    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The ID of the messages to be deleted')]
-    [int]$MessageID,
+    [Parameter(ValueFromPipeline, Mandatory)]
+    [long]$MessageID,
 
-    [Parameter(HelpMessage = 'The ID of the group chat or the user')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
     [string]$ChatID = $Env:TG_CHAT_ID,
 
-    [Parameter(HelpMessage = 'Telegram bot token')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
-    [string]$Token = $Env:TG_BOT_TOKEN
+    [string]$Token = $Env:TG_BOT_TOKEN,
+
+    [Parameter(DontShow)]
+    [AllowNull()]
+    [object]$RateLimitContext
   )
 
-  $Params = @{
-    Method = 'deleteMessage'
-    Body   = @{
-      chat_id    = $ChatID
-      message_id = $MessageID
-    }
-    Token  = $Token
+  process {
+    Invoke-TelegramApi -Method 'deleteMessage' -Body @{ chat_id = $ChatID; message_id = $MessageID } -Token $Token -Idempotent -RateLimitContext $RateLimitContext
   }
-  Invoke-TelegramApi @Params
 }
 
 function Update-TelegramMessage {
   <#
   .SYNOPSIS
-    Update the content of an existing message in a chat
-  .PARAMETER Message
-    The new message content to which the previous one will be updated
-  .PARAMETER AsHtml
-    Parse the new message as HTML
-  .PARAMETER AsMarkdown
-    Parse the new message as Markdown (Telegram format, see https://core.telegram.org/bots/api#markdownv2-style)
-  .PARAMETER MessageID
-    The ID of the message to be updated
-  .PARAMETER ChatID
-    The ID of the group chat or the user
-  .PARAMETER Token
-    Telegram bot token
+    Update an existing Telegram message.
   #>
   [CmdletBinding(DefaultParameterSetName = 'PlainText')]
   param (
-    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The new message content to which the previous one will be updated')]
+    [Parameter(ValueFromPipeline, Mandatory)]
     [string]$Message,
 
-    [Parameter(DontShow, ParameterSetName = 'PlainText', HelpMessage = 'Parse the new message content as plain text')]
+    [Parameter(DontShow, ParameterSetName = 'PlainText')]
     [switch]$AsPlainText,
 
-    [Parameter(ParameterSetName = 'HTML', HelpMessage = 'Parse the new message content as HTML')]
+    [Parameter(ParameterSetName = 'HTML')]
     [switch]$AsHtml,
 
-    [Parameter(ParameterSetName = 'Markdown', HelpMessage = 'Parse the new message content as Markdown (Telegram format)')]
+    [Parameter(ParameterSetName = 'Markdown')]
     [switch]$AsMarkdown,
 
-    [Parameter(Mandatory, ValueFromPipeline, HelpMessage = 'The ID of the message to be updated')]
-    [int]$MessageID,
+    [Parameter(Mandatory)]
+    [long]$MessageID,
 
-    [Parameter(HelpMessage = 'The ID of the group chat or the user')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
     [string]$ChatID = $Env:TG_CHAT_ID,
 
-    [Parameter(HelpMessage = 'Telegram bot token')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
-    [string]$Token = $Env:TG_BOT_TOKEN
+    [string]$Token = $Env:TG_BOT_TOKEN,
+
+    [Parameter(DontShow)]
+    [AllowNull()]
+    [object]$RateLimitContext
   )
 
-  $Params = @{
-    Method = 'editMessageText'
-    Body   = @{
+  process {
+    $null = $AsPlainText.IsPresent
+    $Body = @{
       chat_id                  = $ChatID
       message_id               = $MessageID
       text                     = $Message
       disable_web_page_preview = $true
     }
-    Token  = $Token
+    if ($AsHtml) { $Body.parse_mode = 'HTML' }
+    if ($AsMarkdown) { $Body.parse_mode = 'MarkdownV2' }
+    Invoke-TelegramApi -Method 'editMessageText' -Body $Body -Token $Token -Idempotent -RateLimitContext $RateLimitContext
   }
-  if ($AsHtml) { $Params.Body.parse_mode = 'HTML' }
-  if ($AsMarkdown) { $Params.Body.parse_mode = 'MarkdownV2' }
-  Invoke-TelegramApi @Params
+}
+
+function Invoke-TelegramMessageWrite {
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]
+    [ValidateSet('New', 'Update')]
+    [string]$Operation,
+
+    [Parameter(Mandatory)]
+    [AllowEmptyString()]
+    [string]$Message,
+
+    [long]$MessageID,
+
+    [switch]$AsHtml,
+
+    [switch]$AsMarkdown,
+
+    [Parameter(Mandatory)]
+    [string]$ChatID,
+
+    [Parameter(Mandatory)]
+    [string]$Token,
+
+    [AllowNull()]
+    [object]$RateLimitContext
+  )
+
+  $Parameters = @{ Message = $Message; ChatID = $ChatID; Token = $Token; RateLimitContext = $RateLimitContext }
+  if ($AsHtml) { $Parameters.AsHtml = $true }
+  if ($AsMarkdown) { $Parameters.AsMarkdown = $true }
+
+  try {
+    $Response = $Operation -eq 'New' ? (New-TelegramMessage @Parameters) : (Update-TelegramMessage @Parameters -MessageID $MessageID)
+    return [pscustomobject]@{ Response = $Response; SentText = $Message; NotModified = $false }
+  } catch {
+    $ErrorCode = $_.Exception.Data['TelegramErrorCode']
+    $Description = [string]$_.Exception.Data['TelegramDescription']
+
+    if ($Operation -eq 'Update' -and $ErrorCode -eq 400 -and $Description -match '(?i)message is not modified') {
+      return [pscustomobject]@{ Response = $null; SentText = $Message; NotModified = $true }
+    }
+
+    if (-not $AsMarkdown -or $ErrorCode -ne 400 -or $Description -notmatch '(?i)(parse|markdown|entities)') { throw }
+
+    # Telegram did not accept the MarkdownV2 entities. The failed request did not create or
+    # modify a message, so retrying once without parse_mode is safe.
+    $PlainText = ConvertFrom-TelegramMarkdownV2 -Text $Message
+    $Response = if ($Operation -eq 'New') {
+      New-TelegramMessage -Message $PlainText -ChatID $ChatID -Token $Token -RateLimitContext $RateLimitContext
+    } else {
+      Update-TelegramMessage -Message $PlainText -MessageID $MessageID -ChatID $ChatID -Token $Token -RateLimitContext $RateLimitContext
+    }
+    return [pscustomobject]@{ Response = $Response; SentText = $PlainText; NotModified = $false }
+  }
 }
 
 function Send-TelegramMessage {
   <#
   .SYNOPSIS
-    Send new messages or update existing messages (if the IDs of the previous messages are provided) to a Telegram chat through Telegram bot API
+    Send or reconcile a line-split Telegram message session.
   .PARAMETER Message
-    The message content
+    Complete desired message content.
   .PARAMETER AsHtml
-    Parse the message as HTML
+    Send sanitized Telegram HTML.
   .PARAMETER AsMarkdown
-    Parse the message as Markdown (Telegram format, see https://core.telegram.org/bots/api#markdownv2-style)
-  .PARAMETER MessageID
-    The ID of the message to be updated
-  .PARAMETER ChatID
-    The ID of the group chat or the user
-  .PARAMETER Token
-    Telegram bot token
-  .OUTPUTS
-    The IDs of the messages
+    Send Telegram MarkdownV2.
+  .PARAMETER Session
+    Mutable list containing the content and ID of each existing message chunk.
+  .PARAMETER MaximumMessageLength
+    Telegram message length limit measured in UTF-16 code units.
   #>
   [CmdletBinding(DefaultParameterSetName = 'PlainText')]
-  [OutputType([System.Collections.Generic.List[System.Tuple[string, Int64]]])]
+  [OutputType([System.Collections.Generic.List[System.Tuple[string, long]]])]
   param (
-    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'The message content')]
+    [Parameter(ValueFromPipeline, Mandatory)]
+    [AllowEmptyString()]
     [string]$Message,
 
-    [Parameter(DontShow, ParameterSetName = 'PlainText', HelpMessage = 'Parse the message content as plain text')]
+    [Parameter(DontShow, ParameterSetName = 'PlainText')]
     [switch]$AsPlainText,
 
-    [Parameter(ParameterSetName = 'HTML', HelpMessage = 'Parse the message content as HTML')]
+    [Parameter(ParameterSetName = 'HTML')]
     [switch]$AsHtml,
 
-    [Parameter(ParameterSetName = 'Markdown', HelpMessage = 'Parse the message content as Markdown (Telegram format, see https://core.telegram.org/bots/api#markdownv2-style)')]
+    [Parameter(ParameterSetName = 'Markdown')]
     [switch]$AsMarkdown,
 
-    [Parameter(HelpMessage = 'The content and ID of the messages to update')]
-    [System.Collections.Generic.List[System.Tuple[string, Int64]]]$Session = @(),
+    [Parameter()]
+    [AllowEmptyCollection()]
+    [System.Collections.Generic.List[System.Tuple[string, long]]]$Session,
 
-    [Parameter(HelpMessage = 'The ID of the group chat or the user')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
     [string]$ChatID = $Env:TG_CHAT_ID,
 
-    [Parameter(HelpMessage = 'Telegram bot token')]
+    [Parameter()]
     [ValidateNotNullOrWhiteSpace()]
-    [string]$Token = $Env:TG_BOT_TOKEN
+    [string]$Token = $Env:TG_BOT_TOKEN,
+
+    [ValidateRange(16, 4096)]
+    [int]$MaximumMessageLength = 4096,
+
+    [Parameter(DontShow)]
+    [AllowNull()]
+    [object]$RateLimitContext
   )
 
-  $Params = @{ Token = $Token }
-  if ($AsHtml) { $Params.AsHtml = $true }
-  if ($AsMarkdown) { $Params.AsMarkdown = $true }
+  process {
+    $null = $AsPlainText.IsPresent
+    if ($null -eq $Session) { $Session = [System.Collections.Generic.List[System.Tuple[string, long]]]::new() }
 
-  # Telegram has a message length limit of 4096 characters, split it by length and send them separately
-  $Messages = [System.Collections.Generic.List[string]]::new()
-  $Cursor = 0
-  while ($Cursor -lt $Message.Length) {
-    $Window = [System.Math]::Min(4096, $Message.Length - $Cursor)
-    # In HTML and Markdown formats, avoid cutting on the escape character at the end of the window by reducing the window size
-    while (($AsHtml -or $AsMarkdown) -and $Message[$Cursor + $Window - 1] -eq '\' -and $Window -gt 0) {
-      $Window--
+    $Messages = if ([string]::IsNullOrWhiteSpace($Message)) {
+      [string[]]@()
+    } elseif ($AsHtml) {
+      @(Split-HtmlMessage -Html $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -HtmlProfile Telegram)
+    } elseif ($AsMarkdown) {
+      @(Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -Format MarkdownV2)
+    } else {
+      @(Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -Format PlainText)
     }
-    # Restore the window size if it is currently 0 (This could happen if the message content is full of "\")
-    if ($Window -eq 0) { $Window = [System.Math]::Min(4096, $Message.Length - $Cursor) }
-    $Messages.Add($Message.Substring($Cursor, $Window))
-    $Cursor += $Window
-  }
 
-  if ($Session.Count -eq 0) {
-    # If no message ID is provided, send new messages directly
-    foreach ($Message in $Messages) {
-      $Response = New-TelegramMessage -Message $Message -ChatID $ChatID @Params
-      if ($Response.ok -eq $false) { throw "$($Response.error_code) $($Response.description)" }
-      $Session.Add([System.Tuple]::Create($Message, $Response.result.message_id))
+    $CommonCount = [Math]::Min($Messages.Count, $Session.Count)
+    for ($Index = 0; $Index -lt $CommonCount; $Index++) {
+      if ($Messages[$Index] -ceq $Session[$Index].Item1) { continue }
+
+      $WriteResult = Invoke-TelegramMessageWrite -Operation Update -Message $Messages[$Index] -MessageID $Session[$Index].Item2 `
+        -AsHtml:$AsHtml -AsMarkdown:$AsMarkdown -ChatID $ChatID -Token $Token -RateLimitContext $RateLimitContext
+      $Session[$Index] = [System.Tuple]::Create([string]$WriteResult.SentText, [long]$Session[$Index].Item2)
     }
-  } else {
-    # If message IDs are provided, update the existing messages
-    $i = 0
-    for (; $i -lt [System.Math]::Min($Messages.Count, $Session.Count); $i++) {
-      # Update the message if the content is different
-      if ($Messages[$i] -ne $Session[$i].Item1) {
-        $Response = Update-TelegramMessage -Message $Messages[$i] -MessageID $Session[$i].Item2 -ChatID $ChatID @Params
-        if ($Response.ok -eq $false) {
-          # Telegram API will throw an error if the new message content is the same as the old one
-          # Here we ignore this kind of error and add the original message ID
-          if ($Response.error_code -ne 400) { throw "$($Response.error_code) $($Response.description)" }
-          $Session[$i] = [System.Tuple]::Create($Messages[$i], $Session[$i].Item2)
-        } else {
-          $Session[$i] = [System.Tuple]::Create($Messages[$i], $Response.result.message_id)
-        }
-      }
+
+    for ($Index = $CommonCount; $Index -lt $Messages.Count; $Index++) {
+      $WriteResult = Invoke-TelegramMessageWrite -Operation New -Message $Messages[$Index] `
+        -AsHtml:$AsHtml -AsMarkdown:$AsMarkdown -ChatID $ChatID -Token $Token -RateLimitContext $RateLimitContext
+      $Session.Add([System.Tuple]::Create([string]$WriteResult.SentText, [long]$WriteResult.Response.result.message_id))
     }
-    if ($i -lt $Messages.Count) {
-      for (; $i -lt $Messages.Count; $i++) {
-        $Response = New-TelegramMessage -Message $Messages[$i] -ChatID $ChatID @Params
-        if ($Response.ok -eq $false) { throw "$($Response.error_code) $($Response.description)" }
-        $Session.Add([System.Tuple]::Create($Messages[$i], $Response.result.message_id))
-      }
-    } elseif ($i -lt $Session.Count) {
-      for ($j = $Session.Count - 1; $j -ge $i; $j--) {
-        $Response = Remove-TelegramMessage -MessageID $Session[$j].Item2 -ChatID $ChatID -Token $Token
-        if ($Response.ok -eq $false) { throw "$($Response.error_code) $($Response.description)" }
-        $Session.RemoveAt($j)
-      }
+
+    for ($Index = $Session.Count - 1; $Index -ge $Messages.Count; $Index--) {
+      $null = Remove-TelegramMessage -MessageID $Session[$Index].Item2 -ChatID $ChatID -Token $Token -RateLimitContext $RateLimitContext
+      $Session.RemoveAt($Index)
     }
+
+    Write-Output -InputObject $Session -NoEnumerate
   }
-  return $Session
 }
 
 Export-ModuleMember -Function *

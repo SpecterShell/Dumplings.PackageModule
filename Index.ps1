@@ -21,15 +21,20 @@ if (Test-Path -Path $LibraryPath) {
     Import-Module (Join-Path $LibraryPath $InfrastructureModule) -Force
   }
 
-  # Manifest parsing has an explicit dependency chain. Load general helpers and
-  # the schema/model/serialization boundary first, then parser libraries, and
-  # finally validation, update, and submission orchestration.
-  $Private:ManifestFoundationModules = @('General.psm1', 'YamlSchema.psm1', 'WinGetManifestSchema.psm1', 'WinGetManifestModel.psm1', 'WinGetManifestSerialization.psm1')
+  # Text and messaging helpers are consumed by independently loaded transport modules.
+  $Private:UtilityModules = @('General.psm1', 'TextContent.psm1', 'Messaging.psm1', 'MessageQueue.psm1')
+  foreach ($UtilityModule in $UtilityModules) {
+    Import-Module (Join-Path $LibraryPath $UtilityModule) -Force
+  }
+
+  # Manifest parsing has an explicit dependency chain. Load the schema/model/serialization
+  # boundary before parser libraries, and finally validation, update, and submission orchestration.
+  $Private:ManifestFoundationModules = @('YamlSchema.psm1', 'WinGetManifestSchema.psm1', 'WinGetManifestModel.psm1', 'WinGetManifestSerialization.psm1')
   foreach ($ManifestModule in $ManifestFoundationModules) {
     Import-Module (Join-Path $LibraryPath $ManifestModule) -Force
   }
   $Private:ManifestConsumerModules = @('WinGetManifestValidation.psm1', 'WinGetManifestUpdate.psm1', 'WinGetSubmission.psm1')
-  $Private:OrderedModules = @($InfrastructureModules) + @($ManifestFoundationModules) + @($ManifestConsumerModules)
+  $Private:OrderedModules = @($InfrastructureModules) + @($UtilityModules) + @($ManifestFoundationModules) + @($ManifestConsumerModules)
   Get-ChildItem -LiteralPath $LibraryPath -Filter '*.psm1' -Recurse -File |
     Where-Object Name -NotIn $OrderedModules |
     Import-Module -Force
