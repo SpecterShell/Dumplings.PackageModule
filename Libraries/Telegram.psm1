@@ -426,15 +426,20 @@ function Send-TelegramMessage {
     $null = $AsPlainText.IsPresent
     if ($null -eq $Session) { $Session = [System.Collections.Generic.List[System.Tuple[string, long]]]::new() }
 
-    $Messages = if ([string]::IsNullOrWhiteSpace($Message)) {
-      [string[]]@()
-    } elseif ($AsHtml) {
-      @(Split-HtmlMessage -Html $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -HtmlProfile Telegram)
-    } elseif ($AsMarkdown) {
-      @(Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -Format MarkdownV2)
-    } else {
-      @(Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -Format PlainText)
-    }
+    # Materialize the complete conditional output as an array. PowerShell unwraps a one-item array
+    # emitted by an individual branch into a scalar string; indexing that scalar would send only its
+    # first character (normally "*" for PackageTask Markdown) to Telegram.
+    [string[]]$Messages = @(
+      if ([string]::IsNullOrWhiteSpace($Message)) {
+        # An empty desired state removes every message currently owned by this session.
+      } elseif ($AsHtml) {
+        Split-HtmlMessage -Html $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -HtmlProfile Telegram
+      } elseif ($AsMarkdown) {
+        Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -Format MarkdownV2
+      } else {
+        Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode UTF16 -Format PlainText
+      }
+    )
 
     $CommonCount = [Math]::Min($Messages.Count, $Session.Count)
     for ($Index = 0; $Index -lt $CommonCount; $Index++) {

@@ -68,6 +68,24 @@ after
 
 Describe 'Telegram messaging' {
   InModuleScope Telegram {
+    It 'preserves the complete text of a single Markdown chunk' {
+      $script:WrittenMessage = $null
+      Mock Invoke-TelegramMessageWrite {
+        param($Message)
+        $script:WrittenMessage = $Message
+        [pscustomobject]@{
+          Response    = [pscustomobject]@{ result = [pscustomobject]@{ message_id = 100 } }
+          SentText    = $Message
+          NotModified = $false
+        }
+      }
+
+      $Message = "*Example\.Package*`n`n*Version:* 1\.2\.3"
+      $null = Send-TelegramMessage -Message $Message -AsMarkdown -ChatID 'chat' -Token 'token'
+
+      $script:WrittenMessage | Should -BeExactly $Message
+    }
+
     It 'reconciles line-split chunks without changing the session type' {
       $script:NextMessageID = 100
       $script:Writes = [System.Collections.Generic.List[object]]::new()
@@ -197,6 +215,22 @@ Describe 'Telegram messaging' {
 
 Describe 'Matrix messaging' {
   InModuleScope Matrix {
+    It 'preserves the complete text of a single Markdown chunk' {
+      Mock Assert-MatrixPlaintextAllowed
+      $script:WrittenMessage = $null
+      Mock Invoke-MatrixMessageWrite {
+        param($Message)
+        $script:WrittenMessage = $Message
+        [pscustomobject]@{ event_id = '$event' }
+      }
+
+      $Message = "**Example.Package**`n`n**Version:** 1.2.3"
+      $null = Send-MatrixMessage -Message $Message -AsMarkdown -RoomID '!room:example.org' `
+        -HomeServer 'https://example.org' -Token 'token'
+
+      $script:WrittenMessage | Should -BeExactly $Message
+    }
+
     It 'detects encrypted and unencrypted room state without hard-coded room identities' {
       Mock Invoke-MatrixApi { [pscustomobject]@{ algorithm = 'm.megolm.v1.aes-sha2' } }
       Test-MatrixRoomEncrypted -RoomID '!room:example.org' -HomeServer 'https://example.org' -Token 'token' | Should -BeTrue

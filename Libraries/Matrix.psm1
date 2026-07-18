@@ -528,15 +528,19 @@ function Send-MatrixMessage {
       -AllowUnencryptedInEncryptedRoom:$AllowUnencryptedInEncryptedRoom
 
     $Format = $AsHtml ? 'HTML' : ($AsMarkdown ? 'Markdown' : 'PlainText')
-    $Messages = if ([string]::IsNullOrWhiteSpace($Message)) {
-      [string[]]@()
-    } elseif ($AsHtml) {
-      @(Split-HtmlMessage -Html $Message -MaximumLength $MaximumMessageLength -LengthMode TextElement -HtmlProfile Matrix)
-    } elseif ($AsMarkdown) {
-      @(Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode TextElement -Format Markdown)
-    } else {
-      @(Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode TextElement -Format PlainText)
-    }
+    # Materialize the complete conditional output as an array. Without this outer boundary,
+    # PowerShell unwraps a single chunk into a scalar string and $Messages[0] becomes one character.
+    [string[]]$Messages = @(
+      if ([string]::IsNullOrWhiteSpace($Message)) {
+        # An empty desired state redacts every Matrix event currently owned by this session.
+      } elseif ($AsHtml) {
+        Split-HtmlMessage -Html $Message -MaximumLength $MaximumMessageLength -LengthMode TextElement -HtmlProfile Matrix
+      } elseif ($AsMarkdown) {
+        Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode TextElement -Format Markdown
+      } else {
+        Split-MessageText -Message $Message -MaximumLength $MaximumMessageLength -LengthMode TextElement -Format PlainText
+      }
+    )
 
     $CommonCount = [Math]::Min($Messages.Count, $Session.Count)
     for ($Index = 0; $Index -lt $CommonCount; $Index++) {
