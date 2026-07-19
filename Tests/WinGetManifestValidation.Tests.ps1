@@ -1,6 +1,6 @@
 BeforeDiscovery {
   if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.WinGetVersion').Type) {
-    Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\Versioning.cs')
+    Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\Source\Versioning\Versioning.cs')
   }
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\YamlSchema.psm1') -Force
@@ -241,7 +241,7 @@ PackageIdentifier: Test.Other
   }
 
   It 'Loads every vendored schema offline' {
-    $SchemaRoot = Join-Path $PSScriptRoot '..\Assets\WinGetManifestSchemas'
+    $SchemaRoot = Join-Path $PSScriptRoot '..\Assets\Schemas\WinGetManifest'
     $Schemas = @(Get-ChildItem -LiteralPath $SchemaRoot -Filter '*.json' -Recurse -File)
     $Schemas.Count | Should -BeGreaterThan 50
     foreach ($Schema in $Schemas) {
@@ -416,7 +416,7 @@ Describe 'Process-safe validation' {
         Start-ThreadJob -ArgumentList $Path, $ModuleRoot -ScriptBlock {
           param ($ManifestPath, $Root)
           if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.WinGetVersion').Type) {
-            Add-Type -Path (Join-Path $Root 'Assets\Versioning.cs')
+            Add-Type -Path (Join-Path $Root 'Assets\Source\Versioning\Versioning.cs')
           }
           Import-Module (Join-Path $Root 'Libraries\General.psm1') -Force
           Import-Module (Join-Path $Root 'Libraries\YamlSchema.psm1') -Force

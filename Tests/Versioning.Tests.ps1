@@ -1,6 +1,6 @@
 BeforeAll {
   if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.WinGetVersion').Type) {
-    Add-Type -Path (Join-Path $PSScriptRoot 'Versioning.cs')
+    Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\Source\Versioning\Versioning.cs')
   }
 
   $TypeAcceleratorsClass = [psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')

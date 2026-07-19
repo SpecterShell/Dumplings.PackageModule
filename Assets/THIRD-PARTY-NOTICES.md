@@ -4,10 +4,10 @@
 
 Source: <https://github.com/microsoft/winget-cli>
 
-The native call sequence in `WinGetDownloadProbe.cs` follows the MIT-licensed
+The native call sequence in `Assets/Source/WinGet/WinGetDownloadProbe.cs` follows the MIT-licensed
 `Downloader.cpp` and `DODownloader.cpp` implementations.
 
-The vendored files in `WinGetManifestSchemas` are the official manifest JSON
+The vendored files in `Assets/Schemas/WinGetManifest` are the official manifest JSON
 schemas. The PowerShell manifest validator follows the MIT-licensed
 `YamlParser.cpp`, `ManifestSchemaValidation.cpp`, `ManifestYamlPopulator.cpp`,
 `ManifestValidation.cpp`, `ManifestCommon.cpp`, `MsiExecArguments.cpp`, and `Locale.cpp`
@@ -63,7 +63,7 @@ THE SOFTWARE.
 
 Source: <https://www.gentee.com/download/gentee3.6.1.zip>
 
-The `GenteeLzgeDecoder.cs` implementation is an MIT-licensed adaptation of
+The `Assets/Source/CreateInstall/GenteeLzgeDecoder.cs` implementation is an MIT-licensed adaptation of
 the GEA archive and LZGE/Huffman decoder sources distributed with Gentee.
 
 Copyright (c) 2006-2009 The Gentee Group. All rights reserved.
@@ -85,6 +85,24 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+## SharpCompress.Gentee / pyppmd-gentee 1.4.0
+
+Source: <https://github.com/puigru/pyppmd-gentee>
+
+The source-shipped `Assets/Providers/SharpCompress.Gentee` managed companion provider
+uses SharpCompress 0.39.0's MIT-licensed PPMd-I object model and Gentee variant
+behavior from pyppmd-gentee at commit
+`a6e4dbcf8b600664c4b8ff47ec090e42588f9f14`. It is dynamically loaded as a
+separate AnyCPU assembly and distributed under LGPL-2.1-or-later. Its complete
+corresponding C# source and reproducible build instructions are included beside
+the binary. The standard `SharpCompress.dll` remains unmodified.
+
+Copyright (C) 2020-2021 Hiroshi Miura
+Copyright (C) 2026 Joel Puig Rubio
+
+The complete GNU Lesser General Public License version 2.1 is available in
+`Assets/Providers/SharpCompress.Gentee/LICENSE` and at <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html>.
 
 ## ZstdSharp.Port 0.8.4
 

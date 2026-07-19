@@ -14,13 +14,20 @@
 #     +26 info-size:u32, +2A/+32/+3A archive/volume sizes:i64
 #     +42 moved-size:u32, +46 memory/block/solid multipliers
 #     `-- catalog -> [order:u8][packed-size:u32/u64][packed data]*
+#         +-- type 0: stored bytes
+#         +-- type 1: LZGE adaptive-Huffman stream
+#         `-- type 2: modified PPMd-I range stream + end marker
 #
 # Integers are LE. GEA v1 uses 32-bit file/block sizes; v2 uses 64-bit sizes.
 # The launcher header is identified by "Gentee Launcher\0" and records the
 # runtime/program sizes and the header's own file offset. The decoded GE program
 # is a sequence of bounded object records; direct calls to CreateInstall's
 # source-verified addremoveext routine provide visible uninstall-key evidence.
-# Password and unsupported PPMd records are never bypassed.
+# Password-protected records are never bypassed. PPMd is decoded by the bounded,
+# source-shipped SharpCompress.Gentee managed provider, which preserves GEA's solid
+# model state. SharpCompress's public PpmdStream implements standard H/H7Z/I1 models;
+# it cannot decode GEA because Gentee changes I1 model behavior, allocator scheduling,
+# and per-block framing.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -57,10 +64,36 @@ function Import-CreateInstallLzgeDecoder {
   .SYNOPSIS
     Load the MIT-licensed managed Gentee LZGE decoder once
   #>
-  if (-not ([Management.Automation.PSTypeName]'Dumplings.Gentee.LzgeDecoder').Type) {
-    $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'GenteeLzgeDecoder.cs'
+  if (([Management.Automation.PSTypeName]'Dumplings.Gentee.LzgeDecoder').Type) { return }
+  Use-InstallerRuntimeLoadLock {
+    # Add-Type publishes types process-wide, so recheck after entering the loader lock to avoid a
+    # duplicate-type race between Dumplings worker runspaces.
+    if (([Management.Automation.PSTypeName]'Dumplings.Gentee.LzgeDecoder').Type) { return }
+    $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'Source', 'CreateInstall', 'GenteeLzgeDecoder.cs'
     if (-not (Test-Path -LiteralPath $SourcePath)) { throw "The Gentee LZGE decoder source is missing: $SourcePath" }
-    Add-Type -Path $SourcePath
+    Add-Type -Path $SourcePath -ErrorAction Stop
+  }
+}
+
+function Import-CreateInstallPpmdDecoder {
+  <#
+  .SYNOPSIS
+    Load the source-shipped SharpCompress Gentee PPMd provider once.
+  .DESCRIPTION
+    Loads an AnyCPU managed companion provider. No native architecture selection or
+    external CreateInstall/GEA executable is involved.
+  #>
+  param ()
+
+  if (-not ([Management.Automation.PSTypeName]'SharpCompress.Compressors.PPMd.Gentee.GenteePpmdDecoder').Type) {
+    Use-InstallerRuntimeLoadLock {
+      # Add-Type publishes assemblies process-wide. Recheck under the shared loader lock so
+      # concurrent parser runspaces cannot race to load the same provider twice.
+      if (([Management.Automation.PSTypeName]'SharpCompress.Compressors.PPMd.Gentee.GenteePpmdDecoder').Type) { return }
+      $AssemblyPath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'Providers', 'SharpCompress.Gentee', 'SharpCompress.Gentee.dll'
+      if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) { throw "The SharpCompress Gentee PPMd provider is missing: $AssemblyPath" }
+      Add-Type -Path $AssemblyPath -ErrorAction Stop
+    }
   }
 }
 
@@ -798,8 +831,8 @@ function Get-CreateInstallInfo {
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWriteArray
     if ($ExecutionLevel -ieq 'requireAdministrator' -and $ProductCodes.Count -eq 0) { $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest.') }
     if ($Layout.PasswordCount -gt 0 -or ($Layout.Entries | Where-Object PasswordId -GT 0 | Select-Object -First 1)) { $Warnings.Add('The GEA archive contains password-protected files; encrypted entries are intentionally unsupported.') }
-    # PPMd is an expansion capability, not an ARP metadata failure. Preserve it in GEA evidence
-    # and CanExpand; Expand-CreateInstallInstaller emits a targeted error only when requested.
+    # Compression capability is reported independently from identity evidence. Password-protected
+    # entries and unknown method nibbles remain non-expandable; PPMd is supported statically.
 
     $Scope = if ($DetectedScopes.Count -eq 1) { @($DetectedScopes)[0] } elseif ($DetectedScopes.Count -gt 1) { $null } elseif ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
     $SupportedScopes = if ($DetectedScopes.Count -gt 0) { @($DetectedScopes | Sort-Object) } elseif ($ExecutionLevel -ieq 'requireAdministrator') { @('machine') } else { @() }
@@ -825,11 +858,11 @@ function Get-CreateInstallInfo {
       WritesAppsAndFeaturesEntry = if ($ProductCode) { $true } else { $null }
       GenteeProgram              = $UninstallEvidence.ProgramInfo
       UninstallRegistrations     = @($UninstallEvidence.Calls)
-      GEA                        = [pscustomobject]@{ MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); UnsupportedCompressionMethods = @($CompressionMethods | Where-Object { $_ -in @('PPMd', 'Unknown') } | Sort-Object); PasswordCount = $Layout.PasswordCount }
+      GEA                        = [pscustomobject]@{ MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); UnsupportedCompressionMethods = @($CompressionMethods | Where-Object { $_ -eq 'Unknown' } | Sort-Object); PasswordCount = $Layout.PasswordCount }
       ExtractedFiles             = @($Layout.Entries.FullName)
-      CanExpand                  = $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('PPMd') -and -not $CompressionMethods.Contains('Unknown')
+      CanExpand                  = $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')
       Warnings                   = @($Warnings)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 2; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 bytecode structures', 'CreateInstall addremoveext command source', 'Gentee GEA v1/v2 structures', 'Gentee LZGE decoder') }
+      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 3; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 bytecode structures', 'CreateInstall addremoveext command source', 'Gentee GEA v1/v2 structures', 'Gentee LZGE decoder', 'Gentee-modified PPMd-I decoder') }
     }
   }
 }
@@ -837,7 +870,7 @@ function Get-CreateInstallInfo {
 function Expand-CreateInstallInstaller {
   <#
   .SYNOPSIS
-    Extract stored and LZGE-compressed files from a CreateInstall GEA archive
+    Extract stored, LZGE-compressed, and PPMd-compressed files from a CreateInstall GEA archive
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
   .PARAMETER DestinationPath
@@ -864,46 +897,94 @@ function Expand-CreateInstallInstaller {
     $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $ExpandedBytes = 0L
     $SolidHistory = [byte[]]::new(0)
-    # Solid history must advance through every preceding entry, including unselected entries, so a
-    # later selected file receives the same dictionary state as the original extractor.
-    foreach ($Entry in $Layout.Entries) {
-      if ($Entry.PasswordId -gt 0) { throw "The CreateInstall entry '$($Entry.FullName)' is password-protected and cannot be extracted" }
-      if (-not $Entry.IsSolid) { $SolidHistory = [byte[]]::new(0) }
-      $Selected = Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name
-      if ($Selected) {
-        $ExpandedBytes += [long]$Entry.Size
-        if ($ExpandedBytes -gt $MaximumExpandedBytes) { throw 'CreateInstall extraction exceeds the configured output limit' }
-        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
-        $Parent = [IO.Path]::GetDirectoryName($OutputPath)
-        if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
-        $Output = [IO.File]::Open($OutputPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
-      } else { $Output = $null }
-      try {
-        foreach ($Block in @(Get-CreateInstallBlockInfo -Layout $Layout -Entry $Entry)) {
-          if ($Block.CompressedSize -gt $Script:CreateInstallMaximumBlockBytes -or $Block.OutputSize -gt $Script:CreateInstallMaximumBlockBytes) { throw "The CreateInstall block for '$($Entry.FullName)' exceeds the configured block limit" }
-          $InputBytes = Read-CreateInstallArchiveLogicalRange -Layout $Layout -Offset $Block.DataOffset -Count ([int]$Block.CompressedSize)
-          # Decode one bounded block at a time; unsupported methods fail before partial metadata is
-          # presented as a complete extracted file.
-          switch ($Block.CompressionType) {
-            0 { $Decoded = $InputBytes; $SolidHistory = [byte[]]::new(0) }
-            1 {
-              $Prefix = if ($Block.CompressionOrder -eq 1) { $SolidHistory } else { [byte[]]::new(0) }
-              $Decoded = [Dumplings.Gentee.LzgeDecoder]::Decode($InputBytes, [int]$Block.OutputSize, $Prefix)
-              # Retain only the configured solid window rather than accumulating all prior output.
-              $Combined = if ($Prefix.Length -gt 0) { $Prefix + $Decoded } else { $Decoded }
-              $Keep = [int][Math]::Min($Layout.SolidSize, $Combined.Length)
-              $SolidHistory = [byte[]]::new($Keep)
-              if ($Keep -gt 0) { [Array]::Copy($Combined, $Combined.Length - $Keep, $SolidHistory, 0, $Keep) }
-            }
-            2 { throw "The CreateInstall entry '$($Entry.FullName)' uses unsupported PPMd compression" }
-            default { throw "The CreateInstall entry '$($Entry.FullName)' uses an unknown compression method" }
-          }
-          if ($Output) { $Output.Write($Decoded, 0, $Decoded.Length) }
-        }
-      } finally { if ($Output) { $Output.Dispose() } }
-      if ($Selected) { $Result.Add((Get-Item -LiteralPath $OutputPath -Force)) }
+    $PpmdDecoder = $null
+
+    # Resolve the complete selection before decoding. The last selected index bounds the work while
+    # every earlier entry still advances LZGE or PPMd solid state exactly as Gentee does.
+    $SelectedEntries = [bool[]]::new($Layout.Entries.Count)
+    $LastSelectedIndex = -1
+    for ($EntryIndex = 0; $EntryIndex -lt $Layout.Entries.Count; $EntryIndex++) {
+      if (Test-ExtractionPattern -Path $Layout.Entries[$EntryIndex].FullName -Pattern $Name) {
+        $SelectedEntries[$EntryIndex] = $true
+        $LastSelectedIndex = $EntryIndex
+      }
     }
-    if ($Result.Count -eq 0) { throw "No CreateInstall files matched '$Name'" }
+    if ($LastSelectedIndex -lt 0) { throw "No CreateInstall files matched '$Name'" }
+
+    try {
+      for ($EntryIndex = 0; $EntryIndex -le $LastSelectedIndex; $EntryIndex++) {
+        $Entry = $Layout.Entries[$EntryIndex]
+        if ($Entry.PasswordId -gt 0) { throw "The CreateInstall entry '$($Entry.FullName)' is password-protected and cannot be extracted" }
+        if (-not $Entry.IsSolid) { $SolidHistory = [byte[]]::new(0) }
+        $Selected = $SelectedEntries[$EntryIndex]
+        $OutputPath = $null
+        if ($Selected) {
+          $ExpandedBytes += [long]$Entry.Size
+          if ($ExpandedBytes -gt $MaximumExpandedBytes) { throw 'CreateInstall extraction exceeds the configured output limit' }
+          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
+          $Parent = [IO.Path]::GetDirectoryName($OutputPath)
+          if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
+          $Output = [IO.File]::Open($OutputPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        } else { $Output = $null }
+        try {
+          foreach ($Block in @(Get-CreateInstallBlockInfo -Layout $Layout -Entry $Entry)) {
+            if ($Block.CompressedSize -gt $Script:CreateInstallMaximumBlockBytes -or $Block.OutputSize -gt $Script:CreateInstallMaximumBlockBytes) { throw "The CreateInstall block for '$($Entry.FullName)' exceeds the configured block limit" }
+            $InputBytes = Read-CreateInstallArchiveLogicalRange -Layout $Layout -Offset $Block.DataOffset -Count ([int]$Block.CompressedSize)
+            # Decode one bounded block at a time. Unknown methods fail before a partial output can be
+            # presented as a complete extracted file.
+            switch ($Block.CompressionType) {
+              0 { $Decoded = $InputBytes; $SolidHistory = [byte[]]::new(0) }
+              1 {
+                $Prefix = if ($Block.CompressionOrder -eq 1) { $SolidHistory } else { [byte[]]::new(0) }
+                $Decoded = [Dumplings.Gentee.LzgeDecoder]::Decode($InputBytes, [int]$Block.OutputSize, $Prefix)
+                # Retain only the configured solid window rather than accumulating all prior output.
+                $Combined = if ($Prefix.Length -gt 0) { $Prefix + $Decoded } else { $Decoded }
+                $Keep = [int][Math]::Min($Layout.SolidSize, $Combined.Length)
+                $SolidHistory = [byte[]]::new($Keep)
+                if ($Keep -gt 0) { [Array]::Copy($Combined, $Combined.Length - $Keep, $SolidHistory, 0, $Keep) }
+              }
+              2 {
+                if (-not $PpmdDecoder) {
+                  if ($Layout.MemoryMegabytes -le 0) { throw 'The GEA header declares no PPMd model memory' }
+                  Import-CreateInstallPpmdDecoder
+                  $ModelBytes = [int]([uint32]$Layout.MemoryMegabytes * 1MB)
+                  $PpmdDecoder = [SharpCompress.Compressors.PPMd.Gentee.GenteePpmdDecoder]::new($ModelBytes)
+                }
+                # Order greater than one initializes a model; order one continues the preceding model
+                # after the decoder consumes that block's independent range-stream end marker.
+                $InputStream = [IO.MemoryStream]::new($InputBytes, $false)
+                try {
+                  $Decoded = $PpmdDecoder.DecodeBlock($InputStream, $InputBytes.Length, [int]$Block.OutputSize, $Block.CompressionOrder)
+                } finally { $InputStream.Dispose() }
+                $SolidHistory = [byte[]]::new(0)
+              }
+              default { throw "The CreateInstall entry '$($Entry.FullName)' uses an unknown compression method" }
+            }
+            if ($Output) { $Output.Write($Decoded, 0, $Decoded.Length) }
+          }
+        } catch {
+          if ($Output) { $Output.Dispose(); $Output = $null }
+          if ($OutputPath) { Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue }
+          throw
+        } finally { if ($Output) { $Output.Dispose() } }
+        if ($Selected) {
+          $OutputFile = Get-Item -LiteralPath $OutputPath -Force
+          if ($OutputFile.Length -ne [long]$Entry.Size) {
+            Remove-Item -LiteralPath $OutputFile.FullName -Force -ErrorAction SilentlyContinue
+            throw "The extracted CreateInstall file '$($Entry.FullName)' has an unexpected length"
+          }
+          # Gentee seeds CRC32 with all bits set and does not apply the conventional final XOR.
+          $GenteeCrc32 = [uint32]((Get-BinaryCrc32 -Path $OutputFile.FullName -MaximumBytes $MaximumExpandedBytes) -bxor [uint32]::MaxValue)
+          if ($GenteeCrc32 -ne [uint32]$Entry.Crc32) {
+            Remove-Item -LiteralPath $OutputFile.FullName -Force -ErrorAction SilentlyContinue
+            throw "The extracted CreateInstall file '$($Entry.FullName)' failed its GEA CRC32 check"
+          }
+          $Result.Add($OutputFile)
+        }
+      }
+    } finally {
+      if ($PpmdDecoder) { $PpmdDecoder.Dispose() }
+    }
     return $Result.ToArray()
   }
 }

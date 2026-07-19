@@ -26,7 +26,7 @@ function Get-Assembly {
   [OutputType([string])]
   param ()
 
-  if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'Microsoft.Deployment.Compression.Cab.dll')) {
+  if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'Assemblies' 'Microsoft.Deployment.Compression.Cab.dll')) {
     return (Get-Item -Path $Path -Force)
   } else {
     throw 'The Microsoft.Deployment.Compression.Cab.dll assembly could not be found'

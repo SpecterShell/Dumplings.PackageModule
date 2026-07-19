@@ -45,7 +45,12 @@ function Import-InstallerInfrastructure {
     # Recheck after entering the critical section because another runspace may have loaded the
     # process-wide types while this caller was waiting.
     if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerInfrastructure.BinaryIO').Type) { return }
-    $SourceRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'InstallerInfrastructure'
+    $AssetRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets'
+    $SourceRoot = Join-Path -Path $AssetRoot -ChildPath 'Source' -AdditionalChildPath 'InstallerInfrastructure'
+    if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
+      # InstallerParsers retains the original independently consumable layout.
+      $SourceRoot = Join-Path -Path $AssetRoot -ChildPath 'InstallerInfrastructure'
+    }
     $SourceFiles = @(Get-ChildItem -LiteralPath $SourceRoot -Filter '*.cs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
     if ($SourceFiles.Count -eq 0) { throw "The installer infrastructure source is missing: $SourceRoot" }
     Add-Type -Path $SourceFiles -ErrorAction Stop
@@ -69,7 +74,12 @@ function Import-InstallerManagedAssembly {
   Use-InstallerRuntimeLoadLock {
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
-    $AssemblyPath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', $AssemblyName
+    $AssetRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets'
+    $AssemblyPath = Join-Path -Path $AssetRoot -ChildPath 'Assemblies' -AdditionalChildPath $AssemblyName
+    if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) {
+      # InstallerParsers retains the original independently consumable layout.
+      $AssemblyPath = Join-Path -Path $AssetRoot -ChildPath $AssemblyName
+    }
     if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) { throw "The managed dependency is missing: $AssemblyPath" }
     Add-Type -Path $AssemblyPath -PassThru -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Assembly
   }
@@ -85,4 +95,4 @@ function Import-InstallerArchiveDependency {
   $null = Import-InstallerManagedAssembly -Name 'SharpCompress.dll' -TypeName 'SharpCompress.Archives.ArchiveFactory'
 }
 
-Export-ModuleMember -Function Import-InstallerInfrastructure, Import-InstallerManagedAssembly, Import-InstallerArchiveDependency
+Export-ModuleMember -Function Use-InstallerRuntimeLoadLock, Import-InstallerInfrastructure, Import-InstallerManagedAssembly, Import-InstallerArchiveDependency

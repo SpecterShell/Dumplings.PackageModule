@@ -19,22 +19,23 @@ Describe 'Shared installer infrastructure parity' {
   It 'keeps common sources and archive assets byte-identical' {
     $PackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $ParserRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\InstallerParsers'))
-    foreach ($RelativePath in @(
-        'Libraries\Runtime.psm1',
-        'Libraries\Binary.psm1',
-        'Libraries\Compression.psm1',
-        'Libraries\Archive.psm1',
-        'Libraries\PE.psm1',
-        'Libraries\RegistryAssociations.psm1',
-        'Assets\InstallerInfrastructure\BinaryIO.cs',
-        'Assets\InstallerInfrastructure\PatternSearch.cs',
-        'Assets\InstallerInfrastructure\PEImageReader.cs',
-        'Assets\SharpCompress.dll',
-        'Assets\ZstdSharp.dll',
-        'Tests\TestFixture.ps1'
-      )) {
-      (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PackageRoot $RelativePath)).Hash |
-        Should -Be (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ParserRoot $RelativePath)).Hash
+    $PathPairs = @(
+      @{ Package = 'Libraries\Runtime.psm1'; Parser = 'Libraries\Runtime.psm1' }
+      @{ Package = 'Libraries\Binary.psm1'; Parser = 'Libraries\Binary.psm1' }
+      @{ Package = 'Libraries\Compression.psm1'; Parser = 'Libraries\Compression.psm1' }
+      @{ Package = 'Libraries\Archive.psm1'; Parser = 'Libraries\Archive.psm1' }
+      @{ Package = 'Libraries\PE.psm1'; Parser = 'Libraries\PE.psm1' }
+      @{ Package = 'Libraries\RegistryAssociations.psm1'; Parser = 'Libraries\RegistryAssociations.psm1' }
+      @{ Package = 'Assets\Source\InstallerInfrastructure\BinaryIO.cs'; Parser = 'Assets\InstallerInfrastructure\BinaryIO.cs' }
+      @{ Package = 'Assets\Source\InstallerInfrastructure\PatternSearch.cs'; Parser = 'Assets\InstallerInfrastructure\PatternSearch.cs' }
+      @{ Package = 'Assets\Source\InstallerInfrastructure\PEImageReader.cs'; Parser = 'Assets\InstallerInfrastructure\PEImageReader.cs' }
+      @{ Package = 'Assets\Assemblies\SharpCompress.dll'; Parser = 'Assets\SharpCompress.dll' }
+      @{ Package = 'Assets\Assemblies\ZstdSharp.dll'; Parser = 'Assets\ZstdSharp.dll' }
+      @{ Package = 'Tests\TestFixture.ps1'; Parser = 'Tests\TestFixture.ps1' }
+    )
+    foreach ($Pair in $PathPairs) {
+      (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PackageRoot $Pair.Package)).Hash |
+        Should -Be (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ParserRoot $Pair.Parser)).Hash
     }
   }
 

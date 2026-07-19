@@ -24,14 +24,14 @@ function Import-Assembly {
 
   # Check if the assembly is already loaded to prevent double loading
   if (-not ([System.Management.Automation.PSTypeName]'Microsoft.Deployment.WindowsInstaller').Type) {
-    if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'Microsoft.Deployment.WindowsInstaller.dll')) {
+    if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'Assemblies' 'Microsoft.Deployment.WindowsInstaller.dll')) {
       Add-Type -Path $Path
     } else {
       throw 'The Microsoft.Deployment.WindowsInstaller.dll assembly could not be found'
     }
   }
   if (-not ([System.Management.Automation.PSTypeName]'Microsoft.Deployment.WindowsInstaller.Package').Type) {
-    if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'Microsoft.Deployment.WindowsInstaller.Package.dll')) {
+    if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'Assemblies' 'Microsoft.Deployment.WindowsInstaller.Package.dll')) {
       Add-Type -Path $Path
     } else {
       throw 'The Microsoft.Deployment.WindowsInstaller.Package.dll assembly could not be found'

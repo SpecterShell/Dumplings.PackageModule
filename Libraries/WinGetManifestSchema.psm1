@@ -35,7 +35,7 @@ $Script:WinGetManifestSchemaVersions = @(
   '1.1.0'
   '1.0.0'
 )
-$Script:ManifestSchemaRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'WinGetManifestSchemas'
+$Script:ManifestSchemaRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'Schemas', 'WinGetManifest'
 $Script:ManifestSchemaCache = @{}
 
 function Resolve-WinGetManifestSchemaVersion {

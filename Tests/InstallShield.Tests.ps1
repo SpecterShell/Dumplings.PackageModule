@@ -30,6 +30,20 @@ BeforeAll {
 }
 
 Describe 'InstallShield parser' {
+  It 'Should retain the legacy extraction command without depending on ISx.exe' {
+    Get-ChildItem (Join-Path $PSScriptRoot '..' 'Assets') -Filter 'ISx.exe' -File -Recurse |
+      Should -BeNullOrEmpty
+
+    InModuleScope InstallShield {
+      Mock Expand-InstallShieldInstaller { 'C:\Extracted\Setup_u' }
+
+      Expand-InstallShield -Path 'C:\Fixtures\Setup.exe' | Should -Be 'C:\Extracted\Setup_u'
+      Should -Invoke Expand-InstallShieldInstaller -Exactly 1 -ParameterFilter {
+        $Path -eq 'C:\Fixtures\Setup.exe' -and [string]::IsNullOrEmpty($DestinationPath)
+      }
+    }
+  }
+
   It 'Should stream an encoded zlib payload without whole-buffer parser reads' {
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'synthetic-installshield-streaming'
     Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue

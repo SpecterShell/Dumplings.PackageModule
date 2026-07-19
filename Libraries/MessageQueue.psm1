@@ -44,7 +44,7 @@ function Import-MessageQueueBroker {
     try { $HasLock = $Mutex.WaitOne([timespan]::FromMinutes(2)) } catch [Threading.AbandonedMutexException] { $HasLock = $true }
     if (-not $HasLock) { throw 'Timed out while loading the message queue broker' }
     if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Messaging.MessageQueueBroker').Type) {
-      Add-Type -Path (Join-Path $PSScriptRoot '..' 'Assets' 'MessageQueueBroker.cs')
+      Add-Type -Path (Join-Path $PSScriptRoot '..' 'Assets' 'Source' 'Messaging' 'MessageQueueBroker.cs')
     }
   } finally {
     if ($HasLock) { $Mutex.ReleaseMutex() }

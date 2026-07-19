@@ -45,7 +45,7 @@ function Get-WebDriverAssembly {
   [OutputType([string])]
   param ()
 
-  if (Test-Path -LiteralPath ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'WebDriver.dll')) {
+  if (Test-Path -LiteralPath ($Path = Join-Path $PSScriptRoot '..' 'Assets' 'Assemblies' 'WebDriver.dll')) {
     return (Get-Item -LiteralPath $Path -Force).FullName
   }
   throw 'The WebDriver.dll assembly could not be found'
@@ -78,7 +78,7 @@ function Import-WebDriverLeaseBroker {
     try { $HasLock = $Mutex.WaitOne([timespan]::FromMinutes(2)) } catch [Threading.AbandonedMutexException] { $HasLock = $true }
     if (-not $HasLock) { throw 'Timed out while loading the WebDriver lease broker' }
     if (-not ([System.Management.Automation.PSTypeName]'Dumplings.WebDriver.WebDriverLeasePool').Type) {
-      Add-Type -Path (Join-Path $PSScriptRoot '..' 'Assets' 'WebDriverLeasePool.cs')
+      Add-Type -Path (Join-Path $PSScriptRoot '..' 'Assets' 'Source' 'WebDriver' 'WebDriverLeasePool.cs')
     }
   } finally {
     if ($HasLock) { $Mutex.ReleaseMutex() }

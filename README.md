@@ -1,0 +1,149 @@
+# Dumplings.PackageModule
+
+Dumplings.PackageModule is the MIT-licensed package automation and WinGet toolkit used by [Dumplings](https://github.com/SpecterShell/Dumplings). It supplies task models, release and download helpers, static installer analysis, manifest modeling and validation, notification transports, and guarded submission workflows.
+
+The module is designed for PowerShell 7.4 or later on Windows.
+
+## Loading
+
+Core loads PackageModule automatically by dot-sourcing `Index.ps1` in every task worker. For standalone analysis from the Dumplings root:
+
+```powershell
+. .\Modules\PackageModule\Index.ps1
+```
+
+`Index.ps1` loads components in deterministic dependency order:
+
+1. Version comparison types.
+2. Runtime, binary, compression, archive, PE, and registry infrastructure.
+3. General text and messaging helpers.
+4. YAML schema and WinGet manifest model/serialization foundations.
+5. Installer-family and service libraries.
+6. Manifest validation, update, and submission consumers.
+7. Task model classes.
+
+Functions that perform task execution, messaging, or submission expect the globals initialized by Core. Static parser and manifest functions can be used independently when their documented parameters are supplied.
+
+## Responsibilities
+
+### Task Models
+
+`PackageTask` persists a release state and exposes the task-script lifecycle:
+
+- `$this.Check()` validates and compares the current version and installer URLs with the previous state.
+- `$this.Print()` prints the current state.
+- `$this.Write()` writes a timestamped log and updates `State.yaml` when enabled.
+- `$this.Message()` queues a state notification when enabled.
+- `$this.Submit()` generates and submits manifests when enabled.
+
+`SimpleTask` provides the same Core construction and skip behavior for scripts that do not need package state or WinGet submission.
+
+Package submissions are claimed by effective WinGet identifier in process-wide shared storage. The first task owns the claim for the run; duplicate tasks skip submission rather than racing the same package.
+
+### Installer Analysis
+
+`Get-WinGetInstallerAnalysis` detects file and installer families from structured content and magic bytes, then routes to supported static parsers. PackageModule includes MIT implementations for PE, MSI/WiX, MSIX/AppX, Burn, InstallShield, Chromium Setup, Squirrel/Velopack, install4j, InstallAnywhere, InstallBuilder, CreateInstall, wrapper formats, portable applications, and other installer families.
+
+Some implementations are maintained in the separately licensed InstallerParsers submodule. [`InstallerBridge.psm1`](Libraries/InstallerBridge.psm1) invokes its JSON CLI in a child PowerShell process and returns deserialized evidence. It does not import GPL parser code into PackageModule's process module scope.
+
+Use the [`analyze-winget-installer` skill](../../.agents/skills/analyze-winget-installer/SKILL.md) for the supported workflow, parser routing, manifest interpretation, and VM-only validation rules.
+
+### WinGet Manifests
+
+Manifest processing is separated into explicit layers:
+
+| Module | Responsibility |
+| --- | --- |
+| `YamlSchema.psm1` | Offline structured JSON-schema validation for YAML objects. |
+| `WinGetManifestSchema.psm1` | WinGet schema selection, field ordering, and vendored schema access. |
+| `WinGetManifestModel.psm1` | Logical manifest model, installer inheritance, compaction, and merged projections. |
+| `WinGetManifestSerialization.psm1` | Multi-file parsing, formatting, document sets, headers, and YAML output. |
+| `WinGetManifestValidation.psm1` | Structural, schema, and semantic validation compatible with WinGet's local validation path. |
+| `WinGetManifestUpdate.psm1` | Installer download, matching, parser metadata, and safe updates to existing authored fields. |
+| `WinGetSubmission.psm1` | Repository acquisition, manifest generation, validation, duplicate-PR policy, and submission. |
+
+Primary entry points include:
+
+```powershell
+# Read a singleton or multi-file manifest set into one logical model.
+$Manifest = Read-WinGetManifest -Path C:\Manifests\Vendor.Package\1.2.3
+
+# Validate a path or an in-memory logical model.
+$Result = Get-WinGetManifestValidationResult -Manifest $Manifest
+
+# Format one authored document without adding or deleting fields.
+$Formatted = Format-WinGetManifest -Manifest $InstallerDocument
+
+# Analyze an installer without executing it.
+$Analysis = Get-WinGetInstallerAnalysis -Path C:\Installers\setup.exe
+```
+
+The logical model stores authored values, not WinGet-generated default switches or return codes. Serialization compacts values shared by every installer back to manifest level while preserving installer-level overrides, recursive dictionary atoms, and atomic arrays.
+
+### Supporting Services
+
+- `WinGetDownload.psm1` reproduces WinGet-style Delivery Optimization and WinINet downloads, redirects, and headers with bounded retries and rate-limit handling.
+- `WebDriver.psm1` provides leased Edge/Firefox sessions shared across concurrent tasks.
+- `MessageQueue.psm1`, `Telegram.psm1`, and `Matrix.psm1` provide per-target queues, coalescing, splitting, rate limiting, and session updates.
+- `WinGetARP.psm1` collects and matches Apps & Features evidence, including MSI ownership scope evidence.
+- `TextContent.psm1` and `Format.psm1` normalize release-note HTML, Markdown, tables, Unicode whitespace, and validator-blocked control characters.
+- `WinGetGitHubRepo.psm1` and `WinGetLocalRepo.psm1` implement remote and local manifest repository workflows.
+
+## Directory Layout
+
+```text
+PackageModule/
++-- Index.ps1
++-- Assets/
+|   +-- Assemblies/    # pinned managed dependencies
+|   +-- Providers/     # source-available companion providers and licenses
+|   +-- Schemas/       # offline WinGet schemas
+|   `-- Source/        # auditable C# loaded with Add-Type
++-- Hooks/             # Core lifecycle integration
++-- Libraries/         # PowerShell modules
++-- Models/            # task classes
++-- Tests/              # Pester suites
+`-- Utilities/          # standalone maintenance and validation scripts
+```
+
+See [`Assets/README.md`](Assets/README.md) before adding or moving runtime assets. Do not load assets through recursive discovery; their owning module determines version and load order.
+
+## Design And Security
+
+- Prefer bounded streams and static structures over whole-file buffering and arbitrary text probing.
+- Never infer manifest values from ambiguous version strings when explicit registry, MSI, package, or feed evidence exists.
+- Preserve authored manifest intent. Update logic does not replace fields such as scope, dependencies, package name, publisher, protocols, or file extensions merely because a parser returned partial evidence.
+- Keep installer-family semantics in focused modules and mechanical binary work in shared infrastructure.
+- Do not add an external `7z`, extractor executable, or installer execution dependency to core parsing paths.
+- Keep GPL parser code behind InstallerParsers' process boundary.
+
+## Tests
+
+Run all PackageModule tests from the Dumplings root:
+
+```powershell
+Invoke-Pester .\Modules\PackageModule\Tests
+```
+
+Run a focused suite while developing:
+
+```powershell
+Invoke-Pester .\Modules\PackageModule\Tests\WinGetManifestValidation.Tests.ps1
+Invoke-Pester .\Modules\PackageModule\Tests\ChromiumSetup.Tests.ps1
+```
+
+Run ScriptAnalyzer on modified PowerShell modules and use the repository's accepted exclusion rules where documented:
+
+```powershell
+Invoke-ScriptAnalyzer .\Modules\PackageModule\Libraries\WinGetManifestValidation.psm1
+```
+
+Tests use generated fixtures or the shared persistent installer fixture cache. They must not execute installers or depend on user `Downloads` and temporary folders.
+
+## Third-Party Components
+
+Pinned assemblies, vendored WinGet schemas, source-derived implementations, and companion providers are documented in [`Assets/THIRD-PARTY-NOTICES.md`](Assets/THIRD-PARTY-NOTICES.md). Preserve the corresponding source and license material when updating these assets.
+
+## License
+
+Dumplings.PackageModule is licensed under the [MIT License](LICENSE). Individual redistributed dependencies and companion providers retain the licenses listed in the third-party notices.

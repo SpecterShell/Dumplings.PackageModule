@@ -2,7 +2,7 @@
 
 BeforeAll {
   if (-not ([System.Management.Automation.PSTypeName]'Dumplings.WebDriver.WebDriverLeasePool').Type) {
-    Add-Type -Path (Join-Path $PSScriptRoot '..' 'Assets' 'WebDriverLeasePool.cs')
+    Add-Type -Path (Join-Path $PSScriptRoot '..' 'Assets' 'Source' 'WebDriver' 'WebDriverLeasePool.cs')
   }
 
   function New-TestWebDriverResource {

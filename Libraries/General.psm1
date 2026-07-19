@@ -618,53 +618,6 @@ function Expand-TempArchive {
   }
 }
 
-function Expand-InstallShield {
-  <#
-  .SYNOPSIS
-    Extract files from an InstallShield executable file to the same folder using ISx
-  .PARAMETER Path
-    The path of the InstallShield executable file to be extracted
-  .PARAMETER ISxPath
-    The path to the InstallShield installer extractor (ISx) tool
-  .LINK
-    https://github.com/lifenjoiner/ISx
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path of the InstallShield executable file to be extracted')]
-    [string]$Path,
-
-    [Parameter(HelpMessage = 'The path to the InstallShield installer extractor (ISx) tool')]
-    [string]$ISxPath
-  )
-
-  begin {
-    if ([string]::IsNullOrEmpty($ISxPath)) {
-      if (Test-Path -Path (Join-Path $PSScriptRoot '..' 'Assets' 'ISx.exe')) {
-        $ISxPath = Join-Path $PSScriptRoot '..' 'Assets' 'ISx.exe' -Resolve
-      } elseif ((Test-Path -Path Variable:\DumplingsRoot) -and (Test-Path -Path (Join-Path $DumplingsRoot 'Assets' 'ISx.exe'))) {
-        $ISxPath = Join-Path $DumplingsRoot 'Assets' 'ISx.exe' -Resolve
-      } elseif (Get-Command 'ISx.exe' -ErrorAction SilentlyContinue) {
-        $ISxPath = (Get-Command 'ISx.exe').Path
-      } else {
-        throw 'The ISx tool could not be found'
-      }
-    }
-    if (-not (Test-Path -Path $ISxPath)) {
-      throw 'The path to the ISx tool specified is invalid'
-    }
-  }
-
-  process {
-    # Obtain the absolute path of the file
-    $Path = (Get-Item -Path $Path -Force).FullName
-
-    & $ISxPath $Path | Out-Host
-
-    return "$(Join-Path (Split-Path -Path $Path -Parent) (Split-Path -Path $Path -LeafBase))_u"
-  }
-}
-
 function Invoke-GitHubApi {
   <#
   .SYNOPSIS

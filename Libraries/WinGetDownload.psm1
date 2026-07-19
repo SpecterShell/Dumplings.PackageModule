@@ -6,7 +6,7 @@
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
 if (-not ([System.Management.Automation.PSTypeName]'Dumplings.WinGetDownload.WinInetDownloader').Type) {
-  Add-Type -Path (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'WinGetDownloadProbe.cs')
+  Add-Type -Path (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'Source', 'WinGet', 'WinGetDownloadProbe.cs')
 }
 
 $Script:WinGetDownloadFallbackClientVersion = '1.0.0'

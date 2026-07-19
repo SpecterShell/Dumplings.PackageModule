@@ -1,6 +1,6 @@
 # Load the version comparison classes from code
 if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.WinGetVersion').Type) {
-  Add-Type -Path (Join-Path $PSScriptRoot 'Assets' 'Versioning.cs')
+  Add-Type -Path (Join-Path $PSScriptRoot 'Assets' 'Source' 'Versioning' 'Versioning.cs')
 }
 
 # Add type accelerators for the version comparison classes

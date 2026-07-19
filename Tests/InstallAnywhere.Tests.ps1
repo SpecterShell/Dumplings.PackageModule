@@ -6,7 +6,6 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Archive.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'RegistryAssociations.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'InstallAnywhere.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'ActualInstaller.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\GenericExeParsers'
 
@@ -62,23 +61,5 @@ Describe 'InstallAnywhere static parser' {
     $Info.DisplayVersion | Should -Be '1.2.3.4'
     $Info.Publisher | Should -Be 'Example Vendor'
     $Info.WritesAppsAndFeaturesEntry | Should -BeNullOrEmpty
-  }
-}
-
-Describe 'Actual Installer static parser' {
-  It 'Should parse aisetup.ini and reject build-time version placeholders' {
-    $Zip = Join-Path $Script:FixtureDirectory 'actual.zip'
-    New-TestZipFile -Path $Zip -Entry @{ 'aisetup.ini' = "[Setup]`nGUID={33333333-3333-3333-3333-333333333333}`nAppName=Example Actual`nAppVersion=<V>`nCompanyName=Example Vendor`nInstallDir=<AppData>\\Example`nAltInstallDir=<ProgramFiles>\\Example`nShowAddRemove=1`nUninstallFile=Uninstall.exe`n[Registry]`nSetting=Value"; 'Englishai.lng' = 'language' }
-    $Fixture = New-TestEmbeddedZipFixture -Name 'actual.exe' -ZipPath $Zip
-
-    $Info = Get-ActualInstallerInfo -Path $Fixture
-
-    $Info.ProductCode | Should -Be '{33333333-3333-3333-3333-333333333333}'
-    $Info.DisplayName | Should -Be 'Example Actual'
-    $Info.DisplayVersion | Should -BeNullOrEmpty
-    $Info.Publisher | Should -Be 'Example Vendor'
-    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
-    $Info.SupportedScopes | Should -Be @('user', 'machine')
-    $Info.RegistryWrites | Should -HaveCount 1
   }
 }

@@ -975,6 +975,36 @@ function Expand-InstallShieldInstaller {
   }
 }
 
+function Expand-InstallShield {
+  <#
+  .SYNOPSIS
+    Extract files from an InstallShield executable using the in-process parser.
+  .DESCRIPTION
+    Preserves the original Dumplings helper name while delegating to the managed
+    parser. The former ISx.exe path override is intentionally unsupported because
+    extraction no longer launches an external executable.
+  .PARAMETER Path
+    The path to the InstallShield installer.
+  .PARAMETER DestinationPath
+    The destination directory for extracted files. When omitted, extraction uses
+    the legacy sibling directory named after the installer with an `_u` suffix.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the InstallShield installer')]
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The destination directory for extracted files')]
+    [string]$DestinationPath
+  )
+
+  process {
+    # Keep existing callers on the same output contract while routing all bytes
+    # through the bounded in-process InstallShield parser.
+    Expand-InstallShieldInstaller -Path $Path -DestinationPath $DestinationPath
+  }
+}
+
 function Get-InstallShieldInfo {
   <#
   .SYNOPSIS
@@ -1184,4 +1214,4 @@ function Read-UpgradeCodeFromInstallShield {
   process { (Get-InstallShieldMsiInfo @PSBoundParameters).UpgradeCode }
 }
 
-Export-ModuleMember -Function Get-InstallShieldInfo, Expand-InstallShieldInstaller, Get-InstallShieldMsiInfo, Read-ProductVersionFromInstallShield, Read-ProductCodeFromInstallShield, Read-UpgradeCodeFromInstallShield
+Export-ModuleMember -Function Get-InstallShieldInfo, Expand-InstallShield, Expand-InstallShieldInstaller, Get-InstallShieldMsiInfo, Read-ProductVersionFromInstallShield, Read-ProductCodeFromInstallShield, Read-UpgradeCodeFromInstallShield
