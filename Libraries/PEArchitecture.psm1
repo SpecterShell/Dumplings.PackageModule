@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Structure references: https://github.com/dotnet/dotnet
 # Static architecture policy shared by executable and DLL portable analysis.
 

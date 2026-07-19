@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Format source: https://github.com/dotnetinstaller/dotnetinstaller
 # Binary structure consumed here; dotNetInstaller is a PE resource wrapper:
 #

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static Tarma InstallMate parser. TIZ packages use raw LZMA followed by tzf3
 # records. This module decodes bounded records without executing setup or
 # probing arbitrary strings from payload files.

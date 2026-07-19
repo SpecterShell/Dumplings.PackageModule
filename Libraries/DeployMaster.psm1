@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static DeployMaster parser derived from controlled DeployMaster 7.7 builds,
 # validated legacy packages, and the documented installer command-line behavior.
 # Reference: https://www.deploymaster.com/manual.html

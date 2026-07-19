@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static Wise Installation System wrapper parser. Wise has several product
 # generations; this module handles the validated Wise-for-Windows-Installer
 # variant that embeds a Windows Installer database without executing setup.

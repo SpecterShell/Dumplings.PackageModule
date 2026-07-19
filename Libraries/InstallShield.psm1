@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Format sources: https://github.com/lifenjoiner/ISx
 # Setup.ini source: https://docs.revenera.com/installshield26helplib/helplibrary/SetupIniExe.htm
 # Supported InstallShield binary structures:

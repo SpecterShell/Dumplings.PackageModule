@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # This module only bridges to the independently licensed InstallerParsers CLI.
 #
 # Process boundary (the GPL-2.0 byte parser remains in InstallerParsers):

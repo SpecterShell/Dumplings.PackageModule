@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static Actual Installer parser. The PE contains one or more independent ZIP
 # ranges; the archive containing aisetup.ini is the setup-metadata container.
 # Binary structure consumed here:

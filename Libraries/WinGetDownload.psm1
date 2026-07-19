@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Native WinGet-compatible installer downloads and compatibility probes. These
 # functions never execute installers; probe files are deleted unless retained.
 

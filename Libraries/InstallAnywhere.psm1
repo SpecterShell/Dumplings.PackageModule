@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static InstallAnywhere parser. It reads embedded ZIP/XML project data and
 # never starts the installer or its Java launcher.
 # Binary structure consumed here:

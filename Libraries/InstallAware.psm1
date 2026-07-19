@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static InstallAware parser. It validates the embedded 7z project archive and
 # reads PE metadata without executing either the wrapper or nested setup files.
 # Binary structure consumed here:

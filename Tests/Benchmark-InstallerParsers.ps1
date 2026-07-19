@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Diagnostic benchmark only. It records evidence and enforces no CI threshold.
 
 [CmdletBinding()]

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # Static Windows protocol and file-extension association helpers. These
 # functions interpret explicit registry writes only; they never query or modify
 # the local registry and never infer associations from arbitrary strings.

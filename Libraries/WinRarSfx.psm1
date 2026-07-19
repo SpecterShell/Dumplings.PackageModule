@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # WinRAR GUI SFX binary structure consumed here:
 #
 #   PE stub -> RAR4 52 61 72 21 1A 07 00 or RAR5 ... 01 00 archive

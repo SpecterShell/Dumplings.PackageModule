@@ -115,6 +115,70 @@ function Get-WinGetPullRequestConflictInfo {
   }
 }
 
+function Test-WinGetInstallerUrlIntersection {
+  <#
+  .SYNOPSIS
+    Test whether two installer collections contain an identical installer URL.
+  .DESCRIPTION
+    Reads InstallerUrl explicitly from dictionary-backed or object-backed
+    installer entries and performs an ordinal set comparison. Compare-Object's
+    -Property adapter cannot read keys from OrderedDictionary instances and
+    therefore incorrectly treats every missing adapted property as equal.
+  .PARAMETER ReferenceInstaller
+    Installer entries from the existing manifest version.
+  .PARAMETER DifferenceInstaller
+    Installer entries from the newly generated manifest version.
+  .OUTPUTS
+    True when at least one non-empty InstallerUrl occurs in both collections;
+    otherwise false.
+  #>
+  [OutputType([bool])]
+  param (
+    [AllowNull()]
+    [object[]]$ReferenceInstaller,
+    [AllowNull()]
+    [object[]]$DifferenceInstaller
+  )
+
+  # URL paths and query strings can be case-sensitive. Compare the authored
+  # manifest values exactly instead of applying culture or URI normalization.
+  $ReferenceUrls = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($Installer in @($ReferenceInstaller)) {
+    if ($null -eq $Installer) { continue }
+
+    # Logical WinGet models normally use ordered dictionaries, while callers
+    # and tests may provide PSCustomObject entries. Read both representations.
+    $InstallerUrl = if ($Installer -is [System.Collections.IDictionary]) {
+      if ($Installer.Contains('InstallerUrl')) { [string]$Installer['InstallerUrl'] }
+    } else {
+      $Property = $Installer.PSObject.Properties['InstallerUrl']
+      if ($null -ne $Property) { [string]$Property.Value }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($InstallerUrl)) {
+      $null = $ReferenceUrls.Add($InstallerUrl)
+    }
+  }
+
+  if ($ReferenceUrls.Count -eq 0) { return $false }
+
+  foreach ($Installer in @($DifferenceInstaller)) {
+    if ($null -eq $Installer) { continue }
+    $InstallerUrl = if ($Installer -is [System.Collections.IDictionary]) {
+      if ($Installer.Contains('InstallerUrl')) { [string]$Installer['InstallerUrl'] }
+    } else {
+      $Property = $Installer.PSObject.Properties['InstallerUrl']
+      if ($null -ne $Property) { [string]$Property.Value }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($InstallerUrl) -and $ReferenceUrls.Contains($InstallerUrl)) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
 function Send-WinGetManifest {
   <#
   .SYNOPSIS
@@ -263,12 +327,12 @@ function Send-WinGetManifest {
     #region Remove old manifests
     # Remove old manifests, if
     # 1. The task is configured to remove the last version, or
-    # 2. No installer URL is changed compared with the last state while the version is updated
+    # 2. At least one installer URL is unchanged while the version is updated
     $RemoveLastVersionReason = $null
     if ($Task.Config.Contains('RemoveLastVersion')) {
       if ($Task.Config.RemoveLastVersion) { $RemoveLastVersionReason = 'This task is configured to remove the last version' }
       # If RemoveLastVersion is set to 'false', do not remove the last version
-    } elseif (($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($RefPackageVersion -cne $NewPackageVersion) -and (Compare-Object -ReferenceObject @($RefManifest.Installers) -DifferenceObject @($NewManifest.Installers) -Property InstallerUrl -ExcludeDifferent -IncludeEqual)) {
+    } elseif (($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($RefPackageVersion -cne $NewPackageVersion) -and (Test-WinGetInstallerUrlIntersection -ReferenceInstaller $RefManifest.Installers -DifferenceInstaller $NewManifest.Installers)) {
       $RemoveLastVersionReason = 'At least one of the installer URLs is unchanged compared with the old manifests while the version is updated'
     }
     if ($RemoveLastVersionReason) {

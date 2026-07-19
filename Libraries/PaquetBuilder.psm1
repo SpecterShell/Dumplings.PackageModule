@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static Paquet Builder parser. It identifies the payload and runtime/config
 # 7z archives and reads package identity from explicit PE version resources.
 # Binary structure consumed here:

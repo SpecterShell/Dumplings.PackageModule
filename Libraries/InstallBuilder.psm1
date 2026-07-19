@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Format research: https://gist.github.com/mickael9/0b902da7c13207d1b86e
 # Static BitRock/VMware InstallBuilder parser. InstallBuilder embeds its project
 # VFS in a TclKit/Metakit container; this module reads bounded project records

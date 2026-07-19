@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Import-analysis reference: https://github.com/lucasg/Dependencies
 # PE import-to-runtime mapping used by portable manifest analysis.
 

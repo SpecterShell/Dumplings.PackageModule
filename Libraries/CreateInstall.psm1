@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static CreateInstall parser for Gentee launcher programs and GEA v2 archives.
 # The container logic is PowerShell; the adaptive-Huffman LZGE decoder is an
 # attributed MIT asset. Binary structures consumed here use LE integers:

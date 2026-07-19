@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Telegram Bot API behavior: https://core.telegram.org/bots/api
 # Long-message and Markdown failure behavior was independently implemented after reviewing
 # https://github.com/NousResearch/hermes-agent under its repository license.

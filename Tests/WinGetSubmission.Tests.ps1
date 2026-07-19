@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetSubmission.psm1') -Force
@@ -68,5 +68,53 @@ Describe 'Get-WinGetPullRequestConflictInfo' {
 
     $Info.BlockingPullRequests | Should -BeNullOrEmpty
     $Info.IgnoredPullRequests.number | Should -Be @(2, 3)
+  }
+}
+
+Describe 'Test-WinGetInstallerUrlIntersection' {
+  It 'does not report an unchanged URL when every ordered-dictionary URL changed' {
+    $OldInstallers = @(
+      [ordered]@{ Architecture = 'x86'; InstallerUrl = 'https://old.example/setup-x86.exe' }
+      [ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://old.example/setup-x64.exe' }
+    )
+    $NewInstallers = @(
+      [ordered]@{ Architecture = 'x86'; InstallerUrl = 'https://new.example/setup-x86.exe' }
+      [ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://new.example/setup-x64.exe' }
+    )
+
+    Test-WinGetInstallerUrlIntersection -ReferenceInstaller $OldInstallers -DifferenceInstaller $NewInstallers | Should -BeFalse
+  }
+
+  It 'reports an unchanged URL when one ordered-dictionary URL is retained' {
+    $OldInstallers = @(
+      [ordered]@{ Architecture = 'x86'; InstallerUrl = 'https://example.test/setup-x86.exe' }
+      [ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/setup-x64.exe' }
+    )
+    $NewInstallers = @(
+      [ordered]@{ Architecture = 'x86'; InstallerUrl = 'https://example.test/setup-x86-v2.exe' }
+      [ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/setup-x64.exe' }
+    )
+
+    Test-WinGetInstallerUrlIntersection -ReferenceInstaller $OldInstallers -DifferenceInstaller $NewInstallers | Should -BeTrue
+  }
+
+  It 'supports object-backed installer entries and ignores absent URLs' {
+    $OldInstallers = @(
+      [pscustomobject]@{ InstallerUrl = 'https://example.test/setup.exe' }
+      [pscustomobject]@{ Architecture = 'x64' }
+    )
+    $NewInstallers = @(
+      [pscustomobject]@{ InstallerUrl = 'https://example.test/setup.exe' }
+      [pscustomobject]@{ InstallerUrl = '' }
+    )
+
+    Test-WinGetInstallerUrlIntersection -ReferenceInstaller $OldInstallers -DifferenceInstaller $NewInstallers | Should -BeTrue
+  }
+
+  It 'uses an ordinal comparison for path and query text' {
+    $OldInstallers = @([ordered]@{ InstallerUrl = 'https://example.test/Setup.exe?Channel=Stable' })
+    $NewInstallers = @([ordered]@{ InstallerUrl = 'https://example.test/setup.exe?channel=stable' })
+
+    Test-WinGetInstallerUrlIntersection -ReferenceInstaller $OldInstallers -DifferenceInstaller $NewInstallers | Should -BeFalse
   }
 }

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static PE architecture and dependency analyzer for portable packages. This
 # module consumes PE/COFF and CLR metadata exposed by PE.psm1, plus the following
 # .NET host structures without loading or executing the binary:

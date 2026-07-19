@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Host/runtime source: https://github.com/dotnet/dotnet
 # Streaming .NET apphost mechanics used by Portable.psm1 orchestration.
 

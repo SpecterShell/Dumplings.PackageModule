@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Format sources: https://chromium.googlesource.com/chromium/src/+/main/chrome/installer/mini_installer,
 # https://chromium.googlesource.com/chromium/src/+/main/chrome/install_static/install_util.cc,
 # https://chromium.googlesource.com/chromium/src/+/main/chrome/updater/tag.h,

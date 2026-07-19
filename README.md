@@ -1,6 +1,6 @@
 # Dumplings.PackageModule
 
-Dumplings.PackageModule is the MIT-licensed package automation and WinGet toolkit used by [Dumplings](https://github.com/SpecterShell/Dumplings). It supplies task models, release and download helpers, static installer analysis, manifest modeling and validation, notification transports, and guarded submission workflows.
+Dumplings.PackageModule is the Apache-2.0-licensed package automation and WinGet toolkit used by [Dumplings](https://github.com/SpecterShell/Dumplings). It supplies task models, release and download helpers, static installer analysis, manifest modeling and validation, notification transports, and guarded submission workflows.
 
 The module is designed for PowerShell 7.4 or later on Windows.
 
@@ -42,7 +42,7 @@ Package submissions are claimed by effective WinGet identifier in process-wide s
 
 ### Installer Analysis
 
-`Get-WinGetInstallerAnalysis` detects file and installer families from structured content and magic bytes, then routes to supported static parsers. PackageModule includes MIT implementations for PE, MSI/WiX, MSIX/AppX, Burn, InstallShield, Chromium Setup, Squirrel/Velopack, install4j, InstallAnywhere, InstallBuilder, CreateInstall, wrapper formats, portable applications, and other installer families.
+`Get-WinGetInstallerAnalysis` detects file and installer families from structured content and magic bytes, then routes to supported static parsers. PackageModule includes in-process implementations for PE, MSI/WiX, MSIX/AppX, Burn, InstallShield, Chromium Setup, Squirrel/Velopack, install4j, InstallAnywhere, InstallBuilder, CreateInstall, wrapper formats, portable applications, and other installer families. Their default and file-level licenses are described below.
 
 Some implementations are maintained in the separately licensed InstallerParsers submodule. [`InstallerBridge.psm1`](Libraries/InstallerBridge.psm1) invokes its JSON CLI in a child PowerShell process and returns deserialized evidence. It does not import GPL parser code into PackageModule's process module scope.
 
@@ -146,4 +146,16 @@ Pinned assemblies, vendored WinGet schemas, source-derived implementations, and 
 
 ## License
 
-Dumplings.PackageModule is licensed under the [MIT License](LICENSE). Individual redistributed dependencies and companion providers retain the licenses listed in the third-party notices.
+Dumplings.PackageModule is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
+
+The following components retain file-level licenses instead of Apache-2.0:
+
+| Components | License and reason |
+| --- | --- |
+| `Libraries/{Runtime,Binary,Compression,Archive,PE,RegistryAssociations}.psm1`, `Assets/Source/InstallerInfrastructure/{BinaryIO,PatternSearch,PEImageReader}.cs`, and `Tests/TestFixture.ps1` | MIT; mirrored byte-for-byte into InstallerParsers and usable by its GPL-2.0 parser. |
+| `Libraries/MSI.psm1` | MIT; imported by the GPL-2.0 Advanced Installer parser to inspect nested MSI databases. |
+| `Assets/Source/CreateInstall/GenteeLzgeDecoder.cs` | MIT; adaptation of the Gentee decoder. |
+| `Assets/Source/WinGet/WinGetDownloadProbe.cs` | MIT; independent implementation grounded in winget-cli's MIT source. |
+| Pinned assemblies and `Assets/Providers/SharpCompress.Gentee` | Their own Apache-2.0, MS-RL, MIT, or LGPL licenses as documented. |
+
+Embedded upstream notices in otherwise Apache-2.0 files remain in force for the portions they cover. See [`Assets/THIRD-PARTY-NOTICES.md`](Assets/THIRD-PARTY-NOTICES.md) for complete attribution and redistribution terms.

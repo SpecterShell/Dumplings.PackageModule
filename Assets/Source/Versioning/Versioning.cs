@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
 /*
 WinGetVersion is adapted from the Windows Package Manager version comparator:
 https://github.com/microsoft/winget-cli/blob/master/src/AppInstallerSharedLib/Versions.cpp
 
 The Windows Package Manager source is licensed under the MIT License.
-ChunkVersion is original Dumplings code and is also licensed under the repository's MIT License.
+ChunkVersion is original Dumplings code licensed under the repository's Apache-2.0 license.
 */
 #nullable enable
 using System;

@@ -84,7 +84,7 @@ BeforeAll {
 }
 
 Describe 'Installer bridge' {
-  It 'Should parse Setup Factory metadata through the MIT wrapper' {
+  It 'Should parse Setup Factory metadata through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'OutCALL-2.0.exe' -Url 'https://github.com/bicomsystems/outcall2/releases/download/v2.0/OutCALL-2.0.exe'
     $Info = Get-SetupFactoryInfo -Path $Fixture
     $Info.DisplayName | Should -Be 'OutCALL'
@@ -120,7 +120,7 @@ stagingPercentage: 25
     $Feed.Files[0].BlockMapSize | Should -Be 2345
   }
 
-  It 'Should call the InstallerParsers NSIS parser through the MIT wrapper' {
+  It 'Should call the InstallerParsers NSIS parser through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture
 
@@ -199,7 +199,7 @@ stagingPercentage: 25
     $MsiInfo.ProductCode | Should -Be '{AFD6D03F-AE41-4BB2-9E4D-26E8A9E970B0}'
   }
 
-  It 'Should call the InstallerParsers Qt Installer Framework parser through the MIT wrapper' {
+  It 'Should call the InstallerParsers Qt Installer Framework parser through the Apache-2.0 wrapper' {
     $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-bridge.exe' -InstallerXml @'
 <Installer>
   <Name>Bridge.QtIFW</Name>
@@ -231,7 +231,7 @@ stagingPercentage: 25
     Read-UpgradeBehaviorFromQtInstallerFramework -Path $Fixture | Should -Be 'uninstallPrevious'
   }
 
-  It 'Should expand Qt Installer Framework resources through the MIT wrapper' {
+  It 'Should expand Qt Installer Framework resources through the Apache-2.0 wrapper' {
     $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-expand-bridge.exe' -InstallerXml @'
 <Installer>
   <Name>Bridge.QtIFW.Expand</Name>
@@ -253,7 +253,7 @@ stagingPercentage: 25
     }
   }
 
-  It 'Should detect a user-only electron-builder NSIS installer through the MIT wrapper' {
+  It 'Should detect a user-only electron-builder NSIS installer through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'Aircall-Workspace-1.15.13-x64.exe' -Url 'https://download-electron.aircall.io/aircall-workspace/Aircall-Workspace-1.15.13-x64.exe'
     $IsElectronBuilder = Test-ElectronBuilder -Path $Fixture
     $Info = Get-ElectronBuilderNSISInfo -Path $Fixture
@@ -269,7 +269,7 @@ stagingPercentage: 25
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-64.7z'
   }
 
-  It 'Should detect a universal dual-scope electron-builder NSIS installer through the MIT wrapper' {
+  It 'Should detect a universal dual-scope electron-builder NSIS installer through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'Obsidian-1.12.7.exe' -Url 'https://github.com/obsidianmd/obsidian-releases/releases/download/v1.12.7/Obsidian-1.12.7.exe'
     $IsElectronBuilder = Test-ElectronBuilder -Path $Fixture
     $Info = Get-ElectronBuilderNSISInfo -Path $Fixture
@@ -367,7 +367,7 @@ Describe 'Bridge regressions' {
     Test-Path (Join-Path $PSScriptRoot '..' '..' '..' 'Modules' 'InstallerParsers' 'GPL2') | Should -BeFalse
   }
 
-  It 'Should keep task scripts on MIT helper names instead of direct CLI calls' {
+  It 'Should keep task scripts on PackageModule helper names instead of direct CLI calls' {
     $TaskRoot = Join-Path $PSScriptRoot '..' '..' '..' 'Tasks'
     $TaskPieces = @(Get-ChildItem -Path $TaskRoot -Filter '*.ps1' -Recurse -File)
     $NsisTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match '\bGet-NSISInfo\b' } | Select-Object -ExpandProperty DirectoryName -Unique)
@@ -381,7 +381,7 @@ Describe 'Bridge regressions' {
     $DirectCliTasks.Count | Should -Be 0
   }
 
-  It 'Should keep MIT wrappers from importing the GPL modules into the shared session' {
+  It 'Should keep Apache-2.0 wrappers from importing the GPL modules into the shared session' {
     $NsisContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'NSIS.psm1') -Raw
     $InnoContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'Inno.psm1') -Raw
     $AdvancedInstallerContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'AdvancedInstaller.psm1') -Raw

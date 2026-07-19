@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static QSetup parser. QSetup EXE packages store length-prefixed zlib records
 # after the PE image; Setup.txt contains explicit project and ARP directives.
 # Binary structure consumed here (overlay-relative, LE integers):

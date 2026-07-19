@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Format sources: https://github.com/Squirrel/Squirrel.Windows and https://github.com/velopack/velopack
 # Squirrel/Velopack binary structures consumed here:
 #

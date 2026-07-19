@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Matrix Client-Server API behavior: https://spec.matrix.org/latest/client-server-api/
 # Matrix message hardening was independently implemented after reviewing:
 # - https://github.com/NousResearch/hermes-agent

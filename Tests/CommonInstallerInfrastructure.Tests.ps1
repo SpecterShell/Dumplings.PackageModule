@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force

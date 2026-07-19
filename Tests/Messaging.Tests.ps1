@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 
 BeforeDiscovery {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\TextContent.psm1') -Force

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Format sources: https://github.com/microsoft/msix-packaging
 # MSIX/AppX binary structure consumed here:
 #

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Format sources: https://github.com/wixtoolset/wix
 # Burn binary structure consumed here (section-relative, LE integers):
 #

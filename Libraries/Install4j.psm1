@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # install4j binary structures consumed here:
 #
 #   PE overlay -> D5 13 E4 E8 launcher magic -> int64 data length

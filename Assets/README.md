@@ -1,5 +1,9 @@
 # PackageModule Assets
 
+PackageModule's default license is Apache-2.0. Assemblies, providers, mirrored
+MIT infrastructure, and source-derived components retain the licenses stated
+in their file headers and `THIRD-PARTY-NOTICES.md`.
+
 Runtime assets are grouped by purpose:
 
 - `Assemblies`: pinned third-party managed assemblies loaded by PackageModule.

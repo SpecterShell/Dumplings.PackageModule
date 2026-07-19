@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Static InstallForge parser. InstallForge stores project configuration in a
 # named PE resource and payload files in a 7z archive after the PE image.
 # Binary structure consumed here:
