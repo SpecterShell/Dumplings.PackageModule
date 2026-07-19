@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Format sources: https://chromium.googlesource.com/chromium/src/+/main/chrome/installer/mini_installer,
+# https://chromium.googlesource.com/chromium/src/+/main/chrome/install_static/install_util.cc,
 # https://chromium.googlesource.com/chromium/src/+/main/chrome/updater/tag.h,
 # https://github.com/google/omaha/blob/main/omaha/installers/build_metainstaller.py,
 # https://github.com/brave/brave-core/tree/master/chromium_src/chrome/install_static, and
@@ -31,20 +32,8 @@ $Script:MicrosoftEdgeTagSuffix = [Text.Encoding]::Unicode.GetBytes('_EGDESM')
 $Script:ChromiumMaximumCertificateBytes = 16777216
 $Script:ChromiumMaximumResourceBytes = 2147483648
 $Script:ChromiumMaximumOfflineManifestBytes = 4194304
-$Script:BraveProductCodeByAppGuid = @{
-  '{AFE6A462-C574-4B8A-AF43-4CC60DF4563B}' = 'BraveSoftware Brave-Browser'
-  '{103BD053-949B-43A8-9120-2E424887DE11}' = 'BraveSoftware Brave-Browser-Beta'
-  '{CB2150F2-595F-4633-891A-E39720CE0531}' = 'BraveSoftware Brave-Browser-Dev'
-  '{C6CB981E-DB30-4876-8639-109F8933582C}' = 'BraveSoftware Brave-Browser-Nightly'
-  '{F1EF32DE-F987-4289-81D2-6C4780027F9B}' = 'BraveSoftware Brave-Origin'
-  '{56DA94FD-D872-416B-BFC4-1D7011DA7473}' = 'BraveSoftware Brave-Origin-Beta'
-  '{716D6A4A-D071-47A8-AC64-DBDE3EE3797B}' = 'BraveSoftware Brave-Origin-Dev'
-  '{50474E96-9CD2-4BC8-B0A7-0D4B6EF2E709}' = 'BraveSoftware Brave-Origin-Nightly'
-}
-$Script:MicrosoftEdgeProductCodeByAppGuid = @{
-  # Microsoft documents this app ID as the WebView2 Runtime client registry key.
-  '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' = 'Microsoft EdgeWebView'
-}
+$Script:ChromiumInstallConstantsSize64 = 232
+$Script:ChromiumInstallConstantsSize32 = 168
 
 function ConvertFrom-ChromiumQueryTag {
   <#
@@ -377,42 +366,621 @@ function Close-ChromiumSetupContext {
   $Context.Stream.Dispose()
 }
 
-function Resolve-BraveChromiumProductCode {
+function Export-ChromiumMiniInstallerSetupFromContext {
   <#
   .SYNOPSIS
-    Resolve Brave's updater application identity to its uninstall registry key
-  .PARAMETER ApplicationId
-    The appguid from the signed Omaha tag
-  .PARAMETER Publisher
-    The outer executable publisher used to restrict the Brave-specific mapping
+    Export the source-selected setup.exe payload from an open mini-installer
+  .PARAMETER Context
+    Open Chromium setup context whose stream remains owned by the caller.
+  .PARAMETER DestinationPath
+    Existing or new directory that receives exactly one nested setup.exe.
+  .PARAMETER MaximumExpandedBytes
+    Hard limit for the decompressed setup payload.
   #>
-  [OutputType([string])]
+  [OutputType([IO.FileInfo])]
   param (
-    [string]$ApplicationId,
-    [string]$Publisher
+    [Parameter(Mandatory)][psobject]$Context,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 134217728
   )
 
-  if ([string]::IsNullOrWhiteSpace($ApplicationId) -or ([string]$Publisher).TrimEnd('.') -cne 'BraveSoftware Inc') { return $null }
-  $Script:BraveProductCodeByAppGuid[$ApplicationId.ToUpperInvariant()]
+  if ($Context.Evidence.Variant -cne 'ChromiumMiniInstaller' -or -not $Context.Evidence.MiniSetup) {
+    throw 'The Chromium setup context does not contain a selected mini-installer setup resource.'
+  }
+  $null = New-Item -Path $DestinationPath -ItemType Directory -Force
+  $Evidence = $Context.Evidence.MiniSetup
+  $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath 'setup.exe'
+
+  # Chromium's stub selects one setup representation by resource precedence. Decode only that
+  # representation so metadata inspection follows the same payload that the stub would execute.
+  if ($Evidence.Type -eq 'BN') {
+    return Export-PEResourceData -Resource $Evidence.Resource -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes
+  }
+  if ($Evidence.Type -eq 'BL') {
+    $CabinetPath = New-TempFile
+    try {
+      $null = Export-PEResourceData -Resource $Evidence.Resource -DestinationPath $CabinetPath -MaximumBytes $Script:ChromiumMaximumResourceBytes
+      $Files = @(Export-CabinetEntry -Path $CabinetPath -DestinationPath $DestinationPath -Name 'setup.exe' -MaximumExpandedBytes $MaximumExpandedBytes)
+      if ($Files.Count -ne 1) { throw 'The selected Chromium BL resource does not contain exactly one setup.exe.' }
+      return Get-Item -LiteralPath $Files[0] -Force
+    } finally {
+      Remove-Item -LiteralPath $CabinetPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+  if ($Evidence.Type -eq 'B7') {
+    $ResourceStream = New-BoundedReadStream -Stream $Context.Stream -Offset $Evidence.Offset -Length $Evidence.Size -LeaveOpen
+    $Archive = $null
+    try {
+      $Archive = Get-InstallerArchive -Stream $ResourceStream
+      $Entries = @(Get-InstallerArchiveEntry -Archive $Archive | Where-Object { $_.FullName -ieq 'setup.exe' -or [IO.Path]::GetFileName($_.FullName) -ieq 'setup.exe' })
+      if ($Entries.Count -ne 1) { throw 'The selected Chromium B7 resource does not contain exactly one setup.exe.' }
+      return Export-InstallerArchiveEntry -Entry $Entries[0] -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes
+    } finally {
+      if ($Archive) { $Archive.Dispose() }
+      $ResourceStream.Dispose()
+    }
+  }
+  throw "The selected Chromium setup resource type '$($Evidence.Type)' is not supported."
 }
 
-function Resolve-MicrosoftEdgeChromiumProductCode {
+function Read-ChromiumUtf16StringContainingOffset {
   <#
   .SYNOPSIS
-    Resolve a documented Microsoft Edge updater client identity to its ARP key
-  .PARAMETER ApplicationId
-    The appguid from the signed Microsoft Edge certificate tag
-  .PARAMETER Publisher
-    The outer executable publisher used to restrict the Microsoft-specific mapping
+    Read one bounded null-terminated UTF-16LE string around a known pattern offset
+  .PARAMETER Stream
+    Caller-owned seekable setup.exe stream. Its original position is restored.
+  .PARAMETER Offset
+    Absolute file offset of a UTF-16LE pattern inside the requested string.
+  .PARAMETER MaximumCharacters
+    Maximum characters inspected on either side of the pattern.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Offset,
+    [ValidateRange(1, 4096)][int]$MaximumCharacters = 512
+  )
+
+  $MaximumBytes = $MaximumCharacters * 2
+  $WindowStart = [Math]::Max(0L, $Offset - $MaximumBytes)
+  $WindowEnd = [Math]::Min($Stream.Length, $Offset + $MaximumBytes)
+  $Bytes = Read-BinaryBytes -Stream $Stream -Offset $WindowStart -Count ([int]($WindowEnd - $WindowStart))
+  $PatternIndex = [int]($Offset - $WindowStart)
+
+  # Walk on the pattern's UTF-16 alignment only. A missing terminator at either bounded edge means
+  # the candidate is incomplete and must not become registry evidence.
+  $Start = $PatternIndex
+  while ($Start -ge 2 -and -not ($Bytes[$Start - 2] -eq 0 -and $Bytes[$Start - 1] -eq 0)) { $Start -= 2 }
+  if ($Start -lt 2 -and $WindowStart -ne 0) { return $null }
+  $End = $PatternIndex
+  while ($End + 1 -lt $Bytes.Length -and -not ($Bytes[$End] -eq 0 -and $Bytes[$End + 1] -eq 0)) { $End += 2 }
+  if ($End + 1 -ge $Bytes.Length) { return $null }
+  if ($End -le $Start -or ($End - $Start) % 2 -ne 0) { return $null }
+
+  [pscustomobject]@{
+    Offset = $WindowStart + $Start
+    Text   = [Text.Encoding]::Unicode.GetString($Bytes, $Start, $End - $Start)
+  }
+}
+
+function Read-ChromiumImageString {
+  <#
+  .SYNOPSIS
+    Read a bounded string addressed by a preferred-image virtual pointer
+  .PARAMETER Stream
+    Caller-owned seekable PE stream. Random reads restore its original position.
+  .PARAMETER Layout
+    Parsed PE layout containing the preferred image base and section mappings.
+  .PARAMETER Pointer
+    Preferred virtual address stored in a linked Chromium constant record.
+  .PARAMETER Encoding
+    ASCII for narrow Chromium switches and schemes, or Unicode for wchar_t fields.
+  .PARAMETER MaximumCharacters
+    Maximum number of characters accepted before a null terminator is required.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][psobject]$Layout,
+    [Parameter(Mandatory)][uint64]$Pointer,
+    [Parameter(Mandatory)][ValidateSet('ASCII', 'Unicode')][string]$Encoding,
+    [ValidateRange(1, 4096)][int]$MaximumCharacters = 256
+  )
+
+  # Linked pointers use the PE preferred image base. Reject null, underflow, and addresses outside
+  # the 32-bit RVA space before mapping the pointer through the section table.
+  if ($Pointer -eq 0 -or $Pointer -lt [uint64]$Layout.ImageBase) { return $null }
+  $RvaValue = $Pointer - [uint64]$Layout.ImageBase
+  if ($RvaValue -gt [uint32]::MaxValue) { return $null }
+  $Offset = Convert-PEVirtualAddressToFileOffset -Rva ([uint32]$RvaValue) -Sections $Layout.Sections
+  if ($Offset -lt 0 -or $Offset -ge $Stream.Length) { return $null }
+
+  $BytesPerCharacter = $Encoding -eq 'Unicode' ? 2 : 1
+  $MaximumBytes = $MaximumCharacters * $BytesPerCharacter
+  $Bytes = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count ([int][Math]::Min($MaximumBytes, $Stream.Length - $Offset))
+  if ($Encoding -eq 'Unicode') {
+    $End = 0
+    while ($End + 1 -lt $Bytes.Length -and -not ($Bytes[$End] -eq 0 -and $Bytes[$End + 1] -eq 0)) { $End += 2 }
+    if ($End + 1 -ge $Bytes.Length) { return $null }
+    $Text = [Text.Encoding]::Unicode.GetString($Bytes, 0, $End)
+  } else {
+    $End = [Array]::IndexOf($Bytes, [byte]0)
+    if ($End -lt 0) { return $null }
+    $Text = [Text.Encoding]::ASCII.GetString($Bytes, 0, $End)
+  }
+
+  [pscustomobject]@{ Offset = $Offset; Text = $Text }
+}
+
+function Read-ChromiumInstallConstantsRecord {
+  <#
+  .SYNOPSIS
+    Parse the source-defined identity prefix of one Chromium InstallConstants record
+  .PARAMETER Stream
+    Caller-owned seekable setup.exe stream.
+  .PARAMETER Layout
+    Parsed PE layout used to resolve linked string pointers.
+  .PARAMETER Offset
+    Absolute file offset of the candidate InstallConstants record.
+  .PARAMETER PointerSize
+    Native pointer width in bytes, derived from PE32 or PE32+.
+  .PARAMETER StructureSize
+    Expected source-defined size of the complete record in bytes.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][psobject]$Layout,
+    [Parameter(Mandatory)][long]$Offset,
+    [Parameter(Mandatory)][ValidateSet(4, 8)][int]$PointerSize,
+    [Parameter(Mandatory)][int]$StructureSize
+  )
+
+  if ($Offset -lt 0 -or $Offset + $StructureSize -gt $Stream.Length) { return $null }
+  $DeclaredSize = [uint64](Read-BinaryInteger -Stream $Stream -Offset $Offset -Size $PointerSize)
+  if ($DeclaredSize -ne $StructureSize) { return $null }
+  $Index = [uint32](Read-BinaryInteger -Stream $Stream -Offset ($Offset + $PointerSize) -Size 4)
+  if ($Index -gt 31) { return $null }
+
+  # The first identity fields have remained ordered across the supported 32-bit and 64-bit
+  # InstallConstants layouts. Later GUID/icon fields are deliberately not interpreted here.
+  $PointerBase = $PointerSize -eq 8 ? 16 : 8
+  $Pointers = [uint64[]]::new(9)
+  for ($Field = 0; $Field -lt $Pointers.Length; $Field++) {
+    $Pointers[$Field] = [uint64](Read-BinaryInteger -Stream $Stream -Offset ($Offset + $PointerBase + ($Field * $PointerSize)) -Size $PointerSize)
+  }
+  $InstallSwitch = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[0] -Encoding ASCII -MaximumCharacters 64
+  $InstallSuffix = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[1] -Encoding Unicode -MaximumCharacters 64
+  $LogoSuffix = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[2] -Encoding Unicode -MaximumCharacters 64
+  $ApplicationId = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[3] -Encoding Unicode -MaximumCharacters 64
+  $BaseApplicationName = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[4] -Encoding Unicode -MaximumCharacters 128
+  $BaseApplicationId = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[5] -Encoding Unicode -MaximumCharacters 128
+  $BrowserProgIdPrefix = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[6] -Encoding Unicode -MaximumCharacters 64
+  $BrowserProgIdDescription = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[7] -Encoding Unicode -MaximumCharacters 128
+  $DirectLaunchUrlScheme = Read-ChromiumImageString -Stream $Stream -Layout $Layout -Pointer $Pointers[8] -Encoding ASCII -MaximumCharacters 64
+
+  # Require every pointer in the identity prefix to resolve and then validate the source field's
+  # lexical contract. This prevents arbitrary size-like data from being mistaken for a mode table.
+  if ($null -in @($InstallSwitch, $InstallSuffix, $LogoSuffix, $ApplicationId, $BaseApplicationName, $BaseApplicationId, $BrowserProgIdPrefix, $BrowserProgIdDescription, $DirectLaunchUrlScheme)) { return $null }
+  if ($InstallSwitch.Text -notmatch '^[A-Za-z0-9-]{0,64}$' -or
+    $InstallSuffix.Text -match '[\x00-\x1F\\/]' -or
+    $ApplicationId.Text -notmatch '^(?:|\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\})$' -or
+    [string]::IsNullOrWhiteSpace($BaseApplicationName.Text) -or $BaseApplicationName.Text -match '[\x00-\x1F\\/]' -or
+    $BaseApplicationId.Text -notmatch '^[A-Za-z0-9.]+$' -or $BrowserProgIdPrefix.Text -notmatch '^[A-Za-z0-9.]+$' -or
+    $DirectLaunchUrlScheme.Text -notmatch '^(?:|[A-Za-z][A-Za-z0-9+.-]{0,63})$') { return $null }
+
+  $SupportsSystemLevelOffset = $PointerSize -eq 8 ? 204 : 144
+  $SupportsSystemLevel = [bool](Read-BinaryInteger -Stream $Stream -Offset ($Offset + $SupportsSystemLevelOffset) -Size 1)
+  [pscustomobject]@{
+    Offset                = $Offset
+    StructureSize         = $StructureSize
+    Index                 = [int]$Index
+    InstallSwitch         = $InstallSwitch.Text
+    InstallSuffix         = $InstallSuffix.Text
+    LogoSuffix            = $LogoSuffix.Text
+    ApplicationId         = $ApplicationId.Text
+    BaseApplicationName   = $BaseApplicationName.Text
+    BaseApplicationId     = $BaseApplicationId.Text
+    BrowserProgIdPrefix   = $BrowserProgIdPrefix.Text
+    DirectLaunchUrlScheme = $DirectLaunchUrlScheme.Text
+    SupportsSystemLevel   = $SupportsSystemLevel
+  }
+}
+
+function Get-ChromiumInstallModeInfo {
+  <#
+  .SYNOPSIS
+    Locate and validate Chromium's contiguous kInstallModes array
+  .PARAMETER Stream
+    Caller-owned seekable setup.exe stream.
+  .PARAMETER Layout
+    Parsed PE layout. Only PE32 and PE32+ source layouts are supported.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][psobject]$Layout
+  )
+
+  $PointerSize = $Layout.OptionalHeaderMagic -eq 0x20B ? 8 : 4
+  $StructureSize = $PointerSize -eq 8 ? $Script:ChromiumInstallConstantsSize64 : $Script:ChromiumInstallConstantsSize32
+  $SizePattern = $PointerSize -eq 8 ? [BitConverter]::GetBytes([uint64]$StructureSize) : [BitConverter]::GetBytes([uint32]$StructureSize)
+  $Tables = [Collections.Generic.List[object]]::new()
+
+  # A real array begins with the primary record (index zero), then stores secondary modes in
+  # contiguous records whose self-reported size and indexes agree.
+  foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern $SizePattern -Maximum 512 -Alignment $PointerSize)) {
+    $Primary = Read-ChromiumInstallConstantsRecord -Stream $Stream -Layout $Layout -Offset $Offset -PointerSize $PointerSize -StructureSize $StructureSize
+    if (-not $Primary -or $Primary.Index -ne 0) { continue }
+    $Records = [Collections.Generic.List[object]]::new()
+    for ($ExpectedIndex = 0; $ExpectedIndex -lt 32; $ExpectedIndex++) {
+      $RecordOffset = $Offset + ([long]$ExpectedIndex * $StructureSize)
+      $Record = Read-ChromiumInstallConstantsRecord -Stream $Stream -Layout $Layout -Offset $RecordOffset -PointerSize $PointerSize -StructureSize $StructureSize
+      if (-not $Record -or $Record.Index -ne $ExpectedIndex) { break }
+      $Records.Add($Record)
+    }
+    if ($Records.Count -gt 0) {
+      $Signature = [string]::Join([char]0x1F, @($Records | ForEach-Object { "$($_.InstallSwitch)|$($_.InstallSuffix)|$($_.ApplicationId)|$($_.BaseApplicationName)" }))
+      $Tables.Add([pscustomobject]@{ Offset = $Offset; Records = $Records.ToArray(); Signature = $Signature })
+    }
+  }
+
+  $Warnings = [Collections.Generic.List[string]]::new()
+  $Selected = $null
+  if ($Tables.Count -gt 0) {
+    $Ranked = @($Tables | Sort-Object -Property @{ Expression = { $_.Records.Count }; Descending = $true }, @{ Expression = 'Offset'; Descending = $false })
+    $Best = @($Ranked | Where-Object { $_.Records.Count -eq $Ranked[0].Records.Count })
+    $DistinctSignatures = @($Best.Signature | Sort-Object -Unique)
+    if ($DistinctSignatures.Count -gt 1) {
+      $Warnings.Add("Chromium setup contains multiple equally complete InstallConstants arrays at $([string]::Join(', ', @($Best | ForEach-Object { '0x' + $_.Offset.ToString('X') }))).")
+    } else {
+      $Selected = $Best[0]
+    }
+  }
+
+  [pscustomobject]@{
+    Offset        = if ($Selected) { $Selected.Offset } else { $null }
+    StructureSize = $StructureSize
+    PointerSize   = $PointerSize
+    InstallModes  = if ($Selected) { $Selected.Records } else { @() }
+    Warnings      = $Warnings.ToArray()
+  }
+}
+
+function Find-ChromiumProductPathName {
+  <#
+  .SYNOPSIS
+    Verify a canonical kProductPathName candidate derived from an install mode
+  .PARAMETER Stream
+    Caller-owned seekable setup.exe stream.
+  .PARAMETER DirectLaunchUrlScheme
+    Source-defined direct-launch scheme from the primary InstallConstants record.
   #>
   [OutputType([string])]
   param (
-    [string]$ApplicationId,
-    [string]$Publisher
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][AllowEmptyString()][string]$DirectLaunchUrlScheme
   )
 
-  if ([string]::IsNullOrWhiteSpace($ApplicationId) -or ([string]$Publisher).TrimEnd('.') -cne 'Microsoft Corporation') { return $null }
-  $Script:MicrosoftEdgeProductCodeByAppGuid[$ApplicationId.ToUpperInvariant()]
+  if ([string]::IsNullOrWhiteSpace($DirectLaunchUrlScheme)) { return $null }
+  # Vendor product path constants commonly preserve the direct-launch scheme's words while using
+  # display casing (for example, brave-browser -> Brave-Browser). Treat this only as a candidate;
+  # require an independently stored, null-terminated wchar_t string in the PE before accepting it.
+  $Candidate = [Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($DirectLaunchUrlScheme.ToLowerInvariant())
+  $Pattern = [Text.Encoding]::Unicode.GetBytes("$Candidate$([char]0)")
+  $CandidateOffsets = [Collections.Generic.List[long]]::new()
+  foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern $Pattern -Maximum 16 -Alignment 1)) {
+    if ($Offset -ge 2) {
+      $Prefix = Read-BinaryBytes -Stream $Stream -Offset ($Offset - 2) -Count 2
+      if ($Prefix[0] -ne 0 -or $Prefix[1] -ne 0) { continue }
+    }
+    $CandidateOffsets.Add($Offset)
+  }
+  if ($CandidateOffsets.Count -eq 1) { return $Candidate }
+  return $null
+}
+
+function Read-ChromiumAsciiStringContainingOffset {
+  <#
+  .SYNOPSIS
+    Read one bounded null-terminated ASCII string containing a known offset
+  .PARAMETER Stream
+    Caller-owned seekable stream. Its original position is restored.
+  .PARAMETER Offset
+    Absolute file offset of an ASCII pattern inside the requested string.
+  .PARAMETER MaximumCharacters
+    Maximum characters inspected on either side of the pattern.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Offset,
+    [ValidateRange(1, 512)][int]$MaximumCharacters = 80
+  )
+
+  $WindowStart = [Math]::Max(0L, $Offset - $MaximumCharacters)
+  $WindowEnd = [Math]::Min($Stream.Length, $Offset + $MaximumCharacters)
+  $Bytes = Read-BinaryBytes -Stream $Stream -Offset $WindowStart -Count ([int]($WindowEnd - $WindowStart))
+  $PatternIndex = [int]($Offset - $WindowStart)
+  $Start = $PatternIndex
+  while ($Start -ge 1 -and $Bytes[$Start - 1] -ne 0) { $Start-- }
+  if ($Start -lt 1 -and $WindowStart -ne 0) { return $null }
+  $End = $PatternIndex
+  while ($End -lt $Bytes.Length -and $Bytes[$End] -ne 0) { $End++ }
+  if ($End -ge $Bytes.Length -or $End -le $Start) { return $null }
+
+  [pscustomobject]@{
+    Offset = $WindowStart + $Start
+    Text   = [Text.Encoding]::ASCII.GetString($Bytes, $Start, $End - $Start)
+  }
+}
+
+function Get-ChromiumLegacyProductIdentityInfo {
+  <#
+  .SYNOPSIS
+    Resolve product identity used by legacy Chromium-family setup forks
+  .DESCRIPTION
+    Some vendor forks do not retain Chromium's current InstallConstants layout. They instead
+    embed an ASCII product-specific install-directory switch, a matching Software\<product>
+    registry root, and the standalone product path appended to Chromium's composed uninstall
+    registry root. This function requires all three literals and returns no identity when more
+    than one product agrees.
+  .PARAMETER Stream
+    Caller-owned seekable setup.exe stream. Random reads restore its original position.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][IO.Stream]$Stream)
+
+  $Candidates = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+  $InstallDirectorySuffix = [Text.Encoding]::ASCII.GetBytes('-install-dir')
+  foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern $InstallDirectorySuffix -Maximum 128 -Alignment 1)) {
+    $InstallDirectorySwitch = Read-ChromiumAsciiStringContainingOffset -Stream $Stream -Offset $Offset -MaximumCharacters 80
+    if (-not $InstallDirectorySwitch) { continue }
+    $Match = [regex]::Match($InstallDirectorySwitch.Text, '^(?<Token>[A-Za-z][A-Za-z0-9-]{1,63})-install-dir$', 'CultureInvariant')
+    if (-not $Match.Success) { continue }
+
+    $Token = $Match.Groups['Token'].Value.ToLowerInvariant()
+    # Chromium uninstall paths preserve the product path's display casing. Reconstruct only the
+    # deterministic title-cased token, then require that exact null-terminated UTF-16 literal in
+    # the binary. Multiple occurrences are acceptable; they all prove the same candidate value.
+    $ProductPathName = [Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($Token)
+    $ProductPattern = [Text.Encoding]::Unicode.GetBytes("$ProductPathName$([char]0)")
+    $HasProductPathName = $false
+    foreach ($ProductOffset in (Find-BinaryPattern -Stream $Stream -Pattern $ProductPattern -Maximum 32 -Alignment 1)) {
+      if ($ProductOffset -eq 0) { $HasProductPathName = $true; break }
+      if ($ProductOffset -lt 2) { continue }
+      $Prefix = Read-BinaryBytes -Stream $Stream -Offset ($ProductOffset - 2) -Count 2
+      if ($Prefix[0] -eq 0 -and $Prefix[1] -eq 0) { $HasProductPathName = $true; break }
+    }
+    if (-not $HasProductPathName -or $Candidates.ContainsKey($ProductPathName)) { continue }
+
+    # The same product path must independently own a registry namespace. This excludes generic
+    # switches such as user-data-dir even when their token happens to appear as display text.
+    $ProductRegistryPattern = [Text.Encoding]::Unicode.GetBytes("Software\$ProductPathName$([char]0)")
+    $ProductRegistryMatches = @(Find-BinaryPattern -Stream $Stream -Pattern $ProductRegistryPattern -Maximum 8 -Alignment 1)
+    if ($ProductRegistryMatches.Count -eq 0) { continue }
+    $Candidates[$ProductPathName] = [pscustomobject]@{
+      ProductCode            = $ProductPathName
+      InstallDirectorySwitch = $InstallDirectorySwitch.Text
+      ProductRegistryPath    = "Software\$ProductPathName"
+    }
+  }
+
+  $ResolvedCandidate = if ($Candidates.Count -eq 1) { @($Candidates.Values)[0] } else { $null }
+  [pscustomobject]@{
+    ProductCode            = if ($ResolvedCandidate) { $ResolvedCandidate.ProductCode } else { $null }
+    InstallDirectorySwitch = if ($ResolvedCandidate) { $ResolvedCandidate.InstallDirectorySwitch } else { $null }
+    ProductRegistryPath    = if ($ResolvedCandidate) { $ResolvedCandidate.ProductRegistryPath } else { $null }
+    Candidates             = @($Candidates.Values)
+    IsAmbiguous            = $Candidates.Count -gt 1
+  }
+}
+
+function Get-ChromiumNestedSetupRegistryInfo {
+  <#
+  .SYNOPSIS
+    Read explicit Chromium ARP identity evidence from a nested setup.exe
+  .DESCRIPTION
+    Chromium's install_static::GetUninstallRegistryPath constructs the visible
+    ARP key from kCompanyPathName, kProductPathName, and the selected install
+    suffix. Vendor forks either leave the resulting literal uninstall path in
+    setup.exe or expose the same company/product pair in their updater Clients
+    registry path. Literal uninstall paths take precedence; repeated literals
+    outrank incidental auxiliary-product keys.
+  .PARAMETER Path
+    Path to the statically extracted nested setup.exe. The file is never run.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $File = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $DirectCandidates = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    $UpdateCandidates = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    $UpdateCompanyCandidates = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    $UninstallPaths = [Collections.Generic.List[string]]::new()
+    $UpdateClientPaths = [Collections.Generic.List[string]]::new()
+    $ComposesUninstallRegistryPath = $false
+    $InstallModeInfo = $null
+    $LegacyProductIdentity = $null
+
+    # Modern Chromium setup binaries carry a linked kInstallModes table. Non-PE synthetic fixtures
+    # and older vendor forks simply continue through the explicit registry-path parser.
+    try {
+      $Layout = Get-PELayout -Stream $Stream
+      if ($Layout) { $InstallModeInfo = Get-ChromiumInstallModeInfo -Stream $Stream -Layout $Layout }
+    } catch { }
+
+    # Match only registry structures used by Chromium setup. This deliberately avoids arbitrary
+    # branding/version strings, which are not authoritative ARP identity evidence.
+    $UninstallSuffix = '\Microsoft\Windows\CurrentVersion\Uninstall\'
+    foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern ([Text.Encoding]::Unicode.GetBytes($UninstallSuffix)) -Maximum 512 -Alignment 1)) {
+      $String = Read-ChromiumUtf16StringContainingOffset -Stream $Stream -Offset $Offset
+      if (-not $String) { continue }
+      if ($String.Text -match '^Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$') {
+        $ComposesUninstallRegistryPath = $true
+        continue
+      }
+      $Match = [regex]::Match($String.Text, 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\(?<Key>.+)$', 'IgnoreCase,CultureInvariant')
+      if (-not $Match.Success) { continue }
+      $Key = $Match.Groups['Key'].Value.Trim()
+      # ProductCode is the immediate uninstall subkey. Reject templates, partial GUIDs, nested
+      # paths, and control characters rather than trying to complete or normalize them.
+      if ($Key.Length -gt 200 -or $Key -match '[\\/%\x00-\x1F]' -or
+        (($Key.Contains('{') -or $Key.Contains('}')) -and $Key -notmatch '^\{[0-9A-Fa-f-]{36}\}(?:.+)?$')) { continue }
+      $UninstallPaths.Add($String.Text)
+      if (-not $DirectCandidates.ContainsKey($Key)) {
+        $DirectCandidates[$Key] = [pscustomobject]@{ ProductCode = $Key; Count = 0; Source = 'DirectUninstallRegistryPath' }
+      }
+      $DirectCandidates[$Key].Count++
+    }
+
+    # Some modern vendor builds compose the uninstall path at runtime. Their updater integration
+    # still embeds Software\<company>\<product>\Update\Clients, exposing the same two constants
+    # consumed by GetUninstallRegistryPath without relying on PE display branding.
+    $UpdateClientsSuffix = '\Update\Clients'
+    foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern ([Text.Encoding]::Unicode.GetBytes($UpdateClientsSuffix)) -Maximum 512 -Alignment 1)) {
+      $String = Read-ChromiumUtf16StringContainingOffset -Stream $Stream -Offset $Offset
+      if (-not $String) { continue }
+      $Match = [regex]::Match($String.Text, 'Software\\(?<Root>.+?)\\Update\\Clients\\?$', 'IgnoreCase,CultureInvariant')
+      if (-not $Match.Success) { continue }
+      $Segments = @($Match.Groups['Root'].Value.Split([char]'\') | ForEach-Object Trim | Where-Object { $_ })
+      if ($Segments.Count -eq 0 -or @($Segments | Where-Object { $_ -match '[/%\x00-\x1F]' }).Count -gt 0) { continue }
+      $UpdateClientPaths.Add($Match.Value)
+      if ($Segments.Count -ge 2) {
+        $ProductCode = [string]::Join(' ', $Segments)
+        if (-not $UpdateCandidates.ContainsKey($ProductCode)) {
+          $UpdateCandidates[$ProductCode] = [pscustomobject]@{ ProductCode = $ProductCode; Count = 0; Source = 'ChromiumUpdateClientPath' }
+        }
+        $UpdateCandidates[$ProductCode].Count++
+      } else {
+        $Company = $Segments[0]
+        if (-not $UpdateCompanyCandidates.ContainsKey($Company)) {
+          $UpdateCompanyCandidates[$Company] = [pscustomobject]@{ Company = $Company; Count = 0 }
+        }
+        $UpdateCompanyCandidates[$Company].Count++
+      }
+    }
+
+    $Warnings = [Collections.Generic.List[string]]::new()
+    $Selected = $null
+    # A repeated direct path is stronger than a one-off auxiliary uninstall key. Equal-frequency
+    # candidates are intentionally left unresolved because static evidence cannot choose safely.
+    $Candidates = if ($DirectCandidates.Count -gt 0) {
+      @($DirectCandidates.Values)
+    } elseif ($ComposesUninstallRegistryPath) {
+      @($UpdateCandidates.Values)
+    } else {
+      @()
+    }
+    if ($Candidates.Count -gt 0) {
+      $Ranked = @($Candidates | Sort-Object -Property @{ Expression = 'Count'; Descending = $true }, @{ Expression = 'ProductCode'; Descending = $false })
+      if ($Ranked.Count -gt 1 -and $Ranked[0].Count -eq $Ranked[1].Count) {
+        $Warnings.Add("Chromium setup contains ambiguous $($Ranked[0].Source) ProductCode candidates: $([string]::Join(', ', @($Ranked | ForEach-Object ProductCode))).")
+      } else {
+        $Selected = $Ranked[0]
+      }
+    }
+    if (-not $Selected -and $Candidates.Count -eq 0 -and $ComposesUninstallRegistryPath -and
+      $UpdateCompanyCandidates.Count -gt 0 -and $InstallModeInfo -and $InstallModeInfo.InstallModes.Count -gt 0) {
+      $Companies = @($UpdateCompanyCandidates.Values | Sort-Object -Property @{ Expression = 'Count'; Descending = $true }, @{ Expression = 'Company'; Descending = $false })
+      if ($Companies.Count -gt 1 -and $Companies[0].Count -eq $Companies[1].Count) {
+        $Warnings.Add("Chromium setup contains ambiguous updater company-path constants: $([string]::Join(', ', @($Companies | ForEach-Object Company))).")
+      } else {
+        $Company = $Companies[0].Company
+        $PrimaryMode = @($InstallModeInfo.InstallModes | Where-Object Index -EQ 0)[0]
+        if ($PrimaryMode.BaseApplicationName.StartsWith("$Company ", [StringComparison]::OrdinalIgnoreCase)) {
+          $Selected = [pscustomobject]@{ ProductCode = $PrimaryMode.BaseApplicationName; Count = 1; Source = 'ChromiumCompanyAndInstallConstants' }
+        } else {
+          $ProductPathName = Find-ChromiumProductPathName -Stream $Stream -DirectLaunchUrlScheme $PrimaryMode.DirectLaunchUrlScheme
+          if ($ProductPathName) {
+            $Selected = [pscustomobject]@{ ProductCode = "$Company $ProductPathName"; Count = 1; Source = 'ChromiumCompanyAndProductConstants' }
+          }
+        }
+      }
+    }
+    if (-not $Selected -and $Candidates.Count -eq 0 -and $ComposesUninstallRegistryPath) {
+      # Legacy Chromium forks can replace InstallConstants with product-specific switch constants.
+      # Resolve the appended uninstall key only when the install-dir switch, product registry root,
+      # and product path all agree; no PE publisher or product-name branding participates.
+      $LegacyProductIdentity = Get-ChromiumLegacyProductIdentityInfo -Stream $Stream
+      if ($LegacyProductIdentity.IsAmbiguous) {
+        $Warnings.Add("Chromium setup contains ambiguous legacy product identity candidates: $([string]::Join(', ', @($LegacyProductIdentity.Candidates | ForEach-Object ProductCode))).")
+      } elseif ($LegacyProductIdentity.ProductCode) {
+        $Selected = [pscustomobject]@{ ProductCode = $LegacyProductIdentity.ProductCode; Count = 1; Source = 'LegacyChromiumProductSwitchAndRegistryPath' }
+      }
+    }
+    if ($InstallModeInfo) { foreach ($Warning in $InstallModeInfo.Warnings) { $Warnings.Add($Warning) } }
+
+    $ResolvedInstallModes = [Collections.Generic.List[object]]::new()
+    if ($InstallModeInfo) {
+      foreach ($Mode in $InstallModeInfo.InstallModes) {
+        $ResolvedInstallModes.Add([pscustomobject]@{
+            Index                 = $Mode.Index
+            InstallSwitch         = $Mode.InstallSwitch
+            InstallSuffix         = $Mode.InstallSuffix
+            ApplicationId         = $Mode.ApplicationId
+            BaseApplicationName   = $Mode.BaseApplicationName
+            DirectLaunchUrlScheme = $Mode.DirectLaunchUrlScheme
+            SupportsSystemLevel   = $Mode.SupportsSystemLevel
+            ProductCode           = if ($Selected) { "$($Selected.ProductCode)$($Mode.InstallSuffix)" } else { $null }
+          })
+      }
+    }
+
+    [pscustomobject]@{
+      ProductCode                   = if ($Selected) { $Selected.ProductCode } else { $null }
+      ProductCodeSource             = if ($Selected) { $Selected.Source } else { $null }
+      ComposesUninstallRegistryPath = $ComposesUninstallRegistryPath
+      UninstallRegistryPaths        = $UninstallPaths.ToArray()
+      UpdateClientRegistryPaths     = $UpdateClientPaths.ToArray()
+      ProductCodeCandidates         = @($DirectCandidates.Values) + @($UpdateCandidates.Values)
+      InstallModes                  = $ResolvedInstallModes.ToArray()
+      InstallConstantsOffset        = if ($InstallModeInfo) { $InstallModeInfo.Offset } else { $null }
+      InstallConstantsSize          = if ($InstallModeInfo) { $InstallModeInfo.StructureSize } else { $null }
+      LegacyProductIdentity         = $LegacyProductIdentity
+      Warnings                      = $Warnings.ToArray()
+    }
+  } finally {
+    $Stream.Dispose()
+  }
+}
+
+function Get-ChromiumMiniInstallerNestedSetupInfo {
+  <#
+  .SYNOPSIS
+    Extract and inspect the nested setup selected by a Chromium mini-installer
+  .PARAMETER Context
+    Open Chromium setup context whose outer stream remains owned by the caller.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][psobject]$Context)
+
+  $TemporaryFolder = New-TempFolder
+  try {
+    $SetupFile = Export-ChromiumMiniInstallerSetupFromContext -Context $Context -DestinationPath $TemporaryFolder
+    $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($SetupFile.FullName)
+    $RegistryInfo = Get-ChromiumNestedSetupRegistryInfo -Path $SetupFile.FullName
+    [pscustomobject]@{
+      ProductName                   = $VersionInfo.ProductName
+      ProductVersion                = $VersionInfo.ProductVersion
+      Publisher                     = $VersionInfo.CompanyName
+      ProductCode                   = $RegistryInfo.ProductCode
+      ProductCodeSource             = $RegistryInfo.ProductCodeSource
+      ComposesUninstallRegistryPath = $RegistryInfo.ComposesUninstallRegistryPath
+      UninstallRegistryPaths        = $RegistryInfo.UninstallRegistryPaths
+      UpdateClientRegistryPaths     = $RegistryInfo.UpdateClientRegistryPaths
+      ProductCodeCandidates         = $RegistryInfo.ProductCodeCandidates
+      InstallModes                  = $RegistryInfo.InstallModes
+      InstallConstantsOffset        = $RegistryInfo.InstallConstantsOffset
+      InstallConstantsSize          = $RegistryInfo.InstallConstantsSize
+      LegacyProductIdentity         = $RegistryInfo.LegacyProductIdentity
+      Warnings                      = $RegistryInfo.Warnings
+    }
+  } finally {
+    Remove-Item -LiteralPath $TemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function ConvertFrom-ChromiumOmahaOfflineManifest {
@@ -502,6 +1070,136 @@ function ConvertFrom-ChromiumOmahaOfflineManifest {
   }
 }
 
+function Get-ChromiumOmahaPayloadInfo {
+  <#
+  .SYNOPSIS
+    Parse an Omaha offline manifest and inspect the executable it configures
+  .PARAMETER Resource
+    Validated PE resource evidence with file-relative offsets and bounded lengths.
+  .PARAMETER ApplicationId
+    Installer identity value used to select or report the matching static metadata record.
+  .PARAMETER SkipNestedSetup
+    Parse only OfflineManifest.gup without exporting and inspecting its configured target.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Resource,
+    [string]$ApplicationId,
+    [switch]$SkipNestedSetup
+  )
+
+  $Context = Open-ChromiumOmahaArchive -Resource $Resource -MaximumExpandedBytes $Script:ChromiumMaximumResourceBytes
+  $NestedFolder = $null
+  try {
+    $Entries = [Collections.Generic.List[object]]::new()
+    $ManifestEntry = $null
+    foreach ($Entry in (Get-InstallerArchiveEntry -Archive $Context.Archive)) {
+      $Entries.Add($Entry)
+      if ($Entry.FullName -ine 'OfflineManifest.gup' -and [IO.Path]::GetFileName($Entry.FullName) -ine 'OfflineManifest.gup') { continue }
+      if ($ManifestEntry) { throw 'The Omaha payload contains more than one OfflineManifest.gup entry.' }
+      $ManifestEntry = $Entry
+    }
+    if (-not $ManifestEntry) {
+      return [pscustomobject]@{ OfflineManifest = $null; NestedSetupInfo = $null; NestedSetupError = $null; TargetEntryName = $null }
+    }
+
+    $Text = Read-InstallerArchiveEntryText -Entry $ManifestEntry -MaximumBytes $Script:ChromiumMaximumOfflineManifestBytes
+    $OfflineManifest = ConvertFrom-ChromiumOmahaOfflineManifest -Text $Text -ApplicationId $ApplicationId
+    if ($SkipNestedSetup) {
+      return [pscustomobject]@{ OfflineManifest = $OfflineManifest; NestedSetupInfo = $null; NestedSetupError = $null; TargetEntryName = $null }
+    }
+
+    # OfflineManifest.gup's install action is authoritative. Omaha appends the app GUID to package
+    # entry names in its TAR, so accept either the literal configured name or that exact name plus
+    # one suffix. Package size must agree when the manifest supplies it.
+    $TargetNames = [Collections.Generic.List[string]]::new()
+    if ($OfflineManifest.InstallAction -and -not [string]::IsNullOrWhiteSpace($OfflineManifest.InstallAction.Run)) {
+      $TargetNames.Add([IO.Path]::GetFileName($OfflineManifest.InstallAction.Run))
+    }
+    foreach ($Package in $OfflineManifest.Packages) {
+      if (-not [string]::IsNullOrWhiteSpace($Package.Name) -and -not $TargetNames.Contains([IO.Path]::GetFileName($Package.Name))) {
+        $TargetNames.Add([IO.Path]::GetFileName($Package.Name))
+      }
+    }
+
+    $TargetMatches = [Collections.Generic.List[object]]::new()
+    for ($NameIndex = 0; $NameIndex -lt $TargetNames.Count; $NameIndex++) {
+      $TargetName = $TargetNames[$NameIndex]
+      $ExpectedPackage = @($OfflineManifest.Packages | Where-Object { [IO.Path]::GetFileName($_.Name).Equals($TargetName, [StringComparison]::OrdinalIgnoreCase) })[0]
+      foreach ($Entry in $Entries) {
+        $EntryName = [IO.Path]::GetFileName($Entry.FullName)
+        $MatchKind = if ($EntryName.Equals($TargetName, [StringComparison]::OrdinalIgnoreCase)) {
+          0
+        } elseif ($EntryName.StartsWith("$TargetName.", [StringComparison]::OrdinalIgnoreCase)) {
+          1
+        } else { continue }
+        if ($ExpectedPackage -and $null -ne $ExpectedPackage.Size -and [long]$Entry.Length -ne [long]$ExpectedPackage.Size) { continue }
+        $TargetMatches.Add([pscustomobject]@{ Entry = $Entry; TargetName = $TargetName; Package = $ExpectedPackage; Rank = ($NameIndex * 2) + $MatchKind })
+      }
+    }
+
+    # Microsoft offline bundles may rename a package entry while retaining the selected app's exact
+    # size and SHA-256 in OfflineManifest.gup. Use a unique declared-size match only as a candidate;
+    # the exported bytes are hash-verified below before the nested parser sees them.
+    if ($TargetMatches.Count -eq 0) {
+      for ($PackageIndex = 0; $PackageIndex -lt $OfflineManifest.Packages.Count; $PackageIndex++) {
+        $Package = $OfflineManifest.Packages[$PackageIndex]
+        if ($null -eq $Package.Size -or $Package.HashSha256 -notmatch '^[0-9A-Fa-f]{64}$') { continue }
+        foreach ($Entry in $Entries) {
+          if ([long]$Entry.Length -ne [long]$Package.Size) { continue }
+          $TargetMatches.Add([pscustomobject]@{
+              Entry      = $Entry
+              TargetName = [IO.Path]::GetFileName($Package.Name)
+              Package    = $Package
+              Rank       = 100 + $PackageIndex
+            })
+        }
+      }
+    }
+
+    $NestedSetupInfo = $null
+    $NestedSetupError = $null
+    $TargetEntryName = $null
+    if ($TargetMatches.Count -gt 0) {
+      $RankedMatches = @($TargetMatches | Sort-Object Rank, { $_.Entry.FullName })
+      if ($RankedMatches.Count -gt 1 -and $RankedMatches[0].Rank -eq $RankedMatches[1].Rank) {
+        $NestedSetupError = "OfflineManifest.gup target '$($RankedMatches[0].TargetName)' matches multiple Omaha entries."
+      } else {
+        $Target = $RankedMatches[0]
+        $TargetEntryName = $Target.Entry.FullName
+        $NestedFolder = New-TempFolder
+        $TargetPath = Resolve-SafeExtractionPath -DestinationPath $NestedFolder -RelativePath $Target.TargetName
+        try {
+          $TargetFile = Export-InstallerArchiveEntry -Entry $Target.Entry -DestinationPath $TargetPath -MaximumBytes $Script:ChromiumMaximumResourceBytes
+          if ($Target.Package -and $Target.Package.HashSha256 -match '^[0-9A-Fa-f]{64}$') {
+            $ActualHash = (Get-FileHash -LiteralPath $TargetFile.FullName -Algorithm SHA256).Hash
+            if (-not $ActualHash.Equals($Target.Package.HashSha256, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "The Omaha target '$($Target.Entry.FullName)' does not match OfflineManifest.gup SHA-256 evidence."
+            }
+          }
+          # The configured target is normally a bare mini-installer. Disable a second Omaha payload
+          # walk so malformed recursive wrappers cannot cause unbounded nesting.
+          $NestedSetupInfo = Get-ChromiumSetupInfo -Path $TargetFile.FullName -SkipOfflineManifest
+        } catch {
+          $NestedSetupError = $_.Exception.Message
+        }
+      }
+    } elseif ($TargetNames.Count -gt 0) {
+      $NestedSetupError = "The Omaha payload does not contain the executable '$($TargetNames[0])' selected by OfflineManifest.gup."
+    }
+
+    [pscustomobject]@{
+      OfflineManifest  = $OfflineManifest
+      NestedSetupInfo  = $NestedSetupInfo
+      NestedSetupError = $NestedSetupError
+      TargetEntryName  = $TargetEntryName
+    }
+  } finally {
+    if ($NestedFolder) { Remove-Item -LiteralPath $NestedFolder -Recurse -Force -ErrorAction SilentlyContinue }
+    Close-ChromiumOmahaArchive -Context $Context
+  }
+}
+
 function Get-ChromiumOmahaOfflineManifestInfo {
   <#
   .SYNOPSIS
@@ -517,15 +1215,7 @@ function Get-ChromiumOmahaOfflineManifestInfo {
     [string]$ApplicationId
   )
 
-  $Context = Open-ChromiumOmahaArchive -Resource $Resource -MaximumExpandedBytes $Script:ChromiumMaximumResourceBytes
-  try {
-    foreach ($Entry in (Get-InstallerArchiveEntry -Archive $Context.Archive)) {
-      if ($Entry.FullName -ine 'OfflineManifest.gup' -and [IO.Path]::GetFileName($Entry.FullName) -ine 'OfflineManifest.gup') { continue }
-      $Text = Read-InstallerArchiveEntryText -Entry $Entry -MaximumBytes $Script:ChromiumMaximumOfflineManifestBytes
-      return ConvertFrom-ChromiumOmahaOfflineManifest -Text $Text -ApplicationId $ApplicationId
-    }
-    return $null
-  } finally { Close-ChromiumOmahaArchive -Context $Context }
+  (Get-ChromiumOmahaPayloadInfo -Resource $Resource -ApplicationId $ApplicationId -SkipNestedSetup).OfflineManifest
 }
 
 function Get-ChromiumSetupInfoFromContext {
@@ -556,20 +1246,45 @@ function Get-ChromiumSetupInfoFromContext {
 
   $OfflineManifest = $null
   $OfflineManifestError = $null
+  $OmahaPayloadInfo = $null
   # Decode Omaha's expensive LZMA/BCJ2 payload only when a signed application identity makes the
   # enclosed manifest useful, unless the caller explicitly asks for layout-only evidence.
   $OfflineManifestChecked = $Variant -eq 'Omaha' -and $Tag.IsTagged -and -not $SkipOfflineManifest
   if ($OfflineManifestChecked) {
     try {
-      $OfflineManifest = Get-ChromiumOmahaOfflineManifestInfo -Resource $LayoutEvidence.OmahaResource.Resource -ApplicationId $Tag.ApplicationId
+      $OmahaPayloadInfo = Get-ChromiumOmahaPayloadInfo -Resource $LayoutEvidence.OmahaResource.Resource -ApplicationId $Tag.ApplicationId
+      $OfflineManifest = $OmahaPayloadInfo.OfflineManifest
     } catch {
       $OfflineManifestError = $_.Exception.Message
     }
   }
   $IsOnlineBootstrapper = if (-not $Tag.IsTagged) { $false } elseif ($Variant -eq 'ChromiumUpdater') { $true } elseif ($OfflineManifest) { $false } elseif ($OfflineManifestChecked -and -not $OfflineManifestError) { $true } else { $null }
-  $ProductCode = Resolve-BraveChromiumProductCode -ApplicationId $Tag.ApplicationId -Publisher $VersionInfo.CompanyName
-  if (-not $ProductCode) {
-    $ProductCode = Resolve-MicrosoftEdgeChromiumProductCode -ApplicationId $Tag.ApplicationId -Publisher $VersionInfo.CompanyName
+  $ProductCode = $null
+  $ProductCodeSource = $null
+
+  $NestedSetupInfo = $null
+  $NestedSetupError = $null
+  if ($Variant -eq 'ChromiumMiniInstaller') {
+    try {
+      # The outer stub contains only generic launcher metadata. Inspect the exact nested setup.exe
+      # selected by mini_installer resource precedence for literal ARP registry evidence.
+      $NestedSetupInfo = Get-ChromiumMiniInstallerNestedSetupInfo -Context $Context
+      if (-not $ProductCode -and $NestedSetupInfo.ProductCode) {
+        $ProductCode = $NestedSetupInfo.ProductCode
+        $ProductCodeSource = $NestedSetupInfo.ProductCodeSource
+      }
+    } catch {
+      $NestedSetupError = $_.Exception.Message
+    }
+  } elseif ($OmahaPayloadInfo) {
+    # Tagged offline wrappers contain the target installer named by OfflineManifest.gup. Its own
+    # Chromium setup metadata, not the outer updater appguid, supplies ARP identity.
+    $NestedSetupInfo = $OmahaPayloadInfo.NestedSetupInfo
+    $NestedSetupError = $OmahaPayloadInfo.NestedSetupError
+    if ($NestedSetupInfo -and $NestedSetupInfo.ProductCode) {
+      $ProductCode = $NestedSetupInfo.ProductCode
+      $ProductCodeSource = "OmahaTarget/$($NestedSetupInfo.ProductCodeSource)"
+    }
   }
 
   $SupportedScopes = @()
@@ -623,6 +1338,7 @@ function Get-ChromiumSetupInfoFromContext {
       if ($OfflineManifest) {
         $NestedFiles.Add('OfflineManifest.gup')
         foreach ($Package in $OfflineManifest.Packages) { if ($Package.Name) { $NestedFiles.Add($Package.Name) } }
+        if ($OmahaPayloadInfo.TargetEntryName -and -not $NestedFiles.Contains($OmahaPayloadInfo.TargetEntryName)) { $NestedFiles.Add($OmahaPayloadInfo.TargetEntryName) }
       } else { $NestedFiles.Add('BCJ2-decoded TAR payload') }
       if ($OfflineManifest.InstallAction) {
         $CommandParts = [Collections.Generic.List[string]]::new()
@@ -638,7 +1354,9 @@ function Get-ChromiumSetupInfoFromContext {
   }
   $Warnings = [Collections.Generic.List[string]]::new()
   if ($OfflineManifestError) { $Warnings.Add("The tagged Omaha payload could not be checked for OfflineManifest.gup: $OfflineManifestError") }
-  if ($Tag.ApplicationId -and -not $ProductCode) { $Warnings.Add("Updater appguid '$($Tag.ApplicationId)' is update-protocol identity, not an ARP ProductCode.") }
+  if ($NestedSetupError) { $Warnings.Add("The nested Chromium setup.exe could not be checked for ARP registry identity: $NestedSetupError") }
+  if ($NestedSetupInfo) { foreach ($Warning in $NestedSetupInfo.Warnings) { $Warnings.Add($Warning) } }
+  if ($Tag.ApplicationId -and -not $ProductCode) { $Warnings.Add("Updater appguid '$($Tag.ApplicationId)' is update-protocol identity; this wrapper does not contain source-backed target ARP ProductCode evidence.") }
   if ($IsOnlineBootstrapper) { $Warnings.Add("This setup is a tagged online bootstrapper. Outer version '$($VersionInfo.ProductVersion)' belongs to the updater and is not target-application version evidence; final version, ARP, and switch behavior require target-package evidence.") }
   if ($Variant -eq 'Omaha' -and -not $OfflineManifest) { $Warnings.Add('Omaha executes the first EXE in its decoded TAR payload. Expand and analyze that file before composing nested installer switches.') }
   if ($Variant -eq 'Omaha' -and -not $Tag.IsTagged) { $Warnings.Add('This is an untagged Omaha runtime installer. Its /install runtime tag controls user versus machine scope; do not substitute Chromium Updater --system switches.') }
@@ -654,6 +1372,7 @@ function Get-ChromiumSetupInfoFromContext {
     Publisher                  = $VersionInfo.CompanyName
     OriginalFilename           = $VersionInfo.OriginalFilename
     ProductCode                = $ProductCode
+    ProductCodeSource          = $ProductCodeSource
     ApplicationId              = $Tag.ApplicationId
     ArchiveResourceName        = $MiniArchiveResourceName
     SetupResourceName          = $MiniSetupResourceName
@@ -666,6 +1385,8 @@ function Get-ChromiumSetupInfoFromContext {
     OfflineManifestChecked     = $OfflineManifestChecked
     UpdaterTag                 = $Tag
     OfflineManifest            = $OfflineManifest
+    NestedSetupInfo            = $NestedSetupInfo
+    InstallModes               = if ($NestedSetupInfo -and $NestedSetupInfo.PSObject.Properties['InstallModes']) { @($NestedSetupInfo.InstallModes) } else { @() }
     Resources                  = $ResourceInfo.ToArray()
     NestedFiles                = $NestedFiles.ToArray()
     ExtractedFiles             = $NestedFiles.ToArray()
@@ -684,8 +1405,8 @@ function Get-ChromiumSetupInfoFromContext {
     Warnings                   = $Warnings.ToArray()
     ParserVersionInfo          = [pscustomobject]@{
       Parser      = 'Dumplings.PackageModule.ChromiumSetup'
-      ParserMajor = 2
-      Sources     = @('Chromium mini_installer B7, BL, and BN resource precedence', 'Chromium Updater metainstaller resources and UTF-8 or UTF-16 certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload and OfflineManifest.gup', 'Brave install-mode app GUID and uninstall-key definitions', 'Microsoft Edge UTF-16 certificate tag and documented WebView2 client identity')
+      ParserMajor = 3
+      Sources     = @('Chromium mini_installer B7, BL, and BN resource precedence', 'Chromium install_static InstallConstants and GetUninstallRegistryPath construction', 'Chromium Updater metainstaller resources and UTF-8 or UTF-16 certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload and OfflineManifest.gup target execution', 'Microsoft Edge UTF-16 certificate tag framing')
     }
   }
 }
@@ -715,11 +1436,11 @@ function Get-ChromiumSetupInfo {
 function Resolve-ChromiumSetupProductCode {
   <#
   .SYNOPSIS
-    Resolve a Chromium-family ARP key from deterministic branding and switches
+    Resolve a Chromium-family ARP key from parsed install modes and switches
   .DESCRIPTION
-    Vivaldi has one product-specific uninstall key across its mini-installer
-    channels. Google uses the same mini-installer layout for multiple Chrome
-    channels, whose command-line switches select different uninstall keys.
+    Chromium's kInstallModes table supplies each source-defined selector and
+    uninstall suffix. Legacy Chromium forks expose their selected product code
+    through Get-ChromiumSetupInfo's corroborated switch and registry evidence.
   .PARAMETER Info
     The result returned by Get-ChromiumSetupInfo
   .PARAMETER InstallerSwitches
@@ -731,46 +1452,36 @@ function Resolve-ChromiumSetupProductCode {
     [Parameter(Mandatory)][System.Collections.IDictionary]$InstallerSwitches
   )
 
-  # Prefer explicit parser identity. Product-specific channel rules are used only for bare
-  # mini-installers whose ARP key is selected by command-line switches.
+  # Prefer explicit parser identity. A bare mini-installer may expose several source-defined modes,
+  # in which case the manifest switches select the effective uninstall suffix.
   $MetadataProperty = $Info.PSObject.Properties['Metadata']
   $IdentityInfo = if ($MetadataProperty -and $MetadataProperty.Value) { $MetadataProperty.Value } else { $Info }
   $ProductCodeProperty = $IdentityInfo.PSObject.Properties['ProductCode']
-  if ($ProductCodeProperty -and -not [string]::IsNullOrWhiteSpace([string]$ProductCodeProperty.Value)) {
-    return [string]$ProductCodeProperty.Value
-  }
+  $ExplicitProductCode = if ($ProductCodeProperty -and -not [string]::IsNullOrWhiteSpace([string]$ProductCodeProperty.Value)) { [string]$ProductCodeProperty.Value } else { $null }
   if ($IdentityInfo.Variant -cne 'ChromiumMiniInstaller') {
-    return $null
+    return $ExplicitProductCode
   }
 
-  $ArchiveResourceName = $IdentityInfo.PSObject.Properties.Name -contains 'ArchiveResourceName' ? [string]$IdentityInfo.ArchiveResourceName : ''
-  if (([string]$IdentityInfo.Publisher).TrimEnd('.') -ceq 'Vivaldi Technologies AS' -and
-    $IdentityInfo.ProductName -ceq 'Vivaldi Installer' -and
-    $ArchiveResourceName -match '(?i)^vivaldi(?:\.packed)?\.7z$') {
-    return 'Vivaldi'
+  $ModesProperty = $IdentityInfo.PSObject.Properties['InstallModes']
+  $InstallModes = if ($ModesProperty -and $ModesProperty.Value) { @($ModesProperty.Value) } else { @() }
+  if ($InstallModes.Count -gt 0) {
+    $SwitchValues = [Collections.Generic.List[string]]::new()
+    foreach ($Value in $InstallerSwitches.Values) { if ($Value -is [string]) { $SwitchValues.Add($Value) } }
+    $CommandLine = [string]::Join(' ', $SwitchValues)
+    $SelectedModes = [Collections.Generic.List[object]]::new()
+    foreach ($Mode in $InstallModes) {
+      if ([string]::IsNullOrWhiteSpace([string]$Mode.InstallSwitch)) { continue }
+      $Selector = "--$($Mode.InstallSwitch)"
+      if ($CommandLine -match "(?i)(?<![A-Za-z0-9-])$([regex]::Escape($Selector))(?![A-Za-z0-9-])") { $SelectedModes.Add($Mode) }
+    }
+    # Contradictory mode selectors are not resolved by ordering; manifest validation must fix them.
+    if ($SelectedModes.Count -gt 1) { return $null }
+    if ($SelectedModes.Count -eq 1) { return [string]$SelectedModes[0].ProductCode }
+    $PrimaryMode = @($InstallModes | Where-Object Index -EQ 0)[0]
+    if ($PrimaryMode -and -not [string]::IsNullOrWhiteSpace([string]$PrimaryMode.ProductCode)) { return [string]$PrimaryMode.ProductCode }
   }
 
-  if ($IdentityInfo.Publisher -cne 'Google LLC' -or $IdentityInfo.ProductName -cne 'Google Chrome Installer') { return $null }
-
-  $SwitchValues = [Collections.Generic.List[string]]::new()
-  foreach ($Value in $InstallerSwitches.Values) { if ($Value -is [string]) { $SwitchValues.Add($Value) } }
-  $CommandLine = [string]::Join(' ', $SwitchValues)
-  # Multiple channel selectors are contradictory, so return no ProductCode instead of choosing one.
-  $Channels = @(
-    [pscustomobject]@{ Switch = '--chrome-sxs'; ProductCode = 'Google Chrome SxS' }
-    [pscustomobject]@{ Switch = '--chrome-beta'; ProductCode = 'Google Chrome Beta' }
-    [pscustomobject]@{ Switch = '--chrome-dev'; ProductCode = 'Google Chrome Dev' }
-  )
-  $SelectedChannel = $null
-  foreach ($Channel in $Channels) {
-    if ($CommandLine -notmatch "(?i)(?<!\S)$([regex]::Escape($Channel.Switch))(?!\S)") { continue }
-    if ($SelectedChannel) { return $null }
-    $SelectedChannel = $Channel
-  }
-  if ($SelectedChannel) { return $SelectedChannel.ProductCode }
-
-  # An unqualified Google Chrome mini-installer selects the stable channel.
-  return 'Google Chrome'
+  return $ExplicitProductCode
 }
 
 function Open-ChromiumOmahaArchive {

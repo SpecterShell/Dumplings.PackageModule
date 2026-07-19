@@ -762,6 +762,10 @@ Describe 'WinGet installer manifest metadata updates' {
                 ProductCode    = $null
                 DisplayName    = 'Google Chrome Installer'
                 DisplayVersion = '152.0.7953.0'
+                InstallModes   = @(
+                  [pscustomobject]@{ Index = 0; InstallSwitch = ''; ProductCode = 'Google Chrome' }
+                  [pscustomobject]@{ Index = 1; InstallSwitch = 'chrome-sxs'; ProductCode = 'Google Chrome SxS' }
+                )
               }
             })
           FamilyCandidates = @()
