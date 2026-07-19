@@ -37,6 +37,84 @@ function Get-WinGetLocalRepoPath {
 
 $GitHubTokenUsername = $null
 
+function Get-WinGetPullRequestConflictInfo {
+  <#
+  .SYNOPSIS
+    Classify matching WinGet pull requests for duplicate-submission handling.
+  .DESCRIPTION
+    Pull requests created by the GitHub token owner are always classified as
+    self-authored and never block submission. When a blocking-user list is in
+    use, only other authors in that case-insensitive list block submission.
+    Without a configured list, every other pull request blocks as before.
+  .PARAMETER PullRequest
+    Matching open pull request objects returned by the GitHub search API.
+  .PARAMETER TokenUsername
+    Login associated with the GitHub API token. Matching pull requests are
+    excluded from blocking even if the login also appears in BlockingUsername.
+  .PARAMETER BlockingUsername
+    Optional GitHub logins whose pull requests should block submission.
+  .PARAMETER UseConfiguredBlockingUsers
+    Apply BlockingUsername as an allowlist of blocking authors. Without this
+    switch, all authors other than TokenUsername are considered blocking.
+  .OUTPUTS
+    An object containing SelfPullRequests, BlockingPullRequests,
+    IgnoredPullRequests, and the normalized configured usernames.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(ValueFromPipeline)]
+    [AllowNull()]
+    [object[]]$PullRequest,
+    [AllowNull()]
+    [string]$TokenUsername,
+    [AllowNull()]
+    [AllowEmptyCollection()]
+    [object[]]$BlockingUsername,
+    [switch]$UseConfiguredBlockingUsers
+  )
+
+  begin {
+    # GitHub logins are case-insensitive, so normalize membership through an
+    # ordinal-ignore-case set while retaining the API objects for diagnostics.
+    $ConfiguredUsers = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($Username in @($BlockingUsername)) {
+      if (-not [string]::IsNullOrWhiteSpace([string]$Username)) {
+        $null = $ConfiguredUsers.Add(([string]$Username).Trim())
+      }
+    }
+    $SelfPullRequests = [System.Collections.Generic.List[object]]::new()
+    $BlockingPullRequests = [System.Collections.Generic.List[object]]::new()
+    $IgnoredPullRequests = [System.Collections.Generic.List[object]]::new()
+  }
+
+  process {
+    foreach ($Item in @($PullRequest)) {
+      if ($null -eq $Item) { continue }
+      $Author = [string]$Item.user.login
+
+      # The token owner's PRs are managed after submission and never represent
+      # a competing submission, regardless of the configured blocking list.
+      if (-not [string]::IsNullOrWhiteSpace($TokenUsername) -and $Author -ieq $TokenUsername) {
+        $SelfPullRequests.Add($Item)
+      } elseif (-not $UseConfiguredBlockingUsers -or $ConfiguredUsers.Contains($Author)) {
+        $BlockingPullRequests.Add($Item)
+      } else {
+        $IgnoredPullRequests.Add($Item)
+      }
+    }
+  }
+
+  end {
+    [pscustomobject]@{
+      SelfPullRequests        = $SelfPullRequests.ToArray()
+      BlockingPullRequests    = $BlockingPullRequests.ToArray()
+      IgnoredPullRequests     = $IgnoredPullRequests.ToArray()
+      ConfiguredBlockingUsers = @($ConfiguredUsers | Sort-Object)
+      UsesConfiguredUserList  = [bool]$UseConfiguredBlockingUsers
+    }
+  }
+}
+
 function Send-WinGetManifest {
   <#
   .SYNOPSIS
@@ -96,7 +174,8 @@ function Send-WinGetManifest {
     #region Check existing pull requests in the upstream repo
     $PullRequests = $null
     $SelfPullRequests = $null
-    $OtherPullRequests = $null
+    $BlockingPullRequests = $null
+    $IgnoredPullRequests = $null
     if ($Global:DumplingsPreference['SkipPRCheck'] -or $Task.Config['SkipPRCheck']) { $Task.Log('Skip checking pull requests in the upstream repo as configured', 'Info') }
     elseif ($Global:DumplingsPreference['Dry']) { $Task.Log('Skip checking pull requests in the upstream repo in dry mode', 'Info') }
     else {
@@ -107,12 +186,24 @@ function Send-WinGetManifest {
         $Task.Log("Failed to check existing pull requests in the upstream repo: ${_}", 'Warning')
       }
       if ($PullRequests) {
+        # A null or absent preference preserves the legacy all-other-users
+        # behavior. An explicitly empty YAML list intentionally blocks nobody.
+        $ConfiguredBlockingUsers = $Global:DumplingsPreference['WinGetBlockingPullRequestUsers']
+        $UseConfiguredBlockingUsers = $null -ne $ConfiguredBlockingUsers
+        $PullRequestInfo = Get-WinGetPullRequestConflictInfo -PullRequest $PullRequests -TokenUsername $Script:GitHubTokenUsername -BlockingUsername @($ConfiguredBlockingUsers) -UseConfiguredBlockingUsers:$UseConfiguredBlockingUsers
+        $SelfPullRequests = $PullRequestInfo.SelfPullRequests
+        $BlockingPullRequests = $PullRequestInfo.BlockingPullRequests
+        $IgnoredPullRequests = $PullRequestInfo.IgnoredPullRequests
+
         $PullRequestsMessage = "Found existing pull requests in the upstream repo ${UpstreamRepoOwner}/${UpstreamRepoName}."
-        if ($Script:GitHubTokenUsername -and ($SelfPullRequests = $PullRequests | Where-Object -FilterScript { $_.user.login -ceq $Script:GitHubTokenUsername })) {
+        if ($SelfPullRequests) {
           $PullRequestsMessage += "`nPull requests created by the user (${Script:GitHubTokenUsername}):`n$($SelfPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
         }
-        if ($OtherPullRequests = $PullRequests | Where-Object -FilterScript { -not ($Script:GitHubTokenUsername) -or $_.user.login -cne $Script:GitHubTokenUsername }) {
-          $PullRequestsMessage += "`nPull requests created by other users:`n$($OtherPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url)" } | Join-String -Separator "`n")"
+        if ($BlockingPullRequests) {
+          $PullRequestsMessage += "`nPull requests that block submission:`n$($BlockingPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url) (@$($_.user.login))" } | Join-String -Separator "`n")"
+        }
+        if ($IgnoredPullRequests) {
+          $PullRequestsMessage += "`nPull requests ignored because their authors are not configured to block submission:`n$($IgnoredPullRequests | Select-Object -First 3 | ForEach-Object -Process { "$($_.title) - $($_.html_url) (@$($_.user.login))" } | Join-String -Separator "`n")"
         }
         if ($Global:DumplingsPreference['Force']) {
           $PullRequestsMessage += "`nThe existing pull requests will be ignored in force mode"
@@ -120,11 +211,12 @@ function Send-WinGetManifest {
         } elseif ($Global:DumplingsPreference['IgnorePRCheck'] -or $Task.Config['IgnorePRCheck']) {
           $PullRequestsMessage += "`nThe existing pull requests will be ignored as configured"
           $Task.Log($PullRequestsMessage, 'Warning')
-        } elseif ($OtherPullRequests) {
+        } elseif ($BlockingPullRequests) {
           $PullRequestsMessage += "`nThe process will be terminated"
           throw $PullRequestsMessage
         } else {
-          $PullRequestsMessage += "`nThe existing pull requests created by the user will be closed"
+          if ($SelfPullRequests) { $PullRequestsMessage += "`nThe existing pull requests created by the token user will be closed" }
+          if ($IgnoredPullRequests) { $PullRequestsMessage += "`nThe non-blocking pull requests will be ignored" }
           $Task.Log($PullRequestsMessage, 'Info')
         }
       }
