@@ -30,7 +30,10 @@ BeforeAll {
   }
 
   function New-TestCreateInstallFixture {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+      [Parameter(Mandatory)][string]$Path,
+      [ValidateRange(0, 1048576)][int]$PrefixLength = 512
+    )
 
     $Content = [Text.Encoding]::UTF8.GetBytes('static CreateInstall payload')
     $MetadataStream = [IO.MemoryStream]::new()
@@ -47,12 +50,12 @@ BeforeAll {
     $Metadata = $MetadataStream.ToArray()
     $HeaderSize = 74 + $Metadata.Length
     $SummarySize = 9 + $Content.Length
-    $ArchiveFileSize = 512 + $HeaderSize + $SummarySize
+    $ArchiveFileSize = $PrefixLength + $HeaderSize + $SummarySize
 
     $Output = [IO.MemoryStream]::new()
     $Writer = [IO.BinaryWriter]::new($Output, [Text.Encoding]::UTF8, $true)
     try {
-      $Writer.Write([byte[]]::new(512))
+      $Writer.Write([byte[]]::new($PrefixLength))
       $Writer.Write([Text.Encoding]::ASCII.GetBytes("GEA`0"))
       $Writer.Write([uint16]0)
       $Writer.Write([uint32]0x12345678)
@@ -257,6 +260,47 @@ Describe 'CreateInstall static parser' {
       [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Decoded)) |
         Should -Be 'F28B2E9BAF05FFC72B3059C354EA35A10AA65AE3A574B7110885545699B265CD'
     }
+  }
+
+  It 'Should parse a standalone GEA image such as the SETUP_TEMP resource' {
+    $FixturePath = Join-Path $Script:FixtureDirectory 'synthetic-createinstall-standalone.gea'
+    New-TestCreateInstallFixture -Path $FixturePath -PrefixLength 0
+
+    InModuleScope CreateInstall -Parameters @{ FixturePath = $FixturePath } {
+      param($FixturePath)
+      $Layout = Get-CreateInstallArchiveLayout -Path $FixturePath
+
+      $Layout.ArchiveOffset | Should -Be 0
+      $Layout.Entries.FullName | Should -Be @('payload.txt')
+    }
+  }
+
+  It 'Should derive Balabolka ARP identity from its compiled addremoveext call' {
+    $FixturePath = Join-Path $Script:FixtureDirectory 'CrossPlusA.Balabolka.setup.exe'
+    if (-not (Test-Path -LiteralPath $FixturePath)) { Set-ItResult -Skipped -Because 'The official Balabolka CreateInstall fixture is not cached.'; return }
+
+    $Info = Get-CreateInstallInfo -Path $FixturePath
+
+    $Info.ProductCode | Should -Be 'Balabolka'
+    $Info.ProductCodeEvidence | Should -Be 'Compiled Gentee addremoveext uninstall-key argument'
+    $Info.Scope | Should -Be 'machine'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.UninstallRegistrations.UninstallKeyName | Should -Be @('Balabolka')
+    $Info.GEA.UnsupportedCompressionMethods | Should -Contain 'PPMd'
+    $Info.CanExpand | Should -BeFalse
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should derive the builder ARP identity without package-specific rules' {
+    $FixturePath = Join-Path $Script:FixtureDirectory 'Novostrim.CreateInstall.8.11.2.exe'
+    if (-not (Test-Path -LiteralPath $FixturePath)) { Set-ItResult -Skipped -Because 'The official CreateInstall builder fixture is not cached.'; return }
+
+    $Info = Get-CreateInstallInfo -Path $FixturePath
+
+    $Info.ProductCode | Should -Be 'CreateInstall'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.UninstallRegistrations.Count | Should -Be 1
+    $Info.Warnings | Should -BeNullOrEmpty
   }
 }
 

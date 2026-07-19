@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: MIT
-# Static CreateInstall parser for Gentee GEA v2 archives. The container logic
-# is PowerShell; the adaptive-Huffman LZGE decoder is an attributed MIT asset.
-# Binary structure consumed here (overlay-relative, LE integers):
+# Static CreateInstall parser for Gentee launcher programs and GEA v2 archives.
+# The container logic is PowerShell; the adaptive-Huffman LZGE decoder is an
+# attributed MIT asset. Binary structures consumed here use LE integers:
 #
-#   PE setup -> GEA overlay
+#   PE setup
+#     +-- .gentee section
+#     |   +-- optional embedded runtime DLL
+#     |   `-- [expanded-size:u32][LZGE-compressed GE program]
+#     `-- GEA overlay
 #     +00 47 45 41 00 ("GEA\0")
 #     +04 volume:u16, +06 id:u32, +0A/+0B version bytes
 #     +14 flags:u32, +1A header-size:u32, +1E summary-size:i64
@@ -12,7 +16,11 @@
 #     `-- catalog -> [order:u8][packed-size:u32/u64][packed data]*
 #
 # Integers are LE. GEA v1 uses 32-bit file/block sizes; v2 uses 64-bit sizes.
-# Password and unsupported PPMd records are reported rather than bypassed.
+# The launcher header is identified by "Gentee Launcher\0" and records the
+# runtime/program sizes and the header's own file offset. The decoded GE program
+# is a sequence of bounded object records; direct calls to CreateInstall's
+# source-verified addremoveext routine provide visible uninstall-key evidence.
+# Password and unsupported PPMd records are never bypassed.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -21,6 +29,7 @@ $Script:CreateInstallMaximumHeaderBytes = 268435456
 $Script:CreateInstallMaximumInfoBytes = 268435456
 $Script:CreateInstallMaximumEntries = 1000000
 $Script:CreateInstallMaximumBlockBytes = 268435456
+$Script:CreateInstallMaximumGenteeBytes = 67108864
 $Script:CreateInstallFlagPassword = 0x0001
 $Script:CreateInstallFlagCompressedInfo = 0x0002
 $Script:CreateInstallFileFlagAttribute = 0x0001
@@ -29,6 +38,19 @@ $Script:CreateInstallFileFlagVersion = 0x0020
 $Script:CreateInstallFileFlagGroup = 0x0040
 $Script:CreateInstallFileFlagProtect = 0x0080
 $Script:CreateInstallFileFlagSolid = 0x0100
+# Gentee 4.0 stores VM command operands according to this 218-entry shift table.
+# Values 3/5/8 consume one BWD operand and 7/11 consume two; other values have
+# no generic operand. Commands with raw or length-delimited operands are handled
+# separately by Read-CreateInstallGenteeCommands.
+$Script:CreateInstallGenteeCommandShift = [byte[]](
+  6, 5, 5, 5, 3, 5, 3, 6, 6, 8, 8, 8, 11, 6, 8, 8, 6, 4, 6, 4, 9, 10, 9, 4, 6, 6, 6, 6, 6, 9, 4, 4,
+  4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+  5, 9, 4, 8, 5, 5, 5, 6, 5, 7, 6, 5, 4, 2, 4, 4, 4, 4, 4, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+  4, 4, 4, 4, 4, 4, 4, 6, 9, 6, 9, 9, 6, 9, 6, 4, 4, 9, 6, 9, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1,
+  1, 6, 9, 9, 9, 9, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 2, 2, 2, 2, 2, 6, 1, 1, 4, 4, 4, 4, 4, 4, 4, 4,
+  4, 6, 4, 4, 4, 6, 6, 6, 6, 4, 4, 4, 4, 2, 2, 2, 2, 6, 1, 1, 1, 9, 9, 9, 9, 4, 4, 4, 4, 6, 6, 6,
+  6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 6, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5
+)
 
 function Import-CreateInstallLzgeDecoder {
   <#
@@ -39,6 +61,375 @@ function Import-CreateInstallLzgeDecoder {
     $SourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Assets', 'GenteeLzgeDecoder.cs'
     if (-not (Test-Path -LiteralPath $SourcePath)) { throw "The Gentee LZGE decoder source is missing: $SourcePath" }
     Add-Type -Path $SourcePath
+  }
+}
+
+function Read-CreateInstallGenteeBwd {
+  <#
+  .SYNOPSIS
+    Read one bounded Gentee variable-width unsigned integer.
+  .PARAMETER Bytes
+    Decoded GE program bytes. The array is not modified.
+  .PARAMETER Cursor
+    Mutable object with a Value property containing the current GE-relative byte offset.
+  .PARAMETER Limit
+    Exclusive GE-relative end offset for the containing record.
+  #>
+  [OutputType([uint32])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][psobject]$Cursor,
+    [Parameter(Mandatory)][int]$Limit
+  )
+
+  if ($Cursor.Value -lt 0 -or $Cursor.Value -ge $Limit -or $Limit -gt $Bytes.Length) { throw 'The Gentee BWD value is outside its record' }
+  $Lead = $Bytes[$Cursor.Value]
+  $Cursor.Value++
+  if ($Lead -le 187) { return [uint32]$Lead }
+  if ($Lead -eq 254) {
+    if ($Cursor.Value + 2 -gt $Limit) { throw 'The Gentee BWD uint16 is truncated' }
+    $Value = [BitConverter]::ToUInt16($Bytes, $Cursor.Value)
+    $Cursor.Value += 2
+    return [uint32]$Value
+  }
+  if ($Lead -eq 255) {
+    if ($Cursor.Value + 4 -gt $Limit) { throw 'The Gentee BWD uint32 is truncated' }
+    $Value = [BitConverter]::ToUInt32($Bytes, $Cursor.Value)
+    $Cursor.Value += 4
+    return $Value
+  }
+  if ($Cursor.Value -ge $Limit) { throw 'The Gentee two-byte BWD value is truncated' }
+  $Value = (255 * ($Lead - 188)) + $Bytes[$Cursor.Value]
+  $Cursor.Value++
+  return [uint32]$Value
+}
+
+function Read-CreateInstallGenteeString {
+  <#
+  .SYNOPSIS
+    Read one bounded null-terminated UTF-8 string from a GE object record.
+  .PARAMETER Bytes
+    Decoded GE program bytes. The array is not modified.
+  .PARAMETER Cursor
+    Mutable object with a Value property containing the current GE-relative byte offset.
+  .PARAMETER Limit
+    Exclusive GE-relative end offset for the containing record.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][psobject]$Cursor,
+    [Parameter(Mandatory)][int]$Limit
+  )
+
+  if ($Cursor.Value -lt 0 -or $Cursor.Value -ge $Limit -or $Limit -gt $Bytes.Length) { throw 'The Gentee string is outside its record' }
+  $End = [Array]::IndexOf($Bytes, [byte]0, $Cursor.Value, $Limit - $Cursor.Value)
+  if ($End -lt 0) { throw 'The Gentee object contains an unterminated string' }
+  $Value = [Text.Encoding]::UTF8.GetString($Bytes, $Cursor.Value, $End - $Cursor.Value)
+  $Cursor.Value = $End + 1
+  return $Value
+}
+
+function Move-CreateInstallGenteeVariable {
+  <#
+  .SYNOPSIS
+    Advance over one serialized Gentee variable descriptor.
+  .PARAMETER Bytes
+    Decoded GE program bytes. The array is not modified.
+  .PARAMETER Cursor
+    Mutable object with a Value property containing the current GE-relative byte offset.
+  .PARAMETER Limit
+    Exclusive GE-relative end offset for the containing record.
+  #>
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [Parameter(Mandatory)][psobject]$Cursor,
+    [Parameter(Mandatory)][int]$Limit
+  )
+
+  $Type = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Limit
+  if ($Cursor.Value -ge $Limit) { throw 'The Gentee variable flags are truncated' }
+  $Flags = $Bytes[$Cursor.Value]
+  $Cursor.Value++
+  if (($Flags -band 0x01) -ne 0) { $null = Read-CreateInstallGenteeString -Bytes $Bytes -Cursor $Cursor -Limit $Limit }
+  if (($Flags -band 0x02) -ne 0) { $null = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Limit }
+  if (($Flags -band 0x04) -ne 0) {
+    if ($Cursor.Value -ge $Limit) { throw 'The Gentee variable dimensions are truncated' }
+    $DimensionCount = $Bytes[$Cursor.Value]
+    $Cursor.Value++
+    for ($Index = 0; $Index -lt $DimensionCount; $Index++) { $null = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Limit }
+  }
+  if (($Flags -band 0x20) -eq 0) { return }
+
+  # Primitive VM types store their fixed-width value directly. Strings are null terminated;
+  # dynamically sized values carry a BWD length before their bytes.
+  $PrimitiveSize = switch ($Type) {
+    { $_ -in @(1, 2, 7, 11) } { 4; break }
+    { $_ -in @(3, 4) } { 1; break }
+    { $_ -in @(5, 6) } { 2; break }
+    { $_ -in @(8, 9, 10) } { 8; break }
+    default { $null }
+  }
+  if ($Type -eq 13) {
+    $null = Read-CreateInstallGenteeString -Bytes $Bytes -Cursor $Cursor -Limit $Limit
+  } elseif ($null -ne $PrimitiveSize) {
+    if ($Cursor.Value + $PrimitiveSize -gt $Limit) { throw 'The Gentee primitive variable data is truncated' }
+    $Cursor.Value += $PrimitiveSize
+  } else {
+    $DataSize = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Limit
+    if ($DataSize -gt $Limit - $Cursor.Value) { throw 'The Gentee variable data exceeds its record' }
+    $Cursor.Value += [int]$DataSize
+  }
+}
+
+function Get-CreateInstallGenteeRecord {
+  <#
+  .SYNOPSIS
+    Enumerate bounded objects in a decoded Gentee 4.0 program.
+  .PARAMETER Bytes
+    Complete decoded GE program beginning with the GE header.
+  #>
+  [OutputType([pscustomobject[]])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes)
+
+  if ($Bytes.Length -lt 22 -or [BitConverter]::ToUInt32($Bytes, 0) -ne 0x00004547) { throw 'The decoded CreateInstall program does not have a Gentee GE header' }
+  $HeaderSize = [BitConverter]::ToUInt32($Bytes, 12)
+  $ProgramSize = [BitConverter]::ToUInt32($Bytes, 16)
+  if ($HeaderSize -lt 22 -or $HeaderSize -gt $ProgramSize -or $ProgramSize -gt $Bytes.Length -or $ProgramSize -gt $Script:CreateInstallMaximumGenteeBytes) { throw 'The Gentee GE header declares invalid bounds' }
+  if ($Bytes[20] -ne 4) { throw "Unsupported Gentee GE major version '$($Bytes[20])'" }
+
+  $Records = [System.Collections.Generic.List[object]]::new()
+  $Offset = [int]$HeaderSize
+  $NextObjectId = 1024
+  while ($Offset -lt $ProgramSize) {
+    if ($Records.Count -ge $Script:CreateInstallMaximumEntries -or $Offset + 6 -gt $ProgramSize) { throw 'The Gentee object table is truncated or excessive' }
+    $Type = $Bytes[$Offset]
+    $Flags = [BitConverter]::ToUInt32($Bytes, $Offset + 1)
+    $Cursor = [pscustomobject]@{ Value = $Offset + 5 }
+    $RecordSize = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $ProgramSize
+    if ($RecordSize -lt $Cursor.Value - $Offset -or $RecordSize -gt $ProgramSize - $Offset) { throw 'A Gentee object record exceeds the GE program' }
+    $EndOffset = $Offset + [int]$RecordSize
+    $Name = if (($Flags -band 0x0001) -ne 0) { Read-CreateInstallGenteeString -Bytes $Bytes -Cursor $Cursor -Limit $EndOffset } else { $null }
+    # The leading resource record is serialized outside the VM object table. All following records
+    # retain their VM identifiers beginning at KERNEL_COUNT (1024).
+    $ObjectId = if ($Type -eq 9) { $null } else { $CurrentId = $NextObjectId; $NextObjectId++; $CurrentId }
+    $Records.Add([pscustomobject]@{
+        Id            = $ObjectId
+        Type          = [int]$Type
+        Flags         = [uint32]$Flags
+        Name          = $Name
+        Offset        = $Offset
+        PayloadOffset = [int]$Cursor.Value
+        EndOffset     = $EndOffset
+        Size          = [int]$RecordSize
+      })
+    $Offset = $EndOffset
+  }
+  if ($Offset -ne $ProgramSize) { throw 'The Gentee object records do not end at the declared program size' }
+  return $Records.ToArray()
+}
+
+function Get-CreateInstallGenteeProgram {
+  <#
+  .SYNOPSIS
+    Decode the bounded Gentee program embedded in a CreateInstall PE section.
+  .PARAMETER Path
+    Path to a CreateInstall setup executable. The file is opened read-only and never executed.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  Import-CreateInstallLzgeDecoder
+  $File = Get-Item -LiteralPath $Path -Force
+  $Layout = Get-PELayout -Path $File.FullName
+  $Section = @($Layout.Sections | Where-Object Name -EQ '.gentee')
+  if ($Section.Count -ne 1) { throw 'The CreateInstall PE does not contain one .gentee section' }
+  $LauncherSignature = [Text.Encoding]::ASCII.GetBytes("Gentee Launcher`0")
+  $SearchLength = [Math]::Min(131072L, $File.Length)
+  $HeaderOffsets = @(Find-BinaryPattern -Path $File.FullName -Pattern $LauncherSignature -Length $SearchLength -Maximum 4)
+  if ($HeaderOffsets.Count -ne 1) { throw 'The Gentee launcher header could not be identified uniquely' }
+
+  $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    # linkhead is packed: three byte fields precede an unaligned ushort and uint fields.
+    $Header = Read-BinaryBytes -Stream $Stream -Offset $HeaderOffsets[0] -Count 113
+    $Packed = $Header[26] -ne 0
+    $RuntimeSize = [BitConverter]::ToUInt32($Header, 29)
+    $ProgramRangeSize = [BitConverter]::ToUInt32($Header, 33)
+    $RecordedHeaderOffset = [BitConverter]::ToUInt32($Header, 45)
+    if ($RecordedHeaderOffset -ne $HeaderOffsets[0] -or $ProgramRangeSize -le 0 -or $ProgramRangeSize -gt $Script:CreateInstallMaximumGenteeBytes) { throw 'The Gentee launcher header has invalid program bounds' }
+    if ($RuntimeSize -gt $Section[0].RawSize -or $ProgramRangeSize -gt $Section[0].RawSize - $RuntimeSize) { throw 'The Gentee launcher program exceeds the .gentee section' }
+    $ProgramRange = Read-BinaryBytes -Stream $Stream -Offset ($Section[0].RawOffset + $RuntimeSize) -Count ([int]$ProgramRangeSize)
+  } finally { $Stream.Dispose() }
+
+  if ($Packed) {
+    if ($ProgramRange.Length -lt 5) { throw 'The packed Gentee program is truncated' }
+    $ExpandedSize = [BitConverter]::ToUInt32($ProgramRange, 0)
+    if ($ExpandedSize -lt 22 -or $ExpandedSize -gt $Script:CreateInstallMaximumGenteeBytes) { throw 'The packed Gentee program declares an invalid expanded size' }
+    $Compressed = [byte[]]::new($ProgramRange.Length - 4)
+    [Array]::Copy($ProgramRange, 4, $Compressed, 0, $Compressed.Length)
+    $ProgramBytes = [Dumplings.Gentee.LzgeDecoder]::Decode($Compressed, [int]$ExpandedSize)
+  } else {
+    $ProgramBytes = $ProgramRange
+  }
+  $Records = @(Get-CreateInstallGenteeRecord -Bytes $ProgramBytes)
+  return [pscustomobject]@{
+    Bytes             = $ProgramBytes
+    Records           = $Records
+    LauncherOffset    = [long]$HeaderOffsets[0]
+    SectionOffset     = [long]$Section[0].RawOffset
+    RuntimeSize       = [long]$RuntimeSize
+    StoredProgramSize = [long]$ProgramRangeSize
+    ProgramSize       = [long]$ProgramBytes.Length
+    Packed            = $Packed
+    VersionMajor      = [int]$ProgramBytes[20]
+    VersionMinor      = [int]$ProgramBytes[21]
+  }
+}
+
+function Get-CreateInstallGenteeCommand {
+  <#
+  .SYNOPSIS
+    Decode command boundaries and literal operands from one GE bytecode record.
+  .PARAMETER Program
+    Decoded Gentee program and object records returned by Get-CreateInstallGenteeProgram.
+  .PARAMETER Record
+    One OVM_BYTECODE record from the decoded GE program.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][psobject]$Program,
+    [Parameter(Mandatory)][psobject]$Record
+  )
+
+  if ($Record.Type -ne 3) { return @() }
+  $Bytes = $Program.Bytes
+  $Cursor = [pscustomobject]@{ Value = [int]$Record.PayloadOffset }
+  # A bytecode object begins with its return descriptor, parameter descriptors, and grouped local
+  # descriptors. Commands occupy the remaining bytes in the record.
+  Move-CreateInstallGenteeVariable -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+  $ParameterCount = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+  for ($Index = 0; $Index -lt $ParameterCount; $Index++) { Move-CreateInstallGenteeVariable -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset }
+  $SetCount = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+  $VariableCount = 0L
+  for ($Index = 0; $Index -lt $SetCount; $Index++) { $VariableCount += Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset }
+  if ($VariableCount -gt 1000000) { throw 'The Gentee bytecode declares excessive local variables' }
+  for ($Index = 0; $Index -lt $VariableCount; $Index++) { Move-CreateInstallGenteeVariable -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset }
+
+  $Commands = [System.Collections.Generic.List[object]]::new()
+  while ($Cursor.Value -lt $Record.EndOffset) {
+    $CommandOffset = $Cursor.Value
+    $Command = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+    $Operand = $null
+    if ($Command -ge 18 -and $Command -lt 236) {
+      switch ($Command) {
+        25 { if ($Cursor.Value + 1 -gt $Record.EndOffset) { throw 'A Gentee byte literal is truncated' }; $Operand = [uint32]$Bytes[$Cursor.Value]; $Cursor.Value++; break }
+        26 { if ($Cursor.Value + 2 -gt $Record.EndOffset) { throw 'A Gentee ushort literal is truncated' }; $Operand = [uint32][BitConverter]::ToUInt16($Bytes, $Cursor.Value); $Cursor.Value += 2; break }
+        27 { if ($Cursor.Value + 4 -gt $Record.EndOffset) { throw 'A Gentee uint literal is truncated' }; $Operand = [BitConverter]::ToUInt32($Bytes, $Cursor.Value); $Cursor.Value += 4; break }
+        30 { if ($Cursor.Value + 8 -gt $Record.EndOffset) { throw 'A Gentee ulong literal is truncated' }; $Operand = [BitConverter]::ToUInt64($Bytes, $Cursor.Value); $Cursor.Value += 8; break }
+        31 {
+          $Count = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+          if ($Count -gt ($Record.EndOffset - $Cursor.Value) / 4) { throw 'A Gentee command-list literal is truncated' }
+          $Operand = [uint32]$Count
+          $Cursor.Value += [int](4 * $Count)
+          break
+        }
+        { $_ -in @(28, 29, 85) } { $Operand = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset; break }
+        34 {
+          $Length = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+          if ($Length -gt $Record.EndOffset - $Cursor.Value) { throw 'A Gentee data literal exceeds its bytecode record' }
+          $Operand = [Text.Encoding]::UTF8.GetString($Bytes, $Cursor.Value, [int]$Length)
+          $Cursor.Value += [int]$Length
+          break
+        }
+        93 {
+          $Count = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+          if ($Count -gt ($Record.EndOffset - $Cursor.Value) / 4) { throw 'A Gentee assembler block is truncated' }
+          $Operand = [uint32]$Count
+          $Cursor.Value += [int](4 * $Count)
+          break
+        }
+        default {
+          $Shift = $Script:CreateInstallGenteeCommandShift[$Command - 18]
+          if ($Shift -in @(7, 11)) {
+            $Operand = @(
+              Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+              Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+            )
+          } elseif ($Shift -in @(3, 5, 8)) {
+            $Operand = Read-CreateInstallGenteeBwd -Bytes $Bytes -Cursor $Cursor -Limit $Record.EndOffset
+          }
+        }
+      }
+    }
+    $Commands.Add([pscustomobject]@{ Index = $Commands.Count; Offset = $CommandOffset; Command = [uint32]$Command; Operand = $Operand })
+  }
+  return $Commands.ToArray()
+}
+
+function Get-CreateInstallUninstallEvidence {
+  <#
+  .SYNOPSIS
+    Resolve source-verified CreateInstall Add/Remove calls from compiled GE bytecode.
+  .PARAMETER Path
+    Path to a CreateInstall setup executable. The file is opened read-only and never executed.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $Program = Get-CreateInstallGenteeProgram -Path $Path
+  $UninstallPath = [Text.Encoding]::ASCII.GetBytes('Software\Microsoft\Windows\CurrentVersion\Uninstall\')
+  $RequiredValueNames = @('UninstallString', 'DisplayName', 'NoModify', 'NoRepair')
+  $CandidateRoutines = @($Program.Records | Where-Object Type -EQ 3 | Where-Object {
+      $Record = $_
+      $PathMatch = @(Find-BinaryPattern -Bytes $Program.Bytes -Pattern $UninstallPath -StartOffset $Record.PayloadOffset -Length ($Record.EndOffset - $Record.PayloadOffset) -Maximum 1).Count -eq 1
+      if (-not $PathMatch) { return $false }
+      foreach ($ValueName in $RequiredValueNames) {
+        if (@(Find-BinaryPattern -Bytes $Program.Bytes -Pattern ([Text.Encoding]::ASCII.GetBytes($ValueName)) -StartOffset $Record.PayloadOffset -Length ($Record.EndOffset - $Record.PayloadOffset) -Maximum 1).Count -eq 0) { return $false }
+      }
+      return $true
+    })
+  if ($CandidateRoutines.Count -ne 1) { throw 'The compiled CreateInstall program does not identify one built-in Add/Remove routine' }
+
+  $Calls = [System.Collections.Generic.List[object]]::new()
+  foreach ($Record in @($Program.Records | Where-Object Type -EQ 3)) {
+    $Commands = @(Get-CreateInstallGenteeCommand -Program $Program -Record $Record)
+    for ($CommandIndex = 0; $CommandIndex -lt $Commands.Count; $CommandIndex++) {
+      if ($Commands[$CommandIndex].Command -ne $CandidateRoutines[0].Id) { continue }
+      # addremoveext receives four literal strings (key/display name, icon path, icon file, and
+      # estimated size) plus the current-user flag. Generated project code leaves those literals
+      # adjacent to the direct function call even when helper conversions use local variables.
+      $StringCommands = @($Commands[([Math]::Max(0, $CommandIndex - 64))..($CommandIndex - 1)] | Where-Object Command -EQ 34 | Select-Object -Last 4)
+      if ($StringCommands.Count -ne 4) { continue }
+      $CurrentUserCommands = @($Commands[($StringCommands[2].Index + 1)..($StringCommands[3].Index - 1)] | Where-Object { $_.Command -in @(25, 26, 27) -and $_.Operand -in @(0, 1) })
+      if ($CurrentUserCommands.Count -eq 0) { continue }
+      $Calls.Add([pscustomobject]@{
+          RoutineId         = [uint32]$CandidateRoutines[0].Id
+          CallerId          = [uint32]$Record.Id
+          CallerName        = $Record.Name
+          CallOffset        = [int]$Commands[$CommandIndex].Offset
+          UninstallKeyName  = [string]$StringCommands[0].Operand
+          IconPath          = [string]$StringCommands[1].Operand
+          IconFile          = [string]$StringCommands[2].Operand
+          ForCurrentUser    = [bool]$CurrentUserCommands[-1].Operand
+          EstimatedSizeText = [string]$StringCommands[3].Operand
+        })
+    }
+  }
+  return [pscustomobject]@{
+    Calls       = $Calls.ToArray()
+    ProgramInfo = [pscustomobject]@{
+      LauncherOffset     = $Program.LauncherOffset
+      SectionOffset      = $Program.SectionOffset
+      RuntimeSize        = $Program.RuntimeSize
+      StoredProgramSize  = $Program.StoredProgramSize
+      ProgramSize        = $Program.ProgramSize
+      Packed             = $Program.Packed
+      VersionMajor       = $Program.VersionMajor
+      VersionMinor       = $Program.VersionMinor
+      ObjectCount        = $Program.Records.Count
+      AddRemoveRoutineId = [uint32]$CandidateRoutines[0].Id
+    }
   }
 }
 
@@ -199,10 +590,16 @@ function Get-CreateInstallArchiveLayout {
   param ([Parameter(Mandatory)][string]$Path)
 
   Import-CreateInstallLzgeDecoder
+  $Signature = [byte[]](0x47, 0x45, 0x41, 0x00)
   $File = Get-Item -LiteralPath $Path -Force
   $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-  try { $OverlayOffset = Get-PEOverlayOffset -Stream $Stream } finally { $Stream.Dispose() }
-  $Signature = [byte[]](0x47, 0x45, 0x41, 0x00)
+  try {
+    # SETUP_TEMP is stored as a standalone GEA resource inside CreateInstall's PE. Reuse this
+    # layout parser for that bounded resource by recognizing GEA at offset zero; ordinary setup
+    # executables continue scanning only after their validated PE image.
+    $Prefix = if ($Stream.Length -ge $Signature.Length) { Read-BinaryBytes -Stream $Stream -Offset 0 -Count $Signature.Length } else { [byte[]]::new(0) }
+    $OverlayOffset = if ($Prefix.Length -eq $Signature.Length -and (Test-BinarySequence -Left $Prefix -Right $Signature)) { 0L } else { Get-PEOverlayOffset -Stream $Stream }
+  } finally { $Stream.Dispose() }
   # Search only after the PE image and validate every GEA candidate through its complete size map;
   # compiled signature strings in the setup stub are not archive evidence.
   foreach ($ArchiveOffset in @(Find-BinaryPattern -Path $File.FullName -Pattern $Signature -StartOffset $OverlayOffset -Maximum 16)) {
@@ -352,39 +749,87 @@ function Get-CreateInstallInfo {
     $Layout = Get-CreateInstallArchiveLayout -Path $File.FullName
     $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
     $ExecutionLevel = Get-PERequestedExecutionLevel -Path $File.FullName
+    $ProductName = ([string]$VersionInfo.ProductName).Trim()
+    $DisplayVersion = ([string]$VersionInfo.ProductVersion).Trim()
+    $Publisher = ([string]$VersionInfo.CompanyName).Trim()
     $CompressionMethods = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     # Enumerate block headers without expanding payloads so capability warnings remain inexpensive.
     foreach ($Entry in $Layout.Entries) { foreach ($Block in @(Get-CreateInstallBlockInfo -Layout $Layout -Entry $Entry)) { $null = $CompressionMethods.Add($Block.CompressionName) } }
-    $RegistryWrites = @()
-    $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
     $Warnings = [System.Collections.Generic.List[string]]::new()
-    $Warnings.Add('CreateInstall PE version resources identify the package but do not prove the visible uninstall key. Validate ProductCode and ARP fields in a VM.')
-    if ($ExecutionLevel -ieq 'requireAdministrator') { $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest.') }
+    $RegistryWrites = [System.Collections.Generic.List[object]]::new()
+    $ProductCodes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $DetectedScopes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+    # Decode the compiled install script independently of the payload archive. A source-verified
+    # call to addremoveext proves both the uninstall subkey and the built-in scope rule.
+    $UninstallEvidence = $null
+    try { $UninstallEvidence = Get-CreateInstallUninstallEvidence -Path $File.FullName } catch {
+      $Warnings.Add("The compiled CreateInstall uninstall program could not be parsed: $($_.Exception.Message)")
+    }
+    foreach ($Call in @($UninstallEvidence.Calls)) {
+      $UninstallKeyName = ([string]$Call.UninstallKeyName).Trim()
+      if ([string]::IsNullOrWhiteSpace($UninstallKeyName) -or $UninstallKeyName -ieq '#progname#') { $UninstallKeyName = $ProductName }
+      if ([string]::IsNullOrWhiteSpace($UninstallKeyName)) {
+        $Warnings.Add('CreateInstall invokes the Add/Remove command but its default program name is empty.')
+        continue
+      }
+      if ($UninstallKeyName -match '#[^#]+#') {
+        $Warnings.Add("CreateInstall's uninstall key '$UninstallKeyName' contains a runtime macro and cannot be resolved statically.")
+        continue
+      }
+      $null = $ProductCodes.Add($UninstallKeyName)
+      $Root = if ($Call.ForCurrentUser) { 'HKCU' } elseif ($ExecutionLevel -ieq 'requireAdministrator') { 'HKLM' } else { 'SHCTX' }
+      if ($Root -eq 'HKCU') { $null = $DetectedScopes.Add('user') } elseif ($Root -eq 'HKLM') { $null = $DetectedScopes.Add('machine') } else { $null = $DetectedScopes.Add('user'); $null = $DetectedScopes.Add('machine') }
+      $UninstallKey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$UninstallKeyName"
+      # Only values whose inputs are statically known are materialized. Runtime paths such as
+      # #setuppath# and #uninstexe# remain represented by the call evidence rather than guessed.
+      $RegistryWrites.Add([pscustomobject]@{ Root = $Root; Key = $UninstallKey; Name = 'DisplayName'; Value = $UninstallKeyName; Type = 'REG_SZ'; Evidence = 'Gentee addremoveext call' })
+      if ($DisplayVersion) { $RegistryWrites.Add([pscustomobject]@{ Root = $Root; Key = $UninstallKey; Name = 'DisplayVersion'; Value = $DisplayVersion; Type = 'REG_SZ'; Evidence = 'Gentee addremoveext call + PE ProductVersion' }) }
+      if ($Publisher) { $RegistryWrites.Add([pscustomobject]@{ Root = $Root; Key = $UninstallKey; Name = 'Publisher'; Value = $Publisher; Type = 'REG_SZ'; Evidence = 'Gentee addremoveext call + PE CompanyName' }) }
+      if ($Call.EstimatedSizeText -match '^\d+$') { $RegistryWrites.Add([pscustomobject]@{ Root = $Root; Key = $UninstallKey; Name = 'EstimatedSize'; Value = [uint64]$Call.EstimatedSizeText; Type = 'REG_DWORD'; Evidence = 'Gentee addremoveext call' }) }
+      $RegistryWrites.Add([pscustomobject]@{ Root = $Root; Key = $UninstallKey; Name = 'NoModify'; Value = 1; Type = 'REG_DWORD'; Evidence = 'Gentee addremoveext implementation' })
+      $RegistryWrites.Add([pscustomobject]@{ Root = $Root; Key = $UninstallKey; Name = 'NoRepair'; Value = 1; Type = 'REG_DWORD'; Evidence = 'Gentee addremoveext implementation' })
+    }
+    $ProductCode = if ($ProductCodes.Count -eq 1) { @($ProductCodes)[0] } else { $null }
+    if ($ProductCodes.Count -gt 1) { $Warnings.Add("CreateInstall writes multiple uninstall keys: $(@($ProductCodes | Sort-Object) -join ', ').") }
+    if ($ProductCodes.Count -eq 0) { $Warnings.Add('CreateInstall PE version resources identify the package but the compiled program does not prove one visible uninstall key. Validate ProductCode and ARP fields in a VM.') }
+
+    $RegistryWriteArray = $RegistryWrites.ToArray()
+    $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWriteArray
+    if ($ExecutionLevel -ieq 'requireAdministrator' -and $ProductCodes.Count -eq 0) { $Warnings.Add('Machine scope is inferred from an explicit requireAdministrator application manifest.') }
     if ($Layout.PasswordCount -gt 0 -or ($Layout.Entries | Where-Object PasswordId -GT 0 | Select-Object -First 1)) { $Warnings.Add('The GEA archive contains password-protected files; encrypted entries are intentionally unsupported.') }
-    if ($CompressionMethods.Contains('PPMd')) { $Warnings.Add('The GEA archive uses PPMd blocks, which are not yet supported by the CreateInstall extractor.') }
+    # PPMd is an expansion capability, not an ARP metadata failure. Preserve it in GEA evidence
+    # and CanExpand; Expand-CreateInstallInstaller emits a targeted error only when requested.
+
+    $Scope = if ($DetectedScopes.Count -eq 1) { @($DetectedScopes)[0] } elseif ($DetectedScopes.Count -gt 1) { $null } elseif ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
+    $SupportedScopes = if ($DetectedScopes.Count -gt 0) { @($DetectedScopes | Sort-Object) } elseif ($ExecutionLevel -ieq 'requireAdministrator') { @('machine') } else { @() }
 
     [pscustomobject]@{
       InstallerType              = 'CreateInstall'
-      ProductCode                = $null
-      PackageName                = ([string]$VersionInfo.ProductName).Trim()
-      DisplayName                = ([string]$VersionInfo.ProductName).Trim()
-      ProductName                = ([string]$VersionInfo.ProductName).Trim()
-      DisplayVersion             = ([string]$VersionInfo.ProductVersion).Trim()
-      Publisher                  = ([string]$VersionInfo.CompanyName).Trim()
+      ProductCode                = $ProductCode
+      ProductCodeEvidence        = if ($ProductCode) { 'Compiled Gentee addremoveext uninstall-key argument' } else { $null }
+      PackageName                = $ProductName
+      DisplayName                = $ProductName
+      ProductName                = $ProductName
+      DisplayVersion             = $DisplayVersion
+      Publisher                  = $Publisher
       FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-      Scope                      = if ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
-      SupportedScopes            = if ($ExecutionLevel -ieq 'requireAdministrator') { @('machine') } else { @() }
+      Scope                      = $Scope
+      SupportedScopes            = $SupportedScopes
+      ScopeEvidence              = if ($ProductCode) { 'Compiled addremoveext current-user flag plus PE requestedExecutionLevel' } elseif ($ExecutionLevel -ieq 'requireAdministrator') { 'PE requestedExecutionLevel' } else { $null }
       RequestedExecutionLevel    = $ExecutionLevel
-      RegistryWrites             = $RegistryWrites
+      RegistryWrites             = $RegistryWriteArray
       RegistryAssociationInfo    = $RegistryAssociationInfo
       Protocols                  = $RegistryAssociationInfo.Protocols
       FileExtensions             = $RegistryAssociationInfo.FileExtensions
-      WritesAppsAndFeaturesEntry = $null
-      GEA                        = [pscustomobject]@{ MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); PasswordCount = $Layout.PasswordCount }
+      WritesAppsAndFeaturesEntry = if ($ProductCode) { $true } else { $null }
+      GenteeProgram              = $UninstallEvidence.ProgramInfo
+      UninstallRegistrations     = @($UninstallEvidence.Calls)
+      GEA                        = [pscustomobject]@{ MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); UnsupportedCompressionMethods = @($CompressionMethods | Where-Object { $_ -in @('PPMd', 'Unknown') } | Sort-Object); PasswordCount = $Layout.PasswordCount }
       ExtractedFiles             = @($Layout.Entries.FullName)
       CanExpand                  = $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('PPMd') -and -not $CompressionMethods.Contains('Unknown')
       Warnings                   = @($Warnings)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'Gentee GEA v1/v2 structures', 'Gentee LZGE decoder') }
+      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 2; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 bytecode structures', 'CreateInstall addremoveext command source', 'Gentee GEA v1/v2 structures', 'Gentee LZGE decoder') }
     }
   }
 }
