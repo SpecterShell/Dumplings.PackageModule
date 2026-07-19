@@ -115,6 +115,30 @@ Describe 'Get-InstallerRegistryAssociationInfo' {
     $Info.FileExtensions | Should -Be @('sample')
     $Info.Warnings | Should -Contain "Ignored non-literal protocol key '{code:Protocol}'."
   }
+
+  It 'accepts a direct extension shell command without a ProgID' {
+    $Writes = @(
+      [pscustomobject]@{ Root = 'HKCR'; Key = '.wxproj'; Name = $null; Value = ''; Type = 'REG_SZ' },
+      [pscustomobject]@{ Root = 'HKCR'; Key = '.wxproj\DefaultIcon'; Name = $null; Value = '<InstallLocation>\DevTools.exe'; Type = 'REG_SZ' },
+      [pscustomobject]@{ Root = 'HKCR'; Key = '.wxproj\shell\Open\command'; Name = $null; Value = '"<InstallLocation>\DevTools.exe" "%1"'; Type = 'REG_SZ' }
+    )
+
+    $Info = Get-InstallerRegistryAssociationInfo -RegistryWrite $Writes
+
+    $Info.FileExtensions | Should -Be @('wxproj')
+    $Info.FileExtensionAssociations[0].ProgIds | Should -BeNullOrEmpty
+    $Info.FileExtensionAssociations[0].Command | Should -Be '"<InstallLocation>\DevTools.exe" "%1"'
+    $Info.FileExtensionAssociations[0].DefaultIcon | Should -Be '<InstallLocation>\DevTools.exe'
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'warns when an extension has neither a ProgID nor a direct command' {
+    $Info = Get-InstallerRegistryAssociationInfo -RegistryWrite @(
+      [pscustomobject]@{ Root = 'HKCR'; Key = '.incomplete'; Name = $null; Value = ''; Type = 'REG_SZ' }
+    )
+
+    $Info.Warnings | Should -Contain "File extension '.incomplete' has neither a literal ProgID nor a direct open command."
+  }
 }
 
 Describe 'Find-BinaryPattern' {

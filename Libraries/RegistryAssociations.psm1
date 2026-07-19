@@ -92,7 +92,8 @@ function Get-InstallerRegistryAssociationInfo {
   .DESCRIPTION
     Supports HKCR and HKLM/HKCU Software\Classes writes. Protocols require an
     explicit URL Protocol value. File extensions are resolved from their default
-    ProgID and OpenWithProgids values, with optional open-command and icon data.
+    ProgID and OpenWithProgids values, or from a command written directly below
+    the extension key, with optional open-command and icon data.
   .PARAMETER RegistryWrite
     Objects with Root, Key, Name, Value, and optional Type properties.
   #>
@@ -155,7 +156,13 @@ function Get-InstallerRegistryAssociationInfo {
       if (-not [string]::IsNullOrWhiteSpace($ProgId) -and -not $ProgIds.Contains($ProgId)) { $ProgIds.Add($ProgId) }
     }
     $PrimaryProgId = $ProgIds | Select-Object -First 1
-    if (-not $PrimaryProgId) { $Warnings.Add("File extension '$Extension' has no literal ProgID association.") }
+    # Some installers register verbs directly below .ext instead of creating a separate ProgID.
+    # Preserve that valid shell association and warn only when neither registration form is complete.
+    $DirectCommand = Get-InstallerClassDefaultValue -RegistryWrite $ClassWrites -Root $Root -RelativeKey "$Extension\shell\open\command"
+    $DirectIcon = Get-InstallerClassDefaultValue -RegistryWrite $ClassWrites -Root $Root -RelativeKey "$Extension\DefaultIcon"
+    if (-not $PrimaryProgId -and -not $DirectCommand) {
+      $Warnings.Add("File extension '$Extension' has neither a literal ProgID nor a direct open command.")
+    }
     $FileExtensionAssociations.Add([pscustomobject]@{
         FileExtension = $Extension.TrimStart('.').ToLowerInvariant()
         Extension     = $Extension.ToLowerInvariant()
@@ -163,8 +170,8 @@ function Get-InstallerRegistryAssociationInfo {
         DefaultProgId = $DefaultProgId
         ProgIds       = @($ProgIds)
         Description   = if ($PrimaryProgId) { Get-InstallerClassDefaultValue -RegistryWrite $ClassWrites -Root $Root -RelativeKey $PrimaryProgId } else { $null }
-        Command       = if ($PrimaryProgId) { Get-InstallerClassDefaultValue -RegistryWrite $ClassWrites -Root $Root -RelativeKey "$PrimaryProgId\shell\open\command" } else { $null }
-        DefaultIcon   = if ($PrimaryProgId) { Get-InstallerClassDefaultValue -RegistryWrite $ClassWrites -Root $Root -RelativeKey "$PrimaryProgId\DefaultIcon" } else { $null }
+        Command       = if ($PrimaryProgId) { Get-InstallerClassDefaultValue -RegistryWrite $ClassWrites -Root $Root -RelativeKey "$PrimaryProgId\shell\open\command" } else { $DirectCommand }
+        DefaultIcon   = if ($PrimaryProgId) { Get-InstallerClassDefaultValue -RegistryWrite $ClassWrites -Root $Root -RelativeKey "$PrimaryProgId\DefaultIcon" } else { $DirectIcon }
         Evidence      = @($ClassWrites | Where-Object { $_.Root -eq $Root -and $_.RelativeKey -match "^(?i:$([regex]::Escape($Extension)))(?:\\|$)" } | ForEach-Object Source)
       })
   }
