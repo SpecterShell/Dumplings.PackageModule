@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-  Wake WebDriver waiters before timed-out worker jobs are removed forcibly.
+  Wake browser-automation waiters before timed-out workers are removed forcibly.
 #>
 param (
   [Parameter(Mandatory)]
@@ -17,3 +17,5 @@ $QueueModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'MessageQ
 
 . (Join-Path $PSScriptRoot 'WebDriver.Common.ps1')
 Close-DumplingsWebDriverHookPool -Storage $Context.Storage -KeepInStorage
+. (Join-Path $PSScriptRoot 'Playwright.Common.ps1')
+Close-DumplingsPlaywrightHookPool -Storage $Context.Storage -KeepInStorage

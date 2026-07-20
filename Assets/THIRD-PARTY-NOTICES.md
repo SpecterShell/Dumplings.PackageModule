@@ -132,6 +132,29 @@ Copyright 2011-2021 Software Freedom Conservancy
 
 Copyright 2004-2011 Selenium committers
 
+## Patchright for .NET 1.61.0
+
+Sources:
+
+- <https://github.com/DevEnterpriseSoftware/patchright-dotnet/tree/v1.61.0>
+- <https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/tree/v1.61.0>
+- <https://github.com/microsoft/playwright-dotnet/tree/v1.61.0>
+
+The runtime restored from the official `Patchright` NuGet package is licensed
+under Apache-2.0. It is stored in the local or GitHub Actions cache and is not
+committed to this repository. Package and driver license/notice files are
+retained beside the cached runtime. Patchright's modifications are Apache-2.0;
+it is an API-compatible derivative of MIT-licensed Microsoft Playwright and
+retains the upstream notices.
+
+## Scrapling
+
+Source: <https://github.com/D4Vinci/Scrapling>
+
+Scrapling's BSD-3-Clause `StealthyFetcher` is a behavioral reference for the
+Patchright-backed PowerShell workflow. Scrapling code is not bundled or copied;
+the implementation uses the documented Playwright/Patchright APIs directly.
+
 ## SharpCompress 0.39.0
 
 Source: <https://github.com/adamhathcock/sharpcompress>

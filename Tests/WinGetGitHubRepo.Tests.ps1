@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+
+BeforeAll {
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetGitHubRepo.psm1') -Force
+}
+
+Describe 'Get-WinGetGitHubComparison' {
+  It 'uses owner-qualified and URI-escaped fork references' {
+    $Script:GitHubApiArguments = $null
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      $Script:GitHubApiArguments = $args
+      [pscustomobject]@{ status = 'ahead'; files = @([pscustomobject]@{ filename = 'manifest.yaml' }) }
+    }
+
+    $Result = Get-WinGetGitHubComparison `
+      -Base 'microsoft:master' `
+      -Head 'DumplingsBot:Package/1.0 branch' `
+      -RepoOwner microsoft `
+      -RepoName winget-pkgs
+
+    $Result.status | Should -Be ahead
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly
+    $UriIndex = $Script:GitHubApiArguments.IndexOf('-Uri')
+    $Script:GitHubApiArguments[$UriIndex + 1] | Should -Be 'https://api.github.com/repos/microsoft/winget-pkgs/compare/microsoft%3Amaster...DumplingsBot%3APackage%2F1.0%20branch'
+  }
+}
+
+Describe 'Get-WinGetGitHubPullRequestFile' {
+  It 'reads all pages until GitHub returns fewer than 100 files' {
+    $Script:GitHubApiUris = [System.Collections.Generic.List[string]]::new()
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      $UriIndex = $args.IndexOf('-Uri')
+      $RequestUri = [string]$args[$UriIndex + 1]
+      $Script:GitHubApiUris.Add($RequestUri)
+      if ($RequestUri -match 'page=1$') {
+        return 1..100 | ForEach-Object { [pscustomobject]@{ filename = "file-${_}" } }
+      }
+      return [pscustomobject]@{ filename = 'file-101' }
+    }
+
+    $Files = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber 42 -RepoOwner microsoft -RepoName winget-pkgs)
+
+    $Files.Count | Should -Be 101
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 2 -Exactly
+    $Script:GitHubApiUris | Should -Be @(
+      'https://api.github.com/repos/microsoft/winget-pkgs/pulls/42/files?per_page=100&page=1'
+      'https://api.github.com/repos/microsoft/winget-pkgs/pulls/42/files?per_page=100&page=2'
+    )
+  }
+}
+
+Describe 'Remove-WinGetGitHubBranch' {
+  It 'deletes the escaped branch reference' {
+    $Script:GitHubApiArguments = $null
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      $Script:GitHubApiArguments = $args
+      [pscustomobject]@{ deleted = $true }
+    }
+
+    $null = Remove-WinGetGitHubBranch -Name 'Package/1.0 branch' -RepoOwner DumplingsBot -RepoName winget-pkgs
+
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly
+    $UriIndex = $Script:GitHubApiArguments.IndexOf('-Uri')
+    $MethodIndex = $Script:GitHubApiArguments.IndexOf('-Method')
+    $Script:GitHubApiArguments[$UriIndex + 1] | Should -Be 'https://api.github.com/repos/DumplingsBot/winget-pkgs/git/refs/heads/Package%2F1.0%20branch'
+    $Script:GitHubApiArguments[$MethodIndex + 1] | Should -Be Delete
+  }
+}

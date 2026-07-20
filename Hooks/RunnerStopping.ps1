@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-  Dispose and remove the process-wide WebDriver pool at runner shutdown.
+  Dispose and remove process-wide browser-automation pools at runner shutdown.
 #>
 param (
   [Parameter(Mandatory)]
@@ -17,3 +17,5 @@ $QueueModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'MessageQ
 
 . (Join-Path $PSScriptRoot 'WebDriver.Common.ps1')
 Close-DumplingsWebDriverHookPool -Storage $Context.Storage
+. (Join-Path $PSScriptRoot 'Playwright.Common.ps1')
+Close-DumplingsPlaywrightHookPool -Storage $Context.Storage
