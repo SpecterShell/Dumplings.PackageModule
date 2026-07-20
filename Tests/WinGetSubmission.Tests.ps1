@@ -16,6 +16,22 @@ BeforeAll {
       user     = [pscustomobject]@{ login = $Author }
     }
   }
+
+  function Get-TestFileChange {
+    param (
+      [Parameter(Mandatory)][string]$FileName,
+      [Parameter(Mandatory)][string]$Status,
+      [string]$Sha,
+      [string]$PreviousFileName
+    )
+
+    [pscustomobject]@{
+      filename          = $FileName
+      status            = $Status
+      sha               = $Sha
+      previous_filename = $PreviousFileName
+    }
+  }
 }
 
 Describe 'Get-WinGetPullRequestConflictInfo' {
@@ -116,5 +132,53 @@ Describe 'Test-WinGetInstallerUrlIntersection' {
     $NewInstallers = @([ordered]@{ InstallerUrl = 'https://example.test/setup.exe?channel=stable' })
 
     Test-WinGetInstallerUrlIntersection -ReferenceInstaller $OldInstallers -DifferenceInstaller $NewInstallers | Should -BeFalse
+  }
+}
+
+Describe 'Test-WinGetGitHubFileChangeEquality' {
+  It 'matches the same exact changes regardless of API result order' {
+    $Reference = @(
+      Get-TestFileChange -FileName 'manifests/a.yaml' -Status added -Sha ('a' * 40)
+      Get-TestFileChange -FileName 'manifests/b.yaml' -Status modified -Sha ('b' * 40)
+    )
+    $Difference = @($Reference[1], $Reference[0])
+
+    Test-WinGetGitHubFileChangeEquality -ReferenceChange $Reference -DifferenceChange $Difference | Should -BeTrue
+  }
+
+  It 'rejects a changed resulting blob at the same path' {
+    $Reference = Get-TestFileChange -FileName 'manifests/a.yaml' -Status modified -Sha ('a' * 40)
+    $Difference = Get-TestFileChange -FileName 'manifests/a.yaml' -Status modified -Sha ('b' * 40)
+
+    Test-WinGetGitHubFileChangeEquality -ReferenceChange $Reference -DifferenceChange $Difference | Should -BeFalse
+  }
+
+  It 'treats removal of the same path as identical without relying on the old blob SHA' {
+    $Reference = Get-TestFileChange -FileName 'manifests/old.yaml' -Status removed -Sha ('a' * 40)
+    $Difference = Get-TestFileChange -FileName 'manifests/old.yaml' -Status removed -Sha ('b' * 40)
+
+    Test-WinGetGitHubFileChangeEquality -ReferenceChange $Reference -DifferenceChange $Difference | Should -BeTrue
+  }
+
+  It 'includes the previous path when comparing renames' {
+    $Reference = Get-TestFileChange -FileName 'manifests/new.yaml' -Status renamed -Sha ('a' * 40) -PreviousFileName 'manifests/old.yaml'
+    $Difference = Get-TestFileChange -FileName 'manifests/new.yaml' -Status renamed -Sha ('a' * 40) -PreviousFileName 'manifests/other.yaml'
+
+    Test-WinGetGitHubFileChangeEquality -ReferenceChange $Reference -DifferenceChange $Difference | Should -BeFalse
+  }
+}
+
+Describe 'Select-WinGetPullRequestForClosure' {
+  It 'excludes already handled pull requests and removes duplicate API results' {
+    $PullRequests = @(
+      Get-TestPullRequest -Author DumplingsBot -Number 10
+      Get-TestPullRequest -Author DumplingsBot -Number 11
+      Get-TestPullRequest -Author DumplingsBot -Number 10
+      Get-TestPullRequest -Author DumplingsBot -Number 12
+    )
+
+    $Selected = @(Select-WinGetPullRequestForClosure -PullRequest $PullRequests -ExcludedNumber 10, 12)
+
+    $Selected.number | Should -Be @(11)
   }
 }

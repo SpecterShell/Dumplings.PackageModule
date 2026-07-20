@@ -115,6 +115,171 @@ function Get-WinGetPullRequestConflictInfo {
   }
 }
 
+function ConvertTo-WinGetGitHubFileChangeFingerprint {
+  <#
+  .SYNOPSIS
+    Convert GitHub changed-file objects into deterministic change identities.
+  .DESCRIPTION
+    Exact submission comparison needs more than filenames. Added, modified,
+    copied, and renamed files include the resulting Git blob SHA; removals are
+    identified by path and status because no resulting blob exists. Renames also
+    retain the previous path. Input order does not affect the result.
+  .PARAMETER FileChange
+    File objects returned by the compare or pull-request files GitHub APIs.
+  .OUTPUTS
+    Ordinally sorted JSON identities suitable for exact sequence comparison.
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(ValueFromPipeline)]
+    [AllowNull()]
+    [object[]]$FileChange
+  )
+
+  begin {
+    $Fingerprints = [System.Collections.Generic.List[string]]::new()
+  }
+
+  process {
+    foreach ($Change in @($FileChange)) {
+      if ($null -eq $Change) { continue }
+
+      # GitHub responses are PSCustomObjects, while synthetic callers may use
+      # dictionaries. Read both without relying on PowerShell's property adapter.
+      $ReadValue = {
+        param ($InputObject, [string]$Name)
+        if ($InputObject -is [System.Collections.IDictionary]) {
+          if ($InputObject.Contains($Name)) { return $InputObject[$Name] }
+          return $null
+        }
+        $Property = $InputObject.PSObject.Properties[$Name]
+        return $null -ne $Property ? $Property.Value : $null
+      }
+
+      $FileName = [string](& $ReadValue $Change 'filename')
+      $Status = [string](& $ReadValue $Change 'status')
+      if ([string]::IsNullOrWhiteSpace($FileName) -or [string]::IsNullOrWhiteSpace($Status)) {
+        throw 'A GitHub file change is missing its filename or status and cannot be compared exactly.'
+      }
+
+      $NormalizedStatus = $Status.ToLowerInvariant()
+      $BlobSha = $NormalizedStatus -eq 'removed' ? '' : [string](& $ReadValue $Change 'sha')
+      if ($NormalizedStatus -ne 'removed' -and [string]::IsNullOrWhiteSpace($BlobSha)) {
+        throw "GitHub did not return a resulting blob SHA for changed file '${FileName}'."
+      }
+
+      $Identity = [ordered]@{
+        FileName         = $FileName
+        Status           = $NormalizedStatus
+        PreviousFileName = [string](& $ReadValue $Change 'previous_filename')
+        BlobSha          = $BlobSha
+      }
+      $Fingerprints.Add(($Identity | ConvertTo-Json -Compress))
+    }
+  }
+
+  end {
+    [string[]]$Result = $Fingerprints.ToArray()
+    [Array]::Sort($Result, [StringComparer]::Ordinal)
+    return $Result
+  }
+}
+
+function Test-WinGetGitHubFileChangeEquality {
+  <#
+  .SYNOPSIS
+    Test whether two GitHub file-change collections describe the same change.
+  .PARAMETER ReferenceChange
+    Existing pull-request file changes.
+  .PARAMETER DifferenceChange
+    Candidate branch file changes.
+  .OUTPUTS
+    True only when paths, statuses, rename sources, and resulting blobs match.
+  #>
+  [OutputType([bool])]
+  param (
+    [AllowNull()]
+    [object[]]$ReferenceChange,
+    [AllowNull()]
+    [object[]]$DifferenceChange
+  )
+
+  $ReferenceFingerprint = @(ConvertTo-WinGetGitHubFileChangeFingerprint -FileChange $ReferenceChange)
+  $DifferenceFingerprint = @(ConvertTo-WinGetGitHubFileChangeFingerprint -FileChange $DifferenceChange)
+  if ($ReferenceFingerprint.Count -ne $DifferenceFingerprint.Count) { return $false }
+
+  for ($Index = 0; $Index -lt $ReferenceFingerprint.Count; $Index++) {
+    if ($ReferenceFingerprint[$Index] -cne $DifferenceFingerprint[$Index]) { return $false }
+  }
+  return $true
+}
+
+function Select-WinGetPullRequestForClosure {
+  <#
+  .SYNOPSIS
+    Select unique pull requests that have not already been closed in this run.
+  .PARAMETER PullRequest
+    Pull request objects to consider.
+  .PARAMETER ExcludedNumber
+    Pull request numbers that must not be selected, including newly created or
+    already closed pull requests.
+  .OUTPUTS
+    Unique pull request objects in their original order.
+  #>
+  [OutputType([object[]])]
+  param (
+    [AllowNull()]
+    [object[]]$PullRequest,
+    [AllowNull()]
+    [long[]]$ExcludedNumber
+  )
+
+  $Excluded = [System.Collections.Generic.HashSet[long]]::new()
+  foreach ($Number in @($ExcludedNumber)) { $null = $Excluded.Add($Number) }
+  $Selected = [System.Collections.Generic.List[object]]::new()
+  $Seen = [System.Collections.Generic.HashSet[long]]::new()
+
+  foreach ($Item in @($PullRequest)) {
+    if ($null -eq $Item) { continue }
+    $Number = [long]$Item.number
+    if ($Number -gt 0 -and -not $Excluded.Contains($Number) -and $Seen.Add($Number)) {
+      $Selected.Add($Item)
+    }
+  }
+
+  return $Selected.ToArray()
+}
+
+function Invoke-WinGetSubmissionCandidateBranchCleanup {
+  <#
+  .SYNOPSIS
+    Best-effort cleanup for a candidate branch that will not become a pull request.
+  .PARAMETER Task
+    Package task used for structured logging.
+  .PARAMETER BranchName
+    Candidate branch to remove.
+  .PARAMETER RepoOwner
+    Owner of the fork containing the candidate branch.
+  .PARAMETER RepoName
+    Name of the fork containing the candidate branch.
+  #>
+  param (
+    [Parameter(Mandatory)]$Task,
+    [Parameter(Mandatory)][string]$BranchName,
+    [Parameter(Mandatory)][string]$RepoOwner,
+    [Parameter(Mandatory)][string]$RepoName
+  )
+
+  try {
+    $null = Remove-WinGetGitHubBranch -Name $BranchName -RepoOwner $RepoOwner -RepoName $RepoName
+    $Task.Log("Removed unused candidate branch ${RepoOwner}:${BranchName}", 'Verbose')
+  } catch {
+    # Submission is intentionally aborted even if cleanup fails. Report the
+    # orphaned branch without replacing the more important no-op decision.
+    $Task.Log("Failed to remove unused candidate branch ${RepoOwner}:${BranchName}: ${_}", 'Warning')
+  }
+}
+
 function Test-WinGetInstallerUrlIntersection {
   <#
   .SYNOPSIS
@@ -346,6 +511,54 @@ function Send-WinGetManifest {
     }
     #endregion
 
+    # Compare the final candidate branch with the branch that the pull request
+    # would merge into. Creating commits can still result in an empty effective
+    # diff when an earlier automation pull request has already been merged.
+    $Task.Log('Checking the final candidate branch for effective changes', 'Verbose')
+    try {
+      $CandidateComparison = Get-WinGetGitHubComparison -Base "${UpstreamRepoOwner}:${UpstreamRepoBranch}" -Head "${OriginRepoOwner}:${NewBranchName}" -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
+      $CandidateChanges = @($CandidateComparison.files)
+    } catch {
+      Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
+      throw "Failed to compare the candidate branch with ${UpstreamRepoOwner}/${UpstreamRepoName}:${UpstreamRepoBranch}: ${_}"
+    }
+
+    if ($CandidateChanges.Count -eq 0) {
+      $Task.Log("The candidate branch has no changes compared with ${UpstreamRepoOwner}/${UpstreamRepoName}:${UpstreamRepoBranch}. No pull request is necessary.", 'Info')
+      Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
+      return
+    }
+
+    # Only compare existing self-authored pull requests when the normal cleanup
+    # policy would close them. Keeping an identical PR preserves its completed or
+    # in-progress validation results and avoids submitting a redundant branch.
+    $ShouldCloseSelfPullRequests = $SelfPullRequests -and -not ($Global:DumplingsPreference['KeepOldPRs'] -or $Task.Config['KeepOldPRs'])
+    if ($ShouldCloseSelfPullRequests) {
+      # GitHub caps the compare endpoint's file collection at 300. A full page
+      # cannot prove that more files were not omitted, so fail closed rather than
+      # incorrectly declaring a large candidate identical to an existing PR.
+      if ($CandidateChanges.Count -ge 300) {
+        Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
+        throw 'The candidate branch comparison returned 300 files, so GitHub may have truncated the result and exact duplicate-PR comparison is unsafe.'
+      }
+
+      foreach ($ExistingPullRequest in @($SelfPullRequests)) {
+        try {
+          $ExistingChanges = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $ExistingPullRequest.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
+          $ChangesAreIdentical = Test-WinGetGitHubFileChangeEquality -ReferenceChange $ExistingChanges -DifferenceChange $CandidateChanges
+        } catch {
+          Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
+          throw "Failed to compare candidate changes with existing pull request #$($ExistingPullRequest.number): ${_}"
+        }
+
+        if ($ChangesAreIdentical) {
+          $Task.Log("Existing pull request #$($ExistingPullRequest.number) contains exactly the same changes. Preserving it and aborting redundant submission: $($ExistingPullRequest.html_url)", 'Info')
+          Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
+          return
+        }
+      }
+    }
+
     # Create a pull request in the upstream repo
     $NewPullRequestBody = (Test-Path -Path 'Env:\GITHUB_ACTIONS') ? `
       "Automated by [🥟 ${Env:GITHUB_REPOSITORY_OWNER}/Dumplings](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings) in workflow run [#${Env:GITHUB_RUN_NUMBER}](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings/actions/runs/${Env:GITHUB_RUN_ID})." : `
@@ -353,18 +566,26 @@ function Send-WinGetManifest {
     $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 
+    # GitHub search can continue returning an item briefly after it is closed.
+    # Keep a run-local exclusion set so the broader package cleanup never sends
+    # a second close request for a pull request handled above.
+    $ClosedPullRequestNumbers = [System.Collections.Generic.HashSet[long]]::new()
+
     # Close the old pull requests created by the bot user
-    if ($SelfPullRequests -and -not ($Global:DumplingsPreference['KeepOldPRs'] -or $Task.Config['KeepOldPRs'])) {
-      $SelfPullRequests | ForEach-Object -Process {
+    if ($ShouldCloseSelfPullRequests) {
+      Select-WinGetPullRequestForClosure -PullRequest $SelfPullRequests -ExcludedNumber $NewPullRequest.number | ForEach-Object -Process {
         Close-WinGetGitHubPullRequest -PullRequestNumber $_.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
+        $null = $ClosedPullRequestNumbers.Add([long]$_.number)
         $Task.Log("Closed old pull request of the same version: $($_.title) - $($_.html_url)", 'Info')
       }
     }
 
     # Close the old pull requests of the same package created by the bot user if RemoveLastVersionReason is set
     if ($RemoveLastVersionReason -and $Script:GitHubTokenUsername -and ($SelfPackagePullRequests = (Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/')) in:path is:open author:${Script:GitHubTokenUsername}").items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" })) {
-      $SelfPackagePullRequests | Where-Object -FilterScript { $_.number -ne $NewPullRequest.number } | ForEach-Object -Process {
+      $ExcludedPullRequestNumbers = [long[]]@($ClosedPullRequestNumbers) + [long]$NewPullRequest.number
+      Select-WinGetPullRequestForClosure -PullRequest $SelfPackagePullRequests -ExcludedNumber $ExcludedPullRequestNumbers | ForEach-Object -Process {
         Close-WinGetGitHubPullRequest -PullRequestNumber $_.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
+        $null = $ClosedPullRequestNumbers.Add([long]$_.number)
         $Task.Log("Closed old pull request of the same package: $($_.title) - $($_.html_url)", 'Info')
       }
     }

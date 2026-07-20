@@ -360,6 +360,48 @@ function Get-WinGetGitHubBranch {
   return $Response
 }
 
+function Get-WinGetGitHubComparison {
+  <#
+  .SYNOPSIS
+    Compare two Git references through the GitHub compare API.
+  .DESCRIPTION
+    Returns the commit and file delta from Base to Head. A ref may be qualified
+    with an owner (for example, "fork-owner:feature-branch") when comparing a
+    branch from a fork against the upstream repository.
+  .PARAMETER Base
+    Base branch, tag, commit SHA, or owner-qualified Git reference.
+  .PARAMETER Head
+    Head branch, tag, commit SHA, or owner-qualified Git reference.
+  .PARAMETER RepoOwner
+    Owner of the repository whose fork network contains both references.
+  .PARAMETER RepoName
+    Name of the repository whose fork network contains both references.
+  .OUTPUTS
+    The GitHub comparison response, including status, ahead_by, and files.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The base Git reference')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$Base,
+    [Parameter(Mandatory, HelpMessage = 'The head Git reference')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$Head,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoName
+  )
+
+  # Encode each ref independently so the three-dot comparison delimiter remains
+  # part of the endpoint while slashes and owner qualifiers stay unambiguous.
+  $BaseReference = [Uri]::EscapeDataString($Base)
+  $HeadReference = [Uri]::EscapeDataString($Head)
+  return (Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/compare/${BaseReference}...${HeadReference}")
+}
+
 function New-WinGetGitHubBranch {
   <#
   .SYNOPSIS
@@ -399,6 +441,36 @@ function New-WinGetGitHubBranch {
   }
 
   return $Response
+}
+
+function Remove-WinGetGitHubBranch {
+  <#
+  .SYNOPSIS
+    Delete a branch reference from a GitHub repository.
+  .PARAMETER Name
+    Branch name to delete.
+  .PARAMETER RepoOwner
+    Owner of the repository.
+  .PARAMETER RepoName
+    Name of the repository.
+  #>
+  [CmdletBinding(SupportsShouldProcess)]
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The branch name to delete')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$Name,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoName
+  )
+
+  $EncodedName = [Uri]::EscapeDataString($Name)
+  if ($PSCmdlet.ShouldProcess("${RepoOwner}/${RepoName}:refs/heads/${Name}", 'Delete GitHub branch')) {
+    return (Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/refs/heads/${EncodedName}" -Method Delete)
+  }
 }
 
 function Add-WinGetGitHubManifests {
@@ -665,6 +737,47 @@ function Find-WinGetGitHubPullRequest {
   )
 
   return (Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=$([Uri]::EscapeDataString($Query))")
+}
+
+function Get-WinGetGitHubPullRequestFile {
+  <#
+  .SYNOPSIS
+    Enumerate every changed file reported for a GitHub pull request.
+  .DESCRIPTION
+    Reads the paginated pull-request files endpoint in 100-item pages. GitHub
+    limits this endpoint to 3,000 files; exceeding that limit is fatal because a
+    partial list cannot be used for exact change comparison.
+  .PARAMETER PullRequestNumber
+    Number of the pull request to inspect.
+  .PARAMETER RepoOwner
+    Owner of the repository containing the pull request.
+  .PARAMETER RepoName
+    Name of the repository containing the pull request.
+  .OUTPUTS
+    Changed-file objects returned by GitHub.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The pull request number')]
+    [ValidateRange(1, [int]::MaxValue)]
+    [int]$PullRequestNumber,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoName
+  )
+
+  $Files = [System.Collections.Generic.List[object]]::new()
+  for ($Page = 1; $Page -le 30; $Page++) {
+    $Response = @(Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}/files?per_page=100&page=${Page}")
+    foreach ($File in $Response) { $Files.Add($File) }
+
+    if ($Response.Count -lt 100) { return $Files.ToArray() }
+  }
+
+  throw "Pull request #${PullRequestNumber} contains at least 3,000 changed files; GitHub cannot return a complete file list for exact comparison."
 }
 
 function Close-WinGetGitHubPullRequest {
