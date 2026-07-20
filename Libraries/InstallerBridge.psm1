@@ -74,6 +74,80 @@ function Resolve-InstallerBridgeCliPath {
   return Get-Item -Path $CliPath -Force
 }
 
+function ConvertTo-InstallerBridgeObject {
+  <#
+  .SYNOPSIS
+    Restore normal JSON objects while preserving member names that PowerShell cannot represent on PSCustomObject
+  .PARAMETER InputObject
+    A value produced by ConvertFrom-Json -AsHashtable, including nested dictionaries and arrays
+  #>
+  param (
+    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'A losslessly deserialized installer parser value')]
+    [AllowNull()]
+    [object]$InputObject
+  )
+
+  process {
+    if ($null -eq $InputObject) { return $null }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+      $Converted = [ordered]@{}
+      $MemberNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+      $RequiresDictionary = $false
+
+      foreach ($Entry in $InputObject.GetEnumerator()) {
+        $MemberName = [string]$Entry.Key
+        # PSCustomObject rejects an empty member name and folds names that differ
+        # only by case. Keep such JSON objects as dictionaries to avoid data loss.
+        if ([string]::IsNullOrEmpty($MemberName) -or -not $MemberNames.Add($MemberName)) {
+          $RequiresDictionary = $true
+        }
+        $Converted[$MemberName] = ConvertTo-InstallerBridgeObject -InputObject $Entry.Value
+      }
+
+      if ($RequiresDictionary) {
+        # Unary-comma return preserves IDictionary as one value. In PowerShell
+        # 7.6, Write-Output -NoEnumerate can wrap OrderedDictionary in a List.
+        return ,$Converted
+      } else {
+        [pscustomobject]$Converted
+      }
+      return
+    }
+
+    if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
+      $Converted = [System.Collections.Generic.List[object]]::new()
+      foreach ($Item in $InputObject) {
+        $Converted.Add((ConvertTo-InstallerBridgeObject -InputObject $Item))
+      }
+      return ,$Converted.ToArray()
+    }
+
+    return $InputObject
+  }
+}
+
+function ConvertFrom-InstallerBridgeJson {
+  <#
+  .SYNOPSIS
+    Deserialize installer parser JSON without rejecting unnamed registry values
+  .PARAMETER Json
+    JSON emitted by the separately licensed installer parser CLI
+  #>
+  [OutputType([pscustomobject], [System.Collections.IDictionary], [object[]])]
+  param (
+    [Parameter(ValueFromPipeline, Mandatory, HelpMessage = 'JSON emitted by an installer parser CLI')]
+    [string]$Json
+  )
+
+  process {
+    # Registry default values legitimately use an empty value name. PowerShell's
+    # normal JSON mode rejects those members, while -AsHashtable retains them.
+    $Value = $Json | ConvertFrom-Json -AsHashtable -Depth 100
+    ConvertTo-InstallerBridgeObject -InputObject $Value
+  }
+}
+
 function Invoke-InstallerBridgeCommand {
   <#
   .SYNOPSIS
@@ -153,7 +227,7 @@ function Invoke-InstallerBridgeCommand {
     }
 
     if ([string]::IsNullOrWhiteSpace($StandardOutput)) { return $null }
-    return $StandardOutput | ConvertFrom-Json -Depth 100
+    return $StandardOutput | ConvertFrom-InstallerBridgeJson
   } finally {
     try { if (-not $Process.HasExited) { $Process.Kill($true) } } catch { }
     $Process.Dispose()

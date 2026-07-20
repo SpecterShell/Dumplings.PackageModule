@@ -42,7 +42,7 @@ Package submissions are claimed by effective WinGet identifier in process-wide s
 
 ### Installer Analysis
 
-`Get-WinGetInstallerAnalysis` detects file and installer families from structured content and magic bytes, then routes to supported static parsers. PackageModule includes in-process implementations for PE, MSI/WiX, MSIX/AppX, Burn, InstallShield, Chromium Setup, Squirrel/Velopack, install4j, InstallAnywhere, InstallBuilder, CreateInstall, wrapper formats, portable applications, and other installer families. Their default and file-level licenses are described below.
+`Get-WinGetInstallerAnalysis` detects file and installer families from structured content and magic bytes, then routes to supported static parsers. PackageModule includes in-process implementations for PE, MSI/WiX, MSIX/AppX, Burn, InstallShield, Chromium Setup, Zero Install, Squirrel/Velopack, install4j, InstallAnywhere, InstallBuilder, CreateInstall, wrapper formats, portable applications, and other installer families. Their default and file-level licenses are described below.
 
 Some implementations are maintained in the separately licensed InstallerParsers submodule. [`InstallerBridge.psm1`](Libraries/InstallerBridge.psm1) invokes its JSON CLI in a child PowerShell process and returns deserialized evidence. It does not import GPL parser code into PackageModule's process module scope.
 
@@ -84,10 +84,69 @@ The logical model stores authored values, not WinGet-generated default switches 
 
 - `WinGetDownload.psm1` reproduces WinGet-style Delivery Optimization and WinINet downloads, redirects, and headers with bounded retries and rate-limit handling.
 - `WebDriver.psm1` provides leased Edge/Firefox sessions shared across concurrent tasks.
+- `Playwright.psm1` provides a separately leased Patchright/Playwright page and browser context. It uses installed Edge for ordinary sessions and installed Chrome for stealth sessions, restores the pinned Patchright driver runtime, and synchronously unwraps tasks without registering PowerShell as an asynchronous callback.
 - `MessageQueue.psm1`, `Telegram.psm1`, and `Matrix.psm1` provide per-target queues, coalescing, splitting, rate limiting, and session updates.
 - `WinGetARP.psm1` collects and matches Apps & Features evidence, including MSI ownership scope evidence.
 - `TextContent.psm1` and `Format.psm1` normalize release-note HTML, Markdown, tables, Unicode whitespace, and validator-blocked control characters.
 - `WinGetGitHubRepo.psm1` and `WinGetLocalRepo.psm1` implement remote and local manifest repository workflows.
+
+### Playwright
+
+Use the scoped API so task completion and runner timeouts always release the
+process-wide browser lease:
+
+```powershell
+$Html = Use-PlaywrightPage -Headless {
+  param($Page, $Context, $Browser, $Session)
+
+  $null = Wait-PlaywrightTask ($Page.GotoAsync('https://example.com/'))
+  Wait-PlaywrightTask ($Page.ContentAsync())
+}
+```
+
+The default Chromium channel is installed `msedge`, while `-Stealth` uses the
+Apache-2.0 [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
+driver and defaults to installed `chrome`. Patchright is restored from
+[patchright-dotnet](https://github.com/DevEnterpriseSoftware/patchright-dotnet)
+and supports Chromium only. `Install-PlaywrightBrowser -Browser Chromium`
+explicitly installs its bundled browser when an installed channel is unsuitable.
+Media and YouTube requests are blocked by default; pass `-BlockUrlPattern @()`
+to disable that filter.
+
+The scoped API exposes the compatible controls used by
+[Scrapling StealthyFetcher](https://github.com/D4Vinci/Scrapling), including
+locale/timezone fingerprint settings, proxy and headers, init scripts, WebRTC,
+WebGL and DNS controls, domain/resource blocking, and browser arguments:
+
+```powershell
+$Html = Use-PlaywrightPage -Stealth -Headless -BlockWebRTC -DisableResources `
+  -Locale 'en-US' -TimezoneId 'Asia/Singapore' {
+    param($Page)
+    $null = Wait-PlaywrightTask ($Page.GotoAsync('https://example.com/'))
+    Wait-PlaywrightTask ($Page.ContentAsync())
+  }
+```
+
+For a detached response-like result, use the bounded navigation workflow:
+
+```powershell
+$Response = Invoke-PlaywrightFetch https://example.com/ -Stealth -Headless `
+  -NetworkIdle -WaitSelector 'main' -MaximumRetryCount 3
+$Response.Content
+```
+
+`Invoke-PlaywrightFetch` supports cookies, synchronous setup/action blocks, a
+Google referer, retries, selector and load waits, compiled XHR capture,
+screenshots, and best-effort Cloudflare challenge handling. Patchright's patched
+Chromium driver supplies the anti-detection behavior. Dumplings does not claim
+Scrapling's adaptive selector model, proxy rotation, ad-list bundle, canvas noise
+flag, or multi-page pool.
+
+Do not pass PowerShell scriptblocks to Playwright `RouteAsync`, event handlers,
+`ExposeBindingAsync`, or similar callback APIs. Playwright invokes them
+asynchronously, potentially without the originating PowerShell runspace. Dumplings
+keeps route callbacks in compiled C# and uses `Wait-PlaywrightTask` at the
+synchronous PowerShell boundary to avoid callback hangs.
 
 ## Directory Layout
 

@@ -580,6 +580,21 @@ function Get-WinGetInstallerExeFamilyDefault {
         Notes               = @('ProductCode is usually the embedded .nuspec id.', 'VM-check HKCU ARP, install path, and upgrade behavior.', 'Velopack descendants may need different uninstall behavior.')
       }
     }
+    'Zero Install' {
+      [pscustomobject]@{
+        InstallerType       = 'exe # Zero Install'
+        Scope               = 'user'
+        InstallModes        = @('interactive', 'silent', 'silentWithProgress')
+        InstallerSwitches   = [ordered]@{ Silent = '--verysilent'; SilentWithProgress = '--silent'; InstallLocation = '--store-path="<INSTALLPATH>"' }
+        ExpectedReturnCodes = @()
+        UpgradeBehavior     = 'install'
+        Notes               = @(
+          'Parse ZeroInstall.BootstrapConfig.ini once with Get-ZeroInstallInfo; target version, publisher, architecture, and capabilities come from caller-supplied feed XML.',
+          'The default ARP entry is per-user and --machine selects machine integration only when integrate_args is configured.',
+          'Zero Install integration does not write DisplayVersion; validate target-application behavior in a VM.'
+        )
+      }
+    }
     'Velopack' {
       [pscustomobject]@{
         InstallerType       = 'exe # Velopack'
@@ -816,6 +831,7 @@ function Get-WinGetInstallerGenericExeFamilyCandidate {
     @{ Name = 'InstallShield'; Patterns = @('InstallShield', 'ISSetup.dll', 'InstallScript', 'setup.inx', 'ISScript') },
     @{ Name = 'Velopack'; Patterns = @('Velopack', 'vpk_', 'RELEASES.json') },
     @{ Name = 'Squirrel'; Patterns = @('Squirrel', 'SquirrelSetup', 'Update.exe', '.nupkg', 'RELEASES') },
+    @{ Name = 'Zero Install'; Patterns = @('ZeroInstall.BootstrapConfig.ini', 'Downloads and runs Zero Install', 'Downloads and integrates') },
     @{ Name = 'Setup Factory'; Patterns = @('Setup Factory', 'Indigo Rose', 'IRSetup') },
     @{ Name = 'InstallAnywhere'; Patterns = @('InstallAnywhere', 'Zero G', 'lax.nl.current.vm', 'com.zerog', 'IAClasses.zip', 'Execute.zip', 'InstallScript.iap_xml') },
     @{ Name = 'InstallAware'; Patterns = @('InstallAware', 'MimarSinan') },
@@ -870,6 +886,14 @@ function Get-WinGetInstallerStructuralExeFamilyCandidate {
     if ($Seen.Add('Inno Setup')) {
       [pscustomobject]@{ Family = 'Inno Setup'; Confidence = 'high'; MatchedMarkers = @('RCDATA/11111 loader offset table'); SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'inno' } }
     }
+  }
+
+  # Zero Install launchers are managed PEs with a named embedded bootstrap
+  # configuration. Requiring the CLR ManifestResource row avoids classifying
+  # unrelated .NET applications that merely mention Zero Install in strings.
+  $ManagedConfig = Get-PEManagedResourceInfo -Path $File.FullName -Name 'ZeroInstall.BootstrapConfig.ini' -MaximumResources 16384 -MaximumResourceBytes 1048576 -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($ManagedConfig -and $Seen.Add('Zero Install')) {
+    [pscustomobject]@{ Family = 'Zero Install'; Confidence = 'high'; MatchedMarkers = @('CLR ManifestResource ZeroInstall.BootstrapConfig.ini'); SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'Zero Install' }
   }
 
   $NsisSignature = [byte[]](0xEF, 0xBE, 0xAD, 0xDE) + [Text.Encoding]::ASCII.GetBytes('NullsoftInst')
@@ -1447,6 +1471,22 @@ function Invoke-WinGetInstallerExeParser {
   # Structured generic-family parsers are authoritative. Stop before broad SFX
   # heuristics when one succeeds because many installer engines embed archives.
   $StructuredParserResults = @(
+    if (Test-WinGetInstallerCandidateFamily -Family 'Zero Install') {
+      Invoke-WinGetInstallerDetector -Name 'Zero Install' -ScriptBlock {
+        $Info = Get-ZeroInstallInfo -Path $AnalyzerInstallerPath
+        $Evidence = ConvertTo-GenericExeParserEvidence -Family 'Zero Install' -Info $Info
+
+        # Bootstrap configuration controls whether this is an app-bound GUI or
+        # CLI launcher, whether a store path is accepted, and whether --machine
+        # can create a second scope. Replace broad family defaults accordingly.
+        $Evidence.SuggestedManifestFields.InstallModes = @($Info.InstallModes)
+        $Evidence.SuggestedManifestFields.InstallerSwitches = $Info.InstallerSwitches
+        if ($Info.ScopeSwitches) { $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue $Info.ScopeSwitches -Force }
+        if (-not $Info.Scope) { $Evidence.SuggestedManifestFields.PSObject.Properties.Remove('Scope') }
+        $Evidence
+      }
+    }
+
     if (Test-WinGetInstallerCandidateFamily -Family 'Chromium Setup') {
       Invoke-WinGetInstallerDetector -Name 'Chromium Setup' -ScriptBlock {
         $Info = Get-ChromiumSetupInfo -Path $AnalyzerInstallerPath

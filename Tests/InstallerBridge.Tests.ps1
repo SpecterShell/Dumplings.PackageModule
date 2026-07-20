@@ -84,6 +84,31 @@ BeforeAll {
 }
 
 Describe 'Installer bridge' {
+  It 'Should preserve unnamed registry values returned by a parser CLI' {
+    $Result = InModuleScope InstallerBridge {
+      '{"InstallerType":"Nullsoft","RegistryValues":{"":"1","DisplayName":"Readest"}}' | ConvertFrom-InstallerBridgeJson
+    }
+
+    $Result | Should -BeOfType ([pscustomobject])
+    $Result.InstallerType | Should -Be 'Nullsoft'
+    $Result.RegistryValues | Should -BeOfType ([System.Collections.Specialized.OrderedDictionary])
+    $Result.RegistryValues.Contains('') | Should -BeTrue
+    $Result.RegistryValues[''] | Should -Be '1'
+    $Result.RegistryValues['DisplayName'] | Should -Be 'Readest'
+  }
+
+  It 'Should parse Readest while preserving its unnamed uninstall registry value' {
+    $Fixture = Get-InstallerFixture -Name 'Readest_0.11.20_x64-setup.exe' -Url 'https://github.com/readest/readest/releases/download/v0.11.20/Readest_0.11.20_x64-setup.exe'
+    $Info = Get-NSISInfo -Path $Fixture
+
+    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.DisplayName | Should -Be 'Readest'
+    $Info.DisplayVersion | Should -Be '0.11.20'
+    $Info.RegistryValues.Contains('') | Should -BeTrue
+    $Info.RegistryValues[''] | Should -Be '1'
+    @($Info.RegistryWrites | Where-Object { $_.IsUninstallKey -and $_.Name -eq '' }) | Should -Not -BeNullOrEmpty
+  }
+
   It 'Should parse Setup Factory metadata through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'OutCALL-2.0.exe' -Url 'https://github.com/bicomsystems/outcall2/releases/download/v2.0/OutCALL-2.0.exe'
     $Info = Get-SetupFactoryInfo -Path $Fixture

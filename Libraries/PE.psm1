@@ -210,6 +210,122 @@ function Get-PEResourceInfo {
   }
 }
 
+function Get-PEManagedResourceInfo {
+  <#
+  .SYNOPSIS
+    Enumerate embedded CLR manifest resources without loading the assembly
+  .DESCRIPTION
+    Reads the CLR ManifestResource metadata table and maps each embedded
+    resource into the PE's length-prefixed managed resource blob. Resources
+    implemented by another assembly or file are ignored because their bytes
+    are not present in this PE image.
+  .PARAMETER Path
+    Path to the managed PE. The function opens and closes the file itself.
+  .PARAMETER Stream
+    Caller-owned, readable, seekable PE stream. Its position is restored.
+  .PARAMETER Layout
+    Optional PE layout already parsed from Stream.
+  .PARAMETER Name
+    Case-insensitive wildcard patterns selecting resource names.
+  .PARAMETER MaximumResources
+    Maximum ManifestResource rows accepted from the metadata table.
+  .PARAMETER MaximumResourceBytes
+    Maximum declared size accepted for one selected resource.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream,
+    [Parameter(ParameterSetName = 'Stream')][psobject]$Layout,
+    [string[]]$Name = @('*'),
+    [ValidateRange(1, 100000)][int]$MaximumResources = 10000,
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumResourceBytes = 1073741824
+  )
+  process {
+    $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
+    if (-not $ReaderInput.Stream.CanRead -or -not $ReaderInput.Stream.CanSeek) {
+      if ($ReaderInput.OwnsStream) { $ReaderInput.Stream.Dispose() }
+      throw 'CLR manifest-resource parsing requires a readable, seekable PE stream.'
+    }
+
+    $OriginalPosition = $ReaderInput.Stream.Position
+    $PeReader = $null
+    try {
+      # PEReader consumes CLR metadata safely without loading or executing the
+      # managed installer assembly. LeaveOpen preserves caller stream ownership.
+      $ReaderInput.Stream.Position = 0
+      $PeReader = [Reflection.PortableExecutable.PEReader]::new(
+        $ReaderInput.Stream,
+        [Reflection.PortableExecutable.PEStreamOptions]::LeaveOpen
+      )
+      if (-not $PeReader.HasMetadata) { return }
+
+      $CorHeader = $PeReader.PEHeaders.CorHeader
+      if (-not $CorHeader) { return }
+      $ResourceDirectory = $CorHeader.ResourcesDirectory
+      if ($ResourceDirectory.RelativeVirtualAddress -eq 0 -or $ResourceDirectory.Size -eq 0) { return }
+
+      $EffectiveLayout = if ($Layout) { $Layout } else { Get-PELayout -Stream $ReaderInput.Stream }
+      if (-not $EffectiveLayout) { throw 'The managed resource PE layout could not be parsed.' }
+      $DirectoryOffset = Convert-PEVirtualAddressToFileOffset -Rva $ResourceDirectory.RelativeVirtualAddress -Sections $EffectiveLayout.Sections
+      $DirectorySize = [long]$ResourceDirectory.Size
+      if ($DirectoryOffset -lt 0 -or $DirectoryOffset -gt $ReaderInput.Stream.Length -or $DirectorySize -gt $ReaderInput.Stream.Length - $DirectoryOffset) {
+        throw 'The CLR managed resource directory points outside the PE image.'
+      }
+
+      $MetadataReader = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($PeReader)
+      if ($MetadataReader.ManifestResources.Count -gt $MaximumResources) {
+        throw "The CLR metadata contains more than $MaximumResources manifest resources."
+      }
+      $Patterns = @($Name | ForEach-Object {
+          [WildcardPattern]::new($_, [Management.Automation.WildcardOptions]::IgnoreCase)
+        })
+
+      foreach ($Handle in $MetadataReader.ManifestResources) {
+        $Resource = $MetadataReader.GetManifestResource($Handle)
+        if (-not $Resource.Implementation.IsNil) { continue }
+        $ResourceName = $MetadataReader.GetString($Resource.Name)
+        $NameMatches = $false
+        foreach ($Pattern in $Patterns) {
+          if ($Pattern.IsMatch($ResourceName)) { $NameMatches = $true; break }
+        }
+        if (-not $NameMatches) { continue }
+
+        # Every embedded ManifestResource row points to a record relative to the
+        # CLR resources directory: uint32 byte length followed by raw payload.
+        $RecordRelativeOffset = [long]$Resource.Offset
+        if ($RecordRelativeOffset -lt 0 -or $RecordRelativeOffset -gt $DirectorySize - 4) {
+          throw "CLR manifest resource '$ResourceName' has an invalid record offset."
+        }
+        $RecordOffset = $DirectoryOffset + $RecordRelativeOffset
+        $ResourceSize = [long](Read-PEUInt32 -Stream $ReaderInput.Stream -Offset $RecordOffset)
+        if ($ResourceSize -gt $MaximumResourceBytes) {
+          throw "CLR manifest resource '$ResourceName' exceeds the $MaximumResourceBytes-byte limit."
+        }
+        if ($ResourceSize -gt $DirectorySize - $RecordRelativeOffset - 4) {
+          throw "CLR manifest resource '$ResourceName' is truncated."
+        }
+
+        [pscustomobject]@{
+          Path                    = $ReaderInput.Path
+          SourceStream            = if ($ReaderInput.OwnsStream) { $null } else { $ReaderInput.Stream }
+          TypeName                = 'CLR ManifestResource'
+          Name                    = $ResourceName
+          Attributes              = $Resource.Attributes
+          Offset                  = [long]($RecordOffset + 4)
+          Size                    = $ResourceSize
+          ResourceDirectoryOffset = $DirectoryOffset
+          RelativeOffset          = $RecordRelativeOffset
+        }
+      }
+    } finally {
+      if ($PeReader) { $PeReader.Dispose() }
+      if (-not $ReaderInput.OwnsStream) { $ReaderInput.Stream.Position = $OriginalPosition }
+      if ($ReaderInput.OwnsStream) { $ReaderInput.Stream.Dispose() }
+    }
+  }
+}
+
 function Read-PEResourceData {
   <#
   .SYNOPSIS
@@ -394,4 +510,4 @@ function Get-PEManagedTargetFramework {
   }
 }
 
-Export-ModuleMember -Function Read-PEFileBytes, Read-PEUInt16, Read-PEUInt32, Read-PEUInt64, Convert-PEVirtualAddressToFileOffset, Get-PEMachineName, Get-PESubsystemName, Get-PELayout, Get-PESubsystemInfo, Get-PERequestedExecutionLevel, Get-PEOverlayOffset, Get-PEResourceInfo, Read-PEResourceData, Get-PEVersionStringTable, Export-PEResourceData, Get-PEDataDirectory, Get-PEImportedDll, Get-PEDelayImportedDll, Get-PEClrHeader, Get-PEManagedTargetFramework
+Export-ModuleMember -Function Read-PEFileBytes, Read-PEUInt16, Read-PEUInt32, Read-PEUInt64, Convert-PEVirtualAddressToFileOffset, Get-PEMachineName, Get-PESubsystemName, Get-PELayout, Get-PESubsystemInfo, Get-PERequestedExecutionLevel, Get-PEOverlayOffset, Get-PEResourceInfo, Get-PEManagedResourceInfo, Read-PEResourceData, Get-PEVersionStringTable, Export-PEResourceData, Get-PEDataDirectory, Get-PEImportedDll, Get-PEDelayImportedDll, Get-PEClrHeader, Get-PEManagedTargetFramework
