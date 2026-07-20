@@ -369,10 +369,10 @@ function Set-WinGetInstallerManifestMetadata {
   $NeedsAppsAndFeaturesMetadata = ($Installer.Contains('ProductCode') -and -not $InstallerEntry.Contains('ProductCode')) -or ([bool]$Installer['AppsAndFeaturesEntries'] -and -not $InstallerEntry.Contains('AppsAndFeaturesEntries'))
   if ($Metadata.Contains('WritesAppsAndFeaturesEntry') -and -not [bool]$Metadata.WritesAppsAndFeaturesEntry -and $NeedsAppsAndFeaturesMetadata) {
     $Message = "$ParserName reports that the outer installer does not write a visible Apps & Features entry; existing ARP metadata belongs to a nested payload or custom registration"
-    # Source-backed NSIS nested-payload evidence identifies wrappers such as Mozilla's 7z+NSIS
-    # layout. The outer stub cannot authoritatively replace the nested/custom ARP metadata, so
-    # preserve existing fields instead of failing a known-family update.
-    if ($Strict -and -not ($ParserName -ceq 'NSIS' -and [bool]$Metadata['DelegatesAppsAndFeaturesEntry'])) { throw $Message }
+    # An outer stub that writes no visible Apps & Features entry cannot
+    # authoritatively replace ARP metadata owned by a nested payload or custom
+    # registration. Preserve the existing fields and report the unresolved
+    # evidence as a warning instead of failing the update.
     $Logger.Invoke($Message, 'Warning')
     return
   }

@@ -156,7 +156,7 @@ Describe 'WinGet installer manifest metadata updates' {
       $Script:LogMessages.Where({ $_.Level -eq 'Warning' }) | Should -BeNullOrEmpty
     }
 
-    It 'Rejects known Inno wrappers that cannot own the existing ARP metadata' {
+    It 'Preserves existing ARP metadata with a warning when the outer Inno installer cannot own it' {
       Mock Get-InnoInfo {
         [pscustomobject]@{
           ProductCode                = 'Outer.Inno.Product'
@@ -180,8 +180,11 @@ Describe 'WinGet installer manifest metadata updates' {
       }
       $OldInstaller = $Installer | Copy-Object
 
-      { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
-        Should -Throw '*does not write a visible Apps & Features entry*'
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Nested.Product'
+      $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'Nested.Product'
+      $Script:LogMessages.Message | Should -Contain 'Inno Setup reports that the outer installer does not write a visible Apps & Features entry; existing ARP metadata belongs to a nested payload or custom registration'
       Should -Invoke Get-InnoInfo -Exactly 1
     }
 
