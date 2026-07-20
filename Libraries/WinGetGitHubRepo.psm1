@@ -473,6 +473,41 @@ function Remove-WinGetGitHubBranch {
   }
 }
 
+function Assert-WinGetGitHubGraphQLCommit {
+  <#
+  .SYNOPSIS
+    Surface GraphQL errors and return the created commit OID
+  .DESCRIPTION
+    GitHub GraphQL reports failures as HTTP 200 responses with an errors
+    collection and a null payload instead of a failing status code. Reading
+    the commit OID without checking would silently treat a rejected commit as
+    created, leaving the branch unchanged.
+  .PARAMETER Response
+    The GraphQL response returned by Invoke-GitHubApi
+  .PARAMETER Operation
+    The operation description used in error messages
+  .OUTPUTS
+    The OID of the created commit.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The GraphQL response returned by Invoke-GitHubApi')]
+    $Response,
+    [Parameter(Mandatory, HelpMessage = 'The operation description used in error messages')]
+    [string]$Operation
+  )
+
+  $ErrorsProperty = $Response.PSObject.Properties['errors']
+  if ($null -ne $ErrorsProperty -and @($ErrorsProperty.Value).Count -gt 0) {
+    $Messages = @($ErrorsProperty.Value | ForEach-Object -Process { [string]$_.message })
+    throw "GitHub GraphQL rejected ${Operation}: $($Messages -join '; ')"
+  }
+
+  $CommitOid = [string]$Response.data.createCommitOnBranch.commit.oid
+  if ([string]::IsNullOrWhiteSpace($CommitOid)) { throw "GitHub GraphQL did not return a commit for ${Operation}." }
+  return $CommitOid
+}
+
 function Add-WinGetGitHubManifests {
   <#
   .SYNOPSIS
@@ -579,7 +614,7 @@ mutation {
 "@
     }
 
-    return $Response.data.createCommitOnBranch.commit.oid
+    return Assert-WinGetGitHubGraphQLCommit -Response $Response -Operation "the manifest commit for ${RepoOwner}/${RepoName}:${RepoBranch}"
   }
 }
 
@@ -671,7 +706,7 @@ mutation {
 "@
     }
 
-    return $Response.data.createCommitOnBranch.commit.oid
+    return Assert-WinGetGitHubGraphQLCommit -Response $Response -Operation "the manifest removal commit for ${RepoOwner}/${RepoName}:${RepoBranch}"
   }
 }
 

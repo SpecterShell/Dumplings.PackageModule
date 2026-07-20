@@ -5,6 +5,27 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetGitHubRepo.psm1') -Force
 }
 
+Describe 'Add-WinGetGitHubManifests' {
+  It 'throws when GitHub GraphQL reports an error instead of a commit' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ errors = @([pscustomobject]@{ message = 'Expected head OID does not match' }) }
+    }
+
+    { Add-WinGetGitHubManifests -PackageIdentifier 'Vendor.Package' -PackageVersion '1.0' -RepoOwner DumplingsBot -RepoName winget-pkgs -RepoBranch 'test-branch' -RepoSha ('a' * 40) -RootPath 'manifests' -Manifest ([ordered]@{ Version = 'version'; Installer = 'installer'; Locale = [ordered]@{} }) -CommitMessage 'Test' } |
+      Should -Throw '*Expected head OID does not match*'
+  }
+
+  It 'returns the created commit OID' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ data = [pscustomobject]@{ createCommitOnBranch = [pscustomobject]@{ commit = [pscustomobject]@{ oid = ('b' * 40) } } } }
+    }
+
+    $Result = Add-WinGetGitHubManifests -PackageIdentifier 'Vendor.Package' -PackageVersion '1.0' -RepoOwner DumplingsBot -RepoName winget-pkgs -RepoBranch 'test-branch' -RepoSha ('a' * 40) -RootPath 'manifests' -Manifest ([ordered]@{ Version = 'version'; Installer = 'installer'; Locale = [ordered]@{} }) -CommitMessage 'Test'
+
+    $Result | Should -Be ('b' * 40)
+  }
+}
+
 Describe 'Get-WinGetGitHubComparison' {
   It 'uses owner-qualified and URI-escaped fork references' {
     $Script:GitHubApiArguments = $null

@@ -168,6 +168,47 @@ Describe 'Test-WinGetGitHubFileChangeEquality' {
   }
 }
 
+Describe 'Get-WinGetSubmissionCandidateChange' {
+  It 'returns the comparison files once the compare endpoint catches up' {
+    $Script:CompareAttempts = 0
+    Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission {
+      $Script:CompareAttempts++
+      if ($Script:CompareAttempts -lt 3) { return [pscustomobject]@{ files = @() } }
+      return [pscustomobject]@{ files = @([pscustomobject]@{ filename = 'manifests/p.yaml' }) }
+    }
+
+    $Changes = @(Get-WinGetSubmissionCandidateChange -Base 'microsoft:master' -Head ('a' * 40) -RepoOwner microsoft -RepoName winget-pkgs -MaxRetryDelaySeconds 0)
+
+    $Changes.Count | Should -Be 1
+    $Script:CompareAttempts | Should -Be 3
+  }
+
+  It 'accepts an empty comparison only after the final attempt' {
+    $Script:CompareAttempts = 0
+    Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission {
+      $Script:CompareAttempts++
+      [pscustomobject]@{ files = @() }
+    }
+
+    $Changes = @(Get-WinGetSubmissionCandidateChange -Base 'microsoft:master' -Head ('a' * 40) -RepoOwner microsoft -RepoName winget-pkgs -MaxAttempts 3 -MaxRetryDelaySeconds 0)
+
+    $Changes | Should -BeNullOrEmpty
+    $Script:CompareAttempts | Should -Be 3
+  }
+
+  It 'throws the last compare error after repeated failures' {
+    $Script:CompareAttempts = 0
+    Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission {
+      $Script:CompareAttempts++
+      throw 'boom'
+    }
+
+    { Get-WinGetSubmissionCandidateChange -Base 'microsoft:master' -Head ('a' * 40) -RepoOwner microsoft -RepoName winget-pkgs -MaxAttempts 3 -MaxRetryDelaySeconds 0 } |
+      Should -Throw '*boom*'
+    $Script:CompareAttempts | Should -Be 3
+  }
+}
+
 Describe 'Select-WinGetPullRequestForClosure' {
   It 'excludes already handled pull requests and removes duplicate API results' {
     $PullRequests = @(

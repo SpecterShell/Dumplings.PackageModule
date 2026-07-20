@@ -185,6 +185,61 @@ function ConvertTo-WinGetGitHubFileChangeFingerprint {
   }
 }
 
+function Get-WinGetSubmissionCandidateChange {
+  <#
+  .SYNOPSIS
+    Compare the candidate commit with the upstream base branch, tolerating compare-endpoint lag
+  .DESCRIPTION
+    The GitHub compare endpoint can briefly lag behind a newly created commit
+    and report an empty diff or an unknown reference. Comparing the exact
+    commit SHA instead of the branch name avoids stale branch references, and
+    an empty result is accepted only after every attempt reports it.
+  .PARAMETER Base
+    Base branch, tag, commit SHA, or owner-qualified Git reference.
+  .PARAMETER Head
+    Head commit SHA or owner-qualified Git reference.
+  .PARAMETER RepoOwner
+    Owner of the repository whose fork network contains both references.
+  .PARAMETER RepoName
+    Name of the repository whose fork network contains both references.
+  .PARAMETER MaxAttempts
+    Maximum number of compare attempts before accepting an empty diff or the last error.
+  .PARAMETER MaxRetryDelaySeconds
+    Maximum delay between attempts, in seconds.
+  .OUTPUTS
+    The changed-file objects reported by the compare endpoint.
+  #>
+  [OutputType([object[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The base Git reference')]
+    [string]$Base,
+    [Parameter(Mandatory, HelpMessage = 'The head Git reference')]
+    [string]$Head,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(HelpMessage = 'The maximum number of compare attempts')]
+    [int]$MaxAttempts = 6,
+    [Parameter(HelpMessage = 'The maximum delay between attempts, in seconds')]
+    [int]$MaxRetryDelaySeconds = 5
+  )
+
+  $LastError = $null
+  foreach ($Attempt in 1..$MaxAttempts) {
+    try {
+      $Comparison = Get-WinGetGitHubComparison -Base $Base -Head $Head -RepoOwner $RepoOwner -RepoName $RepoName
+      $Changes = @($Comparison.files)
+      if ($Changes.Count -gt 0 -or $Attempt -eq $MaxAttempts) { return $Changes }
+    } catch {
+      $LastError = $_
+    }
+    if ($Attempt -lt $MaxAttempts) { Start-Sleep -Seconds ([Math]::Min($MaxRetryDelaySeconds, $Attempt)) }
+  }
+
+  throw "Failed to compare the candidate changes with ${RepoOwner}/${RepoName}:${Base}: $LastError"
+}
+
 function Test-WinGetGitHubFileChangeEquality {
   <#
   .SYNOPSIS
@@ -511,16 +566,17 @@ function Send-WinGetManifest {
     }
     #endregion
 
-    # Compare the final candidate branch with the branch that the pull request
+    # Compare the final candidate commit with the branch that the pull request
     # would merge into. Creating commits can still result in an empty effective
     # diff when an earlier automation pull request has already been merged.
+    # The exact commit is compared because the compare endpoint can briefly lag
+    # behind the branch created above and report a false empty diff.
     $Task.Log('Checking the final candidate branch for effective changes', 'Verbose')
     try {
-      $CandidateComparison = Get-WinGetGitHubComparison -Base "${UpstreamRepoOwner}:${UpstreamRepoBranch}" -Head "${OriginRepoOwner}:${NewBranchName}" -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
-      $CandidateChanges = @($CandidateComparison.files)
+      $CandidateChanges = @(Get-WinGetSubmissionCandidateChange -Base "${UpstreamRepoOwner}:${UpstreamRepoBranch}" -Head $NewCommitSha -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
     } catch {
       Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
-      throw "Failed to compare the candidate branch with ${UpstreamRepoOwner}/${UpstreamRepoName}:${UpstreamRepoBranch}: ${_}"
+      throw
     }
 
     if ($CandidateChanges.Count -eq 0) {
