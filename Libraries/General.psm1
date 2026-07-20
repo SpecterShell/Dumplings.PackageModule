@@ -622,6 +622,11 @@ function Invoke-GitHubApi {
   <#
   .SYNOPSIS
     Invoke GitHub API with default headers and provided token
+  .DESCRIPTION
+    Endpoints that return a JSON array yield one pipeline item per element on
+    every supported PowerShell version. Invoke-RestMethod does not guarantee
+    this: recent versions emit the whole array as a single object, which
+    breaks callers that collect the output with @() or paginate on Count.
   #>
 
   $IndexOfBody = $args.IndexOf('-Body')
@@ -630,7 +635,7 @@ function Invoke-GitHubApi {
   }
 
   $IndexOfToken = $args.IndexOf('-Token')
-  if ($IndexOfToken -gt -1) {
+  $Result = if ($IndexOfToken -gt -1) {
     $args[$IndexOfToken + 1] = ConvertTo-SecureString -String $args[$IndexOfToken + 1] -AsPlainText
     Invoke-RestMethod -Authentication Bearer -Headers @{ Accept = 'application/vnd.github+json' } -ContentType 'application/json' @args
   } elseif (Test-Path Env:\GH_DUMPLINGS_TOKEN) {
@@ -639,6 +644,11 @@ function Invoke-GitHubApi {
   } else {
     throw 'A token required to invoke GitHub API is not provided through "-Token" parameter or defined in "GH_DUMPLINGS_TOKEN" environment variable'
   }
+
+  # Re-emit the captured response so a top-level JSON array is enumerated into
+  # individual output items regardless of the Invoke-RestMethod behavior of
+  # the running PowerShell version.
+  return $Result
 }
 
 function Get-RedirectedUrl {
