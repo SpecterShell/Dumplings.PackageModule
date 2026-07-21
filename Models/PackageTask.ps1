@@ -225,6 +225,27 @@ class PackageTask: System.IDisposable {
         # If this is a new task (no last state exists), skip the steps below
         $this.Log('New task', 'Info')
       }
+
+      # Warn when an installer URL moves to a different source identity (e.g., a
+      # different repository, bucket, or host) compared with the last state. A
+      # changed URL within the same identity, such as a new release asset path in
+      # the same repository, is expected and does not warn.
+      if (-not $this.Status.Contains('New') -and (-not $this.Config.Contains('CheckVersionOnly') -or -not $this.Config.CheckVersionOnly)) {
+        $TrustedIdentities = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($InstallerEntry in $this.LastState.Installer) {
+          if ($null -eq $InstallerEntry -or [string]::IsNullOrWhiteSpace([string]$InstallerEntry['InstallerUrl'])) { continue }
+          $Identity = Get-InstallerSourceIdentity -Uri $InstallerEntry['InstallerUrl']
+          if (-not [string]::IsNullOrWhiteSpace($Identity)) { $null = $TrustedIdentities.Add($Identity) }
+        }
+        if ($TrustedIdentities.Count -gt 0) {
+          foreach ($InstallerEntry in $this.CurrentState.Installer) {
+            $Identity = Get-InstallerSourceIdentity -Uri $InstallerEntry['InstallerUrl']
+            if (-not [string]::IsNullOrWhiteSpace($Identity) -and -not $TrustedIdentities.Contains($Identity)) {
+              $this.Log("The installer source identity '${Identity}' changed from the trusted history: $($TrustedIdentities -join ', ')", 'Warning')
+            }
+          }
+        }
+      }
     } else {
       $this.Log('Skip checking states', 'Info')
       $this.Status.AddRange([string[]]@('Changed', 'Updated'))

@@ -61,6 +61,7 @@ Manifest processing is separated into explicit layers:
 | `WinGetManifestValidation.psm1` | Structural, schema, and semantic validation compatible with WinGet's local validation path. |
 | `WinGetManifestUpdate.psm1` | Installer download, matching, parser metadata, and safe updates to existing authored fields. |
 | `WinGetSubmission.psm1` | Repository acquisition, manifest generation, validation, duplicate-PR policy, and submission. |
+| `SourceIdentity.psm1` | Forge- and storage-aware installer source identity normalization used by task state comparison to detect domain changes. |
 
 Primary entry points include:
 

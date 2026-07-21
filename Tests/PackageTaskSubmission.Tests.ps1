@@ -23,6 +23,29 @@ BeforeAll {
     Set-Content -LiteralPath (Join-Path $TaskPath 'Script.ps1') -Value ''
     [PackageTask]::new([ordered]@{ Name = $Name; Path = $TaskPath; Config = $Config })
   }
+
+  function New-CheckTestTask {
+    param (
+      [Parameter(Mandatory)][string]$Name,
+      [Parameter(Mandatory)][string]$LastInstallerUrl,
+      [Parameter(Mandatory)][string]$CurrentInstallerUrl,
+      [System.Collections.IDictionary]$Config = [ordered]@{}
+    )
+
+    $TaskPath = Join-Path $TestDrive $Name
+    $null = New-Item -Path $TaskPath -ItemType Directory -Force
+    Set-Content -LiteralPath (Join-Path $TaskPath 'Script.ps1') -Value ''
+    [ordered]@{
+      Version   = '1.0.0'
+      Installer = @([ordered]@{ InstallerUrl = $LastInstallerUrl })
+      Locale    = @()
+    } | ConvertTo-Yaml | Set-Content -LiteralPath (Join-Path $TaskPath 'State.yaml')
+
+    $Task = [PackageTask]::new([ordered]@{ Name = $Name; Path = $TaskPath; Config = $Config })
+    $Task.CurrentState.Version = '2.0.0'
+    $Task.CurrentState.Installer += [ordered]@{ InstallerUrl = $CurrentInstallerUrl }
+    return $Task
+  }
 }
 
 Describe 'PackageTask WinGet submission claims' {
@@ -87,6 +110,56 @@ Describe 'PackageTask WinGet submission claims' {
 
     $Global:SubmissionTestCalls | Should -BeNullOrEmpty
     $Global:DumplingsStorage['__DumplingsWinGetSubmissionClaims']['Example.Package'] | Should -BeExactly 'First'
+  }
+}
+
+Describe 'PackageTask Check domain-change warning' {
+  BeforeEach {
+    $Global:DumplingsPreference = [ordered]@{}
+  }
+
+  It 'warns when the installer source identity changes' {
+    $Task = New-CheckTestTask -Name DomainChange `
+      -LastInstallerUrl 'https://github.com/example/old/releases/download/v1/app.exe' `
+      -CurrentInstallerUrl 'https://github.com/example/new/releases/download/v2/app.exe'
+
+    $null = $Task.Check()
+
+    $Task.Logs -join "`n" | Should -Match "The installer source identity 'github\.com/example/new' changed from the trusted history"
+  }
+
+  It 'does not warn when the URL changes within the same source identity' {
+    $Task = New-CheckTestTask -Name SameIdentity `
+      -LastInstallerUrl 'https://github.com/example/repo/releases/download/v1/app.exe' `
+      -CurrentInstallerUrl 'https://github.com/example/repo/releases/download/v2/app.exe'
+
+    $null = $Task.Check()
+
+    $Task.Logs -join "`n" | Should -Not -Match 'source identity'
+  }
+
+  It 'does not warn for a new task' {
+    $TaskPath = Join-Path $TestDrive 'NewTask'
+    $null = New-Item -Path $TaskPath -ItemType Directory -Force
+    Set-Content -LiteralPath (Join-Path $TaskPath 'Script.ps1') -Value ''
+    $Task = [PackageTask]::new([ordered]@{ Name = 'NewTask'; Path = $TaskPath; Config = [ordered]@{} })
+    $Task.CurrentState.Version = '2.0.0'
+    $Task.CurrentState.Installer += [ordered]@{ InstallerUrl = 'https://github.com/example/repo/releases/download/v2/app.exe' }
+
+    $null = $Task.Check()
+
+    $Task.Logs -join "`n" | Should -Not -Match 'source identity'
+  }
+
+  It 'does not warn when the task checks versions only' {
+    $Task = New-CheckTestTask -Name VersionOnly `
+      -LastInstallerUrl 'https://github.com/example/old/releases/download/v1/app.exe' `
+      -CurrentInstallerUrl 'https://github.com/example/new/releases/download/v2/app.exe' `
+      -Config ([ordered]@{ CheckVersionOnly = $true })
+
+    $null = $Task.Check()
+
+    $Task.Logs -join "`n" | Should -Not -Match 'source identity'
   }
 }
 
