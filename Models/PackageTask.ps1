@@ -149,7 +149,10 @@ class PackageTask: System.IDisposable {
   [void] Log([string]$Message, [LogLevel]$Level) {
     Write-Log -Object $Message -Level $Level
     if ($Level -ne 'Verbose') {
-      $this.Logs.Add($Message)
+      # Messaging has no colored text, so mark warnings and errors with emoji
+      # to make them stand out in the log section of outgoing messages
+      $Prefix = $Level -eq 'Error' ? '❌ ' : ($Level -eq 'Warning' ? '⚠️ ' : '')
+      $this.Logs.Add("${Prefix}${Message}")
       if ($this.MessageEnabled) { $this.Message() }
     }
   }

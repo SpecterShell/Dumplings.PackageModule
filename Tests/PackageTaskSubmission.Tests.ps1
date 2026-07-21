@@ -125,7 +125,19 @@ Describe 'PackageTask Check domain-change warning' {
 
     $null = $Task.Check()
 
-    $Task.Logs -join "`n" | Should -Match "The installer source identity 'github\.com/example/new' changed from the trusted history"
+    $Task.Logs -join "`n" | Should -Match "⚠️ The installer source identity 'github\.com/example/new' changed from the trusted history"
+  }
+
+  It 'marks error logs with a cross mark and leaves info logs unmarked' {
+    $Task = New-CheckTestTask -Name LogMarkers `
+      -LastInstallerUrl 'https://github.com/example/repo/releases/download/v1/app.exe' `
+      -CurrentInstallerUrl 'https://github.com/example/repo/releases/download/v2/app.exe'
+
+    $Task.Log('Something went wrong', 'Error')
+    $Task.Log('Just a note', 'Info')
+
+    $Task.Logs[0] | Should -Be '❌ Something went wrong'
+    $Task.Logs[1] | Should -Be 'Just a note'
   }
 
   It 'does not warn when the URL changes within the same source identity' {
