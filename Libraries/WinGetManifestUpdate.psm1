@@ -451,6 +451,68 @@ function Set-WinGetInstallerManifestMetadata {
   }
 }
 
+function Get-WinGetInstallerReleaseDate {
+  <#
+  .SYNOPSIS
+    Resolve the installer release date from the Last-Modified response header
+  .DESCRIPTION
+    Best-effort evidence for installer entries without a task-provided
+    ReleaseDate. Uses the headers of the fresh download response when
+    available, otherwise issues a lightweight header request. Returns $null
+    when the server does not provide a usable Last-Modified value.
+  .PARAMETER Uri
+    The installer URL
+  .PARAMETER DownloadResult
+    The native download result when the installer was downloaded in this run
+  .PARAMETER Logger
+    The scriptblock or method used for diagnostics
+  .OUTPUTS
+    The release date in yyyy-MM-dd format, or $null when unavailable.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The installer URL')]
+    [uri]$Uri,
+    [Parameter(HelpMessage = 'The native download result when the installer was downloaded in this run')]
+    $DownloadResult,
+    [Parameter(DontShow, HelpMessage = 'The scriptblock or method for diagnostics')]
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    $Logger = { param($Message, $Level) Write-Host $Message }
+  )
+
+  if ($Uri.Scheme -cnotin @('http', 'https')) { return $null }
+
+  $HeaderInfo = $null
+  if ($DownloadResult -and -not [string]::IsNullOrWhiteSpace([string]$DownloadResult.ResponseHeaders)) {
+    $HeaderInfo = ConvertFrom-WinGetDownloadResponseHeader -Result $DownloadResult -Uri $Uri
+  } else {
+    # Some servers reject HEAD, so fall back to a headers-only GET.
+    foreach ($Method in @([System.Net.Http.HttpMethod]::Head, [System.Net.Http.HttpMethod]::Get)) {
+      try {
+        $HeaderInfo = Get-WebResponseHeader -Uri $Uri.AbsoluteUri -Method $Method -ConnectionTimeoutSeconds 30
+        break
+      } catch {
+        $HeaderInfo = $null
+        $LastHeaderError = $_
+      }
+    }
+    if (-not $HeaderInfo) {
+      $Logger.Invoke("Failed to read the Last-Modified header from ${Uri}: $($LastHeaderError.Exception.Message)", 'Verbose')
+      return $null
+    }
+  }
+
+  $LastModified = [string]@($HeaderInfo.Headers['Last-Modified'])[0]
+  if ([string]::IsNullOrWhiteSpace($LastModified)) { return $null }
+
+  $Parsed = [System.DateTimeOffset]::MinValue
+  if (-not [System.DateTimeOffset]::TryParse($LastModified, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$Parsed)) {
+    $Logger.Invoke("The Last-Modified header from ${Uri} is not a valid HTTP date: ${LastModified}", 'Verbose')
+    return $null
+  }
+  return $Parsed.ToUniversalTime().ToString('yyyy-MM-dd')
+}
+
 function Update-WinGetInstallerManifestInstallerMetadata {
   <#
   .SYNOPSIS
@@ -502,6 +564,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
 
   # Analyze cached installer files even when the task supplied a hash for update detection.
   $HasCachedInstallerFile = $InstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $InstallerFiles[$OriginalInstallerUrl])
+  $DownloadResult = $null
   if (-not $Installer.Contains('InstallerSha256') -or $HasCachedInstallerFile) {
     if ($Script:WinGetTempInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetTempInstallerFiles[$OriginalInstallerUrl])) {
       # Skip downloading if the installer file is already downloaded
@@ -571,6 +634,16 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       } catch {
         $Logger.Invoke("Failed to update generic EXE metadata: $($_.Exception.Message)", 'Warning')
       }
+    }
+  }
+
+  # Fill the release date from the Last-Modified response header when neither
+  # the existing installer entry nor the task provides one.
+  if (-not $Installer.Contains('ReleaseDate') -and -not $InstallerEntry.Contains('ReleaseDate')) {
+    $ReleaseDate = Get-WinGetInstallerReleaseDate -Uri $OriginalInstallerUrl -DownloadResult $DownloadResult -Logger $Logger
+    if ($ReleaseDate) {
+      $Installer.ReleaseDate = $ReleaseDate
+      $Logger.Invoke("Using the Last-Modified response header as the release date: $ReleaseDate", 'Verbose')
     }
   }
 

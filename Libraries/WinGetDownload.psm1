@@ -1217,4 +1217,4 @@ function Test-WinGetInstallerDownload {
   }
 }
 
-Export-ModuleMember -Function Get-WinGetDownloadUserAgent, Get-WinGetWinINetRedirectedUrl, Get-WinGetDeliveryOptimizationRedirectedUrl, Get-WinGetWinINetResponseHeader, Get-WinGetDeliveryOptimizationResponseHeader, Invoke-WinGetWinINetDownload, Invoke-WinGetDeliveryOptimizationDownload, Invoke-WinGetInstallerDownload, Test-WinGetInstallerDownload
+Export-ModuleMember -Function Get-WinGetDownloadUserAgent, Get-WinGetWinINetRedirectedUrl, Get-WinGetDeliveryOptimizationRedirectedUrl, Get-WinGetWinINetResponseHeader, Get-WinGetDeliveryOptimizationResponseHeader, ConvertFrom-WinGetDownloadResponseHeader, Invoke-WinGetWinINetDownload, Invoke-WinGetDeliveryOptimizationDownload, Invoke-WinGetInstallerDownload, Test-WinGetInstallerDownload
