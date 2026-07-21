@@ -492,7 +492,7 @@ function Invoke-WinGetDeliveryOptimizationDownload {
   .PARAMETER ConnectionTimeoutSeconds
     Maximum time for the transfer to receive an HTTP response; TimeoutSec is an alias
   .PARAMETER OperationTimeoutSeconds
-    Maximum time between response-body progress updates
+    Maximum time before the first response-body progress update; mid-transfer stalls are governed by NoProgressTimeoutSeconds
   .PARAMETER MaximumRetryCount
     Number of retries for HTTP 304 and 400 through 599 responses
   .PARAMETER RetryIntervalSec

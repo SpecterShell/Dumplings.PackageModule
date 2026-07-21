@@ -844,6 +844,7 @@ namespace Dumplings.WinGetDownload
                 DateTime lastProgress = started;
                 ulong lastTransferred = 0;
                 bool responseStarted = false;
+                bool transferProgressed = false;
                 while (true)
                 {
                     stage = "WaitForStatus";
@@ -864,6 +865,7 @@ namespace Dumplings.WinGetDownload
                     {
                         lastTransferred = status.BytesTransferred;
                         lastProgress = DateTime.UtcNow;
+                        transferProgressed = true;
                     }
 
                     if (status.State == DODownloadState.Transferring)
@@ -905,7 +907,11 @@ namespace Dumplings.WinGetDownload
                     {
                         throw new TimeoutException("Delivery Optimization exceeded the connection timeout before receiving a response.");
                     }
-                    if (operationTimeoutSeconds > 0 && responseStarted && DateTime.UtcNow >= lastProgress.AddSeconds(operationTimeoutSeconds))
+                    // Match WinGet's no-progress handling: the operation timeout applies
+                    // only until progress is first observed. Mid-transfer stalls are
+                    // governed by the no-progress timeout below instead of aborting
+                    // after a few quiet seconds.
+                    if (operationTimeoutSeconds > 0 && responseStarted && !transferProgressed && DateTime.UtcNow >= lastProgress.AddSeconds(operationTimeoutSeconds))
                     {
                         throw new TimeoutException("Delivery Optimization exceeded the per-operation timeout without receiving more data.");
                     }
