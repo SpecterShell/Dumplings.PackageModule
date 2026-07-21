@@ -26,6 +26,20 @@ Describe 'Add-WinGetGitHubManifests' {
   }
 }
 
+Describe 'Remove-WinGetGitHubManifests' {
+  It 'returns only the created commit OID' {
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetGitHubRepo { @([pscustomobject]@{ path = 'Vendor.Package.yaml' }) }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ data = [pscustomobject]@{ createCommitOnBranch = [pscustomobject]@{ commit = [pscustomobject]@{ oid = ('c' * 40) } } } }
+    }
+
+    $Result = @(Remove-WinGetGitHubManifests -PackageIdentifier 'Vendor.Package' -PackageVersion '1.0' -RepoOwner DumplingsBot -RepoName winget-pkgs -RepoBranch 'test-branch' -RepoSha ('a' * 40) -RootPath 'manifests' -CommitMessage 'Remove version')
+
+    $Result.Count | Should -Be 1
+    $Result[0] | Should -Be ('c' * 40)
+  }
+}
+
 Describe 'Get-WinGetGitHubComparison' {
   It 'uses owner-qualified and URI-escaped fork references' {
     $Script:GitHubApiArguments = $null

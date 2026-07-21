@@ -670,7 +670,8 @@ function Remove-WinGetGitHubManifests {
 
   process {
     $Prefix = $PSCmdlet.ParameterSetName -eq 'Path' ? $Path : (Get-WinGetGitHubPackagePath -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RootPath $RootPath)
-    $PSBoundParameters.Remove('RepoSha'); $PSBoundParameters.Remove('CommitMessage')
+    # Suppress the Boolean results so the function outputs only the commit OID.
+    $null = $PSBoundParameters.Remove('RepoSha'); $null = $PSBoundParameters.Remove('CommitMessage')
     $Manifests = Get-WinGetGitHubManifests @PSBoundParameters
 
     $Response = Invoke-GitHubApi -Uri 'https://api.github.com/graphql' -Method Post -Body @{

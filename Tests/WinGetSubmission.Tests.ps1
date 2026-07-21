@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetGitHubRepo.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetSubmission.psm1') -Force
 
   function Get-TestPullRequest {
