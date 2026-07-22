@@ -1116,10 +1116,10 @@ function Get-InstallShieldMsiInfo {
         SelectionMethod              = $SelectionMethod
         PackageArchitecture          = $MsiInfo.PackageArchitecture
         Template                     = $MsiInfo.Template
-        ProductVersion               = $MsiInfo.ProductVersion
+        ProductVersion               = $MsiInfo.DisplayVersion
         ProductCode                  = $MsiInfo.ProductCode
         UpgradeCode                  = $MsiInfo.UpgradeCode
-        ProductName                  = $MsiInfo.ProductName
+        ProductName                  = $MsiInfo.DisplayName
         Publisher                    = $MsiInfo.Publisher
         InstallerBuilder             = $MsiInfo.InstallerBuilder
         InstallLocationProperty      = $MsiInfo.InstallLocationProperty

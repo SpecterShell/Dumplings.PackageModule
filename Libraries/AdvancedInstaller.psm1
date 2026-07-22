@@ -249,8 +249,8 @@ function Get-AdvancedInstallerMsiInfo {
         Path                         = $MsiFile.FullName
         PackageArchitecture          = $MsiInfo.PackageArchitecture
         Template                     = $MsiInfo.Template
-        ProductName                  = $MsiInfo.ProductName
-        ProductVersion               = $MsiInfo.ProductVersion
+        ProductName                  = $MsiInfo.DisplayName
+        ProductVersion               = $MsiInfo.DisplayVersion
         Publisher                    = $MsiInfo.Publisher
         ProductCode                  = $MsiInfo.ProductCode
         UpgradeCode                  = $MsiInfo.UpgradeCode

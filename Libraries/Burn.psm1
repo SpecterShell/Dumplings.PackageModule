@@ -79,10 +79,13 @@ $BURN_SECTION_OFFSET_UXSIZE = 48
 $BURN_SECTION_MAGIC = 0x00f14300
 $BURN_SECTION_VERSION = 0x00000002
 
-function Get-BurnInfo {
+function Get-BurnEngineInfo {
   <#
   .SYNOPSIS
-    Get metadata from a WiX bundle file
+    Get the engine header layout from a WiX bundle file
+  .DESCRIPTION
+    Read the .wixburn section header: bundle code, format version, stub size,
+    signature boundary, container layout, and engine size.
   .PARAMETER Path
     The path to the WiX bundle file
   .PARAMETER Stream
@@ -247,7 +250,7 @@ function Get-BurnStub {
     try {
       # Container zero is the UX cabinet and begins exactly at StubSize. Copy only its declared
       # range rather than the remainder of the bundle.
-      $BurnInfo = Get-BurnInfo -Stream $BurnStream
+      $BurnInfo = Get-BurnEngineInfo -Stream $BurnStream
       $null = $BurnStream.Seek($BurnInfo.StubSize, 'Begin')
       $BurnStream.CopyTo($CabStream, $BurnInfo.AttachedContainers[0].Size)
       $CabPath
@@ -474,7 +477,7 @@ function Get-BurnPackageArchitectureInfo {
   )
 
   process {
-    $BurnInfo = Get-BurnInfo -Path $Path
+    $BurnInfo = Get-BurnEngineInfo -Path $Path
     $BootstrapperApplicationData = $null
     try {
       $BootstrapperApplicationData = Get-BurnBootstrapperApplicationData -Path $Path
@@ -832,4 +835,56 @@ function Read-ProductNameFromBurn {
   }
 }
 
-Export-ModuleMember -Function Get-BurnInfo, Get-BurnStub, Get-BurnManifest, Get-BurnUXPayload, Get-BurnBootstrapperApplicationData, Get-BurnPackageArchitectureInfo, Get-BurnScopeInfo, Read-ScopeFromBurn, Read-SupportedScopesFromBurn, Test-BurnDualScope, Read-UnsupportedArchitecturesFromBurn, Test-BurnUnsupportedArchitecture, Read-ProductCodeFromBurn, Read-UpgradeCodeFromBurn, Read-ProductNameFromBurn
+function Get-BurnInfo {
+  <#
+  .SYNOPSIS
+    Get static metadata from a WiX Burn bootstrapper bundle
+  .DESCRIPTION
+    Read the Burn manifest registration, ARP, and related-bundle elements and
+    the bundle scope evidence in one pass, matching the metadata contract of
+    the other installer-family parsers.
+  .PARAMETER Path
+    The path to the WiX bundle file
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the WiX bundle file')]
+    [string]$Path
+  )
+
+  process {
+    $null = Get-BurnEngineInfo -Path $Path
+    $Manifest = Get-BurnManifest -Path $Path
+    $Registration = @($Manifest.GetElementsByTagName('Registration') | Select-Object -First 1)
+    if ($Registration.Count -eq 0) { throw 'The Burn manifest does not contain a Registration element' }
+    $Registration = $Registration[0]
+    $Arp = @($Registration.ChildNodes | Where-Object LocalName -EQ 'Arp' | Select-Object -First 1)
+    $RelatedBundle = @($Manifest.GetElementsByTagName('RelatedBundle') | Select-Object -First 1)
+    $ProductCode = $Registration.GetAttribute('Code')
+    if ([string]::IsNullOrWhiteSpace($ProductCode)) { $ProductCode = $Registration.GetAttribute('Id') }
+    $UpgradeCode = if ($RelatedBundle.Count -gt 0) {
+      $Value = $RelatedBundle[0].GetAttribute('Code')
+      [string]::IsNullOrWhiteSpace($Value) ? $RelatedBundle[0].GetAttribute('Id') : $Value
+    } else { $null }
+    $ScopeInfo = Get-BurnScopeInfo -Path $Path
+    $Info = [pscustomobject]@{
+      Path                       = (Get-Item -Path $Path -Force).FullName
+      InstallerType              = 'Burn'
+      ProductCode                = $ProductCode
+      UpgradeCode                = $UpgradeCode
+      DisplayName                = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayName') : $null
+      DisplayVersion             = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayVersion') : $null
+      Publisher                  = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('Publisher') : $null
+      Scope                      = $ScopeInfo.DefaultScope
+      WritesAppsAndFeaturesEntry = $true
+      AppsAndFeaturesProductCode = $ProductCode
+      Warnings                   = @()
+      UnresolvedFields           = @()
+    }
+    if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { $Info.DisplayName = Read-ProductNameFromBurn -Path $Path }
+    if ([string]::IsNullOrWhiteSpace($Info.DisplayVersion)) { $Info.DisplayVersion = Read-ProductVersionFromExe -Path $Path }
+    return $Info
+  }
+}
+
+Export-ModuleMember -Function Get-BurnEngineInfo, Get-BurnStub, Get-BurnManifest, Get-BurnUXPayload, Get-BurnBootstrapperApplicationData, Get-BurnPackageArchitectureInfo, Get-BurnScopeInfo, Get-BurnInfo, Read-ScopeFromBurn, Read-SupportedScopesFromBurn, Test-BurnDualScope, Read-UnsupportedArchitecturesFromBurn, Test-BurnUnsupportedArchitecture, Read-ProductCodeFromBurn, Read-UpgradeCodeFromBurn, Read-ProductNameFromBurn

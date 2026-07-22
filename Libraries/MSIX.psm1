@@ -755,6 +755,8 @@ function Get-MSIXInfo {
       Name                       = [string]$Identity.Name
       Publisher                  = [string]$Identity.Publisher
       Version                    = [string]$Identity.Version
+      DisplayVersion             = [string]$Identity.Version
+      UnresolvedFields           = @()
       Architecture               = [string]$Identity.ProcessorArchitecture
       DisplayName                = [string]$DisplayName
       PublisherDisplayName       = [string]$PublisherDisplayName

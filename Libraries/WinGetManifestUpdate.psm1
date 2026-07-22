@@ -108,7 +108,6 @@ function ConvertTo-WinGetInstallerManifestMetadata {
     Capabilities                  = @('Capabilities')
     RestrictedCapabilities        = @('RestrictedCapabilities')
     UnresolvedFields              = @('UnresolvedFields')
-    DelegatesAppsAndFeaturesEntry = @('DelegatesAppsAndFeaturesEntry')
   }
 
   foreach ($TargetProperty in $PropertyMap.Keys) {
@@ -139,81 +138,43 @@ function Get-WinGetKnownInstallerManifestInfo {
   )
 
   try {
+    $WarningsFor = {
+      param($Info)
+      $WarningsProperty = $Info.PSObject.Properties['Warnings']
+      return $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
+    }
     switch ($InstallerType) {
       { $_ -cin @('msi', 'wix') } {
         $Info = Get-MsiInstallerInfo -Path $Path
-        # Unknown means the MSI retained no source-backed authoring signature; it is not positive
-        # evidence that contradicts a manifest-declared WiX type.
-        if ($InstallerType -ceq 'wix' -and $Info.InstallerBuilder -cnotin @('WiX', 'Unknown')) {
-          throw "The MSI builder is '$($Info.InstallerBuilder)', not WiX"
-        }
-        $ScopeInfo = [pscustomobject]@{ Scope = $Info.AllUsers -ceq '1' ? 'machine' : $null }
-        $TypeInfo = $null
-        if ($InstallerType -ceq 'wix' -and $Info.InstallerBuilder -ceq 'Unknown' -and $Info.AppsAndFeaturesInstallerType -ceq 'msi' -and -not $Info.HasCustomAppsAndFeaturesEntry) {
-          # An unknown builder is inconclusive rather than contradictory. For a normal MSI ARP
-          # entry, retain the manifest-declared WiX family so AppsAndFeaturesEntries does not gain
-          # a redundant `InstallerType: msi` solely because authoring signatures were stripped.
-          $TypeInfo = [pscustomobject]@{ AppsAndFeaturesInstallerType = 'wix' }
-        }
-        $ParserInput = [System.Collections.Generic.List[psobject]]::new()
-        $ParserInput.Add($ScopeInfo)
-        if ($TypeInfo) { $ParserInput.Add($TypeInfo) }
-        $ParserInput.Add($Info)
-        return [pscustomobject]@{ ParserName = 'Windows Installer'; InputObject = $ParserInput.ToArray() }
+        return [pscustomobject]@{ ParserName = 'Windows Installer'; InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
       }
       'burn' {
-        $null = Get-BurnInfo -Path $Path
-        $Manifest = Get-BurnManifest -Path $Path
-        $Registration = @($Manifest.GetElementsByTagName('Registration') | Select-Object -First 1)
-        if ($Registration.Count -eq 0) { throw 'The Burn manifest does not contain a Registration element' }
-        $Registration = $Registration[0]
-        $Arp = @($Registration.ChildNodes | Where-Object LocalName -EQ 'Arp' | Select-Object -First 1)
-        $RelatedBundle = @($Manifest.GetElementsByTagName('RelatedBundle') | Select-Object -First 1)
-        $ProductCode = $Registration.GetAttribute('Code')
-        if ([string]::IsNullOrWhiteSpace($ProductCode)) { $ProductCode = $Registration.GetAttribute('Id') }
-        $UpgradeCode = if ($RelatedBundle.Count -gt 0) {
-          $Value = $RelatedBundle[0].GetAttribute('Code')
-          [string]::IsNullOrWhiteSpace($Value) ? $RelatedBundle[0].GetAttribute('Id') : $Value
-        } else { $null }
-        $ScopeInfo = Get-BurnScopeInfo -Path $Path
-        $Info = [pscustomobject]@{
-          InstallerType  = 'Burn'
-          ProductCode    = $ProductCode
-          UpgradeCode    = $UpgradeCode
-          DisplayName    = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayName') : $null
-          DisplayVersion = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayVersion') : $null
-          Publisher      = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('Publisher') : $null
-          Scope          = $ScopeInfo.DefaultScope
+        $Info = Get-BurnInfo -Path $Path
+        if ($Info.PSObject.Properties.Name -contains 'InstallerType' -and $Info.InstallerType -cne 'Burn') {
+          throw "The parser identified '$($Info.InstallerType)', not Burn"
         }
-        if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { $Info.DisplayName = Read-ProductNameFromBurn -Path $Path }
-        if ([string]::IsNullOrWhiteSpace($Info.DisplayVersion)) { $Info.DisplayVersion = Read-ProductVersionFromExe -Path $Path }
-        return [pscustomobject]@{ ParserName = 'Burn'; InputObject = @($ScopeInfo, $Info) }
+        return [pscustomobject]@{ ParserName = 'Burn'; InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
       }
       'nullsoft' {
         $Info = Get-NSISInfo -Path $Path
         if ($Info.PSObject.Properties.Name -contains 'InstallerType' -and $Info.InstallerType -cne 'Nullsoft') {
           throw "The parser identified '$($Info.InstallerType)', not Nullsoft"
         }
-        $WarningsProperty = $Info.PSObject.Properties['Warnings']
-        return [pscustomobject]@{ ParserName = 'NSIS'; InputObject = @($Info); Warnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value) }
+        return [pscustomobject]@{ ParserName = 'NSIS'; InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
       }
       'inno' {
         $Info = Get-InnoInfo -Path $Path
         if ($Info.PSObject.Properties.Name -contains 'InstallerType' -and $Info.InstallerType -cne 'Inno') {
           throw "The parser identified '$($Info.InstallerType)', not Inno"
         }
-        return [pscustomobject]@{ ParserName = 'Inno Setup'; InputObject = @($Info) }
+        return [pscustomobject]@{ ParserName = 'Inno Setup'; InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
       }
       { $_ -cin @('msix', 'appx') } {
         $Info = Get-MSIXInfo -Path $Path -InstallerTypeHint $InstallerType
         if ($Info.InstallerType -cne $InstallerType) {
           throw "The package is '$($Info.InstallerType)', not '$InstallerType'"
         }
-        $ManifestIdentityInfo = [pscustomobject]@{
-          DisplayVersion = $Info.Version
-          Publisher      = $Info.PublisherDisplayName
-        }
-        return [pscustomobject]@{ ParserName = 'MSIX/AppX'; InputObject = @($ManifestIdentityInfo, $Info) }
+        return [pscustomobject]@{ ParserName = 'MSIX/AppX'; InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
       }
     }
   } catch {
@@ -231,6 +192,8 @@ function Get-WinGetGenericInstallerManifestInfo {
     The architecture of the installer entry
   .PARAMETER InstallerSwitches
     The installer switches used to resolve command-line-selected identities
+  .PARAMETER Analysis
+    A previously computed installer analysis to reuse instead of re-analyzing the file
   .PARAMETER Logger
     The scriptblock or method used for warnings
   #>
@@ -246,15 +209,20 @@ function Get-WinGetGenericInstallerManifestInfo {
     [Parameter(HelpMessage = 'The installer switches used by the manifest')]
     [System.Collections.IDictionary]$InstallerSwitches,
 
+    [Parameter(HelpMessage = 'A previously computed installer analysis to reuse instead of re-analyzing the file')]
+    $Analysis,
+
     [Parameter(Mandatory, HelpMessage = 'The scriptblock or method used for warnings')]
     $Logger
   )
 
-  try {
-    $Analysis = Get-WinGetInstallerAnalysis -Path $Path
-  } catch {
-    $Logger.Invoke("Failed to detect the generic EXE installer family: $($_.Exception.Message)", 'Warning')
-    return $null
+  if (-not $Analysis) {
+    try {
+      $Analysis = Get-WinGetInstallerAnalysis -Path $Path
+    } catch {
+      $Logger.Invoke("Failed to detect the generic EXE installer family: $($_.Exception.Message)", 'Warning')
+      return $null
+    }
   }
 
   $SuccessfulParser = $Analysis.ParserResults | Where-Object { $_.Success -and $_.Result } | Select-Object -First 1
@@ -262,11 +230,15 @@ function Get-WinGetGenericInstallerManifestInfo {
     # Analyzer parser results are produced by the corresponding Get-*Info function.
     $Metadata = $SuccessfulParser.Result.PSObject.Properties.Name -contains 'Metadata' ? $SuccessfulParser.Result.Metadata : $null
     if ($SuccessfulParser.Name -ceq 'Advanced Installer') {
-      if (-not $Metadata) { throw 'Advanced Installer detection did not return parser metadata' }
+      if (-not $Metadata) {
+        $Logger.Invoke('Advanced Installer detection did not return parser metadata', 'Warning')
+        return $null
+      }
       $SelectionProperty = $Metadata.PSObject.Properties['MsiPayloadSelection']
       $Selection = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value
       if ($Selection -and $Selection.SourceKind -ceq 'Download') {
-        throw "Advanced Installer selects the online MSI from MainAppURL '$($Selection.MainAppUrl)'; the embedded files do not represent the installer payload"
+        $Logger.Invoke("Advanced Installer selects the online MSI from MainAppURL '$($Selection.MainAppUrl)'; the embedded files do not represent the installer payload", 'Warning')
+        return $null
       }
       $MsiInfoArguments = @{ Installer = $Metadata }
       if ($Architecture -cin @('x86', 'x64', 'arm64')) { $MsiInfoArguments.Architecture = $Architecture }
@@ -425,16 +397,20 @@ function Set-WinGetInstallerManifestMetadata {
     Publisher      = 'Publisher'
     ProductCode    = 'ProductCode'
     UpgradeCode    = 'UpgradeCode'
-    InstallerType  = 'AppsAndFeaturesInstallerType'
   }
   foreach ($Entry in $MatchingEntries) {
     if ($Metadata.Contains('AppsAndFeaturesInstallerType') -and (& $HasScalarValue $Metadata.AppsAndFeaturesInstallerType)) {
       $InheritedInstallerType = [string]($Installer.Contains('NestedInstallerType') ? $Installer['NestedInstallerType'] : $Installer['InstallerType'])
       if ($Metadata.AppsAndFeaturesInstallerType -ceq $InheritedInstallerType) {
-        # The ARP entry inherits the effective installer type; remove redundant values left by earlier updates.
-        if ($Entry.Contains('InstallerType')) { $Entry.Remove('InstallerType') }
-      } elseif (-not $Entry.Contains('InstallerType')) {
-        # Materialize an incompatible ARP type, such as a WiX MSI exposing an EXE-style custom uninstall key.
+        # Remove only values that restate the effective installer type. An authored
+        # type that disagrees is author intent and must be preserved: an MSI with
+        # ARPSYSTEMCOMPONENT=1 hides its native entry and lets a nested payload,
+        # such as an NSIS installer, write the visible ARP entry, which static
+        # parsing cannot see and would otherwise normalize back to the MSI family.
+        if ($Entry.Contains('InstallerType') -and $Entry['InstallerType'] -ceq $InheritedInstallerType) { $Entry.Remove('InstallerType') }
+      } else {
+        # The parser identified a different ARP family, which is explicit evidence
+        # such as an EXE-style custom uninstall key. Update or materialize the value.
         $Entry['InstallerType'] = $Metadata.AppsAndFeaturesInstallerType
       }
     }
@@ -451,17 +427,18 @@ function Set-WinGetInstallerManifestMetadata {
   }
 }
 
-function Remove-WinGetEmptyAppsAndFeaturesEntries {
+function Remove-WinGetEmptyManifestValue {
   <#
   .SYNOPSIS
-    Remove structurally empty Apps & Features entries after parser updates.
+    Remove structurally empty dictionaries and arrays from an installer entry.
   .DESCRIPTION
-    Parser normalization can remove the final redundant field from an existing
-    AppsAndFeaturesEntries item. An empty dictionary is not useful ARP evidence
-    and serializes as an invalid `- {}` item, so this helper removes empty items
-    and removes the property when no meaningful entries remain.
+    Parser normalization can remove the final field from a nested dictionary or
+    the final item from an array, leaving values that serialize as invalid `{}`
+    or `[]` collections. This helper recursively drops empty dictionary and
+    array values, including null and emptied items nested inside arrays, while
+    preserving every meaningful value without rewriting it.
   .PARAMETER Installer
-    The mutable effective installer entry to normalize.
+    The mutable dictionary to normalize, such as an effective installer entry.
   #>
   [OutputType([void])]
   param (
@@ -469,20 +446,29 @@ function Remove-WinGetEmptyAppsAndFeaturesEntries {
     [System.Collections.IDictionary]$Installer
   )
 
-  if (-not $Installer.Contains('AppsAndFeaturesEntries')) { return }
-
-  $Entries = [System.Collections.Generic.List[object]]::new()
-  foreach ($Entry in @($Installer['AppsAndFeaturesEntries'])) {
-    # Null items and dictionaries with no remaining ARP fields have no schema-valid
-    # manifest representation. Preserve every non-empty item without rewriting it.
-    if ($null -eq $Entry -or ($Entry -is [System.Collections.IDictionary] -and $Entry.Count -eq 0)) { continue }
-    $Entries.Add($Entry)
-  }
-
-  if ($Entries.Count -eq 0) {
-    $Installer.Remove('AppsAndFeaturesEntries')
-  } else {
-    $Installer['AppsAndFeaturesEntries'] = $Entries.ToArray()
+  foreach ($Key in @($Installer.Keys)) {
+    $Value = $Installer[$Key]
+    if ($Value -is [System.Collections.IDictionary]) {
+      Remove-WinGetEmptyManifestValue -Installer $Value
+      if ($Value.Count -eq 0) { $Installer.Remove($Key) }
+    } elseif ($Value -is [System.Collections.IList]) {
+      $Items = [System.Collections.Generic.List[object]]::new()
+      foreach ($Item in @($Value)) {
+        # Null items and dictionaries with no remaining fields have no schema-valid
+        # manifest representation.
+        if ($null -eq $Item) { continue }
+        if ($Item -is [System.Collections.IDictionary]) {
+          Remove-WinGetEmptyManifestValue -Installer $Item
+          if ($Item.Count -eq 0) { continue }
+        }
+        $Items.Add($Item)
+      }
+      if ($Items.Count -eq 0) {
+        $Installer.Remove($Key)
+      } elseif ($Items.Count -ne $Value.Count) {
+        $Installer[$Key] = $Items.ToArray()
+      }
+    }
   }
 }
 
@@ -632,42 +618,111 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     }
 
     $KnownInstallerTypes = @('msi', 'wix', 'burn', 'nullsoft', 'inno', 'msix', 'appx')
-    if ($EffectiveInstallerType -cin $KnownInstallerTypes) {
-      # Known WinGet types are authoritative: family validation, parsing, and field updates must all succeed.
-      $ParserInfo = Get-WinGetKnownInstallerManifestInfo -Path $EffectiveInstallerPath -InstallerType $EffectiveInstallerType
-      $WarningsProperty = $ParserInfo.PSObject.Properties['Warnings']
-      $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
-      foreach ($Warning in @($ParserWarnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
-        $Logger.Invoke("$($ParserInfo.ParserName): $Warning", 'Warning')
+    if ($EffectiveInstallerType -cin $KnownInstallerTypes -or $EffectiveInstallerType -ceq 'exe') {
+      # Always analyze the installer and compare the detected family with the
+      # manifest-declared type instead of trusting the declaration. A mismatch
+      # within the same major type, such as MSI versus WiX, only warns and
+      # updates fields from the detected parser while keeping the declared
+      # type; a mismatch across major types, such as MSI versus EXE or
+      # AppX/MSIX, is fatal. No detection falls back to parsing with the
+      # declared type, whose failure only emits a warning and preserves the
+      # existing fields. MSIX/AppX stay fatal on any mismatch because their
+      # identity fields, such as PackageFamilyName and SignatureSha256, must
+      # never be guessed from a mismatched package.
+      $Analysis = $null
+      try { $Analysis = Get-WinGetInstallerAnalysis -Path $EffectiveInstallerPath } catch { $Analysis = $null }
+      $FamilyCandidates = @()
+      if ($Analysis) {
+        $FamilyCandidatesProperty = $Analysis.PSObject.Properties['FamilyCandidates']
+        $FamilyCandidates = $null -eq $FamilyCandidatesProperty ? @() : @($FamilyCandidatesProperty.Value)
       }
-      $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
-      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -Strict -Logger $Logger
-    } elseif ($EffectiveInstallerType -ceq 'exe') {
-      # Generic EXE families are best effort because static detection can be ambiguous or unsupported.
-      try {
-        $ParserInfoArguments = @{
-          Path         = $EffectiveInstallerPath
-          Architecture = $Installer.Architecture
-          Logger       = $Logger
+      $DetectedType = $null
+      foreach ($Candidate in $FamilyCandidates) {
+        $SuggestedProperty = $Candidate.PSObject.Properties['SuggestedManifestFields']
+        $Suggested = $null -eq $SuggestedProperty ? $null : $SuggestedProperty.Value
+        $TypeProperty = $null -eq $Suggested ? $null : $Suggested.PSObject.Properties['InstallerType']
+        if ($null -ne $TypeProperty -and -not [string]::IsNullOrWhiteSpace([string]$TypeProperty.Value)) {
+          $DetectedType = [string]$TypeProperty.Value
+          break
         }
-        if ($Installer.Contains('InstallerSwitches') -and $Installer.InstallerSwitches -is [System.Collections.IDictionary]) {
-          $ParserInfoArguments.InstallerSwitches = $Installer.InstallerSwitches
-        }
-        $ParserInfo = Get-WinGetGenericInstallerManifestInfo @ParserInfoArguments
-        if ($ParserInfo) {
+      }
+      # Major installer types group families that winget-cli handles alike:
+      # MSI and WiX share one engine, while Burn is its own major type because
+      # winget-cli handles .msi and .exe installers differently. A declared
+      # generic EXE never mismatches because it explicitly accepts any
+      # detected family.
+      $DeclaredMajorType = if ($EffectiveInstallerType -cin @('msi', 'wix')) { 'msi' } elseif ($EffectiveInstallerType -cin @('msix', 'appx')) { 'msix' } else { $EffectiveInstallerType }
+      $DetectedMajorType = $null
+      $TypeMismatch = $false
+      if (-not [string]::IsNullOrWhiteSpace($DetectedType) -and $DetectedType -cne $EffectiveInstallerType -and $DeclaredMajorType -cne 'exe') {
+        $DetectedMajorType = if ($DetectedType -cin @('msi', 'wix')) { 'msi' } elseif ($DetectedType -cin @('msix', 'appx')) { 'msix' } elseif ($DetectedType.StartsWith('exe')) { 'exe' } else { $DetectedType }
+        $TypeMismatch = $true
+      }
+      if ($TypeMismatch) {
+        if ($EffectiveInstallerType -cin @('msix', 'appx') -or $DeclaredMajorType -cne $DetectedMajorType) { throw "The manifest-declared '$EffectiveInstallerType' installer was detected as '$DetectedType'" }
+        $Logger.Invoke("The manifest-declared '$EffectiveInstallerType' installer was detected as '$DetectedType'; the declared type is kept and metadata is updated from the detected parser", 'Warning')
+      }
+      $ParserType = $TypeMismatch ? $DetectedType : $EffectiveInstallerType
+
+      if ($ParserType -cin $KnownInstallerTypes) {
+        # Parsing errors and strict metadata application failures only emit a
+        # warning and roll the entry back to its state before parsing, keeping
+        # the hash update; the release date is filled later as usual. MSIX/AppX
+        # stay fatal because their identity fields must never be guessed.
+        $InstallerBackup = $Installer | Copy-Object
+        try {
+          $ParserInfo = Get-WinGetKnownInstallerManifestInfo -Path $EffectiveInstallerPath -InstallerType $ParserType
           $WarningsProperty = $ParserInfo.PSObject.Properties['Warnings']
           $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
           foreach ($Warning in @($ParserWarnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
             $Logger.Invoke("$($ParserInfo.ParserName): $Warning", 'Warning')
           }
-          if (-not [string]::IsNullOrWhiteSpace([string]$ParserInfo.SelectedMsiPath)) {
-            $Logger.Invoke("$($ParserInfo.ParserName) selected MSI '$($ParserInfo.SelectedMsiPath)' using '$($ParserInfo.SelectionMethod)'", 'Verbose')
-          }
           $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
-          Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -Logger $Logger
+          if ($TypeMismatch) {
+            Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -Logger $Logger
+          } else {
+            Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -Strict -Logger $Logger
+          }
+        } catch {
+          if ($EffectiveInstallerType -cin @('msix', 'appx')) { throw }
+          foreach ($Key in @($Installer.Keys)) {
+            if ($Key -ceq 'InstallerSha256') { continue }
+            if ($InstallerBackup.Contains($Key)) { $Installer[$Key] = $InstallerBackup[$Key] } else { $Installer.Remove($Key) }
+          }
+          foreach ($Key in @($InstallerBackup.Keys)) {
+            if ($Key -ceq 'InstallerSha256' -or $Installer.Contains($Key)) { continue }
+            $Installer[$Key] = $InstallerBackup[$Key]
+          }
+          $Logger.Invoke("$($_.Exception.Message); existing fields are preserved", 'Warning')
         }
-      } catch {
-        $Logger.Invoke("Failed to update generic EXE metadata: $($_.Exception.Message)", 'Warning')
+      } else {
+        # Generic EXE families are best effort because static detection can be ambiguous or unsupported.
+        try {
+          $ParserInfoArguments = @{
+            Path         = $EffectiveInstallerPath
+            Architecture = $Installer.Architecture
+            Logger       = $Logger
+          }
+          if ($Analysis) { $ParserInfoArguments.Analysis = $Analysis }
+          if ($Installer.Contains('InstallerSwitches') -and $Installer.InstallerSwitches -is [System.Collections.IDictionary]) {
+            $ParserInfoArguments.InstallerSwitches = $Installer.InstallerSwitches
+          }
+          $ParserInfo = Get-WinGetGenericInstallerManifestInfo @ParserInfoArguments
+          if ($ParserInfo) {
+            $WarningsProperty = $ParserInfo.PSObject.Properties['Warnings']
+            $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
+            foreach ($Warning in @($ParserWarnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
+              $Logger.Invoke("$($ParserInfo.ParserName): $Warning", 'Warning')
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string]$ParserInfo.SelectedMsiPath)) {
+              $Logger.Invoke("$($ParserInfo.ParserName) selected MSI '$($ParserInfo.SelectedMsiPath)' using '$($ParserInfo.SelectionMethod)'", 'Verbose')
+            }
+            $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
+            Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -Logger $Logger
+          }
+        } catch {
+          $Logger.Invoke("Failed to update generic EXE metadata: $($_.Exception.Message)", 'Warning')
+        }
       }
     }
   }
@@ -682,9 +737,10 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     }
   }
 
-  # A parser may remove a redundant field such as AppsAndFeaturesEntries.InstallerType.
-  # Do not let the now-empty item survive into YAML as `AppsAndFeaturesEntries: - {}`.
-  Remove-WinGetEmptyAppsAndFeaturesEntries -Installer $Installer
+  # A parser may remove the final field of a nested value, such as a redundant
+  # AppsAndFeaturesEntries.InstallerType. Do not let structurally empty
+  # dictionaries or arrays survive into YAML as `{}` or `[]` collections.
+  Remove-WinGetEmptyManifestValue -Installer $Installer
 
   # Beautify entries
   if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }

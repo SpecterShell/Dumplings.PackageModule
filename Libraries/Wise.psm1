@@ -165,9 +165,9 @@ function Get-WiseInfo {
       [pscustomobject]@{
         InstallerType                = 'Wise MSI'
         WiseVariant                  = 'Wise for Windows Installer'
-        DisplayName                  = $MsiInfo.ProductName
-        ProductName                  = $MsiInfo.ProductName
-        DisplayVersion               = $MsiInfo.ProductVersion
+        DisplayName                  = $MsiInfo.DisplayName
+        ProductName                  = $MsiInfo.DisplayName
+        DisplayVersion               = $MsiInfo.DisplayVersion
         Publisher                    = $Publisher
         ProductCode                  = $MsiInfo.ProductCode
         UpgradeCode                  = $MsiInfo.UpgradeCode

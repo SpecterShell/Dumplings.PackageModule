@@ -37,6 +37,21 @@ Describe 'MSI Apps & Features parser' {
     $Info.AppsAndFeaturesEntries.CustomAppsAndFeaturesRegistryKey | Should -Be 'Software\Microsoft\Windows\CurrentVersion\Uninstall\MSI:Tower'
   }
 
+  It 'Should expose the unified parser contract properties' {
+    $Fixture = Get-DumplingsTestFixture -Directory $Script:SquirrelFixtureDirectory -Name 'Tower-13.1.576.msi' -Uri 'https://www.git-tower.com/apps/tower3-win/576-01812649/Tower-13.1.576.msi'
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.PSObject.Properties.Name | Should -Not -Contain 'ProductName'
+    $Info.PSObject.Properties.Name | Should -Not -Contain 'ProductVersion'
+    $Info.PSObject.Properties.Name | Should -Contain 'Path'
+    $Info.DisplayName | Should -Not -BeNullOrEmpty
+    $Info.DisplayVersion | Should -Not -BeNullOrEmpty
+    $Info.PSObject.Properties.Name | Should -Contain 'Scope'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.Warnings | Should -Be @()
+    $Info.UnresolvedFields | Should -Be @()
+  }
+
   It 'Should detect Figma MSI writing a hidden native ARP entry and visible .msq ARP entry' {
     $Fixture = Get-InstallerFixture -Name 'Figma-125.8.5.msi' -Url 'https://desktop.figma.com/win/build/Figma-125.8.5.msi'
     $Info = Get-MsiAppsAndFeaturesInfo -Path $Fixture

@@ -962,17 +962,20 @@ function Get-MsiInstallerInfo {
       $AssociationInfo = Get-MsiAssociationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
 
       [PSCustomObject]@{
+        Path                            = $File.FullName
         InstallerType                   = $AppsAndFeaturesInfo.InstallerType
         ProductCode                     = $Properties['ProductCode']
-        ProductName                     = $Properties['ProductName']
-        ProductVersion                  = $Properties['ProductVersion']
-        Publisher                       = $Properties['Manufacturer']
         UpgradeCode                     = $Properties['UpgradeCode']
+        DisplayName                     = $Properties['ProductName']
+        DisplayVersion                  = $Properties['ProductVersion']
+        Publisher                       = $Properties['Manufacturer']
         AllUsers                        = $Properties['ALLUSERS']
+        Scope                           = $Properties['ALLUSERS'] -ceq '1' ? 'machine' : $null
         InstallerBuilder                = $AppsAndFeaturesInfo.InstallerBuilder
         InstallLocationProperty         = $InstallLocationInfo.Property
         InstallLocationSwitch           = $InstallLocationInfo.Switch
         InstallLocationSource           = $InstallLocationInfo.Source
+        WritesAppsAndFeaturesEntry      = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry -or -not $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
         AppsAndFeaturesInstallerType    = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
         AppsAndFeaturesWindowsInstaller = $AppsAndFeaturesInfo.AppsAndFeaturesWindowsInstaller
         AppsAndFeaturesProductCode      = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
@@ -986,6 +989,8 @@ function Get-MsiInstallerInfo {
         FileExtensions                  = $AssociationInfo.FileExtensions
         RegistryAssociationInfo         = $AssociationInfo
         AppsAndFeaturesEntries          = $AppsAndFeaturesInfo
+        Warnings                        = @()
+        UnresolvedFields                = @()
       }
     } finally {
       switch ($PSCmdlet.ParameterSetName) {

@@ -8,6 +8,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSerialization.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerBridge.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\MSI.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\MSIX.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Burn.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\NSIS.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Inno.psm1') -Force
@@ -441,7 +442,7 @@ Describe 'WinGet installer manifest metadata updates' {
       Should -Invoke Get-MsiInstallerInfo -Exactly 1
     }
 
-    It 'Does not materialize an AppsAndFeaturesEntries type for a matching WiX installer' {
+    It 'Preserves an authored AppsAndFeaturesEntries InstallerType that conflicts with a matching WiX installer' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{NEW-WIX-PRODUCT}'
@@ -465,7 +466,8 @@ Describe 'WinGet installer manifest metadata updates' {
 
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
-      $Result.AppsAndFeaturesEntries[0].Contains('InstallerType') | Should -BeFalse
+      # The authored type is not overwritten or removed by parser-normalized evidence
+      $Result.AppsAndFeaturesEntries[0].InstallerType | Should -Be 'msi'
     }
 
     It 'Uses NestedInstallerType when deciding whether to materialize an AppsAndFeaturesEntries type' {
@@ -562,7 +564,7 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result.AppsAndFeaturesEntries[0].UpgradeCode | Should -Be '{TOWER-UPGRADE}'
     }
 
-    It 'Throws when a manifest-declared WiX installer is built by another MSI tool' {
+    It 'Accepts and updates a manifest-declared WiX installer built by another MSI tool' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode      = '{PRODUCT}'
@@ -576,13 +578,213 @@ Describe 'WinGet installer manifest metadata updates' {
         Architecture  = 'x64'
         InstallerType = 'wix'
         InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = '{OLD-PRODUCT}'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      # The MSI/WiX builder mismatch is intentionally not validated
+      $Result.ProductCode | Should -Be '{PRODUCT}'
+    }
+
+    It 'Warns and preserves fields when a manifest-declared NSIS installer cannot be parsed' {
+      Mock Get-NSISInfo { throw 'The NSIS installer header could not be located at a valid aligned archive start' }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'nullsoft'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Old.NSIS.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Old.NSIS.Product'
+      $Script:LogMessages.Message | Should -Contain "Failed to validate and parse the manifest-declared 'nullsoft' installer: The NSIS installer header could not be located at a valid aligned archive start; existing fields are preserved"
+    }
+
+    It 'Still throws when a manifest-declared MSIX installer cannot be parsed' {
+      Mock Get-MSIXInfo { throw 'The package is not a valid MSIX package' }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'msix'
+        InstallerUrl  = $Script:InstallerUrl
       }
 
       { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
-        Should -Throw "*builder is 'InstallShield', not WiX*"
+        Should -Throw '*not a valid MSIX package*'
     }
 
-    It 'Removes an AppsAndFeaturesEntries item made empty by WiX type normalization' {
+    It 'Returns a uniform result shape with warnings for every known family' {
+      Mock Get-MsiInstallerInfo { [pscustomobject]@{ ProductCode = '{P}'; InstallerBuilder = 'WiX'; Warnings = @() } }
+      Mock Get-BurnInfo { [pscustomobject]@{ InstallerType = 'Burn'; ProductCode = '{B}'; Warnings = @() } }
+      Mock Get-NSISInfo { [pscustomobject]@{ InstallerType = 'Nullsoft'; ProductCode = 'N'; DisplayName = 'N'; DisplayVersion = '1.0'; Warnings = @() } }
+      Mock Get-InnoInfo { [pscustomobject]@{ InstallerType = 'Inno'; ProductCode = 'I'; Warnings = @() } }
+      Mock Get-MSIXInfo { [pscustomobject]@{ InstallerType = 'msix'; Version = '1.0.0.0'; Warnings = @() } }
+
+      foreach ($Case in @(
+          @{ Type = 'msi'; Parser = 'Windows Installer' },
+          @{ Type = 'wix'; Parser = 'Windows Installer' },
+          @{ Type = 'burn'; Parser = 'Burn' },
+          @{ Type = 'nullsoft'; Parser = 'NSIS' },
+          @{ Type = 'inno'; Parser = 'Inno Setup' },
+          @{ Type = 'msix'; Parser = 'MSIX/AppX' }
+        )) {
+        $Info = Get-WinGetKnownInstallerManifestInfo -Path $Script:InstallerPath -InstallerType $Case.Type
+        $Info.ParserName | Should -Be $Case.Parser
+        @($Info.InputObject).Count | Should -Be 1
+        $Info.PSObject.Properties.Name | Should -Contain 'Warnings'
+        $Info.Warnings | Should -Be @()
+      }
+    }
+
+    It 'Forwards Inno parser warnings like NSIS warnings' {
+      Mock Get-InnoInfo {
+        [pscustomobject]@{
+          InstallerType              = 'Inno'
+          ProductCode                = 'Inno.Product'
+          DisplayName                = 'Inno Product'
+          DisplayVersion             = '1.0.0'
+          Publisher                  = 'Inno Publisher'
+          WritesAppsAndFeaturesEntry = $true
+          Warnings                   = @('Inno parser caveat')
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'inno'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Old.Inno.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Inno.Product'
+      $Script:LogMessages.Message | Should -Contain 'Inno Setup: Inno parser caveat'
+    }
+
+    It 'Throws on a cross-major-type mismatch between script installer families' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'NSIS/Nullsoft'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'nullsoft' } }) }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'inno'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Old.Inno.Product'
+      }
+
+      { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
+        Should -Throw "*The manifest-declared 'inno' installer was detected as 'nullsoft'*"
+    }
+
+    It 'Throws when a manifest-declared MSI installer is detected as an EXE family' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = '7z SFX'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe # 7z SFX' } }) }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'msi'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = '{OLD-PRODUCT}'
+      }
+
+      { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
+        Should -Throw "*The manifest-declared 'msi' installer was detected as 'exe # 7z SFX'*"
+    }
+
+    It 'Warns and rolls back when strict metadata application fails, keeping the hash' {
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                  = '{NEW-PRODUCT}'
+          ProductName                  = 'WiX Product'
+          ProductVersion               = '2.0.0'
+          AllUsers                     = '1'
+          UpgradeCode                  = '{NO-MATCH-UPGRADE}'
+          InstallerBuilder             = 'WiX'
+          AppsAndFeaturesInstallerType = 'wix'
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'wix'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = '{OLD-PRODUCT}'
+        AppsAndFeaturesEntries = @(
+          [ordered]@{ UpgradeCode = '{OTHER-UPGRADE}' }
+          [ordered]@{ UpgradeCode = '{THIRD-UPGRADE}' }
+        )
+      }
+      $OldSha256 = '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF'
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      # Parser-applied changes are rolled back, but the hash update is kept
+      $Result.ProductCode | Should -Be '{OLD-PRODUCT}'
+      $Result.AppsAndFeaturesEntries[0].UpgradeCode | Should -Be '{OTHER-UPGRADE}'
+      $Result.AppsAndFeaturesEntries[1].UpgradeCode | Should -Be '{THIRD-UPGRADE}'
+      $Result.InstallerSha256 | Should -Not -BeNullOrEmpty
+      $Result.InstallerSha256 | Should -Not -Be $OldSha256
+      $Script:LogMessages.Message | Should -Contain 'Windows Installer metadata did not match any existing AppsAndFeaturesEntries item; existing fields are preserved'
+    }
+
+    It 'Throws on a cross-major-type mismatch between Burn and WiX' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'MSI'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'wix' } }) }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'burn'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = '{OLD-BUNDLE}'
+      }
+
+      { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
+        Should -Throw "*The manifest-declared 'burn' installer was detected as 'wix'*"
+    }
+
+    It 'Parses a plain MSI while keeping the declared WiX type on a family mismatch' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'MSI'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msi' } }) }
+      }
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                  = '{NEW-PRODUCT}'
+          ProductName                  = 'MSI Product'
+          ProductVersion               = '2.0.0'
+          AllUsers                     = '1'
+          InstallerBuilder             = 'Advanced Installer'
+          AppsAndFeaturesInstallerType = 'msi'
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'wix'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = '{OLD-PRODUCT}'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.InstallerType | Should -Be 'wix'
+      $Result.ProductCode | Should -Be '{NEW-PRODUCT}'
+      $Script:LogMessages.Message | Should -Contain "The manifest-declared 'wix' installer was detected as 'msi'; the declared type is kept and metadata is updated from the detected parser"
+    }
+
+    It 'Throws when a manifest-declared MSIX installer is detected as another type' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'MSI'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msi' } }) }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'msix'
+        InstallerUrl  = $Script:InstallerUrl
+      }
+
+      { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
+        Should -Throw "*The manifest-declared 'msix' installer was detected as 'msi'*"
+    }
+
+    It 'Preserves an authored AppsAndFeaturesEntries InstallerType that disagrees with the normalized type' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                   = '{PRODUCT}'
@@ -605,7 +807,62 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be '{PRODUCT}'
-      $Result.Contains('AppsAndFeaturesEntries') | Should -BeFalse
+      $Result.AppsAndFeaturesEntries[0].InstallerType | Should -Be 'msi'
+    }
+
+    It 'Removes only an AppsAndFeaturesEntries InstallerType that restates the effective type' {
+      Mock Get-MsiInstallerInfo {
+        [pscustomobject]@{
+          ProductCode                   = '{PRODUCT}'
+          ProductName                   = 'WiX Product'
+          ProductVersion                = '1.0.0'
+          AllUsers                      = '1'
+          UpgradeCode                   = '{OLD-UPGRADE}'
+          InstallerBuilder              = 'WiX'
+          AppsAndFeaturesInstallerType  = 'wix'
+          HasCustomAppsAndFeaturesEntry = $false
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'wix'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = '{OLD-PRODUCT}'
+        AppsAndFeaturesEntries = @(
+          [ordered]@{ InstallerType = 'wix'; ProductCode = '{OLD-PRODUCT}'; UpgradeCode = '{OLD-UPGRADE}' }
+          [ordered]@{ InstallerType = 'nullsoft'; ProductCode = '{OLD-PRODUCT}' }
+        )
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.AppsAndFeaturesEntries[0].Contains('InstallerType') | Should -BeFalse
+      # The authored EXE-style type of a bootstrap MSI is author intent and is preserved
+      $Result.AppsAndFeaturesEntries[1].InstallerType | Should -Be 'nullsoft'
+    }
+
+    It 'Removes empty dictionaries and arrays from the installer entry' {
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'exe'
+        InstallerUrl           = $Script:InstallerUrl
+        InstallerSha256        = 'TASK-HASH'
+        Protocols              = @()
+        InstallerSwitches      = [ordered]@{}
+        Dependencies           = [ordered]@{ PackageDependencies = @() }
+        AppsAndFeaturesEntries = @(
+          [ordered]@{}
+          [ordered]@{ UpgradeCode = '{MEANINGFUL-UPGRADE}' }
+        )
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.Contains('Protocols') | Should -BeFalse
+      $Result.Contains('InstallerSwitches') | Should -BeFalse
+      $Result.Contains('Dependencies') | Should -BeFalse
+      @($Result.AppsAndFeaturesEntries).Count | Should -Be 1
+      $Result.AppsAndFeaturesEntries[0].UpgradeCode | Should -Be '{MEANINGFUL-UPGRADE}'
     }
 
     It 'Removes empty AppsAndFeaturesEntries items while preserving meaningful entries' {
@@ -627,11 +884,11 @@ Describe 'WinGet installer manifest metadata updates' {
     }
 
     It 'parses Burn registrations that omit the optional PerMachine attribute' {
-      Mock Get-BurnInfo { [pscustomobject]@{ BundleCode = [guid]::NewGuid() } }
-      Mock Get-BurnManifest {
+      Mock Get-BurnEngineInfo -ModuleName Burn { [pscustomobject]@{ BundleCode = [guid]::NewGuid() } }
+      Mock Get-BurnManifest -ModuleName Burn {
         [xml]'<BurnManifest><Registration Code="{BUNDLE}"><Arp DisplayName="Servo" DisplayVersion="1.0" Publisher="Servo" /></Registration><RelatedBundle Code="{UPGRADE}" /></BurnManifest>'
       }
-      Mock Get-BurnScopeInfo { [pscustomobject]@{ DefaultScope = $null; SupportedScopes = @(); SupportsDualScope = $false } }
+      Mock Get-BurnScopeInfo -ModuleName Burn { [pscustomobject]@{ DefaultScope = $null; SupportedScopes = @(); SupportsDualScope = $false } }
       $Installer = [ordered]@{
         Architecture  = 'x64'
         InstallerType = 'burn'
@@ -697,7 +954,8 @@ Describe 'WinGet installer manifest metadata updates' {
 
       $Result.ProductCode | Should -Be 'Advanced.Product.x64'
       $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'New Advanced Product x64'
-      $Result.AppsAndFeaturesEntries[0].Contains('InstallerType') | Should -BeFalse
+      # The authored type is preserved even when the nested payload reports an EXE-style entry
+      $Result.AppsAndFeaturesEntries[0].InstallerType | Should -Be 'msi'
 
       $X86Installer = [ordered]@{
         Architecture           = 'x86'

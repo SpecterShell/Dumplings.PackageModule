@@ -126,7 +126,7 @@ $Results = @(
     Invoke-InstallerParserBenchmark -Name Squirrel -Path $SquirrelPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-SquirrelInfo -Path `$InstallerPath"
   }
   if ($BurnPath) {
-    Invoke-InstallerParserBenchmark -Name Burn -Path $BurnPath -Expression ". .\Modules\PackageModule\Index.ps1; `$Info = Get-BurnInfo -Path `$InstallerPath; `$Stub = Get-BurnStub -Path `$InstallerPath; try { Get-BurnManifest -StubPath `$Stub } finally { Remove-Item -LiteralPath `$Stub -Force -ErrorAction SilentlyContinue }"
+    Invoke-InstallerParserBenchmark -Name Burn -Path $BurnPath -Expression ". .\Modules\PackageModule\Index.ps1; `$Info = Get-BurnEngineInfo -Path `$InstallerPath; `$Stub = Get-BurnStub -Path `$InstallerPath; try { Get-BurnManifest -StubPath `$Stub } finally { Remove-Item -LiteralPath `$Stub -Force -ErrorAction SilentlyContinue }"
   }
   if ($MsiPath) {
     Invoke-InstallerParserBenchmark -Name MSI -Path $MsiPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-MsiInstallerInfo -Path `$InstallerPath"

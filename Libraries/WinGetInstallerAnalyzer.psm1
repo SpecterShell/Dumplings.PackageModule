@@ -1053,8 +1053,8 @@ function Invoke-WinGetInstallerMsiAnalysis {
     Family                  = 'MSI'
     Confidence              = 'high'
     InstallerType           = 'msi'
-    ProductVersion          = $MsiInfo.ProductVersion
-    ProductName             = $MsiInfo.ProductName
+    ProductVersion          = $MsiInfo.DisplayVersion
+    ProductName             = $MsiInfo.DisplayName
     ProductCode             = $MsiInfo.ProductCode
     UpgradeCode             = $MsiInfo.UpgradeCode
     Protocols               = $MsiInfo.Protocols
@@ -1777,7 +1777,7 @@ function Invoke-WinGetInstallerExeParser {
 
   if (Test-WinGetInstallerCandidateFamily -Family 'Burn') {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'Burn' -ScriptBlock {
-      $Info = Get-BurnInfo -Path $AnalyzerInstallerPath
+      $Info = Get-BurnEngineInfo -Path $AnalyzerInstallerPath
       $StubPath = Get-BurnStub -Path $AnalyzerInstallerPath
       try {
         $BootstrapperApplicationData = Get-BurnBootstrapperApplicationData -StubPath $StubPath -ErrorAction SilentlyContinue
