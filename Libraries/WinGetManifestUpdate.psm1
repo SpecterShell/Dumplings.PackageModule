@@ -451,6 +451,41 @@ function Set-WinGetInstallerManifestMetadata {
   }
 }
 
+function Remove-WinGetEmptyAppsAndFeaturesEntries {
+  <#
+  .SYNOPSIS
+    Remove structurally empty Apps & Features entries after parser updates.
+  .DESCRIPTION
+    Parser normalization can remove the final redundant field from an existing
+    AppsAndFeaturesEntries item. An empty dictionary is not useful ARP evidence
+    and serializes as an invalid `- {}` item, so this helper removes empty items
+    and removes the property when no meaningful entries remain.
+  .PARAMETER Installer
+    The mutable effective installer entry to normalize.
+  #>
+  [OutputType([void])]
+  param (
+    [Parameter(Mandatory)]
+    [System.Collections.IDictionary]$Installer
+  )
+
+  if (-not $Installer.Contains('AppsAndFeaturesEntries')) { return }
+
+  $Entries = [System.Collections.Generic.List[object]]::new()
+  foreach ($Entry in @($Installer['AppsAndFeaturesEntries'])) {
+    # Null items and dictionaries with no remaining ARP fields have no schema-valid
+    # manifest representation. Preserve every non-empty item without rewriting it.
+    if ($null -eq $Entry -or ($Entry -is [System.Collections.IDictionary] -and $Entry.Count -eq 0)) { continue }
+    $Entries.Add($Entry)
+  }
+
+  if ($Entries.Count -eq 0) {
+    $Installer.Remove('AppsAndFeaturesEntries')
+  } else {
+    $Installer['AppsAndFeaturesEntries'] = $Entries.ToArray()
+  }
+}
+
 function Get-WinGetInstallerReleaseDate {
   <#
   .SYNOPSIS
@@ -646,6 +681,10 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       $Logger.Invoke("Using the Last-Modified response header as the release date: $ReleaseDate", 'Verbose')
     }
   }
+
+  # A parser may remove a redundant field such as AppsAndFeaturesEntries.InstallerType.
+  # Do not let the now-empty item survive into YAML as `AppsAndFeaturesEntries: - {}`.
+  Remove-WinGetEmptyAppsAndFeaturesEntries -Installer $Installer
 
   # Beautify entries
   if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }

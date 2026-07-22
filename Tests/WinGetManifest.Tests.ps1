@@ -582,7 +582,7 @@ Describe 'WinGet installer manifest metadata updates' {
         Should -Throw "*builder is 'InstallShield', not WiX*"
     }
 
-    It 'Accepts a manifest-declared WiX installer when builder evidence is inconclusive' {
+    It 'Removes an AppsAndFeaturesEntries item made empty by WiX type normalization' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                   = '{PRODUCT}'
@@ -605,7 +605,25 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be '{PRODUCT}'
-      $Result.AppsAndFeaturesEntries[0].Contains('InstallerType') | Should -BeFalse
+      $Result.Contains('AppsAndFeaturesEntries') | Should -BeFalse
+    }
+
+    It 'Removes empty AppsAndFeaturesEntries items while preserving meaningful entries' {
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'exe'
+        InstallerUrl           = $Script:InstallerUrl
+        InstallerSha256        = 'TASK-HASH'
+        AppsAndFeaturesEntries = @(
+          [ordered]@{}
+          [ordered]@{ UpgradeCode = '{MEANINGFUL-UPGRADE}' }
+        )
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      @($Result.AppsAndFeaturesEntries).Count | Should -Be 1
+      $Result.AppsAndFeaturesEntries[0].UpgradeCode | Should -Be '{MEANINGFUL-UPGRADE}'
     }
 
     It 'parses Burn registrations that omit the optional PerMachine attribute' {
