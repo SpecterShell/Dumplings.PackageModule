@@ -11,18 +11,18 @@ namespace Dumplings.InstallerInfrastructure
     public sealed class PeSectionData
     {
         public string Name { get; set; }
-        public int VirtualAddress { get; set; }
-        public int VirtualSize { get; set; }
-        public int RawOffset { get; set; }
-        public int RawSize { get; set; }
+        public uint VirtualAddress { get; set; }
+        public uint VirtualSize { get; set; }
+        public uint RawOffset { get; set; }
+        public uint RawSize { get; set; }
     }
 
     public sealed class PeDirectoryData
     {
         public int Index { get; set; }
         public string Name { get; set; }
-        public int Rva { get; set; }
-        public int Size { get; set; }
+        public uint Rva { get; set; }
+        public uint Size { get; set; }
         public long Offset { get; set; }
     }
 
@@ -36,11 +36,11 @@ namespace Dumplings.InstallerInfrastructure
         public int OptionalHeaderSize { get; set; }
         public ushort Subsystem { get; set; }
         public ulong ImageBase { get; set; }
-        public int SizeOfHeaders { get; set; }
+        public uint SizeOfHeaders { get; set; }
         public Dictionary<string, PeDirectoryData> DataDirectories { get; } = new Dictionary<string, PeDirectoryData>(StringComparer.OrdinalIgnoreCase);
         public List<PeSectionData> Sections { get; } = new List<PeSectionData>();
-        public int ResourceRva { get; set; }
-        public int ResourceSize { get; set; }
+        public uint ResourceRva { get; set; }
+        public uint ResourceSize { get; set; }
         public long ResourceOffset { get; set; }
     }
 
@@ -87,6 +87,22 @@ namespace Dumplings.InstallerInfrastructure
             "GlobalPointer", "Tls", "LoadConfig", "BoundImport", "ImportAddressTable", "DelayImport", "ClrRuntimeHeader", "Reserved"
         };
 
+        /// <summary>
+        /// Returns the largest stream range that PEReader can address from the
+        /// current position. PE files may carry overlays larger than 2 GiB, but
+        /// PEReader accepts only a signed 32-bit image size. The PE headers and
+        /// sections remain addressable while the format parser handles the
+        /// trailing installer overlay through 64-bit stream offsets.
+        /// </summary>
+        public static int GetReaderSize(Stream stream)
+        {
+            if (stream == null) throw new ArgumentNullException(nameof(stream));
+            if (!stream.CanRead || !stream.CanSeek) throw new ArgumentException("The PE stream must be readable and seekable.", nameof(stream));
+            long remaining = stream.Length - stream.Position;
+            if (remaining <= 0) throw new ArgumentException("The PE stream does not contain any data at its current position.", nameof(stream));
+            return remaining > int.MaxValue ? int.MaxValue : checked((int)remaining);
+        }
+
         public static PeLayoutData ReadLayout(Stream stream, bool restorePosition)
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
@@ -95,7 +111,9 @@ namespace Dumplings.InstallerInfrastructure
             try
             {
                 stream.Position = 0;
-                using PEReader reader = new PEReader(stream, PEStreamOptions.LeaveOpen);
+                // The explicit size prevents PEReader from treating a large
+                // installer overlay as part of its signed 32-bit PE image.
+                using PEReader reader = new PEReader(stream, PEStreamOptions.LeaveOpen, GetReaderSize(stream));
                 PEHeaders headers = reader.PEHeaders;
                 if (headers.PEHeader == null) return null;
                 PEHeader pe = headers.PEHeader;
@@ -109,13 +127,13 @@ namespace Dumplings.InstallerInfrastructure
                     OptionalHeaderSize = headers.CoffHeader.SizeOfOptionalHeader,
                     Subsystem = (ushort)pe.Subsystem,
                     ImageBase = (ulong)pe.ImageBase,
-                    SizeOfHeaders = pe.SizeOfHeaders
+                    SizeOfHeaders = unchecked((uint)pe.SizeOfHeaders)
                 };
                 foreach (SectionHeader section in headers.SectionHeaders)
                 {
                     layout.Sections.Add(new PeSectionData {
-                        Name = section.Name, VirtualAddress = section.VirtualAddress, VirtualSize = section.VirtualSize,
-                        RawOffset = section.PointerToRawData, RawSize = section.SizeOfRawData
+                        Name = section.Name, VirtualAddress = unchecked((uint)section.VirtualAddress), VirtualSize = unchecked((uint)section.VirtualSize),
+                        RawOffset = unchecked((uint)section.PointerToRawData), RawSize = unchecked((uint)section.SizeOfRawData)
                     });
                 }
                 DirectoryEntry[] directories = {
@@ -127,10 +145,12 @@ namespace Dumplings.InstallerInfrastructure
                 for (int i = 0; i < directories.Length; i++)
                 {
                     DirectoryEntry item = directories[i];
+                    uint address = unchecked((uint)item.RelativeVirtualAddress);
+                    uint size = unchecked((uint)item.Size);
                     // The certificate directory uses a file offset; all other directories use RVAs.
-                    long offset = item.RelativeVirtualAddress == 0 ? -1 : (i == 4 ? item.RelativeVirtualAddress : RvaToOffset(item.RelativeVirtualAddress, layout.Sections));
+                    long offset = address == 0 ? -1 : (i == 4 ? (long)address : RvaToOffset(address, layout.Sections));
                     layout.DataDirectories[DirectoryNames[i]] = new PeDirectoryData {
-                        Index = i, Name = DirectoryNames[i], Rva = item.RelativeVirtualAddress, Size = item.Size, Offset = offset
+                        Index = i, Name = DirectoryNames[i], Rva = address, Size = size, Offset = offset
                     };
                 }
                 PeDirectoryData resource = layout.DataDirectories["Resource"];
@@ -164,7 +184,7 @@ namespace Dumplings.InstallerInfrastructure
                             uint dataRva = BitConverter.ToUInt32(entry, 0);
                             uint size = BitConverter.ToUInt32(entry, 4);
                             uint codePage = BitConverter.ToUInt32(entry, 8);
-                            long dataOffset = RvaToOffset((int)dataRva, layout.Sections);
+                            long dataOffset = RvaToOffset(dataRva, layout.Sections);
                             if (dataOffset < 0 || size > stream.Length - dataOffset) throw new InvalidDataException("A PE resource points outside the file.");
                             result.Add(new PeResourceData {
                                 TypeName = type.Name, TypeId = type.Id, Name = name.Name, Id = name.Id,
@@ -202,7 +222,7 @@ namespace Dumplings.InstallerInfrastructure
                         if ((ulong)nameRva < layout.ImageBase) continue;
                         nameRva = checked((uint)((ulong)nameRva - layout.ImageBase));
                     }
-                    long nameOffset = RvaToOffset((int)nameRva, layout.Sections);
+                    long nameOffset = RvaToOffset(nameRva, layout.Sections);
                     string name = ReadAsciiZ(stream, nameOffset, 4096);
                     if (!string.IsNullOrWhiteSpace(name)) result.Add(new PeImportData { Name = name, IsDelayLoad = delay });
                 }
@@ -232,7 +252,7 @@ namespace Dumplings.InstallerInfrastructure
         {
             PeClrData clr = ReadClrHeader(stream, layout, true);
             if (clr == null || clr.MetaDataSize == 0 || clr.MetaDataSize > 268435456) return null;
-            long metadataOffset = RvaToOffset((int)clr.MetaDataRva, layout.Sections);
+            long metadataOffset = RvaToOffset(clr.MetaDataRva, layout.Sections);
             if (metadataOffset < 0 || clr.MetaDataSize > stream.Length - metadataOffset) return null;
             long original = stream.Position;
             try
@@ -246,14 +266,14 @@ namespace Dumplings.InstallerInfrastructure
             finally { if (restorePosition) stream.Position = original; }
         }
 
-        public static long RvaToOffset(int rva, IList<PeSectionData> sections)
+        public static long RvaToOffset(uint rva, IList<PeSectionData> sections)
         {
             if (rva == 0) return -1;
             foreach (PeSectionData section in sections)
             {
-                long start = (uint)section.VirtualAddress;
-                long size = Math.Max((uint)section.VirtualSize, (uint)section.RawSize);
-                if ((uint)rva >= start && (uint)rva < start + size) return (uint)section.RawOffset + ((uint)rva - start);
+                long start = section.VirtualAddress;
+                long size = Math.Max((long)section.VirtualSize, section.RawSize);
+                if (rva >= start && rva < start + size) return section.RawOffset + (rva - start);
             }
             return -1;
         }

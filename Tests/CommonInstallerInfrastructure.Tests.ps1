@@ -7,6 +7,78 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\RegistryAssociations.psm1') -Force
+  if (-not ([Management.Automation.PSTypeName]'Dumplings.Tests.VirtualLargeReadStream').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+
+namespace Dumplings.Tests
+{
+    // Exposes a small real prefix followed by sparse zero bytes so tests can
+    // model multi-gigabyte PE overlays without allocating or writing them.
+    public sealed class VirtualLargeReadStream : Stream
+    {
+        private readonly byte[] prefix;
+        private readonly long length;
+        private long position;
+
+        public VirtualLargeReadStream(byte[] prefix, long length)
+        {
+            this.prefix = prefix ?? throw new ArgumentNullException(nameof(prefix));
+            if (length < prefix.LongLength) throw new ArgumentOutOfRangeException(nameof(length));
+            this.length = length;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => length;
+        public override long Position
+        {
+            get => position;
+            set
+            {
+                if (value < 0 || value > length) throw new ArgumentOutOfRangeException(nameof(value));
+                position = value;
+            }
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (buffer == null) throw new ArgumentNullException(nameof(buffer));
+            if (offset < 0 || count < 0 || offset > buffer.Length - count) throw new ArgumentOutOfRangeException();
+            if (position >= length || count == 0) return 0;
+
+            int total = (int)Math.Min((long)count, length - position);
+            int fromPrefix = position < prefix.LongLength
+                ? (int)Math.Min((long)total, prefix.LongLength - position)
+                : 0;
+            if (fromPrefix > 0) Buffer.BlockCopy(prefix, checked((int)position), buffer, offset, fromPrefix);
+            if (fromPrefix < total) Array.Clear(buffer, offset + fromPrefix, total - fromPrefix);
+            position += total;
+            return total;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            long next = origin switch
+            {
+                SeekOrigin.Begin => offset,
+                SeekOrigin.Current => checked(position + offset),
+                SeekOrigin.End => checked(length + offset),
+                _ => throw new ArgumentOutOfRangeException(nameof(origin))
+            };
+            Position = next;
+            return position;
+        }
+
+        public override void Flush() { }
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+}
+'@
+  }
   $Script:TemporaryRoot = Join-Path ([IO.Path]::GetTempPath()) 'DumplingsCommonInstallerInfrastructureTests'
   $null = New-Item -ItemType Directory -Path $Script:TemporaryRoot -Force
 }
@@ -306,6 +378,28 @@ Describe 'Get-PEVersionStringTable' {
       $Layout = Get-PELayout -Stream $Stream
       $Layout.Sections.Count | Should -BeGreaterThan 0
       $Stream.Position | Should -Be 5
+    } finally { $Stream.Dispose() }
+  }
+
+  It 'reads a PE layout when a large installer overlay exceeds the PEReader size limit' {
+    $ExecutableBytes = [IO.File]::ReadAllBytes((Get-Process -Id $PID).Path)
+    $PeOffset = [BitConverter]::ToInt32($ExecutableBytes, 0x3C)
+    $OptionalHeaderOffset = $PeOffset + 24
+    $DataDirectoryOffset = $OptionalHeaderOffset + $(if ([BitConverter]::ToUInt16($ExecutableBytes, $OptionalHeaderOffset) -eq 0x20B) { 112 } else { 96 })
+    $CertificateEntryOffset = $DataDirectoryOffset + (4 * 8)
+    $LargeCertificateOffset = [uint32]([long][int]::MaxValue + 1024)
+    [BitConverter]::GetBytes($LargeCertificateOffset).CopyTo($ExecutableBytes, $CertificateEntryOffset)
+    [BitConverter]::GetBytes([uint32]512).CopyTo($ExecutableBytes, $CertificateEntryOffset + 4)
+
+    $VirtualLength = [long]$LargeCertificateOffset + 512
+    $Stream = [Dumplings.Tests.VirtualLargeReadStream]::new($ExecutableBytes, $VirtualLength)
+    $Stream.Position = 11
+    try {
+      [Dumplings.InstallerInfrastructure.PEImageReader]::GetReaderSize($Stream) | Should -Be ([int]::MaxValue)
+      $Layout = Get-PELayout -Stream $Stream
+      $Layout.Sections.Count | Should -BeGreaterThan 0
+      $Layout.DataDirectories.Certificate.Offset | Should -Be $LargeCertificateOffset
+      $Stream.Position | Should -Be 11
     } finally { $Stream.Dispose() }
   }
 

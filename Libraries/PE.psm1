@@ -252,11 +252,14 @@ function Get-PEManagedResourceInfo {
     $PeReader = $null
     try {
       # PEReader consumes CLR metadata safely without loading or executing the
-      # managed installer assembly. LeaveOpen preserves caller stream ownership.
+      # managed installer assembly. Bound its signed 32-bit image view so a
+      # multi-gigabyte installer overlay does not make PEReader reject the PE.
+      # LeaveOpen preserves caller stream ownership.
       $ReaderInput.Stream.Position = 0
       $PeReader = [Reflection.PortableExecutable.PEReader]::new(
         $ReaderInput.Stream,
-        [Reflection.PortableExecutable.PEStreamOptions]::LeaveOpen
+        [Reflection.PortableExecutable.PEStreamOptions]::LeaveOpen,
+        [Dumplings.InstallerInfrastructure.PEImageReader]::GetReaderSize($ReaderInput.Stream)
       )
       if (-not $PeReader.HasMetadata) { return }
 
