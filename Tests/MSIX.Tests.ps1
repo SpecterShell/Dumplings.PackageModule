@@ -143,9 +143,34 @@ Describe 'MSIX/AppX dependency filtering' {
     $Info.Dependencies.PackageDependencies[0].MinimumVersion | Should -Be '8.2310.30001.0'
   }
 
+  It 'Should map VCLibs framework identities to their WinGet dependency packages' {
+    $Dependencies = @(
+      [pscustomobject]@{ PackageIdentifier = 'Microsoft.VCLibs.140.00.UWPDesktop'; MinimumVersion = '14.0.30704.0'; Publisher = 'CN=Microsoft Corporation' },
+      [pscustomobject]@{ PackageIdentifier = 'Microsoft.VCLibs.Desktop.14'; MinimumVersion = '14.0.33728.0'; Publisher = 'CN=Microsoft Corporation' },
+      [pscustomobject]@{ PackageIdentifier = 'Microsoft.VCLibs.140.00'; MinimumVersion = '14.0.30704.0'; Publisher = 'CN=Microsoft Corporation' }
+    )
+
+    $Info = ConvertTo-MSIXManifestDependencyInfo -PackageDependencies $Dependencies
+
+    $Info.Dependencies.PackageDependencies | Should -HaveCount 2
+    ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.VCLibs.Desktop.14').MinimumVersion | Should -BeExactly '14.0.33728.0'
+    ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.VCLibs.14').MinimumVersion | Should -BeExactly '14.0.30704.0'
+    $Info.UnknownPackageDependencies | Should -BeNullOrEmpty
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'Should resolve every approved framework identity to its corresponding WinGet package' {
+    Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.VCLibs.140.00.UWPDesktop' | Should -BeExactly 'Microsoft.VCLibs.Desktop.14'
+    Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.VCLibs.140.00' | Should -BeExactly 'Microsoft.VCLibs.14'
+    Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.WindowsAppRuntime.1.7' | Should -BeExactly 'Microsoft.WindowsAppRuntime.1.7'
+    Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.UI.Xaml.2.8' | Should -BeExactly 'Microsoft.UI.Xaml.2.8'
+  }
+
   It 'Should recognize only the supported dependency package patterns' {
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.VCLibs.Desktop.14' | Should -BeTrue
+    Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.VCLibs.140.00.UWPDesktop' | Should -BeTrue
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.VCLibs.14' | Should -BeTrue
+    Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.VCLibs.140.00' | Should -BeTrue
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.WindowsAppRuntime.1.7' | Should -BeTrue
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.UI.Xaml.2.8' | Should -BeTrue
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.NET.Native.Framework.2.2' | Should -BeFalse

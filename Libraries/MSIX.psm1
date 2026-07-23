@@ -16,11 +16,26 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 # Force stop on error
 $ErrorActionPreference = 'Stop'
 
-$Script:MSIXAllowedDependencyPackagePatterns = @(
-  'Microsoft.VCLibs.Desktop.14',
-  'Microsoft.VCLibs.14',
-  'Microsoft.WindowsAppRuntime.*.*',
-  'Microsoft.UI.Xaml.*.*'
+# AppX manifests use framework package identity names, which are not always the identifiers used by
+# winget-pkgs. Each accepted identity pattern maps explicitly to a WinGet package. A null target means
+# the source identity is already the corresponding WinGet identifier and should pass through unchanged.
+$Script:MSIXDependencyPackageMappings = @(
+  [pscustomobject][ordered]@{
+    PackageIdentityPatterns = @('Microsoft.VCLibs.140.00.UWPDesktop', 'Microsoft.VCLibs.Desktop.14')
+    PackageIdentifier       = 'Microsoft.VCLibs.Desktop.14'
+  }
+  [pscustomobject][ordered]@{
+    PackageIdentityPatterns = @('Microsoft.VCLibs.140.00', 'Microsoft.VCLibs.14')
+    PackageIdentifier       = 'Microsoft.VCLibs.14'
+  }
+  [pscustomobject][ordered]@{
+    PackageIdentityPatterns = @('Microsoft.WindowsAppRuntime.*.*')
+    PackageIdentifier       = $null
+  }
+  [pscustomobject][ordered]@{
+    PackageIdentityPatterns = @('Microsoft.UI.Xaml.*.*')
+    PackageIdentifier       = $null
+  }
 )
 
 function Get-MSIXZipArchive {
@@ -472,6 +487,59 @@ function Get-MSIXSignatureHash {
 Set-Alias -Name 'Read-SignatureSha256FromMSIX' -Value 'Get-MSIXSignatureHash'
 
 
+function Find-MSIXManifestDependencyPackageMapping {
+  <#
+  .SYNOPSIS
+    Find the WinGet package mapping for an AppX framework identity.
+  .PARAMETER PackageIdentifier
+    The dependency identity read from a PackageDependency Name attribute.
+  .OUTPUTS
+    The matching mapping record, or no output when the framework is not approved for manifest dependencies.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$PackageIdentifier
+  )
+
+  process {
+    foreach ($Mapping in $Script:MSIXDependencyPackageMappings) {
+      foreach ($Pattern in $Mapping.PackageIdentityPatterns) {
+        if ($PackageIdentifier -clike $Pattern) { return $Mapping }
+      }
+    }
+  }
+}
+
+
+function Resolve-MSIXManifestDependencyPackageIdentifier {
+  <#
+  .SYNOPSIS
+    Resolve an AppX framework identity name to its WinGet package identifier.
+  .PARAMETER PackageIdentifier
+    The dependency identity read from a PackageDependency Name attribute.
+  .OUTPUTS
+    The mapped WinGet package identifier. Known same-name package families and unknown identities are returned unchanged.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$PackageIdentifier
+  )
+
+  process {
+    $Mapping = Find-MSIXManifestDependencyPackageMapping -PackageIdentifier $PackageIdentifier
+    if ($Mapping -and -not [string]::IsNullOrWhiteSpace($Mapping.PackageIdentifier)) {
+      return [string]$Mapping.PackageIdentifier
+    }
+
+    return $PackageIdentifier
+  }
+}
+
+
 function Test-MSIXAllowedDependencyPackage {
   <#
   .SYNOPSIS
@@ -486,11 +554,7 @@ function Test-MSIXAllowedDependencyPackage {
   )
 
   process {
-    foreach ($Pattern in $Script:MSIXAllowedDependencyPackagePatterns) {
-      if ($PackageIdentifier -clike $Pattern) { return $true }
-    }
-
-    return $false
+    return $null -ne (Find-MSIXManifestDependencyPackageMapping -PackageIdentifier $PackageIdentifier)
   }
 }
 
@@ -545,10 +609,13 @@ function ConvertTo-MSIXManifestDependencyInfo {
   foreach ($Dependency in $PackageDependencies) {
     if ([string]::IsNullOrWhiteSpace($Dependency.PackageIdentifier)) { continue }
 
-    $PackageIdentifier = [string]$Dependency.PackageIdentifier
+    # Normalize package-family identities before allowlisting and deduplication. This preserves the
+    # source MinVersion while emitting the package identifier that winget-pkgs can resolve.
+    $SourcePackageIdentifier = [string]$Dependency.PackageIdentifier
+    $PackageIdentifier = Resolve-MSIXManifestDependencyPackageIdentifier -PackageIdentifier $SourcePackageIdentifier
     $MinimumVersion = [string]$Dependency.MinimumVersion
     $Publisher = [string]$Dependency.Publisher
-    $Target = (Test-MSIXAllowedDependencyPackage -PackageIdentifier $PackageIdentifier) ? $AllowedById : $UnknownById
+    $Target = (Test-MSIXAllowedDependencyPackage -PackageIdentifier $SourcePackageIdentifier) ? $AllowedById : $UnknownById
 
     if (-not $Target.Contains($PackageIdentifier)) {
       $Target[$PackageIdentifier] = [pscustomobject]@{
