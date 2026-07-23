@@ -961,24 +961,27 @@ function Get-MsiInstallerInfo {
       $ArchitectureInfo = Get-MsiArchitectureInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
       $AssociationInfo = Get-MsiAssociationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
 
-      [PSCustomObject]@{
-        Path                            = $File.FullName
+      [pscustomobject][ordered]@{
+        Path                            = $PSCmdlet.ParameterSetName -eq 'Path' ? $Path : $null
         InstallerType                   = $AppsAndFeaturesInfo.InstallerType
         ProductCode                     = $Properties['ProductCode']
         UpgradeCode                     = $Properties['UpgradeCode']
         DisplayName                     = $Properties['ProductName']
         DisplayVersion                  = $Properties['ProductVersion']
         Publisher                       = $Properties['Manufacturer']
-        AllUsers                        = $Properties['ALLUSERS']
         Scope                           = $Properties['ALLUSERS'] -ceq '1' ? 'machine' : $null
+        DefaultInstallLocation          = $null
+        WritesAppsAndFeaturesEntry      = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry -or -not $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
+        AppsAndFeaturesProductCode      = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
+        AppsAndFeaturesInstallerType    = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
+        Warnings                        = [string[]]@()
+        UnresolvedFields                = [string[]]@()
+        AllUsers                        = $Properties['ALLUSERS']
         InstallerBuilder                = $AppsAndFeaturesInfo.InstallerBuilder
         InstallLocationProperty         = $InstallLocationInfo.Property
         InstallLocationSwitch           = $InstallLocationInfo.Switch
         InstallLocationSource           = $InstallLocationInfo.Source
-        WritesAppsAndFeaturesEntry      = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry -or -not $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
-        AppsAndFeaturesInstallerType    = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
         AppsAndFeaturesWindowsInstaller = $AppsAndFeaturesInfo.AppsAndFeaturesWindowsInstaller
-        AppsAndFeaturesProductCode      = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
         HasCustomAppsAndFeaturesEntry   = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry
         HidesMsiAppsAndFeaturesEntry    = $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
         Template                        = $ArchitectureInfo.Template
@@ -989,8 +992,6 @@ function Get-MsiInstallerInfo {
         FileExtensions                  = $AssociationInfo.FileExtensions
         RegistryAssociationInfo         = $AssociationInfo
         AppsAndFeaturesEntries          = $AppsAndFeaturesInfo
-        Warnings                        = @()
-        UnresolvedFields                = @()
       }
     } finally {
       switch ($PSCmdlet.ParameterSetName) {

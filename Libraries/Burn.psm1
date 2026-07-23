@@ -768,7 +768,6 @@ function Read-ProductCodeFromBurn {
         Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.Id
       }
     } catch {
-      Write-Host -Object 'Failed to read the BootstrapperApplicationData file. Fallbacking to the manifest file'
       $Manifest = Get-BurnManifest -Path $Path
       if ($Manifest.BurnManifest.Registration.HasAttribute('Code')) {
         # WiX v6+
@@ -798,7 +797,6 @@ function Read-UpgradeCodeFromBurn {
       $BootstrapperApplicationData = Get-BurnBootstrapperApplicationData -Path $Path
       Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.UpgradeCode
     } catch {
-      Write-Host -Object 'Failed to read the BootstrapperApplicationData file. Fallbacking to the manifest file'
       $Manifest = Get-BurnManifest -Path $Path
       if ($Manifest.BurnManifest.RelatedBundle.HasAttribute('Code')) {
         # WiX v6+
@@ -828,7 +826,6 @@ function Read-ProductNameFromBurn {
       $BootstrapperApplicationData = Get-BurnBootstrapperApplicationData -Path $Path
       Write-Output -InputObject $BootstrapperApplicationData.BootstrapperApplicationData.WixBundleProperties.DisplayName
     } catch {
-      Write-Host -Object 'Failed to read the BootstrapperApplicationData file. Fallbacking to the manifest file'
       $Manifest = Get-BurnManifest -Path $Path
       Write-Output -InputObject $Manifest.BurnManifest.Registration.Arp.DisplayName
     }
@@ -867,19 +864,21 @@ function Get-BurnInfo {
       [string]::IsNullOrWhiteSpace($Value) ? $RelatedBundle[0].GetAttribute('Id') : $Value
     } else { $null }
     $ScopeInfo = Get-BurnScopeInfo -Path $Path
-    $Info = [pscustomobject]@{
-      Path                       = (Get-Item -Path $Path -Force).FullName
-      InstallerType              = 'Burn'
-      ProductCode                = $ProductCode
-      UpgradeCode                = $UpgradeCode
-      DisplayName                = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayName') : $null
-      DisplayVersion             = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayVersion') : $null
-      Publisher                  = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('Publisher') : $null
-      Scope                      = $ScopeInfo.DefaultScope
-      WritesAppsAndFeaturesEntry = $true
-      AppsAndFeaturesProductCode = $ProductCode
-      Warnings                   = @()
-      UnresolvedFields           = @()
+    $Info = [pscustomobject][ordered]@{
+      Path                         = (Get-Item -Path $Path -Force).FullName
+      InstallerType                = 'Burn'
+      ProductCode                  = $ProductCode
+      UpgradeCode                  = $UpgradeCode
+      DisplayName                  = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayName') : $null
+      DisplayVersion               = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayVersion') : $null
+      Publisher                    = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('Publisher') : $null
+      Scope                        = $ScopeInfo.DefaultScope
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $true
+      AppsAndFeaturesProductCode   = $ProductCode
+      AppsAndFeaturesInstallerType = 'burn'
+      Warnings                     = [string[]]@()
+      UnresolvedFields             = [string[]]@()
     }
     if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { $Info.DisplayName = Read-ProductNameFromBurn -Path $Path }
     if ([string]::IsNullOrWhiteSpace($Info.DisplayVersion)) { $Info.DisplayVersion = Read-ProductVersionFromExe -Path $Path }

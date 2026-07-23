@@ -143,6 +143,7 @@ Describe 'WinGet installer manifest metadata updates' {
     }
 
     It 'Updates NSIS ProductCode and AppsAndFeaturesEntries from one parser result' {
+      Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
       Mock Get-NSISInfo {
         [pscustomobject]@{
           ProductCode                = 'New.NSIS.Product'
@@ -174,6 +175,7 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New NSIS Publisher'
       $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'New.NSIS.Product'
       Should -Invoke Get-NSISInfo -Exactly 1
+      Should -Invoke Get-WinGetInstallerAnalysis -Exactly 0
     }
 
     It 'Updates source-derived Inno ProductCode and directory metadata' {
@@ -342,8 +344,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{NEW-PRODUCT}'
-          ProductName                  = 'New MSI Product'
-          ProductVersion               = '2.0.0'
+          DisplayName                  = 'New MSI Product'
+          DisplayVersion               = '2.0.0'
           Publisher                    = 'New MSI Publisher'
           UpgradeCode                  = '{UPGRADE}'
           AllUsers                     = '1'
@@ -402,8 +404,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{NEW-PRODUCT}'
-          ProductName                  = 'New MSI Product'
-          ProductVersion               = '2.0.0'
+          DisplayName                  = 'New MSI Product'
+          DisplayVersion               = '2.0.0'
           Publisher                    = 'New MSI Publisher'
           UpgradeCode                  = '{NEW-UPGRADE}'
           AllUsers                     = '1'
@@ -446,8 +448,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{NEW-WIX-PRODUCT}'
-          ProductName                  = 'WiX Product'
-          ProductVersion               = '2.0.0'
+          DisplayName                  = 'WiX Product'
+          DisplayVersion               = '2.0.0'
           Publisher                    = 'WiX Publisher'
           UpgradeCode                  = '{WIX-UPGRADE}'
           AllUsers                     = '1'
@@ -475,8 +477,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{NEW-NESTED-WIX-PRODUCT}'
-          ProductName                  = 'Nested WiX Product'
-          ProductVersion               = '2.0.0'
+          DisplayName                  = 'Nested WiX Product'
+          DisplayVersion               = '2.0.0'
           Publisher                    = 'WiX Publisher'
           UpgradeCode                  = '{NESTED-WIX-UPGRADE}'
           AllUsers                     = '1'
@@ -504,8 +506,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{DRAW-PRODUCT}'
-          ProductName                  = 'draw.io'
-          ProductVersion               = '30.3.6'
+          DisplayName                  = 'draw.io'
+          DisplayVersion               = '30.3.6'
           Publisher                    = 'JGraph'
           UpgradeCode                  = '{DRAW-UPGRADE}'
           AllUsers                     = '1'
@@ -532,8 +534,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                   = '{NEW-TOWER-MSI}'
-          ProductName                   = 'Tower'
-          ProductVersion                = '13.1.576.0'
+          DisplayName                   = 'Tower'
+          DisplayVersion                = '13.1.576.0'
           Publisher                     = 'saas.group'
           UpgradeCode                   = '{TOWER-UPGRADE}'
           AllUsers                      = '2'
@@ -568,8 +570,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode      = '{PRODUCT}'
-          ProductName      = 'MSI Product'
-          ProductVersion   = '1.0.0'
+          DisplayName      = 'MSI Product'
+          DisplayVersion   = '1.0.0'
           AllUsers         = '1'
           InstallerBuilder = 'InstallShield'
         }
@@ -589,6 +591,7 @@ Describe 'WinGet installer manifest metadata updates' {
 
     It 'Warns and preserves fields when a manifest-declared NSIS installer cannot be parsed' {
       Mock Get-NSISInfo { throw 'The NSIS installer header could not be located at a valid aligned archive start' }
+      Mock Get-WinGetInstallerAnalysis { $null }
       $Installer = [ordered]@{
         Architecture  = 'x64'
         InstallerType = 'nullsoft'
@@ -599,19 +602,100 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Old.NSIS.Product'
-      $Script:LogMessages.Message | Should -Contain "Failed to validate and parse the manifest-declared 'nullsoft' installer: The NSIS installer header could not be located at a valid aligned archive start; existing fields are preserved"
+      $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'nullsoft' installer: The NSIS installer header could not be located at a valid aligned archive start Static format analysis was unavailable. Existing installer fields are preserved."
     }
 
-    It 'Still throws when a manifest-declared MSIX installer cannot be parsed' {
+    It 'Treats a failed NSIS metadata parse as recoverable when structural evidence matches NSIS' {
+      Mock Get-NSISInfo { throw 'Unsupported NSIS command layout' }
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          DetectedFileType = [pscustomobject]@{ Type = 'PE' }
+          DetectedFamilies = @([pscustomobject]@{
+              Family                  = 'NSIS/Nullsoft'
+              Confidence              = 'high'
+              ValidationStatus        = 'ConfirmedParser'
+              MatchedMarkers          = @('DEADBEEF + NullsoftInst')
+              SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'nullsoft' }
+            })
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'nullsoft'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Existing.NSIS.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Existing.NSIS.Product'
+      $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'nullsoft' installer: Unsupported NSIS command layout Structural evidence matches the declared family: NSIS/Nullsoft: DEADBEEF + NullsoftInst. Existing installer fields are preserved."
+    }
+
+    It 'Does not treat a low-confidence CreateInstall candidate as an NSIS mismatch' {
+      Mock Get-NSISInfo { throw 'Unsupported NSIS command layout' }
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          DetectedFileType   = [pscustomobject]@{ Type = 'PE' }
+          DetectedFamilies   = @()
+          RoutingHints       = @([pscustomobject]@{
+              Family                  = 'CreateInstall'
+              Confidence              = 'low'
+              MatchedMarkers          = @('.ciq')
+              SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe # CreateInstall' }
+            })
+          RejectedCandidates = @([pscustomobject]@{
+              Family           = 'CreateInstall'
+              Confidence       = 'low'
+              EvidenceKind     = 'Heuristic'
+              ValidationStatus = 'RejectedByParser'
+              IsOuterContainer = $false
+            })
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'nullsoft'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Existing.NSIS.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Existing.NSIS.Product'
+      $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'nullsoft' installer: Unsupported NSIS command layout No high-confidence structural evidence proved or disproved the declared family. Existing installer fields are preserved."
+    }
+
+    It 'Throws when the declared parser positively identifies a different family' {
+      Mock Get-InnoInfo {
+        [pscustomobject]@{
+          InstallerType              = 'Nullsoft'
+          WritesAppsAndFeaturesEntry = $true
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'inno'
+        InstallerUrl  = $Script:InstallerUrl
+      }
+
+      { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
+        Should -Throw "*The manifest-declared 'inno' installer was detected as 'Nullsoft'*"
+    }
+
+    It 'Preserves fields when a manifest-declared MSIX installer cannot be parsed and its format is indeterminate' {
       Mock Get-MSIXInfo { throw 'The package is not a valid MSIX package' }
+      Mock Get-WinGetInstallerAnalysis { $null }
       $Installer = [ordered]@{
         Architecture  = 'x64'
         InstallerType = 'msix'
         InstallerUrl  = $Script:InstallerUrl
       }
 
-      { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
-        Should -Throw '*not a valid MSIX package*'
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.InstallerType | Should -Be 'msix'
+      $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'msix' installer: The package is not a valid MSIX package Static format analysis was unavailable. Existing installer fields are preserved."
     }
 
     It 'Returns a uniform result shape with warnings for every known family' {
@@ -664,7 +748,7 @@ Describe 'WinGet installer manifest metadata updates' {
 
     It 'Throws on a cross-major-type mismatch between script installer families' {
       Mock Get-WinGetInstallerAnalysis {
-        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'NSIS/Nullsoft'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'nullsoft' } }) }
+        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'NSIS/Nullsoft'; Confidence = 'high'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'nullsoft' } }) }
       }
       $Installer = [ordered]@{
         Architecture  = 'x64'
@@ -679,7 +763,10 @@ Describe 'WinGet installer manifest metadata updates' {
 
     It 'Throws when a manifest-declared MSI installer is detected as an EXE family' {
       Mock Get-WinGetInstallerAnalysis {
-        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = '7z SFX'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe # 7z SFX' } }) }
+        [pscustomobject]@{
+          DetectedFileType = [pscustomobject]@{ Type = 'PE' }
+          FamilyCandidates = @([pscustomobject]@{ Family = '7z SFX'; Confidence = 'medium'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe # 7z SFX' } })
+        }
       }
       $Installer = [ordered]@{
         Architecture  = 'x64'
@@ -689,15 +776,15 @@ Describe 'WinGet installer manifest metadata updates' {
       }
 
       { Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger } |
-        Should -Throw "*The manifest-declared 'msi' installer was detected as 'exe # 7z SFX'*"
+        Should -Throw "*The manifest-declared 'msi' installer was detected as 'exe'*"
     }
 
-    It 'Warns and rolls back when strict metadata application fails, keeping the hash' {
+    It 'Updates resolved fields while preserving an unmatched AppsAndFeaturesEntries item' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{NEW-PRODUCT}'
-          ProductName                  = 'WiX Product'
-          ProductVersion               = '2.0.0'
+          DisplayName                  = 'WiX Product'
+          DisplayVersion               = '2.0.0'
           AllUsers                     = '1'
           UpgradeCode                  = '{NO-MATCH-UPGRADE}'
           InstallerBuilder             = 'WiX'
@@ -718,18 +805,19 @@ Describe 'WinGet installer manifest metadata updates' {
 
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
-      # Parser-applied changes are rolled back, but the hash update is kept
-      $Result.ProductCode | Should -Be '{OLD-PRODUCT}'
+      # Resolved top-level metadata is updated independently from the ARP entry
+      # whose identity could not be correlated.
+      $Result.ProductCode | Should -Be '{NEW-PRODUCT}'
       $Result.AppsAndFeaturesEntries[0].UpgradeCode | Should -Be '{OTHER-UPGRADE}'
       $Result.AppsAndFeaturesEntries[1].UpgradeCode | Should -Be '{THIRD-UPGRADE}'
       $Result.InstallerSha256 | Should -Not -BeNullOrEmpty
       $Result.InstallerSha256 | Should -Not -Be $OldSha256
-      $Script:LogMessages.Message | Should -Contain 'Windows Installer metadata did not match any existing AppsAndFeaturesEntries item; existing fields are preserved'
+      $Script:LogMessages.Message | Should -Contain 'Windows Installer metadata did not match any existing AppsAndFeaturesEntries item'
     }
 
     It 'Throws on a cross-major-type mismatch between Burn and WiX' {
       Mock Get-WinGetInstallerAnalysis {
-        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'MSI'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'wix' } }) }
+        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'MSI'; Confidence = 'high'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'wix' } }) }
       }
       $Installer = [ordered]@{
         Architecture  = 'x64'
@@ -742,15 +830,13 @@ Describe 'WinGet installer manifest metadata updates' {
         Should -Throw "*The manifest-declared 'burn' installer was detected as 'wix'*"
     }
 
-    It 'Parses a plain MSI while keeping the declared WiX type on a family mismatch' {
-      Mock Get-WinGetInstallerAnalysis {
-        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'MSI'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msi' } }) }
-      }
+    It 'Parses a plain MSI while keeping the compatible declared WiX type' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
+          InstallerType                = 'msi'
           ProductCode                  = '{NEW-PRODUCT}'
-          ProductName                  = 'MSI Product'
-          ProductVersion               = '2.0.0'
+          DisplayName                  = 'MSI Product'
+          DisplayVersion               = '2.0.0'
           AllUsers                     = '1'
           InstallerBuilder             = 'Advanced Installer'
           AppsAndFeaturesInstallerType = 'msi'
@@ -767,12 +853,12 @@ Describe 'WinGet installer manifest metadata updates' {
 
       $Result.InstallerType | Should -Be 'wix'
       $Result.ProductCode | Should -Be '{NEW-PRODUCT}'
-      $Script:LogMessages.Message | Should -Contain "The manifest-declared 'wix' installer was detected as 'msi'; the declared type is kept and metadata is updated from the detected parser"
+      $Script:LogMessages.Message | Should -Contain "The Windows Installer parser identified 'msi' while the manifest declares 'wix'; the declared type is retained"
     }
 
     It 'Throws when a manifest-declared MSIX installer is detected as another type' {
       Mock Get-WinGetInstallerAnalysis {
-        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'MSI'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msi' } }) }
+        [pscustomobject]@{ FamilyCandidates = @([pscustomobject]@{ Family = 'MSI'; Confidence = 'high'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msi' } }) }
       }
       $Installer = [ordered]@{
         Architecture  = 'x64'
@@ -788,8 +874,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                   = '{PRODUCT}'
-          ProductName                   = 'Inconclusive WiX Product'
-          ProductVersion                = '1.0.0'
+          DisplayName                   = 'Inconclusive WiX Product'
+          DisplayVersion                = '1.0.0'
           AllUsers                      = '1'
           InstallerBuilder              = 'Unknown'
           AppsAndFeaturesInstallerType  = 'msi'
@@ -814,8 +900,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                   = '{PRODUCT}'
-          ProductName                   = 'WiX Product'
-          ProductVersion                = '1.0.0'
+          DisplayName                   = 'WiX Product'
+          DisplayVersion                = '1.0.0'
           AllUsers                      = '1'
           UpgradeCode                   = '{OLD-UPGRADE}'
           InstallerBuilder              = 'WiX'
@@ -923,8 +1009,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-AdvancedInstallerMsiInfo {
         param($Installer, $Architecture)
         [pscustomobject]@{
-          ProductName                  = "New Advanced Product $Architecture"
-          ProductVersion               = '5.0.0'
+          DisplayName                  = "New Advanced Product $Architecture"
+          DisplayVersion               = '5.0.0'
           Publisher                    = 'New Advanced Publisher'
           ProductCode                  = '{MSI-PRODUCT}'
           AppsAndFeaturesProductCode   = "Advanced.Product.$Architecture"
@@ -1004,8 +1090,8 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-AdvancedInstallerMsiInfo {
         param($Installer, $Architecture)
         [pscustomobject]@{
-          ProductName                  = "Advanced Product $Architecture"
-          ProductVersion               = '5.0.0'
+          DisplayName                  = "Advanced Product $Architecture"
+          DisplayVersion               = '5.0.0'
           Publisher                    = 'Advanced Publisher'
           ProductCode                  = "MSI.Product.$Architecture"
           AppsAndFeaturesProductCode   = "ARP.Product.$Architecture"
@@ -1133,7 +1219,6 @@ Describe 'WinGet installer manifest metadata updates' {
               Result  = [pscustomobject]@{
                 Variant        = 'ChromiumMiniInstaller'
                 Publisher      = 'Google LLC'
-                ProductName    = 'Google Chrome Installer'
                 ProductCode    = $null
                 DisplayName    = 'Google Chrome Installer'
                 DisplayVersion = '152.0.7953.0'
@@ -1222,8 +1307,8 @@ Describe 'WinGet installer manifest metadata updates' {
     It 'Uses InstallShield marker evidence before parsing an embedded MSI' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
-          ParserResults    = @()
-          FamilyCandidates = @([pscustomobject]@{ Family = 'InstallShield'; Confidence = 'medium' })
+          ParserResults = @()
+          RoutingHints  = @([pscustomobject]@{ Family = 'InstallShield'; Confidence = 'medium' })
         }
       }
       Mock Get-InstallShieldInfo {
@@ -1241,8 +1326,8 @@ Describe 'WinGet installer manifest metadata updates' {
       }
       Mock Get-InstallShieldMsiInfo {
         [pscustomobject]@{
-          ProductName                  = 'New InstallShield Product'
-          ProductVersion               = '4.0.0'
+          DisplayName                  = 'New InstallShield Product'
+          DisplayVersion               = '4.0.0'
           Publisher                    = 'New InstallShield Publisher'
           ProductCode                  = '{INSTALLSHIELD-MSI}'
           AppsAndFeaturesProductCode   = '{INSTALLSHIELD-MSI}'
@@ -1281,8 +1366,8 @@ Describe 'WinGet installer manifest metadata updates' {
     It 'Warns and preserves metadata for InstallShield payloads without an MSI' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
-          ParserResults    = @()
-          FamilyCandidates = @([pscustomobject]@{ Family = 'InstallShield'; Confidence = 'medium' })
+          ParserResults = @()
+          RoutingHints  = @([pscustomobject]@{ Family = 'InstallShield'; Confidence = 'medium' })
         }
       }
       Mock Get-InstallShieldInfo {
@@ -1305,8 +1390,62 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Existing.InstallShield.Product'
-      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike "*'InstallScript' payload does not contain an MSI*"
+      ($Script:LogMessages.Where({ $_.Level -eq 'Verbose' }).Message -join "`n") | Should -BeLike "*'InstallScript' payload does not contain an MSI*"
       Should -Invoke Get-InstallShieldMsiInfo -Exactly 0
+    }
+
+    It 'Logs rejected generic EXE routing hints at verbose level without a classification warning' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults      = @([pscustomobject]@{ Name = 'CreateInstall'; Success = $false; Error = 'No supported GEA archive' })
+          DetectedFamilies   = @()
+          RoutingHints       = @([pscustomobject]@{ Family = 'CreateInstall'; Confidence = 'low' })
+          RejectedCandidates = @([pscustomobject]@{
+              Family           = 'CreateInstall'
+              EvidenceKind     = 'Heuristic'
+              IsOuterContainer = $false
+              ParserName       = 'CreateInstall'
+              Error            = 'No supported GEA archive'
+            })
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'exe'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Existing.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Existing.Product'
+      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
+      ($Script:LogMessages.Where({ $_.Level -eq 'Verbose' }).Message -join "`n") | Should -BeLike '*CreateInstall: No supported GEA archive*'
+    }
+
+    It 'Preserves generic EXE metadata when multiple incompatible parsers succeed' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults      = @(
+            [pscustomobject]@{ Name = 'CreateInstall'; Success = $true; Result = [pscustomobject]@{ Family = 'CreateInstall'; Metadata = [pscustomobject]@{ ProductCode = 'CreateInstall.Product' } } }
+            [pscustomobject]@{ Name = 'Squirrel/Velopack'; Success = $true; Result = [pscustomobject]@{ Family = 'Squirrel'; Metadata = [pscustomobject]@{ ProductCode = 'Squirrel.Product' } } }
+          )
+          DetectedFamilies   = @()
+          RoutingHints       = @()
+          RejectedCandidates = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'exe'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Existing.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Existing.Product'
+      ($Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message -join "`n") | Should -BeLike '*conflicting installer families: CreateInstall, Squirrel*'
     }
 
     It 'Warns and preserves generic EXE metadata when detection fails' {

@@ -162,37 +162,39 @@ function Get-WiseInfo {
       $Scope = if ($AllUsers -eq '1') { 'machine' } else { $null }
       $VersionStrings = @(Get-PEVersionStringTable -Path $File.FullName)[0]
 
-      [pscustomobject]@{
+      [pscustomobject][ordered]@{
+        Path                         = $File.FullName
         InstallerType                = 'Wise MSI'
-        WiseVariant                  = 'Wise for Windows Installer'
-        DisplayName                  = $MsiInfo.DisplayName
-        ProductName                  = $MsiInfo.DisplayName
-        DisplayVersion               = $MsiInfo.DisplayVersion
-        Publisher                    = $Publisher
         ProductCode                  = $MsiInfo.ProductCode
         UpgradeCode                  = $MsiInfo.UpgradeCode
+        DisplayName                  = $MsiInfo.DisplayName
+        DisplayVersion               = $MsiInfo.DisplayVersion
+        Publisher                    = $Publisher
         Scope                        = $Scope
+        DefaultInstallLocation       = $null
+        WritesAppsAndFeaturesEntry   = $true
+        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
+        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
+        Warnings                     = [string[]]@(
+          'Wise is the outer bootstrapper; the embedded MSI is authoritative for ProductCode, UpgradeCode, associations, and visible Windows Installer ARP behavior.'
+          if (-not $Scope) { 'The nested MSI does not explicitly set ALLUSERS=1. Omit Scope unless VM validation proves the final installation scope.' }
+        )
+        UnresolvedFields             = [string[]]@()
+        WiseVariant                  = 'Wise for Windows Installer'
         SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
         InstallLocationProperty      = $MsiInfo.InstallLocationProperty
         InstallLocationSwitch        = $MsiInfo.InstallLocationSwitch
         NestedInstallerBuilder       = $MsiInfo.InstallerBuilder
-        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
-        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
         AppsAndFeaturesEntries       = $MsiInfo.AppsAndFeaturesEntries
         RegistryAssociationInfo      = $MsiInfo.RegistryAssociationInfo
         Protocols                    = @($MsiInfo.Protocols)
         FileExtensions               = @($MsiInfo.FileExtensions)
         SupportedArchitectures       = @($MsiInfo.SupportedArchitectures)
         UnsupportedArchitectures     = @($MsiInfo.UnsupportedArchitectures)
-        WritesAppsAndFeaturesEntry   = $true
         EmbeddedMsi                  = $EmbeddedMsi
         ExtractedFiles               = @([IO.Path]::GetFileName($MsiPath))
         CanExpand                    = $true
         OuterVersionInfo             = $VersionStrings
-        Warnings                     = @(
-          'Wise is the outer bootstrapper; the embedded MSI is authoritative for ProductCode, UpgradeCode, associations, and visible Windows Installer ARP behavior.'
-          if (-not $Scope) { 'The nested MSI does not explicitly set ALLUSERS=1. Omit Scope unless VM validation proves the final installation scope.' }
-        )
         ParserVersionInfo            = [pscustomobject]@{
           Parser      = 'Dumplings.PackageModule.Wise'
           ParserMajor = 1

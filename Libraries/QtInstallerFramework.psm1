@@ -29,9 +29,9 @@ function Get-QtInstallerFrameworkInfo {
   )
 
   process {
-    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'QtInstallerFramework.GetInfo' -Argument @{
-      Path = (Get-Item -Path $Path -Force).FullName
-    }
+    $InstallerPath = (Get-Item -Path $Path -Force).FullName
+    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'QtInstallerFramework.GetInfo' -Argument @{ Path = $InstallerPath }
+    return $Info
   }
 }
 
@@ -199,8 +199,8 @@ function Read-ProductNameFromQtInstallerFramework {
 
   process {
     $Info = Get-QtInstallerFrameworkInfo -Path $Path
-    if ([string]::IsNullOrWhiteSpace($Info.PackageName)) { throw 'The Qt Installer Framework installer does not expose a Name value' }
-    return $Info.PackageName
+    if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { throw 'The Qt Installer Framework installer does not expose a Name value' }
+    return $Info.DisplayName
   }
 }
 

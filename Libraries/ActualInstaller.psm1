@@ -111,21 +111,28 @@ function Get-ActualInstallerInfo {
         $DisplayVersion = $null
       }
       $Warnings.Add('Actual Installer GUID is project identity evidence, not proof of the visible ARP key. /CU and /RUNAS /ALL select user or machine installation; validate the selected scope and ARP entry in a VM.')
-      [pscustomobject]@{
+      $WritesAppsAndFeaturesEntry = $Setup['ShowAddRemove'] -eq '1'
+
+      [pscustomobject][ordered]@{
+        Path                           = $File.FullName
         InstallerType                  = 'Actual Installer'
         ProductCode                    = $ProductCode
-        PackageName                    = $Setup['AppName']
+        UpgradeCode                    = $null
         DisplayName                    = $Setup['AppName']
-        ProductName                    = $Setup['AppName']
         DisplayVersion                 = $DisplayVersion
         Publisher                      = $Setup['CompanyName']
+        Scope                          = $null
+        DefaultInstallLocation         = $Setup['InstallDir']
+        WritesAppsAndFeaturesEntry     = $WritesAppsAndFeaturesEntry
+        AppsAndFeaturesProductCode     = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
+        AppsAndFeaturesInstallerType   = $WritesAppsAndFeaturesEntry ? 'exe' : $null
+        Warnings                       = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+        UnresolvedFields               = [string[]]@()
         PublisherUrl                   = $Setup['WebSite']
-        DefaultInstallationDirectory   = $Setup['InstallDir']
         AlternateInstallationDirectory = $Setup['AltInstallDir']
         MainExecutable                 = $Setup['MainExe']
         Uninstaller                    = $Setup['UninstallFile']
         ShowsAppsAndFeaturesEntry      = $Setup['ShowAddRemove'] -eq '1'
-        Scope                          = $null
         SupportedScopes                = @('user', 'machine')
         RegistryWrites                 = @($RegistryWrites)
         RegistryAssociationInfo        = $RegistryAssociationInfo
@@ -133,8 +140,6 @@ function Get-ActualInstallerInfo {
         FileExtensions                 = $RegistryAssociationInfo.FileExtensions
         EmbeddedFiles                  = @($ArchiveData.Entries.FullName)
         ArchiveRange                   = $ArchiveData.Range
-        WritesAppsAndFeaturesEntry     = if ($Setup['ShowAddRemove'] -eq '1') { $true } else { $false }
-        Warnings                       = @($Warnings)
         ParserVersionInfo              = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.ActualInstaller'; ParserMajor = 1; Sources = @('Validated embedded ZIP archive', 'aisetup.ini') }
       }
     } finally { Close-InstallerArchiveRange -Context $Context }

@@ -837,32 +837,37 @@ function Get-CreateInstallInfo {
     $Scope = if ($DetectedScopes.Count -eq 1) { @($DetectedScopes)[0] } elseif ($DetectedScopes.Count -gt 1) { $null } elseif ($ExecutionLevel -ieq 'requireAdministrator') { 'machine' } else { $null }
     $SupportedScopes = if ($DetectedScopes.Count -gt 0) { @($DetectedScopes | Sort-Object) } elseif ($ExecutionLevel -ieq 'requireAdministrator') { @('machine') } else { @() }
 
-    [pscustomobject]@{
-      InstallerType              = 'CreateInstall'
-      ProductCode                = $ProductCode
-      ProductCodeEvidence        = if ($ProductCode) { 'Compiled Gentee addremoveext uninstall-key argument' } else { $null }
-      PackageName                = $ProductName
-      DisplayName                = $ProductName
-      ProductName                = $ProductName
-      DisplayVersion             = $DisplayVersion
-      Publisher                  = $Publisher
-      FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-      Scope                      = $Scope
-      SupportedScopes            = $SupportedScopes
-      ScopeEvidence              = if ($ProductCode) { 'Compiled addremoveext current-user flag plus PE requestedExecutionLevel' } elseif ($ExecutionLevel -ieq 'requireAdministrator') { 'PE requestedExecutionLevel' } else { $null }
-      RequestedExecutionLevel    = $ExecutionLevel
-      RegistryWrites             = $RegistryWriteArray
-      RegistryAssociationInfo    = $RegistryAssociationInfo
-      Protocols                  = $RegistryAssociationInfo.Protocols
-      FileExtensions             = $RegistryAssociationInfo.FileExtensions
-      WritesAppsAndFeaturesEntry = if ($ProductCode) { $true } else { $null }
-      GenteeProgram              = $UninstallEvidence.ProgramInfo
-      UninstallRegistrations     = @($UninstallEvidence.Calls)
-      GEA                        = [pscustomobject]@{ MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); UnsupportedCompressionMethods = @($CompressionMethods | Where-Object { $_ -eq 'Unknown' } | Sort-Object); PasswordCount = $Layout.PasswordCount }
-      ExtractedFiles             = @($Layout.Entries.FullName)
-      CanExpand                  = $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')
-      Warnings                   = @($Warnings)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 3; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 bytecode structures', 'CreateInstall addremoveext command source', 'Gentee GEA v1/v2 structures', 'Gentee LZGE decoder', 'Gentee-modified PPMd-I decoder') }
+    $WritesAppsAndFeaturesEntry = if ($ProductCode) { $true } else { $null }
+    [pscustomobject][ordered]@{
+      Path                         = $File.FullName
+      InstallerType                = 'CreateInstall'
+      ProductCode                  = $ProductCode
+      UpgradeCode                  = $null
+      DisplayName                  = $ProductName
+      DisplayVersion               = $DisplayVersion
+      Publisher                    = $Publisher
+      Scope                        = $Scope
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
+      AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
+      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields             = [string[]]@()
+      ProductCodeEvidence          = if ($ProductCode) { 'Compiled Gentee addremoveext uninstall-key argument' } else { $null }
+      FileDescription              = ([string]$VersionInfo.FileDescription).Trim()
+      SupportedScopes              = $SupportedScopes
+      ScopeEvidence                = if ($ProductCode) { 'Compiled addremoveext current-user flag plus PE requestedExecutionLevel' } elseif ($ExecutionLevel -ieq 'requireAdministrator') { 'PE requestedExecutionLevel' } else { $null }
+      RequestedExecutionLevel      = $ExecutionLevel
+      RegistryWrites               = $RegistryWriteArray
+      RegistryAssociationInfo      = $RegistryAssociationInfo
+      Protocols                    = $RegistryAssociationInfo.Protocols
+      FileExtensions               = $RegistryAssociationInfo.FileExtensions
+      GenteeProgram                = $UninstallEvidence.ProgramInfo
+      UninstallRegistrations       = @($UninstallEvidence.Calls)
+      GEA                          = [pscustomobject]@{ MajorVersion = $Layout.MajorVersion; MinorVersion = $Layout.MinorVersion; ArchiveOffset = $Layout.ArchiveOffset; HeaderSize = $Layout.HeaderSize; SummarySize = $Layout.SummarySize; MovedSize = $Layout.MovedSize; BlockSize = $Layout.BlockSize; SolidSize = $Layout.SolidSize; EntryCount = $Layout.Entries.Count; CompressionMethods = @($CompressionMethods | Sort-Object); UnsupportedCompressionMethods = @($CompressionMethods | Where-Object { $_ -eq 'Unknown' } | Sort-Object); PasswordCount = $Layout.PasswordCount }
+      ExtractedFiles               = @($Layout.Entries.FullName)
+      CanExpand                    = $Layout.PasswordCount -eq 0 -and -not $CompressionMethods.Contains('Unknown')
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.CreateInstall'; ParserMajor = 3; Sources = @('PE version resource', 'PE application manifest', 'Gentee launcher/linkhead and GE 4.0 bytecode structures', 'CreateInstall addremoveext command source', 'Gentee GEA v1/v2 structures', 'Gentee LZGE decoder', 'Gentee-modified PPMd-I decoder') }
     }
   }
 }

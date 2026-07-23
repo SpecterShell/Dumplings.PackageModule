@@ -298,21 +298,26 @@ function Get-QSetupInfo {
     if (-not $Scope) { $Warnings.Add('QSetup scope is not explicit in Setup.txt and requires VM validation.') }
     if ($Directive.ContainsKey('SET_PERFORM_EXECUTE_OP')) { $Warnings.Add('QSetup defines custom execution actions. Inspect nested executables and action arguments before finalizing dependencies or switches.') }
 
-    [pscustomobject]@{
+    [pscustomobject][ordered]@{
+      Path                         = $File.FullName
       InstallerType                = 'QSetup'
       ProductCode                  = $ProductCode
-      PackageName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_NAME'
+      UpgradeCode                  = $null
       DisplayName                  = $DisplayName
-      ProductName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_NAME'
       DisplayVersion               = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_VERSION'
       Publisher                    = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_NAME'
+      Scope                        = $Scope
+      DefaultInstallLocation       = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_TARGET_DIR'
+      WritesAppsAndFeaturesEntry   = [bool]$WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
+      AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
+      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields             = [string[]]@()
       PublisherUrl                 = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_URL'
       ProjectName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROJECT_NAME'
       ProjectStamp                 = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PC_STAMP'
       ComposerBuild                = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPOSER_BUILD'
-      DefaultInstallationDirectory = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_TARGET_DIR'
       MainExecutable               = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROG_EXE_NAME'
-      Scope                        = $Scope
       SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
       SupportedArchitectures       = $SupportedArchitectures
       AllowedOperatingSystems      = $AllowedOs
@@ -320,11 +325,9 @@ function Get-QSetupInfo {
       RegistryAssociationInfo      = $RegistryAssociationInfo
       Protocols                    = $RegistryAssociationInfo.Protocols
       FileExtensions               = $RegistryAssociationInfo.FileExtensions
-      WritesAppsAndFeaturesEntry   = [bool]$WritesAppsAndFeaturesEntry
       Records                      = @($Layout.Records | Select-Object Name, Required, Stamp, Offset, CompressedLength)
       ExtractedFiles               = @($Layout.Records.Name)
       SetupDirectives              = $Directive
-      Warnings                     = @($Warnings)
       ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.QSetup'; ParserMajor = 1; Sources = @('validated QSetup zlib record table', 'Setup.txt directives') }
     }
   }

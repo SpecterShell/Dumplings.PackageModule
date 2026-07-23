@@ -919,6 +919,163 @@ function Get-WinGetInstallerStructuralExeFamilyCandidate {
   }
 }
 
+function ConvertTo-WinGetInstallerFamilyEvidence {
+  <#
+  .SYNOPSIS
+    Add provenance and validation state to an installer-family candidate.
+  .PARAMETER Candidate
+    Candidate produced by a structural detector or bounded text scan.
+  .PARAMETER EvidenceKind
+    Whether the candidate came from a structured binary check or a text heuristic.
+  .PARAMETER IsOuterContainer
+    Indicates that the structural marker identifies the outer installer container
+    without requiring the metadata parser to complete successfully.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Candidate,
+    [Parameter(Mandatory)][ValidateSet('Structural', 'Heuristic')][string]$EvidenceKind,
+    [switch]$IsOuterContainer
+  )
+
+  [pscustomobject][ordered]@{
+    Family                  = [string]$Candidate.Family
+    Confidence              = [string]$Candidate.Confidence
+    EvidenceKind            = $EvidenceKind
+    ValidationStatus        = $IsOuterContainer ? 'ConfirmedStructure' : 'RoutingHint'
+    IsOuterContainer        = $IsOuterContainer.IsPresent
+    MatchedMarkers          = @($Candidate.MatchedMarkers)
+    SuggestedManifestFields = $Candidate.SuggestedManifestFields
+  }
+}
+
+function Get-WinGetInstallerParserNameForFamily {
+  <#
+  .SYNOPSIS
+    Map analyzer family aliases to the parser result that validates them.
+  .PARAMETER Family
+    Candidate family name emitted by a structural or heuristic detector.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][string]$Family)
+
+  switch ($Family) {
+    'Inno Setup' { 'Inno' }
+    'NSIS/Nullsoft' { 'NSIS' }
+    { $_ -cin @('Squirrel', 'Velopack') } { 'Squirrel/Velopack' }
+    default { $Family }
+  }
+}
+
+function Resolve-WinGetInstallerFamilyEvidence {
+  <#
+  .SYNOPSIS
+    Separate confirmed installer families from rejected and unvalidated routes.
+  .PARAMETER Candidates
+    Annotated structural and heuristic candidates used to route parsers.
+  .PARAMETER ParserResults
+    Parser invocation results produced for those candidates.
+  .OUTPUTS
+    One object containing DetectedFamilies, RoutingHints, and RejectedCandidates.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Candidates,
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ParserResults
+  )
+
+  $Detected = [Collections.Generic.List[object]]::new()
+  $Rejected = [Collections.Generic.List[object]]::new()
+  $ConfirmedParserNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+  foreach ($Candidate in $Candidates) {
+    $ParserName = Get-WinGetInstallerParserNameForFamily -Family $Candidate.Family
+    $MatchingRuns = @($ParserResults | Where-Object { $_.Name -ceq $ParserName })
+    $SuccessfulRun = $MatchingRuns | Where-Object { $_.Success -and $_.Result } | Select-Object -First 1
+
+    if ($SuccessfulRun) {
+      # A parser success validates the family even when the initial route came
+      # from a weak marker such as .ciq, RELEASES, or Update.exe.
+      $null = $ConfirmedParserNames.Add($ParserName)
+      $ResultFamilyProperty = $SuccessfulRun.Result.PSObject.Properties['Family']
+      $ResultFamily = if ($null -ne $ResultFamilyProperty -and -not [string]::IsNullOrWhiteSpace([string]$ResultFamilyProperty.Value)) {
+        [string]$ResultFamilyProperty.Value
+      } else {
+        [string]$Candidate.Family
+      }
+      $ResultConfidenceProperty = $SuccessfulRun.Result.PSObject.Properties['Confidence']
+      $Detected.Add([pscustomobject][ordered]@{
+          Family                  = $ResultFamily
+          Confidence              = $null -eq $ResultConfidenceProperty ? 'high' : [string]$ResultConfidenceProperty.Value
+          EvidenceKind            = 'Parser'
+          ValidationStatus        = 'ConfirmedParser'
+          IsOuterContainer        = $true
+          ParserName              = $ParserName
+          MatchedMarkers          = @($Candidate.MatchedMarkers)
+          SuggestedManifestFields = $SuccessfulRun.Result.SuggestedManifestFields
+        })
+      continue
+    }
+
+    # Some signatures, such as a .wixburn section or the Advanced Installer
+    # footer, identify the outer container independently from metadata decoding.
+    if ($Candidate.IsOuterContainer) {
+      $Detected.Add($Candidate)
+    }
+
+    $FailedRun = $MatchingRuns | Where-Object { $_.Success -eq $false -and $_.Error } | Select-Object -First 1
+    if ($FailedRun) {
+      $Rejected.Add([pscustomobject][ordered]@{
+          Family                  = [string]$Candidate.Family
+          Confidence              = [string]$Candidate.Confidence
+          EvidenceKind            = [string]$Candidate.EvidenceKind
+          ValidationStatus        = 'RejectedByParser'
+          IsOuterContainer        = [bool]$Candidate.IsOuterContainer
+          ParserName              = $ParserName
+          MatchedMarkers          = @($Candidate.MatchedMarkers)
+          SuggestedManifestFields = $Candidate.SuggestedManifestFields
+          Error                   = [string]$FailedRun.Error
+        })
+    }
+  }
+
+  # A parser can occasionally be invoked without an equivalent candidate alias.
+  # Preserve its successful structured result as confirmed family evidence.
+  foreach ($ParserResult in @($ParserResults | Where-Object { $_.Success -and $_.Result })) {
+    $ResultFamilyProperty = $ParserResult.Result.PSObject.Properties['Family']
+    if ($null -eq $ResultFamilyProperty -or [string]::IsNullOrWhiteSpace([string]$ResultFamilyProperty.Value)) { continue }
+    $Family = [string]$ResultFamilyProperty.Value
+    if ($Detected | Where-Object { $_.Family -ceq $Family } | Select-Object -First 1) { continue }
+    $null = $ConfirmedParserNames.Add([string]$ParserResult.Name)
+    $ResultConfidenceProperty = $ParserResult.Result.PSObject.Properties['Confidence']
+    $Detected.Add([pscustomobject][ordered]@{
+        Family                  = $Family
+        Confidence              = $null -eq $ResultConfidenceProperty ? 'high' : [string]$ResultConfidenceProperty.Value
+        EvidenceKind            = 'Parser'
+        ValidationStatus        = 'ConfirmedParser'
+        IsOuterContainer        = $true
+        ParserName              = [string]$ParserResult.Name
+        MatchedMarkers          = @()
+        SuggestedManifestFields = $ParserResult.Result.SuggestedManifestFields
+      })
+  }
+
+  $DetectedFamilies = @($Detected | Group-Object Family | ForEach-Object {
+      $_.Group | Sort-Object { if ($_.ValidationStatus -ceq 'ConfirmedParser') { 0 } else { 1 } } | Select-Object -First 1
+    })
+  $RoutingHints = @($Candidates | Where-Object {
+      -not $_.IsOuterContainer -and -not $ConfirmedParserNames.Contains((Get-WinGetInstallerParserNameForFamily -Family $_.Family))
+    } | Group-Object Family | ForEach-Object {
+      $_.Group | Sort-Object { if ($_.Confidence -ceq 'high') { 0 } elseif ($_.Confidence -ceq 'medium') { 1 } else { 2 } } | Select-Object -First 1
+    })
+
+  [pscustomobject]@{
+    DetectedFamilies   = $DetectedFamilies
+    RoutingHints       = $RoutingHints
+    RejectedCandidates = @($Rejected)
+  }
+}
+
 function Get-WinGetInstallerWrapperWarning {
   <#
   .SYNOPSIS
@@ -1446,14 +1603,13 @@ function Invoke-WinGetInstallerExeParser {
     if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
     if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue @($Info.SupportedScopes) -Force }
     if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
-    $ProductName = if ($Info.DisplayName) { $Info.DisplayName } elseif ($Info.PackageName) { $Info.PackageName } else { $Info.ProductName }
     [pscustomobject]@{
       Family                  = $Family
       Confidence              = $Confidence
       InstallerType           = "exe # $Family"
       Metadata                = $Info
       ProductVersion          = $Info.DisplayVersion
-      ProductName             = $ProductName
+      ProductName             = $Info.DisplayName
       Publisher               = $Info.Publisher
       ProductCode             = $Info.ProductCode
       Scope                   = $Info.Scope
@@ -1765,7 +1921,7 @@ function Invoke-WinGetInstallerExeParser {
         Confidence              = 'high'
         InstallerType           = 'exe # dotNetInstaller'
         Metadata                = $Info
-        ProductVersion          = $Info.ProductVersion
+        ProductVersion          = $Info.ConfigurationProductVersion
         ExecutedPayloads        = $Info.ExecutedPayloads
         NestedInstallerFiles    = $Info.NestedFiles
         SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'dotNetInstaller'
@@ -1899,7 +2055,7 @@ function Invoke-WinGetInstallerExeParser {
         InstallerType                        = 'exe # Qt Installer Framework'
         Metadata                             = $Info
         ProductVersion                       = $Info.DisplayVersion
-        ProductName                          = $Info.PackageName
+        ProductName                          = $Info.DisplayName
         Publisher                            = $Info.Publisher
         ProductCode                          = $Info.ProductCode
         Scope                                = $Info.Scope
@@ -1933,7 +2089,7 @@ function Invoke-WinGetInstallerExeParser {
         InstallerType           = 'exe # install4j'
         Metadata                = $Info
         ProductVersion          = $Info.DisplayVersion
-        ProductName             = $Info.ProductName
+        ProductName             = $Info.DisplayName
         Publisher               = $Info.Publisher
         ProductCode             = $Info.ProductCode
         Scope                   = $Info.Scope
@@ -1975,7 +2131,10 @@ function Get-WinGetInstallerAnalysis {
     This function is read-only. It runs PackageModule parser functions that are already
     loaded by Dumplings, scans bounded string windows for generic EXE families, and
     returns structured evidence for manifest decisions. It does not execute installers
-    and does not format or serialize output for callers.
+    and does not format or serialize output for callers. DetectedFamilies contains only
+    structurally confirmed or successfully parsed families. RoutingHints and
+    RejectedCandidates retain unvalidated routing evidence without promoting it to a
+    detected installer family.
   .PARAMETER Path
     The installer path to inspect
   .PARAMETER ScanBytes
@@ -2010,6 +2169,11 @@ function Get-WinGetInstallerAnalysis {
       AuthenticodeSigner = (Get-AuthenticodeSignature -LiteralPath $Installer.FullName -ErrorAction SilentlyContinue).SignerCertificate.Subject
       VersionInfo        = Get-WinGetInstallerFileVersionEvidence -File $Installer -ErrorAction SilentlyContinue
       ParserResults      = @()
+      DetectedFamilies   = @()
+      RoutingHints       = @()
+      RejectedCandidates = @()
+      # Compatibility projection retained for callers written before evidence
+      # separation. It contains confirmed families only.
       FamilyCandidates   = @()
       PortableEvidence   = $null
       WrapperWarnings    = @()
@@ -2064,14 +2228,28 @@ function Get-WinGetInstallerAnalysis {
       }
       'PE' {
         $ScanText = Read-WinGetInstallerStringWindows -File $Installer -Budget $ScanBytes
+        $StructuralCandidates = @(Get-WinGetInstallerStructuralExeFamilyCandidate -File $Installer | ForEach-Object {
+            # These structures identify the outer container by format. The raw
+            # NSIS signature and InstallBuilder project marker remain routes until
+            # their parsers validate surrounding offsets and records.
+            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
+            ConvertTo-WinGetInstallerFamilyEvidence -Candidate $_ -EvidenceKind Structural -IsOuterContainer:$OuterContainer
+          })
+        $HeuristicCandidates = @(Get-WinGetInstallerGenericExeFamilyCandidate -File $Installer -Budget $ScanBytes -Text $ScanText | ForEach-Object {
+            ConvertTo-WinGetInstallerFamilyEvidence -Candidate $_ -EvidenceKind Heuristic
+          })
         $AllCandidates = @(
-          Get-WinGetInstallerStructuralExeFamilyCandidate -File $Installer
-          Get-WinGetInstallerGenericExeFamilyCandidate -File $Installer -Budget $ScanBytes -Text $ScanText
+          $StructuralCandidates
+          $HeuristicCandidates
         )
         $FamilyCandidates = @($AllCandidates | Group-Object Family | ForEach-Object { $_.Group | Sort-Object { if ($_.Confidence -eq 'high') { 0 } elseif ($_.Confidence -eq 'medium') { 1 } else { 2 } } | Select-Object -First 1 })
         $ParserRuns = @(Invoke-WinGetInstallerExeParser -InstallerPath $Installer.FullName -ExtractEmbeddedMsi:$ExtractEmbeddedMsi.IsPresent -FamilyCandidates $FamilyCandidates)
         $Analysis.ParserResults += $ParserRuns
-        $Analysis.FamilyCandidates += $FamilyCandidates
+        $ResolvedFamilies = Resolve-WinGetInstallerFamilyEvidence -Candidates $FamilyCandidates -ParserResults $ParserRuns
+        $Analysis.DetectedFamilies += @($ResolvedFamilies.DetectedFamilies)
+        $Analysis.RoutingHints += @($ResolvedFamilies.RoutingHints)
+        $Analysis.RejectedCandidates += @($ResolvedFamilies.RejectedCandidates)
+        $Analysis.FamilyCandidates += @($ResolvedFamilies.DetectedFamilies)
         $Analysis.WrapperWarnings += @(Get-WinGetInstallerWrapperWarning -File $Installer -Budget $ScanBytes -ParserRuns $ParserRuns -Text $ScanText)
         if (-not ($ParserRuns.Success -contains $true)) {
           $Analysis.PortableEvidence = try { Get-WinGetInstallerPortableEvidence -Path $Installer.FullName } catch { $null }
@@ -2094,6 +2272,27 @@ function Get-WinGetInstallerAnalysis {
       default {
         $Analysis.SuggestedNextSteps += 'Unknown file signature; inspect as archive or PE manually before choosing a WinGet installer type.'
       }
+    }
+
+    # Non-PE parsers already operate on decisive container evidence. Project
+    # their successful family result into the same confirmed-family contract.
+    if ($FileType.Type -cne 'PE') {
+      foreach ($ParserResult in @($Analysis.ParserResults | Where-Object { $_.Success -and $_.Result })) {
+        $FamilyProperty = $ParserResult.Result.PSObject.Properties['Family']
+        if ($null -eq $FamilyProperty -or [string]::IsNullOrWhiteSpace([string]$FamilyProperty.Value)) { continue }
+        $Analysis.DetectedFamilies += [pscustomobject][ordered]@{
+          Family                  = [string]$FamilyProperty.Value
+          Confidence              = 'high'
+          EvidenceKind            = 'Parser'
+          ValidationStatus        = 'ConfirmedParser'
+          IsOuterContainer        = $true
+          ParserName              = [string]$ParserResult.Name
+          MatchedMarkers          = @()
+          SuggestedManifestFields = $ParserResult.Result.SuggestedManifestFields
+        }
+      }
+      $Analysis.DetectedFamilies = @($Analysis.DetectedFamilies | Group-Object Family | ForEach-Object { $_.Group | Select-Object -First 1 })
+      $Analysis.FamilyCandidates = @($Analysis.DetectedFamilies)
     }
 
     [pscustomobject]$Analysis

@@ -41,6 +41,11 @@ Describe 'MSI Apps & Features parser' {
     $Fixture = Get-DumplingsTestFixture -Directory $Script:SquirrelFixtureDirectory -Name 'Tower-13.1.576.msi' -Uri 'https://www.git-tower.com/apps/tower3-win/576-01812649/Tower-13.1.576.msi'
     $Info = Get-MsiInstallerInfo -Path $Fixture
 
+    $Info.PSObject.Properties.Name[0..13] | Should -Be @(
+      'Path', 'InstallerType', 'ProductCode', 'UpgradeCode', 'DisplayName', 'DisplayVersion',
+      'Publisher', 'Scope', 'DefaultInstallLocation', 'WritesAppsAndFeaturesEntry',
+      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Warnings', 'UnresolvedFields'
+    )
     $Info.PSObject.Properties.Name | Should -Not -Contain 'ProductName'
     $Info.PSObject.Properties.Name | Should -Not -Contain 'ProductVersion'
     $Info.PSObject.Properties.Name | Should -Contain 'Path'
@@ -50,6 +55,8 @@ Describe 'MSI Apps & Features parser' {
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $Info.Warnings | Should -Be @()
     $Info.UnresolvedFields | Should -Be @()
+    $Info.Warnings.GetType() | Should -Be ([string[]])
+    $Info.UnresolvedFields.GetType() | Should -Be ([string[]])
   }
 
   It 'Should detect Figma MSI writing a hidden native ARP entry and visible .msq ARP entry' {

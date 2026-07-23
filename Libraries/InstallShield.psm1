@@ -1045,22 +1045,36 @@ function Get-InstallShieldInfo {
       'Unknown'
     }
 
-    [pscustomobject]@{
-      Path                = $InstallerPath
-      ExtractedPath       = $ExtractedPath
-      InstallerType       = 'InstallShield'
-      Variant             = $Variant
-      HasMsi              = [bool]$MsiFiles
-      HasInstallScript    = [bool]$InxFiles
-      MsiFiles            = @($MsiFiles | Select-Object -ExpandProperty FullName)
-      SetupIniPath        = $MsiPayloadSelection.SetupIniPath
-      SetupConfiguration  = $MsiPayloadSelection.Configuration
-      MsiPayloadSelection = $MsiPayloadSelection
-      SelectedMsiPath     = $MsiPayloadSelection.SelectedMsiPath
-      InxFiles            = @($InxFiles | Select-Object -ExpandProperty FullName)
-      CabFiles            = @($CabFiles | Select-Object -ExpandProperty FullName)
-      SfxFiles            = @($SfxFiles | Select-Object -ExpandProperty FullName)
-      Warnings            = @($MsiPayloadSelection.Warnings)
+    # The InstallShield launcher classification does not prove which nested
+    # package owns ARP. Get-InstallShieldMsiInfo supplies identity only after
+    # Setup.ini has selected an MSI payload.
+    [pscustomobject][ordered]@{
+      Path                         = $InstallerPath
+      InstallerType                = 'InstallShield'
+      ProductCode                  = $null
+      UpgradeCode                  = $null
+      DisplayName                  = $null
+      DisplayVersion               = $null
+      Publisher                    = $null
+      Scope                        = $null
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $null
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@($MsiPayloadSelection.Warnings)
+      UnresolvedFields             = [string[]]@()
+      ExtractedPath                = $ExtractedPath
+      Variant                      = $Variant
+      HasMsi                       = [bool]$MsiFiles
+      HasInstallScript             = [bool]$InxFiles
+      MsiFiles                     = @($MsiFiles | Select-Object -ExpandProperty FullName)
+      SetupIniPath                 = $MsiPayloadSelection.SetupIniPath
+      SetupConfiguration           = $MsiPayloadSelection.Configuration
+      MsiPayloadSelection          = $MsiPayloadSelection
+      SelectedMsiPath              = $MsiPayloadSelection.SelectedMsiPath
+      InxFiles                     = @($InxFiles | Select-Object -ExpandProperty FullName)
+      CabFiles                     = @($CabFiles | Select-Object -ExpandProperty FullName)
+      SfxFiles                     = @($SfxFiles | Select-Object -ExpandProperty FullName)
     }
   }
 }
@@ -1109,24 +1123,30 @@ function Get-InstallShieldMsiInfo {
       $SelectionProperty = $Installer.PSObject.Properties['MsiPayloadSelection']
       $SelectionMethod = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value.SelectionMethod
 
-      [pscustomobject]@{
-        Name                         = $MsiFile.Name
+      [pscustomobject][ordered]@{
         Path                         = $MsiFile.FullName
+        InstallerType                = $MsiInfo.InstallerType
+        ProductCode                  = $MsiInfo.ProductCode
+        UpgradeCode                  = $MsiInfo.UpgradeCode
+        DisplayName                  = $MsiInfo.DisplayName
+        DisplayVersion               = $MsiInfo.DisplayVersion
+        Publisher                    = $MsiInfo.Publisher
+        Scope                        = $MsiInfo.Scope
+        DefaultInstallLocation       = $MsiInfo.DefaultInstallLocation
+        WritesAppsAndFeaturesEntry   = $MsiInfo.WritesAppsAndFeaturesEntry
+        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
+        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
+        Warnings                     = [string[]]@($MsiInfo.Warnings)
+        UnresolvedFields             = [string[]]@($MsiInfo.UnresolvedFields)
+        Name                         = $MsiFile.Name
         SelectedMsiPath              = [System.IO.Path]::GetRelativePath($Installer.ExtractedPath, $MsiFile.FullName)
         SelectionMethod              = $SelectionMethod
         PackageArchitecture          = $MsiInfo.PackageArchitecture
         Template                     = $MsiInfo.Template
-        ProductVersion               = $MsiInfo.DisplayVersion
-        ProductCode                  = $MsiInfo.ProductCode
-        UpgradeCode                  = $MsiInfo.UpgradeCode
-        ProductName                  = $MsiInfo.DisplayName
-        Publisher                    = $MsiInfo.Publisher
         InstallerBuilder             = $MsiInfo.InstallerBuilder
         InstallLocationProperty      = $MsiInfo.InstallLocationProperty
         InstallLocationSwitch        = $MsiInfo.InstallLocationSwitch
         IsWiX                        = $MsiInfo.InstallerBuilder -ceq 'WiX'
-        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
-        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
         Protocols                    = $MsiInfo.Protocols
         FileExtensions               = $MsiInfo.FileExtensions
         RegistryAssociationInfo      = $MsiInfo.RegistryAssociationInfo
@@ -1161,7 +1181,7 @@ function Read-ProductVersionFromInstallShield {
     [string]$Name = '*.msi'
   )
 
-  process { (Get-InstallShieldMsiInfo @PSBoundParameters).ProductVersion }
+  process { (Get-InstallShieldMsiInfo @PSBoundParameters).DisplayVersion }
 }
 
 function Read-ProductCodeFromInstallShield {

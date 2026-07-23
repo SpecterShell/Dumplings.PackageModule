@@ -97,31 +97,35 @@ function Get-PaquetBuilderInfo {
     }
     $Warnings.Add('Built-in /s and /silent handling depends on the Paquet Builder version and project settings. Verify the exact package before authoring InstallerSwitches.')
 
-    [pscustomobject]@{
-      InstallerType              = 'Paquet Builder'
-      ProductCode                = $null
-      PackageName                = ([string]$VersionInfo.ProductName).Trim()
-      DisplayName                = ([string]$VersionInfo.ProductName).Trim()
-      ProductName                = ([string]$VersionInfo.ProductName).Trim()
-      DisplayVersion             = ([string]$VersionInfo.ProductVersion).Trim()
-      Publisher                  = ([string]$VersionInfo.CompanyName).Trim()
-      FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-      Scope                      = $Scope
-      SupportedScopes            = if ($Scope) { @($Scope) } else { @() }
-      RequestedExecutionLevel    = $ExecutionLevel
-      SupportsSilentInstallation = $null
-      RegistryWrites             = $RegistryWrites
-      RegistryAssociationInfo    = $RegistryAssociationInfo
-      Protocols                  = $RegistryAssociationInfo.Protocols
-      FileExtensions             = $RegistryAssociationInfo.FileExtensions
-      WritesAppsAndFeaturesEntry = $null
-      PayloadFiles               = @($ArchiveData.Payload.Entries.FullName)
-      RuntimeFiles               = @($ArchiveData.Runtime.Entries.FullName)
-      NestedInstallerFiles       = $NestedInstallers
-      PayloadArchiveRange        = $ArchiveData.Payload.Range
-      RuntimeArchiveRange        = $ArchiveData.Runtime.Range
-      Warnings                   = @($Warnings)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.PaquetBuilder'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'validated payload and runtime 7z archives') }
+    [pscustomobject][ordered]@{
+      Path                         = $File.FullName
+      InstallerType                = 'Paquet Builder'
+      ProductCode                  = $null
+      UpgradeCode                  = $null
+      DisplayName                  = ([string]$VersionInfo.ProductName).Trim()
+      DisplayVersion               = ([string]$VersionInfo.ProductVersion).Trim()
+      Publisher                    = ([string]$VersionInfo.CompanyName).Trim()
+      Scope                        = $Scope
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $null
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields             = [string[]]@()
+      FileDescription              = ([string]$VersionInfo.FileDescription).Trim()
+      SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
+      RequestedExecutionLevel      = $ExecutionLevel
+      SupportsSilentInstallation   = $null
+      RegistryWrites               = $RegistryWrites
+      RegistryAssociationInfo      = $RegistryAssociationInfo
+      Protocols                    = $RegistryAssociationInfo.Protocols
+      FileExtensions               = $RegistryAssociationInfo.FileExtensions
+      PayloadFiles                 = @($ArchiveData.Payload.Entries.FullName)
+      RuntimeFiles                 = @($ArchiveData.Runtime.Entries.FullName)
+      NestedInstallerFiles         = $NestedInstallers
+      PayloadArchiveRange          = $ArchiveData.Payload.Range
+      RuntimeArchiveRange          = $ArchiveData.Runtime.Range
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.PaquetBuilder'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'validated payload and runtime 7z archives') }
     }
   }
 }

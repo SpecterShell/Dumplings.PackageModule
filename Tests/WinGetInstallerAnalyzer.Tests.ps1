@@ -6,6 +6,7 @@ BeforeAll {
   . (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Index.ps1')
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\WinGetInstallerAnalyzer'
+  $Script:DeclaredTypeFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'ManifestUpdateDeclaredTypes'
   $ProgressPreference = 'SilentlyContinue'
 
   function Get-AnalyzerInstallerFixture {
@@ -18,6 +19,16 @@ BeforeAll {
     )
 
     Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url
+  }
+
+  function Get-DeclaredTypeRegressionFixture {
+    param(
+      [Parameter(Mandatory)][string]$Name,
+      [Parameter(Mandatory)][uri]$Url,
+      [Parameter(Mandatory)][string]$Sha256
+    )
+
+    Get-DumplingsTestFixture -Directory $Script:DeclaredTypeFixtureDirectory -Name $Name -Uri $Url -Sha256 $Sha256
   }
 
   function Get-AnalyzerMsixFixtureFromTemplate {
@@ -282,6 +293,52 @@ Describe 'WinGet installer analyzer content detection' {
     $Candidate.Family | Should -Be 'CreateInstall'
     $Candidate.SuggestedManifestFields.Scope | Should -Be 'machine'
     $Candidate.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '-silent'
+  }
+
+  It 'Should keep CreateInstall text inside Codeg as a rejected route after NSIS succeeds' {
+    $Installer = Get-DeclaredTypeRegressionFixture -Name 'codeg_0.21.5_x64-setup.exe' -Url 'https://github.com/xintaofei/codeg/releases/download/v0.21.5/codeg_0.21.5_x64-setup.exe' -Sha256 '4774C23369A92D788C31D1CB80093E45973428C9329221308A67D8CDBBB07A74'
+
+    $Analysis = Get-WinGetInstallerAnalysis -Path $Installer
+
+    $Analysis.DetectedFamilies.Family | Should -Contain 'NSIS/Nullsoft'
+    $Analysis.FamilyCandidates.Family | Should -Contain 'NSIS/Nullsoft'
+    $Analysis.FamilyCandidates.Family | Should -Not -Contain 'CreateInstall'
+    $Analysis.RoutingHints.Family | Should -Contain 'CreateInstall'
+    ($Analysis.RejectedCandidates | Where-Object Family -EQ 'CreateInstall').ParserName | Should -Be 'CreateInstall'
+  }
+
+  It 'Should keep CreateInstall text inside PixPin as a rejected route after Inno succeeds' {
+    $Installer = Get-DeclaredTypeRegressionFixture -Name 'PixPin_win_3.4.2.1.exe' -Url 'https://download.pixpinapp.com/PixPin_win_3.4.2.1.exe' -Sha256 '02F23A4A71EC8F8FD60F071FA6157B83A0478BB2B478E2A00598C1CF752C9287'
+
+    $Analysis = Get-WinGetInstallerAnalysis -Path $Installer
+
+    $Analysis.DetectedFamilies.Family | Should -Contain 'Inno Setup'
+    $Analysis.FamilyCandidates.Family | Should -Contain 'Inno Setup'
+    $Analysis.FamilyCandidates.Family | Should -Not -Contain 'CreateInstall'
+    $Analysis.RoutingHints.Family | Should -Contain 'CreateInstall'
+    ($Analysis.RejectedCandidates | Where-Object Family -EQ 'CreateInstall').ValidationStatus | Should -Be 'RejectedByParser'
+  }
+
+  It 'Should not promote common embedded marker strings when their parser rejects the file' -ForEach @(
+    @{ Family = 'CreateInstall'; Markers = 'CreateInstall Novostrim .ciq' }
+    @{ Family = 'Squirrel'; Markers = 'SquirrelSetup Update.exe RELEASES package.nupkg' }
+  ) {
+    $FixturePath = Join-Path $TestDrive "$Family-marker-host.exe"
+    Copy-Item -LiteralPath (Get-Process -Id $PID).Path -Destination $FixturePath
+    $Stream = [IO.File]::Open($FixturePath, 'Append', 'Write', 'Read')
+    try {
+      $Bytes = [Text.Encoding]::ASCII.GetBytes("`0$Markers`0")
+      $Stream.Write($Bytes)
+    } finally {
+      $Stream.Dispose()
+    }
+
+    $Analysis = Get-WinGetInstallerAnalysis -Path $FixturePath
+
+    $Analysis.DetectedFamilies.Family | Should -Not -Contain $Family
+    $Analysis.FamilyCandidates.Family | Should -Not -Contain $Family
+    $Analysis.RoutingHints.Family | Should -Contain $Family
+    $Analysis.RejectedCandidates.Family | Should -Contain $Family
   }
 
   It 'Should prefer a structured generic EXE parser over archive-wrapper heuristics' {

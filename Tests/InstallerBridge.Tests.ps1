@@ -97,6 +97,16 @@ Describe 'Installer bridge' {
     $Result.RegistryValues['DisplayName'] | Should -Be 'Readest'
   }
 
+  It 'Should restore canonical diagnostic array types returned by a parser CLI' {
+    $Result = InModuleScope InstallerBridge {
+      '{"Warnings":["Incomplete metadata"],"UnresolvedFields":[],"Files":["payload.exe"]}' | ConvertFrom-InstallerBridgeJson
+    }
+
+    $Result.Warnings.GetType() | Should -Be ([string[]])
+    $Result.UnresolvedFields.GetType() | Should -Be ([string[]])
+    $Result.Files.GetType() | Should -Not -Be ([string[]])
+  }
+
   It 'Should parse Readest while preserving its unnamed uninstall registry value' {
     $Fixture = Get-InstallerFixture -Name 'Readest_0.11.20_x64-setup.exe' -Url 'https://github.com/readest/readest/releases/download/v0.11.20/Readest_0.11.20_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture
@@ -174,7 +184,7 @@ stagingPercentage: 25
     $Fixture = Get-InstallerFixture -Name 'TINspireComputerLink-3.9.0.455.exe' -Url 'https://education.ti.com/download/en/ed-tech/82035809F7E6474099944056CCB01C20/AC3AAE51297B4902B6B6CA005B8391F0/TINspireComputerLink-3.9.0.455.exe'
     $MsiInfo = Get-AdvancedInstallerMsiInfo -Path $Fixture -Name 'ComputerLink.msi'
 
-    $MsiInfo.ProductVersion | Should -Be '3.9.0.455'
+    $MsiInfo.DisplayVersion | Should -Be '3.9.0.455'
     $MsiInfo.ProductCode | Should -Be '{6C5AC088-3136-4043-8985-8B0772A9580E}'
   }
 

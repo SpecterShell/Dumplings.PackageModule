@@ -397,8 +397,21 @@ function Get-ZeroInstallInfo {
       })
     $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
 
-    [pscustomobject]@{
+    [pscustomobject][ordered]@{
+      Path                         = $File.FullName
       InstallerType                = 'Zero Install'
+      ProductCode                  = $ProductCode
+      UpgradeCode                  = $null
+      DisplayName                  = $DisplayName
+      DisplayVersion               = $null
+      Publisher                    = $FeedInfo.Publisher
+      Scope                        = if ($WritesAppsAndFeaturesEntry) { 'user' } else { $null }
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
+      AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
+      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields             = [string[]]@()
       Family                       = 'Zero Install'
       BootstrapperVariant          = if ($IsGui) { 'GUI' } else { 'CLI' }
       BootstrapperVersion          = $VersionInfo.FileVersion
@@ -412,15 +425,9 @@ function Get-ZeroInstallInfo {
       KeyFingerprint               = Get-ZeroInstallIniOption -Ini $Config -Section 'bootstrap' -Name 'key_fingerprint'
       CustomizableStorePath        = $CustomizableStorePath
       EstimatedRequiredSpace       = if ($EstimatedSpaceText) { $EstimatedSpace } else { $null }
-      DisplayName                  = $DisplayName
-      DisplayVersion               = $null
-      Publisher                    = $FeedInfo.Publisher
-      ProductCode                  = $ProductCode
       UninstallKeyName             = $ProductCode
-      Scope                        = if ($WritesAppsAndFeaturesEntry) { 'user' } else { $null }
       SupportedScopes              = if ($WritesAppsAndFeaturesEntry -and $IsAppBootstrapper) { @('user', 'machine') } elseif ($WritesAppsAndFeaturesEntry) { @('user') } else { @() }
       SupportsDualScope            = [bool]($WritesAppsAndFeaturesEntry -and $IsAppBootstrapper)
-      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
       AppsAndFeaturesEntries       = @()
       InstallModes                 = $InstallModes
       InstallerSwitches            = [pscustomobject]$InstallerSwitches
@@ -442,7 +449,6 @@ function Get-ZeroInstallInfo {
       EmbeddedResources            = $ExtractableResources
       ExtractedFiles               = @($ExtractableResources.RelativePath)
       CanExpand                    = $true
-      Warnings                     = $Warnings.ToArray()
       ParserVersionInfo            = [pscustomobject]@{
         Parser      = 'Dumplings.PackageModule.ZeroInstall'
         ParserMajor = 1

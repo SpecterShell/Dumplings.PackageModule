@@ -22,9 +22,9 @@ function Get-SetupFactoryInfo {
   [OutputType([pscustomobject])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
   process {
-    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'SetupFactory.GetInfo' -Argument @{
-      Path = (Get-Item -LiteralPath $Path -Force).FullName
-    }
+    $InstallerPath = (Get-Item -LiteralPath $Path -Force).FullName
+    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'SetupFactory.GetInfo' -Argument @{ Path = $InstallerPath }
+    return $Info
   }
 }
 

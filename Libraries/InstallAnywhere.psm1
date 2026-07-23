@@ -180,26 +180,30 @@ function Get-InstallAnywhereInfo {
     $RegistryWrites = @(Get-InstallAnywhereRegistryWrite -ProjectXml $ProjectXml)
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
     $Scope = if ($RegistryWrites.Root -match 'HKLM|HKEY_LOCAL_MACHINE') { 'machine' } elseif ($RegistryWrites.Root -match 'HKCU|HKEY_CURRENT_USER') { 'user' } else { $null }
-    [pscustomobject]@{
+    $ProductCode = Get-InstallAnywherePropertyText -Xml $Xml -Name 'productID'
+    $WritesAppsAndFeaturesEntry = if ($RegistryWrites.Count) { $true } else { $null }
+    [pscustomobject][ordered]@{
+      Path                         = $ArchiveData.SourcePath
       InstallerType                = 'InstallAnywhere'
-      ProductCode                  = Get-InstallAnywherePropertyText -Xml $Xml -Name 'productID'
+      ProductCode                  = $ProductCode
       UpgradeCode                  = Get-InstallAnywherePropertyText -Xml $Xml -Name 'upgradeCode'
-      PackageName                  = Get-InstallAnywherePropertyText -Xml $Xml -Name 'productName'
       DisplayName                  = Get-InstallAnywherePropertyText -Xml $Xml -Name 'productName'
-      ProductName                  = Get-InstallAnywherePropertyText -Xml $Xml -Name 'productName'
       DisplayVersion               = Get-InstallAnywhereVersion -Xml $Xml
       Publisher                    = Get-InstallAnywherePropertyText -Xml $Xml -Name 'vendorName'
-      PublisherUrl                 = Get-InstallAnywherePropertyText -Xml $Xml -Name 'vendorURL'
-      DefaultInstallationDirectory = Get-InstallAnywherePropertyText -Xml $Xml -Name 'defaultInstallDir'
       Scope                        = $Scope
+      DefaultInstallLocation       = Get-InstallAnywherePropertyText -Xml $Xml -Name 'defaultInstallDir'
+      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
+      AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
+      Warnings                     = [string[]]@('InstallAnywhere can create its uninstall registration from built-in project metadata. Validate the visible ARP entry and scope in a VM when no explicit uninstall registry action was found.')
+      UnresolvedFields             = [string[]]@()
+      PublisherUrl                 = Get-InstallAnywherePropertyText -Xml $Xml -Name 'vendorURL'
       RegistryWrites               = $RegistryWrites
       RegistryAssociationInfo      = $RegistryAssociationInfo
       Protocols                    = $RegistryAssociationInfo.Protocols
       FileExtensions               = $RegistryAssociationInfo.FileExtensions
       EmbeddedFiles                = @($ArchiveData.EntryNames)
       ArchiveRange                 = $ArchiveData.Range
-      WritesAppsAndFeaturesEntry   = if ($RegistryWrites.Count) { $true } else { $null }
-      Warnings                     = @('InstallAnywhere can create its uninstall registration from built-in project metadata. Validate the visible ARP entry and scope in a VM when no explicit uninstall registry action was found.')
       ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallAnywhere'; ParserMajor = 1; Sources = @('Validated embedded ZIP archive', 'InstallerData/Execute.zip', 'InstallScript.iap_xml') }
     }
   }

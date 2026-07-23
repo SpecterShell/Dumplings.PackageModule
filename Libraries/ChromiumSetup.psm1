@@ -1362,48 +1362,53 @@ function Get-ChromiumSetupInfoFromContext {
   if ($Variant -eq 'Omaha' -and -not $Tag.IsTagged) { $Warnings.Add('This is an untagged Omaha runtime installer. Its /install runtime tag controls user versus machine scope; do not substitute Chromium Updater --system switches.') }
   if ($Tag.IsTagged -and -not $SupportedScopes) { $Warnings.Add("The updater tag needsadmin value '$($Tag.NeedsAdmin)' does not provide deterministic WinGet scope evidence.") }
 
-  [pscustomobject]@{
-    InstallerType              = 'Chromium Setup'
-    Variant                    = $Variant
-    ProductName                = $VersionInfo.ProductName
-    DisplayName                = $Tag.ApplicationName ?? $VersionInfo.ProductName
-    DisplayVersion             = if ($OfflineManifest) { $OfflineManifest.Version } elseif ($Tag.IsTagged) { $null } else { $VersionInfo.ProductVersion }
-    OuterProductVersion        = $VersionInfo.ProductVersion
-    Publisher                  = $VersionInfo.CompanyName
-    OriginalFilename           = $VersionInfo.OriginalFilename
-    ProductCode                = $ProductCode
-    ProductCodeSource          = $ProductCodeSource
-    ApplicationId              = $Tag.ApplicationId
-    ArchiveResourceName        = $MiniArchiveResourceName
-    SetupResourceName          = $MiniSetupResourceName
-    Scope                      = $Scope
-    SupportedScopes            = @($SupportedScopes)
-    SupportsDualScope          = $SupportsDualScope
-    UserScopeSwitch            = $UserScopeSwitch
-    MachineScopeSwitch         = $MachineScopeSwitch
-    IsOnlineBootstrapper       = $IsOnlineBootstrapper
-    OfflineManifestChecked     = $OfflineManifestChecked
-    UpdaterTag                 = $Tag
-    OfflineManifest            = $OfflineManifest
-    NestedSetupInfo            = $NestedSetupInfo
-    InstallModes               = if ($NestedSetupInfo -and $NestedSetupInfo.PSObject.Properties['InstallModes']) { @($NestedSetupInfo.InstallModes) } else { @() }
-    Resources                  = $ResourceInfo.ToArray()
-    NestedFiles                = $NestedFiles.ToArray()
-    ExtractedFiles             = $NestedFiles.ToArray()
-    ExecutedPayloads           = $ExecutedPayloads.ToArray()
-    WritesAppsAndFeaturesEntry = if ($Variant -eq 'ChromiumMiniInstaller' -or $ProductCode) { $true } else { $null }
-    RegistryAssociationInfo    = $null
-    Protocols                  = @()
-    FileExtensions             = @()
-    CanExpand                  = $true
+  $WritesAppsAndFeaturesEntry = if ($Variant -eq 'ChromiumMiniInstaller' -or $ProductCode) { $true } else { $null }
+  [pscustomobject][ordered]@{
+    Path                         = $Context.File.FullName
+    InstallerType                = 'Chromium Setup'
+    ProductCode                  = $ProductCode
+    UpgradeCode                  = $null
+    DisplayName                  = $Tag.ApplicationName ?? $VersionInfo.ProductName
+    DisplayVersion               = if ($OfflineManifest) { $OfflineManifest.Version } elseif ($Tag.IsTagged) { $null } else { $VersionInfo.ProductVersion }
+    Publisher                    = $VersionInfo.CompanyName
+    Scope                        = $Scope
+    DefaultInstallLocation       = $null
+    WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+    AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
+    AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
+    Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
     # A tagged updater application ID is not necessarily the visible uninstall key. Preserve an
     # existing manifest ProductCode when source-backed vendor/channel mapping cannot resolve it.
-    UnresolvedFields           = @(
+    UnresolvedFields             = [string[]]@(
       if ([string]::IsNullOrWhiteSpace($ProductCode)) { 'ProductCode' }
       if ($Tag.IsTagged -and -not $OfflineManifest) { 'DisplayVersion' }
     )
-    Warnings                   = $Warnings.ToArray()
-    ParserVersionInfo          = [pscustomobject]@{
+    Variant                      = $Variant
+    OuterProductVersion          = $VersionInfo.ProductVersion
+    OriginalFilename             = $VersionInfo.OriginalFilename
+    ProductCodeSource            = $ProductCodeSource
+    ApplicationId                = $Tag.ApplicationId
+    ArchiveResourceName          = $MiniArchiveResourceName
+    SetupResourceName            = $MiniSetupResourceName
+    SupportedScopes              = @($SupportedScopes)
+    SupportsDualScope            = $SupportsDualScope
+    UserScopeSwitch              = $UserScopeSwitch
+    MachineScopeSwitch           = $MachineScopeSwitch
+    IsOnlineBootstrapper         = $IsOnlineBootstrapper
+    OfflineManifestChecked       = $OfflineManifestChecked
+    UpdaterTag                   = $Tag
+    OfflineManifest              = $OfflineManifest
+    NestedSetupInfo              = $NestedSetupInfo
+    InstallModes                 = if ($NestedSetupInfo -and $NestedSetupInfo.PSObject.Properties['InstallModes']) { @($NestedSetupInfo.InstallModes) } else { @() }
+    Resources                    = $ResourceInfo.ToArray()
+    NestedFiles                  = $NestedFiles.ToArray()
+    ExtractedFiles               = $NestedFiles.ToArray()
+    ExecutedPayloads             = $ExecutedPayloads.ToArray()
+    RegistryAssociationInfo      = $null
+    Protocols                    = @()
+    FileExtensions               = @()
+    CanExpand                    = $true
+    ParserVersionInfo            = [pscustomobject]@{
       Parser      = 'Dumplings.PackageModule.ChromiumSetup'
       ParserMajor = 3
       Sources     = @('Chromium mini_installer B7, BL, and BN resource precedence', 'Chromium install_static InstallConstants and GetUninstallRegistryPath construction', 'Chromium Updater metainstaller resources and UTF-8 or UTF-16 certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload and OfflineManifest.gup target execution', 'Microsoft Edge UTF-16 certificate tag framing')

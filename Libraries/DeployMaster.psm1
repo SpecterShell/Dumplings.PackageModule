@@ -798,25 +798,30 @@ function Get-DeployMasterInfo {
       if ($InstallerArchitecture -eq 'x86') { 'x64ApplicationWithX86InstallerStub' } else { 'x64ApplicationWithX64Installer' }
     } else { $PackageData.Header.ApplicationArchitectureMode }
 
-    [pscustomobject]@{
+    [pscustomobject][ordered]@{
+      Path                                  = $File.FullName
       InstallerType                         = 'DeployMaster'
       ProductCode                           = $Identity.DisplayName
-      ProductCodeEvidence                   = 'DeployMaster structured identity and built-in uninstall-key convention'
-      PackageName                           = $Identity.DisplayName
+      UpgradeCode                           = $null
       DisplayName                           = $Identity.DisplayName
-      ProductName                           = $Identity.DisplayName
       DisplayVersion                        = $Identity.DisplayVersion
       Publisher                             = $Identity.Publisher
+      Scope                                 = $PackageData.Header.Scope
+      DefaultInstallLocation                = $InstallLocation
+      WritesAppsAndFeaturesEntry            = $true
+      AppsAndFeaturesProductCode            = $Identity.DisplayName
+      AppsAndFeaturesInstallerType          = 'exe'
+      Warnings                              = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields                      = [string[]]@()
+      ProductCodeEvidence                   = 'DeployMaster structured identity and built-in uninstall-key convention'
       PublisherUrl                          = $Identity.PublisherUrl
       PackageUrl                            = $Identity.PackageUrl
       Copyright                             = $Identity.Copyright
       ReleaseDate                           = $Identity.ReleaseDate
-      InstallLocation                       = $InstallLocation
       MachineInstallLocation                = $Identity.MachineInstallLocation
       UserInstallLocation                   = $Identity.UserInstallLocation
       RuntimeProductName                    = $RuntimeProductName
       FileDescription                       = ([string]$VersionInfo.FileDescription).Trim()
-      Scope                                 = $PackageData.Header.Scope
       DefaultScope                          = $PackageData.Header.DefaultScope
       SupportedScopes                       = $PackageData.Header.SupportedScopes
       SupportsDualScope                     = $PackageData.Header.SupportsDualScope
@@ -831,7 +836,6 @@ function Get-DeployMasterInfo {
       Protocols                             = $RegistryAssociationInfo.Protocols
       FileExtensions                        = $RegistryAssociationInfo.FileExtensions
       FileAssociations                      = $PackageData.FileAssociations
-      WritesAppsAndFeaturesEntry            = $true
       FileEntries                           = $PackageData.FileEntries
       ExtractedFiles                        = @($PackageData.FileEntries | Select-Object -ExpandProperty FullName)
       OverlayInfo                           = [pscustomobject]@{
@@ -845,7 +849,6 @@ function Get-DeployMasterInfo {
         PackageDataOffset = $PackageData.Locator.PackageDataOffset
       }
       CanExpand                             = $true
-      Warnings                              = @($Warnings | Select-Object -Unique)
       ParserVersionInfo                     = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.DeployMaster'; ParserMajor = 2; Sources = @('DeployMaster 0x80 package locator', 'CRC32-protected package-control header', 'bounded LZMA identity and file-type blocks', 'controlled scope and architecture builder outputs') }
     }
   }

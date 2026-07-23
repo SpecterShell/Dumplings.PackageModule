@@ -102,13 +102,19 @@ function ConvertTo-InstallerBridgeObject {
         if ([string]::IsNullOrEmpty($MemberName) -or -not $MemberNames.Add($MemberName)) {
           $RequiresDictionary = $true
         }
-        $Converted[$MemberName] = ConvertTo-InstallerBridgeObject -InputObject $Entry.Value
+        $ConvertedValue = ConvertTo-InstallerBridgeObject -InputObject $Entry.Value
+        if ($MemberName -in @('Warnings', 'UnresolvedFields')) {
+          # JSON arrays lose their element type. Restore the documented parser
+          # diagnostic contract as part of transport deserialization only.
+          $ConvertedValue = [string[]]@($ConvertedValue)
+        }
+        $Converted[$MemberName] = $ConvertedValue
       }
 
       if ($RequiresDictionary) {
         # Unary-comma return preserves IDictionary as one value. In PowerShell
         # 7.6, Write-Output -NoEnumerate can wrap OrderedDictionary in a List.
-        return ,$Converted
+        return , $Converted
       } else {
         [pscustomobject]$Converted
       }
@@ -120,7 +126,7 @@ function ConvertTo-InstallerBridgeObject {
       foreach ($Item in $InputObject) {
         $Converted.Add((ConvertTo-InstallerBridgeObject -InputObject $Item))
       }
-      return ,$Converted.ToArray()
+      return , $Converted.ToArray()
     }
 
     return $InputObject

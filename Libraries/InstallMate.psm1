@@ -409,33 +409,38 @@ function Get-InstallMateInfo {
     if ($ScopeInfo.SupportsDualScope) { $Warnings.Add('This InstallMate package has elevation-dependent scope; confirm whether its command line can select scope before creating duplicate WinGet installer entries.') }
     $Warnings.Add('InstallMate custom registry records and folder hierarchy are not decoded yet; validate custom ARP fields and associations in a VM.')
 
-    [pscustomobject]@{
-      InstallerType              = 'InstallMate'
-      ProductCode                = $ProductCode
-      ProductCodeEvidence        = if ($ProductCode) { 'Named StringFileInfo.ProductCode value in the PE version resource' } else { $null }
-      PackageCode                = $PackageCode
-      PackageName                = $DisplayName
-      DisplayName                = $DisplayName
-      ProductName                = $DisplayName
-      DisplayVersion             = ([string]$VersionInfo.ProductVersion).Trim()
-      Publisher                  = ([string]$VersionInfo.CompanyName).Trim()
-      FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-      Scope                      = $ScopeInfo.Scope
-      DefaultScope               = $ScopeInfo.DefaultScope
-      SupportedScopes            = $ScopeInfo.SupportedScopes
-      SupportsDualScope          = $ScopeInfo.SupportsDualScope
-      ScopeConfidence            = $ScopeInfo.Confidence
-      ScopeEvidence              = $ScopeInfo.Evidence
-      InstallLevel               = $ScopeInfo.InstallLevel
-      InstallLevelName           = $ScopeInfo.InstallLevelName
-      RequestedExecutionLevel    = $ExecutionLevel
-      RegistryWrites             = $RegistryWrites
-      RegistryAssociationInfo    = $RegistryAssociationInfo
-      Protocols                  = $RegistryAssociationInfo.Protocols
-      FileExtensions             = $RegistryAssociationInfo.FileExtensions
-      WritesAppsAndFeaturesEntry = $null
-      ArchiveInfo                = $ArchiveInfo
-      DatabaseInfo               = if ($DatabaseInfo) {
+    [pscustomobject][ordered]@{
+      Path                         = $File.FullName
+      InstallerType                = 'InstallMate'
+      ProductCode                  = $ProductCode
+      UpgradeCode                  = $null
+      DisplayName                  = $DisplayName
+      DisplayVersion               = ([string]$VersionInfo.ProductVersion).Trim()
+      Publisher                    = ([string]$VersionInfo.CompanyName).Trim()
+      Scope                        = $ScopeInfo.Scope
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $null
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields             = [string[]]@()
+      ProductCodeEvidence          = if ($ProductCode) { 'Named StringFileInfo.ProductCode value in the PE version resource' } else { $null }
+      PackageCode                  = $PackageCode
+      FileDescription              = ([string]$VersionInfo.FileDescription).Trim()
+      DefaultScope                 = $ScopeInfo.DefaultScope
+      SupportedScopes              = $ScopeInfo.SupportedScopes
+      SupportsDualScope            = $ScopeInfo.SupportsDualScope
+      ScopeConfidence              = $ScopeInfo.Confidence
+      ScopeEvidence                = $ScopeInfo.Evidence
+      InstallLevel                 = $ScopeInfo.InstallLevel
+      InstallLevelName             = $ScopeInfo.InstallLevelName
+      RequestedExecutionLevel      = $ExecutionLevel
+      RegistryWrites               = $RegistryWrites
+      RegistryAssociationInfo      = $RegistryAssociationInfo
+      Protocols                    = $RegistryAssociationInfo.Protocols
+      FileExtensions               = $RegistryAssociationInfo.FileExtensions
+      ArchiveInfo                  = $ArchiveInfo
+      DatabaseInfo                 = if ($DatabaseInfo) {
         [pscustomobject]@{
           Signature           = $DatabaseInfo.DatabaseSignature
           Length              = $DatabaseInfo.DatabaseLength
@@ -443,11 +448,10 @@ function Get-InstallMateInfo {
           FileRecordCount     = $DatabaseInfo.FileRecords.Count
         }
       } else { $null }
-      FileEntries                = if ($DatabaseInfo) { $DatabaseInfo.FileRecords } else { @() }
-      ExtractedFiles             = if ($DatabaseInfo) { @($DatabaseInfo.FileRecords | Select-Object -ExpandProperty FileName) } else { @() }
-      CanExpand                  = $null -ne $DatabaseInfo
-      Warnings                   = @($Warnings)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallMate'; ParserMajor = 3; Sources = @('PE StringFileInfo version resource', 'PE application manifest', 'bounded TIZ raw-LZMA stream', 'tzf3 installer database and file records', 'InstallMate documented install-level behavior') }
+      FileEntries                  = if ($DatabaseInfo) { $DatabaseInfo.FileRecords } else { @() }
+      ExtractedFiles               = if ($DatabaseInfo) { @($DatabaseInfo.FileRecords | Select-Object -ExpandProperty FileName) } else { @() }
+      CanExpand                    = $null -ne $DatabaseInfo
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallMate'; ParserMajor = 3; Sources = @('PE StringFileInfo version resource', 'PE application manifest', 'bounded TIZ raw-LZMA stream', 'tzf3 installer database and file records', 'InstallMate documented install-level behavior') }
     }
   }
 }

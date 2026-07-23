@@ -644,17 +644,23 @@ function Get-InstallBuilderInfo {
     }
     $UninstallerKeyName = if ($ShortName) { $ShortName } else { $FullName }
     $ProductCode = if ($UninstallerKeyName -and $Version) { "$UninstallerKeyName $Version" } else { $UninstallerKeyName }
-    [pscustomobject]@{
+    $WritesAppsAndFeaturesEntry = if ($AppsAndFeaturesWrites.Count) { $true } elseif ($HasBuiltInUninstaller) { $null } else { $false }
+    [pscustomobject][ordered]@{
+      Path                         = $File.FullName
       InstallerType                = 'InstallBuilder'
       ProductCode                  = $ProductCode
-      ProductCodeEvidence          = if ($ProductCode) { 'InstallBuilder candidate uninstaller-key convention: <shortName-or-fullName> <version>; validate visible ARP key in a VM.' } else { $null }
-      PackageName                  = if ($FullName) { $FullName } else { $ShortName }
+      UpgradeCode                  = $null
       DisplayName                  = if ($FullName) { $FullName } else { $ShortName }
-      ProductName                  = if ($FullName) { $FullName } else { $ShortName }
       DisplayVersion               = $Version
       Publisher                    = Get-InstallBuilderXmlValue -Xml $Xml -XPath '/project/vendor'
-      DefaultInstallationDirectory = (Get-InstallBuilderXmlValue -Xml $Xml -XPath "//directoryParameter[@name='installdir']/default"), (Get-InstallBuilderXmlValue -Xml $Xml -XPath "//directoryParameter[name='InstallDir']/default") | Where-Object { $_ } | Select-Object -First 1
       Scope                        = $ScopeInfo.Scope
+      DefaultInstallLocation       = (Get-InstallBuilderXmlValue -Xml $Xml -XPath "//directoryParameter[@name='installdir']/default"), (Get-InstallBuilderXmlValue -Xml $Xml -XPath "//directoryParameter[name='InstallDir']/default") | Where-Object { $_ } | Select-Object -First 1
+      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
+      AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
+      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields             = [string[]]@()
+      ProductCodeEvidence          = if ($ProductCode) { 'InstallBuilder candidate uninstaller-key convention: <shortName-or-fullName> <version>; validate visible ARP key in a VM.' } else { $null }
       SupportedScopes              = $ScopeInfo.SupportedScopes
       ScopeConfidence              = $ScopeInfo.Confidence
       ScopeEvidence                = $ScopeInfo.Evidence
@@ -663,7 +669,6 @@ function Get-InstallBuilderInfo {
       RegistryAssociationInfo      = $RegistryAssociationInfo
       Protocols                    = $RegistryAssociationInfo.Protocols
       FileExtensions               = $RegistryAssociationInfo.FileExtensions
-      WritesAppsAndFeaturesEntry   = if ($AppsAndFeaturesWrites.Count) { $true } elseif ($HasBuiltInUninstaller) { $null } else { $false }
       HasBuiltInUninstaller        = $HasBuiltInUninstaller
       ProjectOffset                = $Project.Offset
       ProjectLength                = $Project.Length
@@ -671,7 +676,6 @@ function Get-InstallBuilderInfo {
       PayloadFiles                 = @($PayloadFiles | ForEach-Object Path)
       PayloadFileCount             = $PayloadFiles.Count
       CookfsInfo                   = if ($Cookfs) { [pscustomobject]@{ EndOffset = $Cookfs.EndOffset; IndexOffset = $Cookfs.IndexOffset; PageDataOffset = $Cookfs.PageDataOffset; PageCount = $Cookfs.PageCount; IndexSize = $Cookfs.IndexSize; CompressionIds = $Cookfs.CompressionIds; CompressionTypes = $Cookfs.CompressionTypes; HasUnsupportedCompression = $Cookfs.HasUnsupportedCompression } } else { $null }
-      Warnings                     = @($Warnings)
       ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallBuilder'; ParserMajor = 2; Sources = @('Metakit VFS project.xml marker', 'bounded zlib project record', 'CookFS CFS0002 footer and file index') }
     }
   }

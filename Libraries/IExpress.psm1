@@ -105,21 +105,35 @@ function Get-IExpressInfo {
         })
     }
 
-    [pscustomobject]@{
-      Path             = $Installer.FullName
-      Format           = 'IExpress'
-      OriginalFilename = $OriginalName
-      Configuration    = [pscustomobject]$Configuration
-      Commands         = @($Commands)
-      ExecutedPayloads = @($Commands | Where-Object { $_.Command.ExecutedPayload } | ForEach-Object { $_.Command.ExecutedPayload } | Select-Object -Unique)
-      CabinetResources = @($CabinetEvidence)
-      NestedFiles      = @($NestedFiles | Select-Object -Unique)
-      Warnings         = @(
+    # IExpress launches configured CAB payloads and does not register the outer
+    # WExtract package in Apps & Features.
+    [pscustomobject][ordered]@{
+      Path                         = $Installer.FullName
+      InstallerType                = 'iexpress'
+      ProductCode                  = $null
+      UpgradeCode                  = $null
+      DisplayName                  = $null
+      DisplayVersion               = $null
+      Publisher                    = $null
+      Scope                        = $null
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $false
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@(
         if ($Commands.Count -eq 0) { 'No IExpress execution command resource was found.' }
         foreach ($Command in $Commands) {
           if (-not $Command.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded cabinet entry: $($Command.Command.CommandLine)" }
         }
       )
+      UnresolvedFields             = [string[]]@()
+      Format                       = 'IExpress'
+      OriginalFilename             = $OriginalName
+      Configuration                = [pscustomobject]$Configuration
+      Commands                     = @($Commands)
+      ExecutedPayloads             = @($Commands | Where-Object { $_.Command.ExecutedPayload } | ForEach-Object { $_.Command.ExecutedPayload } | Select-Object -Unique)
+      CabinetResources             = @($CabinetEvidence)
+      NestedFiles                  = @($NestedFiles | Select-Object -Unique)
     }
   }
 }

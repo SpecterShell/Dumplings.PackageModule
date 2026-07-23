@@ -147,9 +147,9 @@ function Get-AdvancedInstallerInfo {
   )
 
   process {
-    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'AdvancedInstaller.GetInfo' -Argument @{
-      Path = (Get-Item -Path $Path -Force).FullName
-    }
+    $InstallerPath = (Get-Item -Path $Path -Force).FullName
+    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'AdvancedInstaller.GetInfo' -Argument @{ Path = $InstallerPath }
+    return $Info
   }
 }
 
@@ -244,21 +244,27 @@ function Get-AdvancedInstallerMsiInfo {
       $SelectionMethod = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value.SelectionMethod
       $ArchitectureSelectionMode = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value.ArchitectureSelectionMode
 
-      return [pscustomobject]@{
-        Name                         = $MsiFile.Name
+      return [pscustomobject][ordered]@{
         Path                         = $MsiFile.FullName
-        PackageArchitecture          = $MsiInfo.PackageArchitecture
-        Template                     = $MsiInfo.Template
-        ProductName                  = $MsiInfo.DisplayName
-        ProductVersion               = $MsiInfo.DisplayVersion
-        Publisher                    = $MsiInfo.Publisher
+        InstallerType                = $MsiInfo.InstallerType
         ProductCode                  = $MsiInfo.ProductCode
         UpgradeCode                  = $MsiInfo.UpgradeCode
+        DisplayName                  = $MsiInfo.DisplayName
+        DisplayVersion               = $MsiInfo.DisplayVersion
+        Publisher                    = $MsiInfo.Publisher
+        Scope                        = $MsiInfo.Scope
+        DefaultInstallLocation       = $MsiInfo.DefaultInstallLocation
+        WritesAppsAndFeaturesEntry   = $MsiInfo.WritesAppsAndFeaturesEntry
+        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
+        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
+        Warnings                     = [string[]]@($MsiInfo.Warnings)
+        UnresolvedFields             = [string[]]@($MsiInfo.UnresolvedFields)
+        Name                         = $MsiFile.Name
+        PackageArchitecture          = $MsiInfo.PackageArchitecture
+        Template                     = $MsiInfo.Template
         InstallerBuilder             = $MsiInfo.InstallerBuilder
         InstallLocationProperty      = $MsiInfo.InstallLocationProperty
         InstallLocationSwitch        = $MsiInfo.InstallLocationSwitch
-        AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
-        AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
         Protocols                    = $MsiInfo.Protocols
         FileExtensions               = $MsiInfo.FileExtensions
         RegistryAssociationInfo      = $MsiInfo.RegistryAssociationInfo
@@ -302,7 +308,7 @@ function Read-ProductVersionFromAdvancedInstaller {
   )
 
   process {
-    (Get-AdvancedInstallerMsiInfo @PSBoundParameters).ProductVersion
+    (Get-AdvancedInstallerMsiInfo @PSBoundParameters).DisplayVersion
   }
 }
 

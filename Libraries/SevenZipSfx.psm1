@@ -192,26 +192,40 @@ function Get-SevenZipSfxInfo {
       Remove-Item -LiteralPath $ArchivePath -Force
     }
 
-    [pscustomobject]@{
-      Path                      = $Installer.FullName
-      Format                    = '7z SFX'
-      ConfigOffset              = $ConfigStart
-      ArchiveOffset             = $ArchiveOffset
-      Configuration             = $Config.Values
-      CommandSource             = $Config.CommandSource
-      CommandLine               = $Config.Command.CommandLine
-      ExecutedPayload           = $Config.Command.ExecutedPayload
-      ExecutedPayloads          = @($Config.Commands | Where-Object { $_.Detail.Command.ExecutedPayload } | ForEach-Object { $_.Detail.Command.ExecutedPayload } | Select-Object -Unique)
-      PayloadReference          = $Config.Command.PayloadReference
-      PayloadArguments          = $Config.Command.ArgumentList
-      Commands                  = $Config.Commands
-      PassesAdditionalArguments = $Config.PassesAdditionalArguments
-      NestedFiles               = @($Entries.FullName)
-      Warnings                  = @(
+    # The SFX configuration proves only which nested file is launched. Product
+    # and ARP metadata belong to that payload, not to the extraction stub.
+    [pscustomobject][ordered]@{
+      Path                         = $Installer.FullName
+      InstallerType                = '7zip-sfx'
+      ProductCode                  = $null
+      UpgradeCode                  = $null
+      DisplayName                  = $null
+      DisplayVersion               = $null
+      Publisher                    = $null
+      Scope                        = $null
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $false
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@(
         foreach ($Command in $Config.Commands) {
           if (-not $Command.Detail.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded archive entry: $($Command.Detail.Command.CommandLine)" }
         }
       )
+      UnresolvedFields             = [string[]]@()
+      Format                       = '7z SFX'
+      ConfigOffset                 = $ConfigStart
+      ArchiveOffset                = $ArchiveOffset
+      Configuration                = $Config.Values
+      CommandSource                = $Config.CommandSource
+      CommandLine                  = $Config.Command.CommandLine
+      ExecutedPayload              = $Config.Command.ExecutedPayload
+      ExecutedPayloads             = @($Config.Commands | Where-Object { $_.Detail.Command.ExecutedPayload } | ForEach-Object { $_.Detail.Command.ExecutedPayload } | Select-Object -Unique)
+      PayloadReference             = $Config.Command.PayloadReference
+      PayloadArguments             = $Config.Command.ArgumentList
+      Commands                     = $Config.Commands
+      PassesAdditionalArguments    = $Config.PassesAdditionalArguments
+      NestedFiles                  = @($Entries.FullName)
     }
   }
 }

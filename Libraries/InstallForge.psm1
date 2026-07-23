@@ -258,20 +258,25 @@ function Get-InstallForgeInfo {
       $RegistryWrites = @()
       $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
       $WritesAppsAndFeaturesEntry = $Setup['Uninstaller'] -eq '1'
-      [pscustomobject]@{
+      [pscustomobject][ordered]@{
+        Path                         = $File.FullName
         InstallerType                = 'InstallForge'
         ProductCode                  = $null
-        PackageName                  = $Setup['Appname']
+        UpgradeCode                  = $null
         DisplayName                  = $Setup['Appname']
-        ProductName                  = $Setup['Appname']
         DisplayVersion               = $Setup['Version']
         Publisher                    = $Setup['Company']
+        Scope                        = $Scope
+        DefaultInstallLocation       = $Setup['InstallDir']
+        WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+        AppsAndFeaturesProductCode   = $null
+        AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
+        Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+        UnresolvedFields             = [string[]]@()
         PublisherUrl                 = $Setup['Website1']
-        DefaultInstallationDirectory = $Setup['InstallDir']
         MainExecutable               = $Setup['ProgramRun']
         MainExecutableArguments      = $Setup['ProgramRunArguments']
         Uninstaller                  = if ($Setup['Uninstaller'] -eq '1') { "$($Setup['UninstallerFilename']).exe" } else { $null }
-        Scope                        = $Scope
         SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
         SupportsSilentInstallation   = $false
         InstallModes                 = @('interactive')
@@ -279,11 +284,9 @@ function Get-InstallForgeInfo {
         RegistryAssociationInfo      = $RegistryAssociationInfo
         Protocols                    = $RegistryAssociationInfo.Protocols
         FileExtensions               = $RegistryAssociationInfo.FileExtensions
-        WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
         ConfigurationFiles           = @($ConfigurationData.Entries.FullName)
         ExtractedFiles               = if ($PayloadData) { @($PayloadData.Entries | Where-Object { [IO.Path]::GetFileName($_.FullName) -ine 'empty.empty' } | Select-Object -ExpandProperty FullName) } else { @() }
         ArchiveOffset                = if ($PayloadData) { $PayloadData.Offset } else { $null }
-        Warnings                     = @($Warnings)
         ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallForge'; ParserMajor = 1; Sources = @('SETUPCONFIGURATION PE resource', 'SC.dat', 'validated embedded 7z payload') }
       }
     } finally {

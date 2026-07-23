@@ -247,19 +247,22 @@ function Get-DotNetInstallerInfo {
     # Resolve XML command references only after the complete cabinet catalog is known.
     $Config = ConvertFrom-DotNetInstallerConfiguration -Content $ConfigurationText -ArchiveEntry @($NestedFiles)
     $Commands = @($Config.Components | ForEach-Object { $_.Commands })
-    [pscustomobject]@{
-      Path             = $Installer.FullName
-      Format           = 'dotNetInstaller'
-      FileVersion      = $Config.FileVersion
-      ProductVersion   = $Config.ProductVersion
-      SchemaVersion    = $Config.SchemaVersion
-      Generator        = $Config.Generator
-      Components       = $Config.Components
-      Commands         = $Commands
-      ExecutedPayloads = @($Commands | Where-Object { $_.Command.ExecutedPayload } | ForEach-Object { $_.Command.ExecutedPayload } | Select-Object -Unique)
-      CabinetResources = @($Cabinets)
-      NestedFiles      = @($NestedFiles | Select-Object -Unique)
-      Warnings         = @(
+    # dotNetInstaller is only the bootstrapper. Its configuration identifies
+    # nested commands but does not own their package identity or ARP entry.
+    [pscustomobject][ordered]@{
+      Path                         = $Installer.FullName
+      InstallerType                = 'dotnetinstaller'
+      ProductCode                  = $null
+      UpgradeCode                  = $null
+      DisplayName                  = $null
+      DisplayVersion               = $null
+      Publisher                    = $null
+      Scope                        = $null
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $false
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@(
         if ($Config.Components.Count -eq 0) { 'No install components were found in the dotNetInstaller configuration.' }
         foreach ($Component in $Config.Components) {
           foreach ($Command in $Component.Commands) {
@@ -269,6 +272,17 @@ function Get-DotNetInstallerInfo {
           }
         }
       )
+      UnresolvedFields             = [string[]]@()
+      Format                       = 'dotNetInstaller'
+      FileVersion                  = $Config.FileVersion
+      ConfigurationProductVersion  = $Config.ProductVersion
+      SchemaVersion                = $Config.SchemaVersion
+      Generator                    = $Config.Generator
+      Components                   = $Config.Components
+      Commands                     = $Commands
+      ExecutedPayloads             = @($Commands | Where-Object { $_.Command.ExecutedPayload } | ForEach-Object { $_.Command.ExecutedPayload } | Select-Object -Unique)
+      CabinetResources             = @($Cabinets)
+      NestedFiles                  = @($NestedFiles | Select-Object -Unique)
     }
   }
 }

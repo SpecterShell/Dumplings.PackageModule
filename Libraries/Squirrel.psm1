@@ -297,21 +297,29 @@ function New-SquirrelInfo {
     $null
   }
 
-  [pscustomobject]@{
-    Path                    = (Get-Item -Path $Path -Force).FullName
-    InstallerType           = 'Squirrel'
-    Family                  = $Family
-    Confidence              = $Confidence
-    ZipOffset               = $ZipOffset
-    NupkgPath               = $NupkgPath
-    Nuspec                  = $Nuspec
-    ProductCode             = $Nuspec.Id
-    DisplayName             = $DisplayName
-    DisplayVersion          = $Nuspec.Version
-    Publisher               = $Nuspec.Authors
-    Scope                   = 'user'
-    DefaultInstallLocation  = $DefaultInstallLocation
-    SuggestedManifestFields = [pscustomobject]@{
+  # Nuspec identity is the same identity Squirrel uses for its per-user ARP
+  # registration, so emit the shared contract directly.
+  [pscustomobject][ordered]@{
+    Path                         = [IO.Path]::GetFullPath($Path)
+    InstallerType                = 'Squirrel'
+    ProductCode                  = $Nuspec.Id
+    UpgradeCode                  = $null
+    DisplayName                  = $DisplayName
+    DisplayVersion               = $Nuspec.Version
+    Publisher                    = $Nuspec.Authors
+    Scope                        = 'user'
+    DefaultInstallLocation       = $DefaultInstallLocation
+    WritesAppsAndFeaturesEntry   = $true
+    AppsAndFeaturesProductCode   = $Nuspec.Id
+    AppsAndFeaturesInstallerType = 'exe'
+    Warnings                     = [string[]]@()
+    UnresolvedFields             = [string[]]@()
+    Family                       = $Family
+    Confidence                   = $Confidence
+    ZipOffset                    = $ZipOffset
+    NupkgPath                    = $NupkgPath
+    Nuspec                       = $Nuspec
+    SuggestedManifestFields      = [pscustomobject]@{
       InstallerType        = 'exe # Squirrel'
       Scope                = 'user'
       ProductCode          = $Nuspec.Id

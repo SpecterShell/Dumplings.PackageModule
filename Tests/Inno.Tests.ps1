@@ -25,6 +25,13 @@ Describe 'Inno bridge' {
     $Fixture = Get-InstallerFixture -Name 'kiro-ide-1.0.138-stable-win32-x64.exe' -Url 'https://prod.download.desktop.kiro.dev/releases/stable/win32-x64/signed/1.0.138/kiro-ide-1.0.138-stable-win32-x64.exe'
     $Info = Get-InnoInfo -Path $Fixture
 
+    $Info.PSObject.Properties.Name[0..13] | Should -Be @(
+      'Path', 'InstallerType', 'ProductCode', 'UpgradeCode', 'DisplayName', 'DisplayVersion',
+      'Publisher', 'Scope', 'DefaultInstallLocation', 'WritesAppsAndFeaturesEntry',
+      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Warnings', 'UnresolvedFields'
+    )
+    $Info.Warnings.GetType() | Should -Be ([string[]])
+    $Info.UnresolvedFields.GetType() | Should -Be ([string[]])
     $Info.ProductCode | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
     $Info.AppId | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}'
     $Info.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\Kiro'

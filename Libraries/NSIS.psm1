@@ -29,9 +29,9 @@ function Get-NSISInfo {
   )
 
   process {
-    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetInfo' -Argument @{
-      Path = (Get-Item -Path $Path -Force).FullName
-    }
+    $InstallerPath = (Get-Item -Path $Path -Force).FullName
+    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetInfo' -Argument @{ Path = $InstallerPath }
+    return $Info
   }
 }
 

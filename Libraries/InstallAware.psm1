@@ -93,30 +93,34 @@ function Get-InstallAwareInfo {
     }
     if ($MsiPayloads.Count -gt 0) { $Warnings.Add('The InstallAware archive contains MSI/MSP payloads. Analyze the nested database and determine whether the visible ARP entry is MSI or EXE.') }
 
-    [pscustomobject]@{
-      InstallerType              = 'InstallAware'
-      ProductCode                = $null
-      PackageName                = $DisplayName
-      DisplayName                = $DisplayName
-      ProductName                = $DisplayName
-      DisplayVersion             = $DisplayVersion
-      Publisher                  = $Publisher
-      FileDescription            = ([string]$VersionInfo.FileDescription).Trim()
-      Scope                      = $Scope
-      SupportedScopes            = if ($Scope) { @($Scope) } else { @() }
-      RequestedExecutionLevel    = $ExecutionLevel
-      RegistryWrites             = $RegistryWrites
-      RegistryAssociationInfo    = $RegistryAssociationInfo
-      Protocols                  = $RegistryAssociationInfo.Protocols
-      FileExtensions             = $RegistryAssociationInfo.FileExtensions
-      WritesAppsAndFeaturesEntry = $null
-      ExtractedFiles             = @($ArchiveData.Entries.FullName)
-      NestedInstallerFiles       = $NestedInstallers
-      MsiPayloads                = $MsiPayloads
-      ArchiveOffset              = $ArchiveData.Range.Offset
-      ArchiveLength              = $ArchiveData.Range.Length
-      Warnings                   = @($Warnings)
-      ParserVersionInfo          = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallAware'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'validated embedded 7z project archive') }
+    [pscustomobject][ordered]@{
+      Path                         = $File.FullName
+      InstallerType                = 'InstallAware'
+      ProductCode                  = $null
+      UpgradeCode                  = $null
+      DisplayName                  = $DisplayName
+      DisplayVersion               = $DisplayVersion
+      Publisher                    = $Publisher
+      Scope                        = $Scope
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $null
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields             = [string[]]@()
+      FileDescription              = ([string]$VersionInfo.FileDescription).Trim()
+      SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
+      RequestedExecutionLevel      = $ExecutionLevel
+      RegistryWrites               = $RegistryWrites
+      RegistryAssociationInfo      = $RegistryAssociationInfo
+      Protocols                    = $RegistryAssociationInfo.Protocols
+      FileExtensions               = $RegistryAssociationInfo.FileExtensions
+      ExtractedFiles               = @($ArchiveData.Entries.FullName)
+      NestedInstallerFiles         = $NestedInstallers
+      MsiPayloads                  = $MsiPayloads
+      ArchiveOffset                = $ArchiveData.Range.Offset
+      ArchiveLength                = $ArchiveData.Range.Length
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallAware'; ParserMajor = 1; Sources = @('PE version resource', 'PE application manifest', 'validated embedded 7z project archive') }
     }
   }
 }

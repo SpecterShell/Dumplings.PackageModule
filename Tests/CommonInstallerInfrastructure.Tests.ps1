@@ -54,6 +54,7 @@ $Jobs = 1..8 | ForEach-Object {
     }
   } -ArgumentList $RuntimeModule
 }
+
 $Jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction Stop
 '@ | Set-Content -LiteralPath $ScriptPath
 
@@ -78,6 +79,22 @@ $Jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction Stop
       }
     }
     $Violations | Should -BeNullOrEmpty
+  }
+}
+
+Describe 'Aggregate parser result ownership' {
+  It 'keeps canonical result construction in format parsers' {
+    $Roots = @(
+      [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries')),
+      [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\InstallerParsers\Libraries'))
+    )
+
+    foreach ($Root in $Roots) {
+      Test-Path -LiteralPath (Join-Path $Root 'InstallerMetadata.psm1') | Should -BeFalse
+      Get-ChildItem -LiteralPath $Root -Filter '*.psm1' -File |
+        Select-String -Pattern 'Complete-InstallerParserInfo' |
+        Should -BeNullOrEmpty
+    }
   }
 }
 

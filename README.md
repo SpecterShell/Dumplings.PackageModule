@@ -42,9 +42,13 @@ Package submissions are claimed by effective WinGet identifier in process-wide s
 
 ### Installer Analysis
 
-`Get-WinGetInstallerAnalysis` detects file and installer families from structured content and magic bytes, then routes to supported static parsers. PackageModule includes in-process implementations for PE, MSI/WiX, MSIX/AppX, Burn, InstallShield, Chromium Setup, Zero Install, Squirrel/Velopack, install4j, InstallAnywhere, InstallBuilder, CreateInstall, wrapper formats, portable applications, and other installer families. Their default and file-level licenses are described below.
+`Get-WinGetInstallerAnalysis` detects file and installer families from structured content and magic bytes, then routes to supported static parsers. Its `DetectedFamilies` output contains only structurally confirmed or successfully parsed families; `RoutingHints` and `RejectedCandidates` retain heuristic diagnostics without promoting them to detections. `FamilyCandidates` remains a confirmed-only compatibility projection. PackageModule includes in-process implementations for PE, MSI/WiX, MSIX/AppX, Burn, InstallShield, Chromium Setup, Zero Install, Squirrel/Velopack, install4j, InstallAnywhere, InstallBuilder, CreateInstall, wrapper formats, portable applications, and other installer families. Their default and file-level licenses are described below.
 
 Some implementations are maintained in the separately licensed InstallerParsers submodule. [`InstallerBridge.psm1`](Libraries/InstallerBridge.psm1) invokes its JSON CLI in a child PowerShell process and returns deserialized evidence. It does not import GPL parser code into PackageModule's process module scope.
+
+Each aggregate parser constructs the canonical identity/ARP envelope directly and returns diagnostics through `Warnings` and `UnresolvedFields`; parsers do not write log messages directly. This keeps family-specific ARP decisions in the parser that understands the format instead of deriving them from a shared normalizer. Family-specific layout, payload, association, scope, and architecture evidence remains additive.
+
+Manifest updates run a known manifest-declared parser before generic detection. If metadata parsing fails, structural evidence classifies the result as matched, mismatched, or indeterminate. Only a definitive incompatible format throws; matched or indeterminate failures preserve existing fields and emit warnings, while resolved fields from a partial successful result are applied independently.
 
 Use the [`analyze-winget-installer` skill](../../.agents/skills/analyze-winget-installer/SKILL.md) for the supported workflow, parser routing, manifest interpretation, and VM-only validation rules.
 

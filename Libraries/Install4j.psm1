@@ -1112,7 +1112,7 @@ function Get-Install4jRegistryWrite {
     DisplayVersion  = $Info.DisplayVersion
     Publisher       = $Info.Publisher
     URLInfoAbout    = $Info.PublisherUrl
-    InstallLocation = $Info.DefaultInstallationDirectory
+    InstallLocation = $Info.DefaultInstallLocation
     UninstallString = if ($Info.UninstallerFilename) { "<InstallLocation>\$($Info.UninstallerFilename).exe" } else { $null }
   }
 
@@ -1233,26 +1233,31 @@ function Get-Install4jInfo {
     $AssociationInfo = Get-Install4jAssociationInfo -Config $Config
     foreach ($Warning in @($AssociationInfo.Warnings)) { $Warnings.Add($Warning) }
 
-    $Info = [pscustomobject]@{
+    $Info = [pscustomobject][ordered]@{
+      Path                         = $File.FullName
       InstallerType                = 'install4j'
-      Family                       = 'install4j'
       ProductCode                  = $ApplicationId
-      ApplicationId                = $ApplicationId
-      PackageName                  = $Config.General.ApplicationName
+      UpgradeCode                  = $null
       DisplayName                  = $DisplayName
-      ProductName                  = Get-Install4jFirstValue -Value @($Config.General.ApplicationName, $VersionInfo.ProductName, $VersionInfo.FileDescription)
       DisplayVersion               = $DisplayVersion
       Publisher                    = $Publisher
+      Scope                        = $ScopeInfo.Scope
+      DefaultInstallLocation       = $DefaultInstallationDirectory
+      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ApplicationId : $null
+      AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
+      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields             = [string[]]@()
+      Family                       = 'install4j'
+      ApplicationId                = $ApplicationId
+      PackageName                  = $Config.General.ApplicationName
       PublisherUrl                 = $Config.General.PublisherUrl
       Architecture                 = $Architecture
-      Scope                        = $ScopeInfo.Scope
       DefaultScope                 = $ScopeInfo.DefaultScope
       SupportedScopes              = $ScopeInfo.SupportedScopes
       SupportsDualScope            = $ScopeInfo.SupportsDualScope
       ScopeConfidence              = $ScopeInfo.Confidence
       ScopeEvidence                = $ScopeInfo.Evidence
-      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
-      DefaultInstallationDirectory = $DefaultInstallationDirectory
       UninstallerFilename          = $Config.General.UninstallerFilename
       UninstallerDirectory         = $Config.General.UninstallerDirectory
       MsiProductId                 = $Config.MsiProductId
@@ -1266,7 +1271,6 @@ function Get-Install4jInfo {
       FileExtensions               = $AssociationInfo.FileExtensions
       VersionInfo                  = $VersionInfo
       Config                       = $Config
-      Warnings                     = @($Warnings)
       ParserVersionInfo            = [pscustomobject]@{
         Parser      = 'Dumplings.PackageModule.Install4j'
         ParserMajor = 2
@@ -1487,8 +1491,8 @@ function Read-ProductNameFromInstall4j {
 
   process {
     $Info = Get-Install4jInfo -Path $Path
-    if ([string]::IsNullOrWhiteSpace($Info.ProductName)) { throw 'The install4j installer does not expose a product name value' }
-    return $Info.ProductName
+    if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { throw 'The install4j installer does not expose a product name value' }
+    return $Info.DisplayName
   }
 }
 

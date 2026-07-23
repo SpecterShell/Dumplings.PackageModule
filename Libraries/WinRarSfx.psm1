@@ -110,21 +110,35 @@ function Get-WinRarSfxInfo {
       Remove-Item -LiteralPath $ArchivePath -Force
     }
 
-    [pscustomobject]@{
-      Path             = $Installer.FullName
-      Format           = if ($null -ne $Rar5Offset -and $ArchiveOffset -eq $Rar5Offset) { 'WinRAR GUI SFX (RAR5)' } else { 'WinRAR GUI SFX (RAR4)' }
-      ArchiveOffset    = $ArchiveOffset
-      Configuration    = $Config.Values
-      Comment          = $Comment
-      Commands         = @($Config.Commands)
-      ExecutedPayloads = @($Config.Commands | Where-Object { $_.Command.ExecutedPayload } | ForEach-Object { $_.Command.ExecutedPayload })
-      NestedFiles      = @($Entries.FullName)
-      Warnings         = @(
+    # WinRAR SFX owns extraction and command dispatch only; the configured
+    # nested payload owns installation identity and registration.
+    [pscustomobject][ordered]@{
+      Path                         = $Installer.FullName
+      InstallerType                = 'winrar-sfx'
+      ProductCode                  = $null
+      UpgradeCode                  = $null
+      DisplayName                  = $null
+      DisplayVersion               = $null
+      Publisher                    = $null
+      Scope                        = $null
+      DefaultInstallLocation       = $null
+      WritesAppsAndFeaturesEntry   = $false
+      AppsAndFeaturesProductCode   = $null
+      AppsAndFeaturesInstallerType = $null
+      Warnings                     = [string[]]@(
         if ($Config.Commands.Count -eq 0) { 'The WinRAR SFX comment does not contain Setup or Presetup commands.' }
         foreach ($Command in $Config.Commands) {
           if (-not $Command.Command.IsResolved) { "The $($Command.Stage) command did not resolve to an embedded archive entry: $($Command.Command.CommandLine)" }
         }
       )
+      UnresolvedFields             = [string[]]@()
+      Format                       = if ($null -ne $Rar5Offset -and $ArchiveOffset -eq $Rar5Offset) { 'WinRAR GUI SFX (RAR5)' } else { 'WinRAR GUI SFX (RAR4)' }
+      ArchiveOffset                = $ArchiveOffset
+      Configuration                = $Config.Values
+      Comment                      = $Comment
+      Commands                     = @($Config.Commands)
+      ExecutedPayloads             = @($Config.Commands | Where-Object { $_.Command.ExecutedPayload } | ForEach-Object { $_.Command.ExecutedPayload })
+      NestedFiles                  = @($Entries.FullName)
     }
   }
 }
