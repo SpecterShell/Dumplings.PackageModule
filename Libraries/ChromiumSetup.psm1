@@ -2,6 +2,7 @@
 # Format sources: https://chromium.googlesource.com/chromium/src/+/main/chrome/installer/mini_installer,
 # https://chromium.googlesource.com/chromium/src/+/main/chrome/install_static/install_util.cc,
 # https://chromium.googlesource.com/chromium/src/+/main/chrome/updater/tag.h,
+# https://chromium.googlesource.com/chromium/src/+/main/docs/updater/functional_spec.md,
 # https://github.com/google/omaha/blob/main/omaha/installers/build_metainstaller.py,
 # https://github.com/brave/brave-core/tree/master/chromium_src/chrome/install_static, and
 # https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution.
@@ -13,7 +14,8 @@
 #
 #   mini-installer: PE resources B7 setup*.7z > BL setup.ex_ > BN setup.exe,
 #                   plus the product archive
-#   Updater:        B7 updater.packed.7z -> updater.7z/bin/updater.exe
+#   Updater:        B7 updater.packed.7z -> updater.7z -> bin/updater.exe and
+#                   optional bin/Offline/{bundle}/{app}/target installer
 #   Omaha:          B resource 102 -> LZMA -> BCJ2 -> TAR/offline manifest
 #   certificate:    "Gact2.0Omaha" + uint16 BE length + UTF-8 query, or
 #                   bounded UTF-16LE start/end markers (Updater/Edge)
@@ -92,7 +94,8 @@ function ConvertFrom-ChromiumUpdaterTagData {
 
   # Probe the source-defined certificate-tag encodings in precedence order. Each candidate must be
   # completely bounded by the certificate table before query parameters are decoded.
-  foreach ($Offset in (Find-BinaryPattern -Bytes $Bytes -Pattern $Script:ChromiumUpdaterTagMarker -Maximum 32)) {
+  $OmahaTagOffsets = if ($Bytes.Length -gt 0) { @(Find-BinaryPattern -Bytes $Bytes -Pattern $Script:ChromiumUpdaterTagMarker -Maximum 32) } else { @() }
+  foreach ($Offset in $OmahaTagOffsets) {
     $LengthOffset = $Offset + $Script:ChromiumUpdaterTagMarker.Length
     if ($LengthOffset + 2 -gt $Bytes.Length) { continue }
     $Length = ([int]$Bytes[$LengthOffset] -shl 8) -bor [int]$Bytes[$LengthOffset + 1]
@@ -102,7 +105,8 @@ function ConvertFrom-ChromiumUpdaterTagData {
     return ConvertFrom-ChromiumQueryTag -RawTag $RawTag -Offset $Offset -Length $Length -TagFormat 'OmahaCertificateTag'
   }
 
-  foreach ($Offset in (Find-BinaryPattern -Bytes $Bytes -Pattern $Script:ChromiumUpdaterWideTagPrefix -Maximum 32)) {
+  $WideTagOffsets = if ($Bytes.Length -gt 0) { @(Find-BinaryPattern -Bytes $Bytes -Pattern $Script:ChromiumUpdaterWideTagPrefix -Maximum 32) } else { @() }
+  foreach ($Offset in $WideTagOffsets) {
     $TagOffset = $Offset + $Script:ChromiumUpdaterWideTagPrefix.Length
     $SuffixOffset = $null
     foreach ($Candidate in (Find-BinaryPattern -Bytes $Bytes -Pattern $Script:ChromiumUpdaterWideTagSuffix -StartOffset $TagOffset -Maximum 1)) {
@@ -116,7 +120,8 @@ function ConvertFrom-ChromiumUpdaterTagData {
     return ConvertFrom-ChromiumQueryTag -RawTag $RawTag -Offset $Offset -Length $Length -TagFormat 'ChromiumWideCertificateTag'
   }
 
-  foreach ($Offset in (Find-BinaryPattern -Bytes $Bytes -Pattern $Script:MicrosoftEdgeTagPrefix -Maximum 32)) {
+  $EdgeTagOffsets = if ($Bytes.Length -gt 0) { @(Find-BinaryPattern -Bytes $Bytes -Pattern $Script:MicrosoftEdgeTagPrefix -Maximum 32) } else { @() }
+  foreach ($Offset in $EdgeTagOffsets) {
     $TagOffset = $Offset + $Script:MicrosoftEdgeTagPrefix.Length
     $SuffixOffset = $null
     foreach ($Candidate in (Find-BinaryPattern -Bytes $Bytes -Pattern $Script:MicrosoftEdgeTagSuffix -StartOffset $TagOffset -Maximum 1)) {
@@ -564,7 +569,7 @@ function Read-ChromiumInstallConstantsRecord {
   if ($null -in @($InstallSwitch, $InstallSuffix, $LogoSuffix, $ApplicationId, $BaseApplicationName, $BaseApplicationId, $BrowserProgIdPrefix, $BrowserProgIdDescription, $DirectLaunchUrlScheme)) { return $null }
   if ($InstallSwitch.Text -notmatch '^[A-Za-z0-9-]{0,64}$' -or
     $InstallSuffix.Text -match '[\x00-\x1F\\/]' -or
-    $ApplicationId.Text -notmatch '^(?:|\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\})$' -or
+    $ApplicationId.Text -notmatch '^(?:|\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$' -or
     [string]::IsNullOrWhiteSpace($BaseApplicationName.Text) -or $BaseApplicationName.Text -match '[\x00-\x1F\\/]' -or
     $BaseApplicationId.Text -notmatch '^[A-Za-z0-9.]+$' -or $BrowserProgIdPrefix.Text -notmatch '^[A-Za-z0-9.]+$' -or
     $DirectLaunchUrlScheme.Text -notmatch '^(?:|[A-Za-z][A-Za-z0-9+.-]{0,63})$') { return $null }
@@ -572,18 +577,19 @@ function Read-ChromiumInstallConstantsRecord {
   $SupportsSystemLevelOffset = $PointerSize -eq 8 ? 204 : 144
   $SupportsSystemLevel = [bool](Read-BinaryInteger -Stream $Stream -Offset ($Offset + $SupportsSystemLevelOffset) -Size 1)
   [pscustomobject]@{
-    Offset                = $Offset
-    StructureSize         = $StructureSize
-    Index                 = [int]$Index
-    InstallSwitch         = $InstallSwitch.Text
-    InstallSuffix         = $InstallSuffix.Text
-    LogoSuffix            = $LogoSuffix.Text
-    ApplicationId         = $ApplicationId.Text
-    BaseApplicationName   = $BaseApplicationName.Text
-    BaseApplicationId     = $BaseApplicationId.Text
-    BrowserProgIdPrefix   = $BrowserProgIdPrefix.Text
-    DirectLaunchUrlScheme = $DirectLaunchUrlScheme.Text
-    SupportsSystemLevel   = $SupportsSystemLevel
+    Offset                    = $Offset
+    StructureSize             = $StructureSize
+    Index                     = [int]$Index
+    InstallSwitch             = $InstallSwitch.Text
+    InstallSuffix             = $InstallSuffix.Text
+    LogoSuffix                = $LogoSuffix.Text
+    ApplicationId             = $ApplicationId.Text
+    BaseApplicationName       = $BaseApplicationName.Text
+    BaseApplicationNameOffset = $BaseApplicationName.Offset
+    BaseApplicationId         = $BaseApplicationId.Text
+    BrowserProgIdPrefix       = $BrowserProgIdPrefix.Text
+    DirectLaunchUrlScheme     = $DirectLaunchUrlScheme.Text
+    SupportsSystemLevel       = $SupportsSystemLevel
   }
 }
 
@@ -653,23 +659,26 @@ function Find-ChromiumProductPathName {
     Verify a canonical kProductPathName candidate derived from an install mode
   .PARAMETER Stream
     Caller-owned seekable setup.exe stream.
-  .PARAMETER DirectLaunchUrlScheme
-    Source-defined direct-launch scheme from the primary InstallConstants record.
+  .PARAMETER Candidate
+    Candidate product path derived from a source-defined InstallConstants field.
+  .PARAMETER ExcludedOffset
+    File offsets of InstallConstants strings that cannot serve as independent product-path evidence.
   #>
   [OutputType([string])]
   param (
     [Parameter(Mandatory)][IO.Stream]$Stream,
-    [Parameter(Mandatory)][AllowEmptyString()][string]$DirectLaunchUrlScheme
+    [Parameter(Mandatory)][AllowEmptyString()][string]$Candidate,
+    [long[]]$ExcludedOffset = @()
   )
 
-  if ([string]::IsNullOrWhiteSpace($DirectLaunchUrlScheme)) { return $null }
-  # Vendor product path constants commonly preserve the direct-launch scheme's words while using
-  # display casing (for example, brave-browser -> Brave-Browser). Treat this only as a candidate;
-  # require an independently stored, null-terminated wchar_t string in the PE before accepting it.
-  $Candidate = [Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($DirectLaunchUrlScheme.ToLowerInvariant())
+  if ([string]::IsNullOrWhiteSpace($Candidate) -or $Candidate.Length -gt 128 -or $Candidate -match '[\x00-\x1F\\/]') { return $null }
+  # A product-path candidate becomes evidence only when setup.exe stores it as an independent,
+  # null-terminated wchar_t constant. Excluding the InstallConstants field itself prevents the
+  # base application name from proving its own use as kProductPathName.
   $Pattern = [Text.Encoding]::Unicode.GetBytes("$Candidate$([char]0)")
   $CandidateOffsets = [Collections.Generic.List[long]]::new()
   foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern $Pattern -Maximum 16 -Alignment 1)) {
+    if ($Offset -in $ExcludedOffset) { continue }
     if ($Offset -ge 2) {
       $Prefix = Read-BinaryBytes -Stream $Stream -Offset ($Offset - 2) -Count 2
       if ($Prefix[0] -ne 0 -or $Prefix[1] -ne 0) { continue }
@@ -893,7 +902,18 @@ function Get-ChromiumNestedSetupRegistryInfo {
         if ($PrimaryMode.BaseApplicationName.StartsWith("$Company ", [StringComparison]::OrdinalIgnoreCase)) {
           $Selected = [pscustomobject]@{ ProductCode = $PrimaryMode.BaseApplicationName; Count = 1; Source = 'ChromiumCompanyAndInstallConstants' }
         } else {
-          $ProductPathName = Find-ChromiumProductPathName -Stream $Stream -DirectLaunchUrlScheme $PrimaryMode.DirectLaunchUrlScheme
+          $DirectLaunchCandidate = if ([string]::IsNullOrWhiteSpace($PrimaryMode.DirectLaunchUrlScheme)) {
+            $null
+          } else {
+            [Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($PrimaryMode.DirectLaunchUrlScheme.ToLowerInvariant())
+          }
+          $ProductPathName = Find-ChromiumProductPathName -Stream $Stream -Candidate $DirectLaunchCandidate
+          if (-not $ProductPathName) {
+            # Some vendor builds use a branded launch scheme unrelated to kProductPathName. In that
+            # case, accept the base application name only when a second independent PE literal proves
+            # that the same value is also compiled as a product-path constant.
+            $ProductPathName = Find-ChromiumProductPathName -Stream $Stream -Candidate $PrimaryMode.BaseApplicationName -ExcludedOffset $PrimaryMode.BaseApplicationNameOffset
+          }
           if ($ProductPathName) {
             $Selected = [pscustomobject]@{ ProductCode = "$Company $ProductPathName"; Count = 1; Source = 'ChromiumCompanyAndProductConstants' }
           }
@@ -1070,43 +1090,48 @@ function ConvertFrom-ChromiumOmahaOfflineManifest {
   }
 }
 
-function Get-ChromiumOmahaPayloadInfo {
+function Get-ChromiumOfflineArchivePayloadInfo {
   <#
   .SYNOPSIS
-    Parse an Omaha offline manifest and inspect the executable it configures
-  .PARAMETER Resource
-    Validated PE resource evidence with file-relative offsets and bounded lengths.
+    Parse an updater offline manifest and inspect the executable it configures
+  .PARAMETER Archive
+    Open caller-owned archive containing the offline manifest and target package.
   .PARAMETER ApplicationId
     Installer identity value used to select or report the matching static metadata record.
+  .PARAMETER SourceName
+    Format name used to make malformed-payload diagnostics actionable.
   .PARAMETER SkipNestedSetup
     Parse only OfflineManifest.gup without exporting and inspecting its configured target.
   #>
   [OutputType([pscustomobject])]
   param (
-    [Parameter(Mandatory)][psobject]$Resource,
+    [Parameter(Mandatory)][psobject]$Archive,
     [string]$ApplicationId,
+    [Parameter(Mandatory)][string]$SourceName,
     [switch]$SkipNestedSetup
   )
 
-  $Context = Open-ChromiumOmahaArchive -Resource $Resource -MaximumExpandedBytes $Script:ChromiumMaximumResourceBytes
   $NestedFolder = $null
   try {
     $Entries = [Collections.Generic.List[object]]::new()
     $ManifestEntry = $null
-    foreach ($Entry in (Get-InstallerArchiveEntry -Archive $Context.Archive)) {
+    $ApplicationManifestName = if ([string]::IsNullOrWhiteSpace($ApplicationId)) { $null } else { "$ApplicationId.gup" }
+    foreach ($Entry in (Get-InstallerArchiveEntry -Archive $Archive)) {
       $Entries.Add($Entry)
-      if ($Entry.FullName -ine 'OfflineManifest.gup' -and [IO.Path]::GetFileName($Entry.FullName) -ine 'OfflineManifest.gup') { continue }
-      if ($ManifestEntry) { throw 'The Omaha payload contains more than one OfflineManifest.gup entry.' }
+      $EntryName = [IO.Path]::GetFileName($Entry.FullName)
+      if ($EntryName -ine 'OfflineManifest.gup' -and
+        ([string]::IsNullOrWhiteSpace($ApplicationManifestName) -or $EntryName -ine $ApplicationManifestName)) { continue }
+      if ($ManifestEntry) { throw "The $SourceName contains more than one matching offline manifest entry." }
       $ManifestEntry = $Entry
     }
     if (-not $ManifestEntry) {
-      return [pscustomobject]@{ OfflineManifest = $null; NestedSetupInfo = $null; NestedSetupError = $null; TargetEntryName = $null }
+      return [pscustomobject]@{ OfflineManifest = $null; NestedSetupInfo = $null; NestedSetupError = $null; ManifestEntryName = $null; TargetEntryName = $null }
     }
 
     $Text = Read-InstallerArchiveEntryText -Entry $ManifestEntry -MaximumBytes $Script:ChromiumMaximumOfflineManifestBytes
     $OfflineManifest = ConvertFrom-ChromiumOmahaOfflineManifest -Text $Text -ApplicationId $ApplicationId
     if ($SkipNestedSetup) {
-      return [pscustomobject]@{ OfflineManifest = $OfflineManifest; NestedSetupInfo = $null; NestedSetupError = $null; TargetEntryName = $null }
+      return [pscustomobject]@{ OfflineManifest = $OfflineManifest; NestedSetupInfo = $null; NestedSetupError = $null; ManifestEntryName = $ManifestEntry.FullName; TargetEntryName = $null }
     }
 
     # OfflineManifest.gup's install action is authoritative. Omaha appends the app GUID to package
@@ -1163,7 +1188,7 @@ function Get-ChromiumOmahaPayloadInfo {
     if ($TargetMatches.Count -gt 0) {
       $RankedMatches = @($TargetMatches | Sort-Object Rank, { $_.Entry.FullName })
       if ($RankedMatches.Count -gt 1 -and $RankedMatches[0].Rank -eq $RankedMatches[1].Rank) {
-        $NestedSetupError = "OfflineManifest.gup target '$($RankedMatches[0].TargetName)' matches multiple Omaha entries."
+        $NestedSetupError = "OfflineManifest.gup target '$($RankedMatches[0].TargetName)' matches multiple $SourceName entries."
       } else {
         $Target = $RankedMatches[0]
         $TargetEntryName = $Target.Entry.FullName
@@ -1189,14 +1214,84 @@ function Get-ChromiumOmahaPayloadInfo {
     }
 
     [pscustomobject]@{
-      OfflineManifest  = $OfflineManifest
-      NestedSetupInfo  = $NestedSetupInfo
-      NestedSetupError = $NestedSetupError
-      TargetEntryName  = $TargetEntryName
+      OfflineManifest   = $OfflineManifest
+      NestedSetupInfo   = $NestedSetupInfo
+      NestedSetupError  = $NestedSetupError
+      ManifestEntryName = $ManifestEntry.FullName
+      TargetEntryName   = $TargetEntryName
     }
   } finally {
     if ($NestedFolder) { Remove-Item -LiteralPath $NestedFolder -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+function Get-ChromiumOmahaPayloadInfo {
+  <#
+  .SYNOPSIS
+    Decode an Omaha payload and inspect its optional offline target
+  .PARAMETER Resource
+    Validated PE resource evidence with file-relative offsets and bounded lengths.
+  .PARAMETER ApplicationId
+    Installer identity value used to select the matching offline application record.
+  .PARAMETER SkipNestedSetup
+    Parse only the offline manifest without exporting and inspecting its configured target.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Resource,
+    [string]$ApplicationId,
+    [switch]$SkipNestedSetup
+  )
+
+  $Context = Open-ChromiumOmahaArchive -Resource $Resource -MaximumExpandedBytes $Script:ChromiumMaximumResourceBytes
+  try {
+    Get-ChromiumOfflineArchivePayloadInfo -Archive $Context.Archive -ApplicationId $ApplicationId -SourceName 'Omaha payload' -SkipNestedSetup:$SkipNestedSetup
+  } finally {
     Close-ChromiumOmahaArchive -Context $Context
+  }
+}
+
+function Get-ChromiumUpdaterPayloadInfo {
+  <#
+  .SYNOPSIS
+    Inspect a Chromium Updater archive for an embedded offline application
+  .PARAMETER Context
+    Open Chromium setup context whose installer stream remains owned by the caller.
+  .PARAMETER ApplicationId
+    Installer identity value used to select the matching offline application record.
+  .PARAMETER SkipNestedSetup
+    Parse only the offline manifest without exporting and inspecting its configured target.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Context,
+    [string]$ApplicationId,
+    [switch]$SkipNestedSetup
+  )
+
+  $Evidence = $Context.Evidence.UpdaterArchive
+  if (-not $Evidence) { throw 'The Chromium Updater context does not contain its selected updater archive resource.' }
+  $ResourceStream = New-BoundedReadStream -Stream $Context.Stream -Offset $Evidence.Offset -Length $Evidence.Size -LeaveOpen
+  $OuterArchive = $null
+  $NestedInput = $null
+  $NestedContext = $null
+  $NestedArchive = $null
+  try {
+    # updater.packed.7z contains one updater.7z. Offline installers place their manifest and target
+    # under bin/Offline/{bundle-guid}/ inside that second archive.
+    $OuterArchive = Get-InstallerArchive -Stream $ResourceStream
+    $UpdaterEntries = @(Get-InstallerArchiveEntry -Archive $OuterArchive | Where-Object { $_.FullName -ieq 'updater.7z' })
+    if ($UpdaterEntries.Count -ne 1) { throw 'The Chromium Updater resource does not contain exactly one updater.7z entry.' }
+    $NestedInput = Open-InstallerArchiveEntry -Entry $UpdaterEntries[0]
+    $NestedContext = New-InstallerSeekableStream -SourceStream $NestedInput -MaximumBytes $Script:ChromiumMaximumResourceBytes
+    $NestedArchive = Get-InstallerArchive -Stream $NestedContext.Stream
+    Get-ChromiumOfflineArchivePayloadInfo -Archive $NestedArchive -ApplicationId $ApplicationId -SourceName 'Chromium Updater archive' -SkipNestedSetup:$SkipNestedSetup
+  } finally {
+    if ($NestedArchive) { $NestedArchive.Dispose() }
+    if ($NestedContext) { $NestedContext.Dispose() }
+    if ($NestedInput) { $NestedInput.Dispose() }
+    if ($OuterArchive) { $OuterArchive.Dispose() }
+    $ResourceStream.Dispose()
   }
 }
 
@@ -1246,19 +1341,23 @@ function Get-ChromiumSetupInfoFromContext {
 
   $OfflineManifest = $null
   $OfflineManifestError = $null
-  $OmahaPayloadInfo = $null
-  # Decode Omaha's expensive LZMA/BCJ2 payload only when a signed application identity makes the
-  # enclosed manifest useful, unless the caller explicitly asks for layout-only evidence.
-  $OfflineManifestChecked = $Variant -eq 'Omaha' -and $Tag.IsTagged -and -not $SkipOfflineManifest
+  $OfflinePayloadInfo = $null
+  # A tag may select either a network application or an application embedded beside the updater.
+  # Inspect both supported wrapper formats before classifying the setup as an online bootstrapper.
+  $OfflineManifestChecked = ($Variant -eq 'Omaha' -or $Variant -eq 'ChromiumUpdater') -and $Tag.IsTagged -and -not $SkipOfflineManifest
   if ($OfflineManifestChecked) {
     try {
-      $OmahaPayloadInfo = Get-ChromiumOmahaPayloadInfo -Resource $LayoutEvidence.OmahaResource.Resource -ApplicationId $Tag.ApplicationId
-      $OfflineManifest = $OmahaPayloadInfo.OfflineManifest
+      $OfflinePayloadInfo = if ($Variant -eq 'ChromiumUpdater') {
+        Get-ChromiumUpdaterPayloadInfo -Context $Context -ApplicationId $Tag.ApplicationId
+      } else {
+        Get-ChromiumOmahaPayloadInfo -Resource $LayoutEvidence.OmahaResource.Resource -ApplicationId $Tag.ApplicationId
+      }
+      $OfflineManifest = $OfflinePayloadInfo.OfflineManifest
     } catch {
       $OfflineManifestError = $_.Exception.Message
     }
   }
-  $IsOnlineBootstrapper = if (-not $Tag.IsTagged) { $false } elseif ($Variant -eq 'ChromiumUpdater') { $true } elseif ($OfflineManifest) { $false } elseif ($OfflineManifestChecked -and -not $OfflineManifestError) { $true } else { $null }
+  $IsOnlineBootstrapper = if (-not $Tag.IsTagged) { $false } elseif ($OfflineManifest) { $false } elseif ($OfflineManifestChecked -and -not $OfflineManifestError) { $true } else { $null }
   $ProductCode = $null
   $ProductCodeSource = $null
 
@@ -1276,14 +1375,14 @@ function Get-ChromiumSetupInfoFromContext {
     } catch {
       $NestedSetupError = $_.Exception.Message
     }
-  } elseif ($OmahaPayloadInfo) {
+  } elseif ($OfflinePayloadInfo) {
     # Tagged offline wrappers contain the target installer named by OfflineManifest.gup. Its own
     # Chromium setup metadata, not the outer updater appguid, supplies ARP identity.
-    $NestedSetupInfo = $OmahaPayloadInfo.NestedSetupInfo
-    $NestedSetupError = $OmahaPayloadInfo.NestedSetupError
+    $NestedSetupInfo = $OfflinePayloadInfo.NestedSetupInfo
+    $NestedSetupError = $OfflinePayloadInfo.NestedSetupError
     if ($NestedSetupInfo -and $NestedSetupInfo.ProductCode) {
       $ProductCode = $NestedSetupInfo.ProductCode
-      $ProductCodeSource = "OmahaTarget/$($NestedSetupInfo.ProductCodeSource)"
+      $ProductCodeSource = "$($Variant)Target/$($NestedSetupInfo.ProductCodeSource)"
     }
   }
 
@@ -1333,12 +1432,23 @@ function Get-ChromiumSetupInfoFromContext {
       $NestedFiles.Add('updater.7z')
       $NestedFiles.Add('bin\updater.exe')
       $ExecutedPayloads.Add('bin\updater.exe')
+      if ($OfflineManifest) {
+        if ($OfflinePayloadInfo.ManifestEntryName) { $NestedFiles.Add($OfflinePayloadInfo.ManifestEntryName) }
+        foreach ($Package in $OfflineManifest.Packages) { if ($Package.Name) { $NestedFiles.Add($Package.Name) } }
+        if ($OfflinePayloadInfo.TargetEntryName -and -not $NestedFiles.Contains($OfflinePayloadInfo.TargetEntryName)) { $NestedFiles.Add($OfflinePayloadInfo.TargetEntryName) }
+        if ($OfflineManifest.InstallAction) {
+          $CommandParts = [Collections.Generic.List[string]]::new()
+          if (-not [string]::IsNullOrWhiteSpace($OfflineManifest.InstallAction.Run)) { $CommandParts.Add($OfflineManifest.InstallAction.Run) }
+          if (-not [string]::IsNullOrWhiteSpace($OfflineManifest.InstallAction.Arguments)) { $CommandParts.Add($OfflineManifest.InstallAction.Arguments) }
+          $ExecutedPayloads.Add([string]::Join(' ', $CommandParts))
+        }
+      }
     }
     'Omaha' {
       if ($OfflineManifest) {
         $NestedFiles.Add('OfflineManifest.gup')
         foreach ($Package in $OfflineManifest.Packages) { if ($Package.Name) { $NestedFiles.Add($Package.Name) } }
-        if ($OmahaPayloadInfo.TargetEntryName -and -not $NestedFiles.Contains($OmahaPayloadInfo.TargetEntryName)) { $NestedFiles.Add($OmahaPayloadInfo.TargetEntryName) }
+        if ($OfflinePayloadInfo.TargetEntryName -and -not $NestedFiles.Contains($OfflinePayloadInfo.TargetEntryName)) { $NestedFiles.Add($OfflinePayloadInfo.TargetEntryName) }
       } else { $NestedFiles.Add('BCJ2-decoded TAR payload') }
       if ($OfflineManifest.InstallAction) {
         $CommandParts = [Collections.Generic.List[string]]::new()
@@ -1353,7 +1463,7 @@ function Get-ChromiumSetupInfoFromContext {
     $ResourceInfo.Add([pscustomobject]@{ Type = $Resource.Type; Name = $Resource.Name; Id = $Resource.Id; Offset = $Resource.Offset; Size = $Resource.Size })
   }
   $Warnings = [Collections.Generic.List[string]]::new()
-  if ($OfflineManifestError) { $Warnings.Add("The tagged Omaha payload could not be checked for OfflineManifest.gup: $OfflineManifestError") }
+  if ($OfflineManifestError) { $Warnings.Add("The tagged Chromium payload could not be checked for an offline manifest: $OfflineManifestError") }
   if ($NestedSetupError) { $Warnings.Add("The nested Chromium setup.exe could not be checked for ARP registry identity: $NestedSetupError") }
   if ($NestedSetupInfo) { foreach ($Warning in $NestedSetupInfo.Warnings) { $Warnings.Add($Warning) } }
   if ($Tag.ApplicationId -and -not $ProductCode) { $Warnings.Add("Updater appguid '$($Tag.ApplicationId)' is update-protocol identity; this wrapper does not contain source-backed target ARP ProductCode evidence.") }
@@ -1410,8 +1520,8 @@ function Get-ChromiumSetupInfoFromContext {
     CanExpand                    = $true
     ParserVersionInfo            = [pscustomobject]@{
       Parser      = 'Dumplings.PackageModule.ChromiumSetup'
-      ParserMajor = 3
-      Sources     = @('Chromium mini_installer B7, BL, and BN resource precedence', 'Chromium install_static InstallConstants and GetUninstallRegistryPath construction', 'Chromium Updater metainstaller resources and UTF-8 or UTF-16 certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload and OfflineManifest.gup target execution', 'Microsoft Edge UTF-16 certificate tag framing')
+      ParserMajor = 4
+      Sources     = @('Chromium mini_installer B7, BL, and BN resource precedence', 'Chromium install_static InstallConstants and GetUninstallRegistryPath construction', 'Chromium Updater metainstaller resources, offline payload layout, and UTF-8 or UTF-16 certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload and OfflineManifest.gup target execution', 'Microsoft Edge UTF-16 certificate tag framing')
     }
   }
 }

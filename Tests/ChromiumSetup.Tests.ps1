@@ -15,6 +15,13 @@ BeforeAll {
 }
 
 Describe 'Chromium updater tag parser' {
+  It 'Should return untagged evidence for an empty certificate table' {
+    $Info = ConvertFrom-ChromiumUpdaterTagData -Bytes ([byte[]]::new(0))
+
+    $Info.MarkerFound | Should -BeFalse
+    $Info.IsTagged | Should -BeFalse
+  }
+
   It 'Should parse a certificate tag with big-endian length and URL-encoded values' {
     $RawTag = 'appguid={8A69D345-D564-463C-AFF1-A69D9E530F96}&appname=Google%20Chrome&needsadmin=prefers&brand=GTPM'
     $TagBytes = [Text.Encoding]::UTF8.GetBytes($RawTag)
@@ -198,6 +205,37 @@ Describe 'Chromium resource classification' {
       $Info.Variant | Should -Be 'ChromiumUpdater'
       $Info.ExecutedPayloads | Should -Be @('bin\updater.exe')
       $Info.MachineScopeSwitch | Should -Be '--system'
+    }
+  }
+
+  It 'Should inspect a tagged Chromium Updater for an offline target before classifying it as online' {
+    InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
+      param($SyntheticPath)
+      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
+      Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'updater.packed.7z'; Id = $null; Offset = 100; Size = 200 } }
+      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
+      Mock Get-ChromiumUpdaterPayloadInfo {
+        [pscustomobject]@{
+          OfflineManifest   = [pscustomobject]@{
+            Version       = '10.20.30.40'
+            Packages      = @([pscustomobject]@{ Name = 'mini_installer.exe' })
+            InstallAction = [pscustomobject]@{ Run = 'mini_installer.exe'; Arguments = '--system-level' }
+          }
+          NestedSetupInfo   = [pscustomobject]@{ ProductCode = 'Vendor Browser'; ProductCodeSource = 'TestEvidence'; Warnings = @() }
+          NestedSetupError  = $null
+          ManifestEntryName = 'bin/Offline/{BUNDLE}/OfflineManifest.gup'
+          TargetEntryName   = 'bin/Offline/{BUNDLE}/{APP-ID}/mini_installer.exe'
+        }
+      }
+
+      $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
+
+      $Info.ProductCode | Should -BeExactly 'Vendor Browser'
+      $Info.ProductCodeSource | Should -BeExactly 'ChromiumUpdaterTarget/TestEvidence'
+      $Info.DisplayVersion | Should -BeExactly '10.20.30.40'
+      $Info.IsOnlineBootstrapper | Should -BeFalse
+      $Info.Warnings | Should -BeNullOrEmpty
+      $Info.ExecutedPayloads | Should -Contain 'mini_installer.exe --system-level'
     }
   }
 
@@ -482,6 +520,22 @@ Describe 'Chromium real installer fixtures' {
     $Info.IsOnlineBootstrapper | Should -BeFalse
     $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--msedgewebview --verbose-logging --do-not-launch-msedge'
     ($Info.Warnings -join ' ') | Should -BeLike '*does not contain source-backed target ARP ProductCode evidence*'
+  }
+
+  It 'Should parse the cached Perplexity Comet offline Chromium Updater bundle' {
+    $Installer = Join-Path $Script:FixtureDirectory 'Perplexity.Comet-150.0.7871.230-x64.exe'
+    if (-not (Test-Path -LiteralPath $Installer)) { Set-ItResult -Skipped -Because 'The 227 MB Perplexity Comet fixture is not cached.'; return }
+
+    $Info = Get-ChromiumSetupInfo -Path $Installer
+
+    $Info.Variant | Should -BeExactly 'ChromiumUpdater'
+    $Info.IsOnlineBootstrapper | Should -BeFalse
+    $Info.DisplayVersion | Should -BeExactly '150.0.7871.230'
+    $Info.ProductCode | Should -BeExactly 'Perplexity Comet'
+    $Info.ProductCodeSource | Should -BeExactly 'ChromiumUpdaterTarget/ChromiumCompanyAndProductConstants'
+    $Info.OfflineManifest.InstallAction.Run | Should -BeExactly 'mini_installer.exe'
+    $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--system-level'
+    $Info.Warnings | Should -BeNullOrEmpty
   }
 }
 
