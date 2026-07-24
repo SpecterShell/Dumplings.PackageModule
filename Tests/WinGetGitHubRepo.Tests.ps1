@@ -17,13 +17,87 @@ Describe 'Add-WinGetGitHubManifests' {
   }
 
   It 'returns the created commit OID' {
+    $Script:GraphQLMaximumRetryCount = $null
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      $Script:GraphQLMaximumRetryCount = $MaximumRetryCount
       [pscustomobject]@{ data = [pscustomobject]@{ createCommitOnBranch = [pscustomobject]@{ commit = [pscustomobject]@{ oid = ('b' * 40) } } } }
     }
 
     $Result = Add-WinGetGitHubManifests -PackageIdentifier 'Vendor.Package' -PackageVersion '1.0' -RepoOwner DumplingsBot -RepoName winget-pkgs -RepoBranch 'test-branch' -RepoSha ('a' * 40) -RootPath 'manifests' -Manifest ([ordered]@{ Version = 'version'; Installer = 'installer'; Locale = [ordered]@{} }) -CommitMessage 'Test'
 
     $Result | Should -Be ('b' * 40)
+    $Script:GraphQLMaximumRetryCount | Should -Be 0
+  }
+}
+
+Describe 'Invoke-WinGetGitHubCommitMutation' {
+  BeforeEach {
+    $Script:OldHead = 'a' * 40
+    $Script:NewHead = 'b' * 40
+    $Script:FinalHead = 'c' * 40
+    $Script:ObservedExpectedHeads = [System.Collections.Generic.List[string]]::new()
+    Mock Start-Sleep -ModuleName WinGetGitHubRepo
+  }
+
+  It 'recovers a commit that succeeded before its response was lost' {
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ object = [pscustomobject]@{ sha = $Script:NewHead } }
+    }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      if ($Uri.AbsolutePath -eq '/graphql') {
+        $Script:ObservedExpectedHeads.Add([string]$Body.variables.input.expectedHeadOid)
+        throw 'The connection closed before a response was received'
+      }
+      [pscustomobject]@{
+        message = 'Test commit'
+        parents = @([pscustomobject]@{ sha = $Script:OldHead })
+      }
+    }
+
+    $Result = Invoke-WinGetGitHubCommitMutation `
+      -RepoOwner DumplingsBot `
+      -RepoName winget-pkgs `
+      -RepoBranch test-branch `
+      -ExpectedHeadOid $Script:OldHead `
+      -CommitMessage 'Test commit' `
+      -FileChanges ([ordered]@{ additions = @([ordered]@{ path = 'manifest.yaml'; contents = 'YQ==' }) }) `
+      -Operation 'the test commit'
+
+    $Result | Should -BeExactly $Script:NewHead
+    $Script:ObservedExpectedHeads | Should -Be @($Script:OldHead)
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Uri.AbsolutePath -eq '/graphql' -and $MaximumRetryCount -eq 0 }
+  }
+
+  It 'retries against the observed head when another commit advanced the branch' {
+    $Script:GraphQLAttempt = 0
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ object = [pscustomobject]@{ sha = $Script:NewHead } }
+    }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      if ($Uri.AbsolutePath -eq '/graphql') {
+        $Script:GraphQLAttempt++
+        $Script:ObservedExpectedHeads.Add([string]$Body.variables.input.expectedHeadOid)
+        if ($Script:GraphQLAttempt -eq 1) { throw 'Expected branch head did not match' }
+        return [pscustomobject]@{ data = [pscustomobject]@{ createCommitOnBranch = [pscustomobject]@{ commit = [pscustomobject]@{ oid = $Script:FinalHead } } } }
+      }
+      [pscustomobject]@{
+        message = 'Another commit'
+        parents = @([pscustomobject]@{ sha = ('f' * 40) })
+      }
+    }
+
+    $Result = Invoke-WinGetGitHubCommitMutation `
+      -RepoOwner DumplingsBot `
+      -RepoName winget-pkgs `
+      -RepoBranch test-branch `
+      -ExpectedHeadOid $Script:OldHead `
+      -CommitMessage 'Test commit' `
+      -FileChanges ([ordered]@{ deletions = @([ordered]@{ path = 'manifest.yaml' }) }) `
+      -Operation 'the test commit'
+
+    $Result | Should -BeExactly $Script:FinalHead
+    $Script:ObservedExpectedHeads | Should -Be @($Script:OldHead, $Script:NewHead)
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 2 -Exactly -ParameterFilter { $Uri.AbsolutePath -eq '/graphql' -and $MaximumRetryCount -eq 0 }
   }
 }
 

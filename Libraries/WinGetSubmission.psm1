@@ -662,26 +662,29 @@ function Send-WinGetManifest {
     $ShouldCloseSelfPullRequests = $SelfPullRequests -and -not ($Global:DumplingsPreference['KeepOldPRs'] -or $Task.Config['KeepOldPRs'])
     if ($ShouldCloseSelfPullRequests) {
       # GitHub caps the compare endpoint's file collection at 300. A full page
-      # cannot prove that more files were not omitted, so fail closed rather than
-      # incorrectly declaring a large candidate identical to an existing PR.
+      # cannot prove that more files were not omitted. Exact duplicate detection
+      # is an optimization, so preserve the normal replacement workflow instead
+      # of failing the entire submission when equality cannot be proven.
       if ($CandidateChanges.Count -ge 300) {
-        Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
-        throw 'The candidate branch comparison returned 300 files, so GitHub may have truncated the result and exact duplicate-PR comparison is unsafe.'
-      }
+        $Task.Log('The candidate comparison returned GitHub''s 300-file limit. Exact duplicate pull-request detection is skipped, and normal replacement submission will continue.', 'Warning')
+      } else {
+        foreach ($ExistingPullRequest in @($SelfPullRequests)) {
+          try {
+            $ExistingChanges = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $ExistingPullRequest.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
+            $ChangesAreIdentical = Test-WinGetGitHubFileChangeEquality -ReferenceChange $ExistingChanges -DifferenceChange $CandidateChanges
+          } catch {
+            # A transient or malformed GitHub response cannot establish exact
+            # equality. Continue the historical replace-and-close workflow
+            # rather than abandoning a valid candidate branch.
+            $Task.Log("Unable to compare candidate changes exactly with existing pull request #$($ExistingPullRequest.number). Normal replacement submission will continue: ${_}", 'Warning')
+            continue
+          }
 
-      foreach ($ExistingPullRequest in @($SelfPullRequests)) {
-        try {
-          $ExistingChanges = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $ExistingPullRequest.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
-          $ChangesAreIdentical = Test-WinGetGitHubFileChangeEquality -ReferenceChange $ExistingChanges -DifferenceChange $CandidateChanges
-        } catch {
-          Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
-          throw "Failed to compare candidate changes with existing pull request #$($ExistingPullRequest.number): ${_}"
-        }
-
-        if ($ChangesAreIdentical) {
-          $Task.Log("Existing pull request #$($ExistingPullRequest.number) contains exactly the same changes. Preserving it and aborting redundant submission: $($ExistingPullRequest.html_url)", 'Info')
-          Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
-          return
+          if ($ChangesAreIdentical) {
+            $Task.Log("Existing pull request #$($ExistingPullRequest.number) contains exactly the same changes. Preserving it and aborting redundant submission: $($ExistingPullRequest.html_url)", 'Info')
+            Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
+            return
+          }
         }
       }
     }

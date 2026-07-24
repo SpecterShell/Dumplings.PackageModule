@@ -221,6 +221,14 @@ Describe 'Test-WinGetGitHubFileChangeEquality' {
 
     Test-WinGetGitHubFileChangeEquality -ReferenceChange $Reference -DifferenceChange $Difference | Should -BeFalse
   }
+
+  It 'rejects incomplete GitHub file evidence instead of declaring it identical' {
+    $Reference = [pscustomobject]@{ filename = 'manifests/a.yaml'; sha = ('a' * 40) }
+    $Difference = Get-TestFileChange -FileName 'manifests/a.yaml' -Status modified -Sha ('a' * 40)
+
+    { Test-WinGetGitHubFileChangeEquality -ReferenceChange $Reference -DifferenceChange $Difference } |
+      Should -Throw '*missing its filename or status*'
+  }
 }
 
 Describe 'Get-WinGetSubmissionCandidateChange' {

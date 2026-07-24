@@ -508,6 +508,141 @@ function Assert-WinGetGitHubGraphQLCommit {
   return $CommitOid
 }
 
+function Invoke-WinGetGitHubCommitMutation {
+  <#
+  .SYNOPSIS
+    Create one commit on a GitHub branch with optimistic-head reconciliation.
+  .DESCRIPTION
+    GitHub's createCommitOnBranch mutation is not idempotent. An HTTP client
+    retry can replay a mutation that GitHub already accepted, causing the
+    second request to fail because expectedHeadOid now points at the parent of
+    the newly created commit. This helper disables implicit HTTP retries and
+    explicitly reconciles the branch after an ambiguous failure.
+
+    If the branch advanced to a commit with the requested message and attempted
+    head as its sole parent, the first mutation succeeded and that commit OID is
+    returned. Otherwise, the mutation is retried against the observed branch
+    head. This is safe for Dumplings' task-specific submission branches and
+    avoids both duplicate commits and stale-head failures.
+  .PARAMETER RepoOwner
+    The owner of the repository containing the branch.
+  .PARAMETER RepoName
+    The name of the repository containing the branch.
+  .PARAMETER RepoBranch
+    The branch to update.
+  .PARAMETER ExpectedHeadOid
+    The branch head expected by the first mutation attempt.
+  .PARAMETER CommitMessage
+    The commit headline. It is also used to identify a mutation that succeeded
+    before its response was lost.
+  .PARAMETER FileChanges
+    GraphQL fileChanges input containing additions and/or deletions.
+  .PARAMETER Operation
+    Human-readable operation description used in diagnostics.
+  .PARAMETER MaximumAttempts
+    Maximum number of explicit mutation attempts.
+  .OUTPUTS
+    The OID of the created or reconciled commit.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch to update')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$RepoBranch,
+    [Parameter(Mandatory, HelpMessage = 'The expected branch head OID')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$ExpectedHeadOid,
+    [Parameter(Mandatory, HelpMessage = 'The commit headline')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$CommitMessage,
+    [Parameter(Mandatory, HelpMessage = 'The GraphQL fileChanges input')]
+    [System.Collections.IDictionary]$FileChanges,
+    [Parameter(Mandatory, HelpMessage = 'The operation description used in diagnostics')]
+    [ValidateNotNullOrWhiteSpace()]
+    [string]$Operation,
+    [Parameter(HelpMessage = 'The maximum number of explicit mutation attempts')]
+    [ValidateRange(1, 10)]
+    [int]$MaximumAttempts = 3
+  )
+
+  $Mutation = @'
+mutation CreateCommitOnBranch($input: CreateCommitOnBranchInput!) {
+  createCommitOnBranch(input: $input) {
+    commit {
+      oid
+    }
+  }
+}
+'@
+  $AttemptHeadOid = $ExpectedHeadOid
+
+  foreach ($Attempt in 1..$MaximumAttempts) {
+    try {
+      # Never let Invoke-RestMethod replay this non-idempotent mutation. Any
+      # retry must first inspect the branch to determine whether GitHub applied
+      # the preceding request.
+      $Response = Invoke-GitHubApi -Uri 'https://api.github.com/graphql' -Method Post -MaximumRetryCount 0 -Body @{
+        query     = $Mutation
+        variables = @{
+          input = @{
+            branch          = @{
+              repositoryNameWithOwner = "${RepoOwner}/${RepoName}"
+              branchName              = $RepoBranch
+            }
+            message         = @{ headline = $CommitMessage }
+            fileChanges     = $FileChanges
+            expectedHeadOid = $AttemptHeadOid
+          }
+        }
+      }
+      return Assert-WinGetGitHubGraphQLCommit -Response $Response -Operation $Operation
+    } catch {
+      $MutationError = $_
+    }
+
+    try {
+      # A failed client request can still have committed server-side. Read the
+      # authoritative branch head before deciding whether another POST is safe.
+      $CurrentHeadOid = [string](Get-WinGetGitHubBranch -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch).object.sha
+      if ([string]::IsNullOrWhiteSpace($CurrentHeadOid)) {
+        throw "GitHub did not return the current head of ${RepoOwner}/${RepoName}:${RepoBranch}."
+      }
+
+      if ($CurrentHeadOid -cne $AttemptHeadOid) {
+        $EncodedHeadOid = [Uri]::EscapeDataString($CurrentHeadOid)
+        $CurrentCommit = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/commits/${EncodedHeadOid}" -MaximumRetryCount 0
+        $Parents = @($CurrentCommit.parents)
+        $IsRecoveredCommit = $Parents.Count -eq 1 -and
+        [string]$Parents[0].sha -ceq $AttemptHeadOid -and
+        [string]$CurrentCommit.message -ceq $CommitMessage
+
+        if ($IsRecoveredCommit) {
+          Write-Verbose "Recovered ${Operation} at ${CurrentHeadOid}; GitHub advanced the branch before the mutation response was received."
+          return $CurrentHeadOid
+        }
+
+        # Another operation advanced this task branch. Preserve that work and
+        # retry the requested file changes against the actual current head.
+        $AttemptHeadOid = $CurrentHeadOid
+      }
+    } catch {
+      throw "Failed to reconcile ${Operation} after an ambiguous GitHub response. Mutation error: $MutationError Reconciliation error: $_"
+    }
+
+    if ($Attempt -eq $MaximumAttempts) {
+      throw "Failed to create ${Operation} after ${MaximumAttempts} attempts: $MutationError"
+    }
+
+    Start-Sleep -Seconds 1
+  }
+}
+
 function Add-WinGetGitHubManifests {
   <#
   .SYNOPSIS
@@ -579,42 +714,24 @@ function Add-WinGetGitHubManifests {
     # Add locale manifests to write if they exist
     $Manifest.Locale.GetEnumerator() | ForEach-Object -Process { $Manifests["${PackageIdentifier}.locale.$($_.Key).yaml"] = $_.Value }
 
-    # Write manifests
-    $Response = Invoke-GitHubApi -Uri 'https://api.github.com/graphql' -Method Post -Body @{
-      query = @"
-mutation {
-  createCommitOnBranch(
-    input: {
-      branch: {
-        repositoryNameWithOwner: "${RepoOwner}/${RepoName}"
-        branchName: "${RepoBranch}"
-      }
-      message: {
-        headline: "${CommitMessage}"
-      }
-      fileChanges: {
-        additions: [
-          $($Manifests.GetEnumerator() | ForEach-Object -Process {
-            @"
-          {
-            path: "${Prefix}/$($_.Key)"
-            contents: "$([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($_.Value.ReplaceLineEndings("`n"))))"
-          }
-"@ } | Join-String -Separator ",`n")
-        ]
-      }
-      expectedHeadOid: "${RepoSha}"
-    }
-  ) {
-    commit {
-      oid
-    }
-  }
-}
-"@
+    # Build typed GraphQL variables rather than interpolating paths, content,
+    # and commit messages into query syntax.
+    $Additions = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
+    foreach ($ManifestEntry in $Manifests.GetEnumerator()) {
+      $Additions.Add([ordered]@{
+          path     = "${Prefix}/$($ManifestEntry.Key)"
+          contents = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($ManifestEntry.Value.ReplaceLineEndings("`n")))
+        })
     }
 
-    return Assert-WinGetGitHubGraphQLCommit -Response $Response -Operation "the manifest commit for ${RepoOwner}/${RepoName}:${RepoBranch}"
+    return Invoke-WinGetGitHubCommitMutation `
+      -RepoOwner $RepoOwner `
+      -RepoName $RepoName `
+      -RepoBranch $RepoBranch `
+      -ExpectedHeadOid $RepoSha `
+      -CommitMessage $CommitMessage `
+      -FileChanges ([ordered]@{ additions = $Additions.ToArray() }) `
+      -Operation "the manifest commit for ${RepoOwner}/${RepoName}:${RepoBranch}"
   }
 }
 
@@ -674,40 +791,19 @@ function Remove-WinGetGitHubManifests {
     $null = $PSBoundParameters.Remove('RepoSha'); $null = $PSBoundParameters.Remove('CommitMessage')
     $Manifests = Get-WinGetGitHubManifests @PSBoundParameters
 
-    $Response = Invoke-GitHubApi -Uri 'https://api.github.com/graphql' -Method Post -Body @{
-      query = @"
-mutation {
-  createCommitOnBranch(
-    input: {
-      branch: {
-        repositoryNameWithOwner: "${RepoOwner}/${RepoName}"
-        branchName: "${RepoBranch}"
-      }
-      message: {
-        headline: "${CommitMessage}"
-      }
-      fileChanges: {
-        deletions: [
-          $($Manifests | ForEach-Object -Process {
-            @"
-          {
-            path: "${Prefix}/$($_.path)"
-          }
-"@ } | Join-String -Separator ",`n")
-        ]
-      }
-      expectedHeadOid: "${RepoSha}"
-    }
-  ) {
-    commit {
-      oid
-    }
-  }
-}
-"@
+    $Deletions = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
+    foreach ($ManifestEntry in $Manifests) {
+      $Deletions.Add([ordered]@{ path = "${Prefix}/$($ManifestEntry.path)" })
     }
 
-    return Assert-WinGetGitHubGraphQLCommit -Response $Response -Operation "the manifest removal commit for ${RepoOwner}/${RepoName}:${RepoBranch}"
+    return Invoke-WinGetGitHubCommitMutation `
+      -RepoOwner $RepoOwner `
+      -RepoName $RepoName `
+      -RepoBranch $RepoBranch `
+      -ExpectedHeadOid $RepoSha `
+      -CommitMessage $CommitMessage `
+      -FileChanges ([ordered]@{ deletions = $Deletions.ToArray() }) `
+      -Operation "the manifest removal commit for ${RepoOwner}/${RepoName}:${RepoBranch}"
   }
 }
 
