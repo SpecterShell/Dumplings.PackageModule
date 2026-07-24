@@ -399,6 +399,71 @@ function Test-WinGetInstallerUrlIntersection {
   return $false
 }
 
+function Invoke-WinGetSubmissionManifestRemoval {
+  <#
+  .SYNOPSIS
+    Remove a previous package version while applying the submission failure policy.
+  .DESCRIPTION
+    Explicitly configured removals are required and propagate failures. Automatically inferred
+    removals caused by a reused installer URL are best-effort: a failure keeps the successful
+    new-version commit and emits a warning instead of aborting submission.
+  .PARAMETER Task
+    Package task used to write warning diagnostics.
+  .PARAMETER PackageIdentifier
+    Identifier of the package version to remove.
+  .PARAMETER PackageVersion
+    Version whose manifest files should be removed.
+  .PARAMETER RepoOwner
+    Owner of the repository branch receiving the removal commit.
+  .PARAMETER RepoName
+    Name of the repository branch receiving the removal commit.
+  .PARAMETER RepoBranch
+    Branch that already contains the new-version commit.
+  .PARAMETER RepoSha
+    Current commit SHA. This is retained when a best-effort removal fails.
+  .PARAMETER RootPath
+    Manifest root path in the repository.
+  .PARAMETER CommitMessage
+    Headline for the removal commit.
+  .PARAMETER WarnOnFailure
+    Downgrade removal failures to warnings and return RepoSha unchanged.
+  .OUTPUTS
+    An object containing CommitSha, Succeeded, and ErrorMessage.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]$Task,
+    [Parameter(Mandatory)][string]$PackageIdentifier,
+    [Parameter(Mandatory)][string]$PackageVersion,
+    [Parameter(Mandatory)][string]$RepoOwner,
+    [Parameter(Mandatory)][string]$RepoName,
+    [Parameter(Mandatory)][string]$RepoBranch,
+    [Parameter(Mandatory)][string]$RepoSha,
+    [Parameter(Mandatory)][string]$RootPath,
+    [Parameter(Mandatory)][string]$CommitMessage,
+    [switch]$WarnOnFailure
+  )
+
+  try {
+    $CommitSha = Remove-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch -RepoSha $RepoSha -RootPath $RootPath -CommitMessage $CommitMessage
+    return [pscustomobject]@{
+      CommitSha    = $CommitSha
+      Succeeded    = $true
+      ErrorMessage = $null
+    }
+  } catch {
+    if (-not $WarnOnFailure) { throw }
+
+    $ErrorMessage = [string]$_.Exception.Message
+    $Task.Log("Failed to remove the manifests of version ${PackageVersion}: ${ErrorMessage}. Continuing with the new-version commit only.", 'Warning')
+    return [pscustomobject]@{
+      CommitSha    = $RepoSha
+      Succeeded    = $false
+      ErrorMessage = $ErrorMessage
+    }
+  }
+}
+
 function Send-WinGetManifest {
   <#
   .SYNOPSIS
@@ -549,19 +614,25 @@ function Send-WinGetManifest {
     # 1. The task is configured to remove the last version, or
     # 2. At least one installer URL is unchanged while the version is updated
     $RemoveLastVersionReason = $null
+    $RemoveLastVersionIsInferred = $false
+    $RemoveLastVersionChangeApplied = $false
     if ($Task.Config.Contains('RemoveLastVersion')) {
       if ($Task.Config.RemoveLastVersion) { $RemoveLastVersionReason = 'This task is configured to remove the last version' }
       # If RemoveLastVersion is set to 'false', do not remove the last version
     } elseif (($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($RefPackageVersion -cne $NewPackageVersion) -and (Test-WinGetInstallerUrlIntersection -ReferenceInstaller $RefManifest.Installers -DifferenceInstaller $NewManifest.Installers)) {
       $RemoveLastVersionReason = 'At least one of the installer URLs is unchanged compared with the old manifests while the version is updated'
+      $RemoveLastVersionIsInferred = $true
     }
     if ($RemoveLastVersionReason) {
       if ($RefPackageVersion -cne $NewPackageVersion) {
         $Task.Log("Removing the manifests of the last version ${RefPackageVersion}: ${RemoveLastVersionReason}", 'Info')
         $CommitMessage = "Remove version: ${RefPackageIdentifier} version ${RefPackageVersion}"
-        $NewCommitSha = Remove-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewCommitSha -RootPath $RootPath -CommitMessage $CommitMessage
+        $RemovalResult = Invoke-WinGetSubmissionManifestRemoval -Task $Task -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewCommitSha -RootPath $RootPath -CommitMessage $CommitMessage -WarnOnFailure:$RemoveLastVersionIsInferred
+        $NewCommitSha = $RemovalResult.CommitSha
+        $RemoveLastVersionChangeApplied = $RemovalResult.Succeeded
       } else {
         $Task.Log("Overriding the manifests of the last version ${RefPackageVersion}: ${RemoveLastVersionReason}", 'Info')
+        $RemoveLastVersionChangeApplied = $true
       }
     }
     #endregion
@@ -636,8 +707,8 @@ function Send-WinGetManifest {
       }
     }
 
-    # Close the old pull requests of the same package created by the bot user if RemoveLastVersionReason is set
-    if ($RemoveLastVersionReason -and $Script:GitHubTokenUsername -and ($SelfPackagePullRequests = (Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/')) in:path is:open author:${Script:GitHubTokenUsername}").items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" })) {
+    # Close old package PRs only when the candidate actually removes or overrides the old manifests.
+    if ($RemoveLastVersionChangeApplied -and $Script:GitHubTokenUsername -and ($SelfPackagePullRequests = (Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/')) in:path is:open author:${Script:GitHubTokenUsername}").items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" })) {
       $ExcludedPullRequestNumbers = [long[]]@($ClosedPullRequestNumbers) + [long]$NewPullRequest.number
       Select-WinGetPullRequestForClosure -PullRequest $SelfPackagePullRequests -ExcludedNumber $ExcludedPullRequestNumbers | ForEach-Object -Process {
         Close-WinGetGitHubPullRequest -PullRequestNumber $_.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName

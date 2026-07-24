@@ -2,6 +2,7 @@
 
 BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\GitHub.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetGitHubRepo.psm1') -Force
 }
 
@@ -42,9 +43,9 @@ Describe 'Remove-WinGetGitHubManifests' {
 
 Describe 'Get-WinGetGitHubComparison' {
   It 'uses owner-qualified and URI-escaped fork references' {
-    $Script:GitHubApiArguments = $null
+    $Script:GitHubApiUri = $null
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
-      $Script:GitHubApiArguments = $args
+      $Script:GitHubApiUri = $Uri.AbsoluteUri
       [pscustomobject]@{ status = 'ahead'; files = @([pscustomobject]@{ filename = 'manifest.yaml' }) }
     }
 
@@ -56,8 +57,7 @@ Describe 'Get-WinGetGitHubComparison' {
 
     $Result.status | Should -Be ahead
     Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly
-    $UriIndex = $Script:GitHubApiArguments.IndexOf('-Uri')
-    $Script:GitHubApiArguments[$UriIndex + 1] | Should -Be 'https://api.github.com/repos/microsoft/winget-pkgs/compare/microsoft%3Amaster...DumplingsBot%3APackage%2F1.0%20branch'
+    $Script:GitHubApiUri | Should -Be 'https://api.github.com/repos/microsoft/winget-pkgs/compare/microsoft%3Amaster...DumplingsBot%3APackage%2F1.0%20branch'
   }
 }
 
@@ -65,8 +65,7 @@ Describe 'Get-WinGetGitHubPullRequestFile' {
   It 'reads all pages until GitHub returns fewer than 100 files' {
     $Script:GitHubApiUris = [System.Collections.Generic.List[string]]::new()
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
-      $UriIndex = $args.IndexOf('-Uri')
-      $RequestUri = [string]$args[$UriIndex + 1]
+      $RequestUri = [string]$Uri
       $Script:GitHubApiUris.Add($RequestUri)
       if ($RequestUri -match 'page=1$') {
         return 1..100 | ForEach-Object { [pscustomobject]@{ filename = "file-${_}" } }
@@ -87,18 +86,16 @@ Describe 'Get-WinGetGitHubPullRequestFile' {
 
 Describe 'Remove-WinGetGitHubBranch' {
   It 'deletes the escaped branch reference' {
-    $Script:GitHubApiArguments = $null
+    $Script:GitHubApiParameters = $null
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
-      $Script:GitHubApiArguments = $args
+      $Script:GitHubApiParameters = [ordered]@{ Uri = $Uri.AbsoluteUri; Method = $Method }
       [pscustomobject]@{ deleted = $true }
     }
 
     $null = Remove-WinGetGitHubBranch -Name 'Package/1.0 branch' -RepoOwner DumplingsBot -RepoName winget-pkgs
 
     Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly
-    $UriIndex = $Script:GitHubApiArguments.IndexOf('-Uri')
-    $MethodIndex = $Script:GitHubApiArguments.IndexOf('-Method')
-    $Script:GitHubApiArguments[$UriIndex + 1] | Should -Be 'https://api.github.com/repos/DumplingsBot/winget-pkgs/git/refs/heads/Package%2F1.0%20branch'
-    $Script:GitHubApiArguments[$MethodIndex + 1] | Should -Be Delete
+    $Script:GitHubApiParameters.Uri | Should -Be 'https://api.github.com/repos/DumplingsBot/winget-pkgs/git/refs/heads/Package%2F1.0%20branch'
+    $Script:GitHubApiParameters.Method | Should -Be Delete
   }
 }

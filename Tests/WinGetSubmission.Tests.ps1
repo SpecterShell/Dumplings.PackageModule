@@ -137,6 +137,59 @@ Describe 'Test-WinGetInstallerUrlIntersection' {
   }
 }
 
+Describe 'Invoke-WinGetSubmissionManifestRemoval' {
+  BeforeEach {
+    $Script:RemovalLogs = [System.Collections.Generic.List[object]]::new()
+    $Script:RemovalTask = [pscustomobject]@{}
+    $Script:RemovalTask | Add-Member -MemberType ScriptMethod -Name Log -Value {
+      param($Message, $Level)
+      $Script:RemovalLogs.Add([pscustomobject]@{ Message = $Message; Level = $Level })
+    }
+    $Script:RemovalParameters = @{
+      Task              = $Script:RemovalTask
+      PackageIdentifier = 'Vendor.Package'
+      PackageVersion    = '1.0'
+      RepoOwner         = 'DumplingsBot'
+      RepoName          = 'winget-pkgs'
+      RepoBranch        = 'test-branch'
+      RepoSha           = ('a' * 40)
+      RootPath          = 'manifests'
+      CommitMessage     = 'Remove version'
+    }
+  }
+
+  It 'retains the new-version commit and warns when inferred removal fails' {
+    Mock Remove-WinGetGitHubManifests -ModuleName WinGetSubmission { throw 'tree rejected the deletion' }
+
+    $Result = Invoke-WinGetSubmissionManifestRemoval @Script:RemovalParameters -WarnOnFailure
+
+    $Result.Succeeded | Should -BeFalse
+    $Result.CommitSha | Should -Be ('a' * 40)
+    $Result.ErrorMessage | Should -BeLike '*tree rejected the deletion*'
+    $Script:RemovalLogs | Should -HaveCount 1
+    $Script:RemovalLogs[0].Level | Should -BeExactly 'Warning'
+    $Script:RemovalLogs[0].Message | Should -BeLike '*Continuing with the new-version commit only*'
+  }
+
+  It 'still throws when an explicitly configured removal fails' {
+    Mock Remove-WinGetGitHubManifests -ModuleName WinGetSubmission { throw 'tree rejected the deletion' }
+
+    { Invoke-WinGetSubmissionManifestRemoval @Script:RemovalParameters } | Should -Throw '*tree rejected the deletion*'
+    $Script:RemovalLogs | Should -BeNullOrEmpty
+  }
+
+  It 'returns the removal commit when deletion succeeds' {
+    Mock Remove-WinGetGitHubManifests -ModuleName WinGetSubmission { 'b' * 40 }
+
+    $Result = Invoke-WinGetSubmissionManifestRemoval @Script:RemovalParameters -WarnOnFailure
+
+    $Result.Succeeded | Should -BeTrue
+    $Result.CommitSha | Should -Be ('b' * 40)
+    $Result.ErrorMessage | Should -BeNullOrEmpty
+    $Script:RemovalLogs | Should -BeNullOrEmpty
+  }
+}
+
 Describe 'Test-WinGetGitHubFileChangeEquality' {
   It 'matches the same exact changes regardless of API result order' {
     $Reference = @(

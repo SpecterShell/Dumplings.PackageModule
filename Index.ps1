@@ -22,7 +22,7 @@ if (Test-Path -Path $LibraryPath) {
   }
 
   # Text and messaging helpers are consumed by independently loaded transport modules.
-  $Private:UtilityModules = @('General.psm1', 'TextContent.psm1', 'Messaging.psm1', 'MessageQueue.psm1')
+  $Private:UtilityModules = @('General.psm1', 'GitHub.psm1', 'TextContent.psm1', 'Messaging.psm1', 'MessageQueue.psm1')
   foreach ($UtilityModule in $UtilityModules) {
     Import-Module (Join-Path $LibraryPath $UtilityModule) -Force
   }

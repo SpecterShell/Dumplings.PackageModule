@@ -618,39 +618,6 @@ function Expand-TempArchive {
   }
 }
 
-function Invoke-GitHubApi {
-  <#
-  .SYNOPSIS
-    Invoke GitHub API with default headers and provided token
-  .DESCRIPTION
-    Endpoints that return a JSON array yield one pipeline item per element on
-    every supported PowerShell version. Invoke-RestMethod does not guarantee
-    this: recent versions emit the whole array as a single object, which
-    breaks callers that collect the output with @() or paginate on Count.
-  #>
-
-  $IndexOfBody = $args.IndexOf('-Body')
-  if ($IndexOfBody -gt -1 -and $args[$IndexOfBody + 1] -is [System.Collections.IDictionary]) {
-    $args[$IndexOfBody + 1] = ConvertTo-Json -InputObject $args[$IndexOfBody + 1] -Depth 5 -Compress -EscapeHandling EscapeNonAscii
-  }
-
-  $IndexOfToken = $args.IndexOf('-Token')
-  $Result = if ($IndexOfToken -gt -1) {
-    $args[$IndexOfToken + 1] = ConvertTo-SecureString -String $args[$IndexOfToken + 1] -AsPlainText
-    Invoke-RestMethod -Authentication Bearer -Headers @{ Accept = 'application/vnd.github+json' } -ContentType 'application/json' @args
-  } elseif (Test-Path Env:\GH_DUMPLINGS_TOKEN) {
-    $Token = ConvertTo-SecureString -String $Env:GH_DUMPLINGS_TOKEN -AsPlainText
-    Invoke-RestMethod -Authentication Bearer -Token $Token -Headers @{ Accept = 'application/vnd.github+json' } -ContentType 'application/json' @args
-  } else {
-    throw 'A token required to invoke GitHub API is not provided through "-Token" parameter or defined in "GH_DUMPLINGS_TOKEN" environment variable'
-  }
-
-  # Re-emit the captured response so a top-level JSON array is enumerated into
-  # individual output items regardless of the Invoke-RestMethod behavior of
-  # the running PowerShell version.
-  return $Result
-}
-
 function Get-RedirectedUrl {
   <#
   .SYNOPSIS
