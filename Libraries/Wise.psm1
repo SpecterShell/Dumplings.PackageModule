@@ -119,19 +119,24 @@ function Expand-WiseInstaller {
     The path to the Wise installer
   .PARAMETER DestinationPath
     The output MSI path; a temporary file is used when omitted
+  .PARAMETER CollisionAction
+    Behavior when the requested output MSI path already exists.
   #>
   [OutputType([System.IO.FileInfo])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
-    [string]$DestinationPath
+    [string]$DestinationPath,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt'
   )
 
   process {
-    $File = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    $File = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force -ErrorAction Stop
     $EmbeddedMsi = Get-WiseEmbeddedMsiInfo -Path $File.FullName
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = New-TempFile }
     if ([IO.Path]::GetExtension($DestinationPath) -ine '.msi') { $DestinationPath = [IO.Path]::ChangeExtension($DestinationPath, '.msi') }
-    return Export-InstallerArchiveRange -Path $File.FullName -Offset $EmbeddedMsi.Offset -Length $EmbeddedMsi.Length -DestinationPath $DestinationPath
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    return Export-InstallerArchiveRange -Path $File.FullName -Offset $EmbeddedMsi.Offset -Length $EmbeddedMsi.Length `
+      -DestinationPath $DestinationPath -CollisionAction $CollisionAction
   }
 }
 
@@ -153,7 +158,7 @@ function Get-WiseInfo {
     try {
       # The nested MSI is authoritative for product identity, associations, and
       # architecture. Outer PE version resources remain secondary evidence only.
-      $null = Expand-WiseInstaller -Path $File.FullName -DestinationPath $MsiPath
+      $null = Expand-WiseInstaller -Path $File.FullName -DestinationPath $MsiPath -CollisionAction Rename
       $MsiInfo = Get-MsiInstallerInfo -Path $MsiPath
       $Publisher = try { Read-MsiProperty -Path $MsiPath -Query "SELECT `Value` FROM `Property` WHERE `Property`='Manufacturer'" } catch { $null }
       $AllUsers = try { Read-MsiProperty -Path $MsiPath -Query "SELECT `Value` FROM `Property` WHERE `Property`='ALLUSERS'" } catch { $null }

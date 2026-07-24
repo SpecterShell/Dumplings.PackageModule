@@ -231,6 +231,46 @@ function Test-BinarySequence {
   return [Dumplings.InstallerInfrastructure.BinaryIO]::SequenceEqual($Left, $Right)
 }
 
+function Resolve-InstallerFileSystemPath {
+  <#
+  .SYNOPSIS
+    Resolve a filesystem path against PowerShell's current provider location
+  .PARAMETER Path
+    Existing or prospective filesystem path to resolve.
+  .PARAMETER AllowNonexistent
+    Allow the final path component to be absent, as required for extraction destinations.
+  .PARAMETER PathType
+    Optional existing-item type constraint.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
+    [switch]$AllowNonexistent,
+    [ValidateSet('Any', 'Leaf', 'Container')][string]$PathType = 'Any'
+  )
+
+  process {
+    if ([string]::IsNullOrWhiteSpace($Path)) { throw 'The filesystem path is empty.' }
+
+    if ($AllowNonexistent) {
+      $Provider = $null
+      $Drive = $null
+      $ResolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+        $Path, [ref]$Provider, [ref]$Drive)
+      if ($Provider.Name -ne 'FileSystem') { throw "The path is not in the FileSystem provider: $Path" }
+    } else {
+      $Item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+      if ($Item.PSProvider.Name -ne 'FileSystem') { throw "The path is not in the FileSystem provider: $Path" }
+      $ResolvedPath = $Item.FullName
+      if ($PathType -eq 'Leaf' -and -not $Item.PSIsContainer) { return $ResolvedPath }
+      if ($PathType -eq 'Container' -and $Item.PSIsContainer) { return $ResolvedPath }
+      if ($PathType -ne 'Any') { throw "The path is not a $($PathType.ToLowerInvariant()) filesystem item: $Path" }
+    }
+
+    return [IO.Path]::GetFullPath($ResolvedPath)
+  }
+}
+
 function Resolve-SafeExtractionPath {
   <#
   .SYNOPSIS
@@ -244,10 +284,122 @@ function Resolve-SafeExtractionPath {
   if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath.IndexOf([char]0) -ge 0) { throw 'The payload path is empty or invalid.' }
   $Normalized = $RelativePath.Replace('/', [IO.Path]::DirectorySeparatorChar).Replace('\', [IO.Path]::DirectorySeparatorChar)
   if ([IO.Path]::IsPathRooted($Normalized) -or $Normalized -match '^[A-Za-z]:') { throw "The payload path is rooted: $RelativePath" }
-  $Root = [IO.Path]::GetFullPath($DestinationPath).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  # Resolve with PowerShell semantics before using System.IO. The process-wide
+  # .NET current directory can differ from the runspace's current location.
+  $ResolvedDestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  $Root = $ResolvedDestinationPath.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
   $Output = [IO.Path]::GetFullPath([IO.Path]::Combine($Root, $Normalized.TrimStart([IO.Path]::DirectorySeparatorChar)))
   if (-not $Output.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) { throw "The payload path escapes the destination: $RelativePath" }
   return $Output
+}
+
+function Read-InstallerCollisionAction {
+  <#
+  .SYNOPSIS
+    Prompt for or return a concrete extraction collision action
+  .PARAMETER CollisionAction
+    Requested collision behavior. Prompt displays an interactive choice; every
+    other value is returned unchanged for programmatic callers.
+  .PARAMETER Path
+    Optional colliding output path included in the prompt message.
+  #>
+  [OutputType([string])]
+  param (
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt',
+
+    [string]$Path
+  )
+
+  if ($CollisionAction -ne 'Prompt') { return $CollisionAction }
+
+  $Choices = [System.Management.Automation.Host.ChoiceDescription[]]@(
+    [System.Management.Automation.Host.ChoiceDescription]::new('&Error', 'Stop extraction without changing the colliding output.')
+    [System.Management.Automation.Host.ChoiceDescription]::new('&Skip', 'Keep the existing output and skip the new payload.')
+    [System.Management.Automation.Host.ChoiceDescription]::new('&Overwrite', 'Replace the existing output with the new payload.')
+    [System.Management.Automation.Host.ChoiceDescription]::new('&Rename', 'Keep both outputs by adding a numeric suffix to the new payload.')
+  )
+  $Message = if ([string]::IsNullOrWhiteSpace($Path)) {
+    'Choose the behavior to use when an extraction output path collides.'
+  } else {
+    "Choose how to handle the extraction output collision:`n$Path"
+  }
+  try {
+    $Selection = $Host.UI.PromptForChoice('Installer extraction collision', $Message, $Choices, 3)
+  } catch {
+    throw 'The host cannot prompt for an extraction collision action. Specify -CollisionAction explicitly.'
+  }
+  if ($Selection -lt 0 -or $Selection -ge $Choices.Count) {
+    throw 'No extraction collision action was selected.'
+  }
+  return @('Error', 'Skip', 'Overwrite', 'Rename')[$Selection]
+}
+
+function Resolve-InstallerExtractionTarget {
+  <#
+  .SYNOPSIS
+    Resolve a safe output path and apply the selected collision policy
+  .PARAMETER DestinationPath
+    Absolute or PowerShell-relative extraction root.
+  .PARAMETER RelativePath
+    Untrusted payload-relative file path.
+  .PARAMETER CollisionAction
+    Prompt, error, skip, overwrite, or deterministically rename a colliding file.
+  .PARAMETER ReservedPath
+    Optional case-insensitive path set used to reserve outputs before files are written.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [Parameter(Mandatory)][string]$RelativePath,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename',
+    [System.Collections.Generic.ISet[string]]$ReservedPath
+  )
+
+  $OriginalPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
+  $HasCollision = (Test-Path -LiteralPath $OriginalPath) -or ($ReservedPath -and $ReservedPath.Contains($OriginalPath))
+  $OutputPath = $OriginalPath
+  $Disposition = 'Create'
+  $ShouldWrite = $true
+
+  if ($HasCollision) {
+    $CollisionAction = Read-InstallerCollisionAction -CollisionAction $CollisionAction -Path $OriginalPath
+    switch ($CollisionAction) {
+      'Error' { throw "The extraction output already exists: $OriginalPath" }
+      'Skip' {
+        $Disposition = 'Skip'
+        $ShouldWrite = $false
+      }
+      'Overwrite' {
+        if ((Test-Path -LiteralPath $OriginalPath -PathType Container)) {
+          throw "A directory occupies the extraction output path: $OriginalPath"
+        }
+        $Disposition = 'Overwrite'
+      }
+      'Rename' {
+        $Directory = [IO.Path]::GetDirectoryName($OriginalPath)
+        $BaseName = [IO.Path]::GetFileNameWithoutExtension($OriginalPath)
+        $Extension = [IO.Path]::GetExtension($OriginalPath)
+        for ($Index = 1; $Index -le 1000000; $Index++) {
+          $Candidate = Join-Path $Directory ("$BaseName ($Index)$Extension")
+          if (-not (Test-Path -LiteralPath $Candidate) -and (-not $ReservedPath -or -not $ReservedPath.Contains($Candidate))) {
+            $OutputPath = $Candidate
+            $Disposition = 'Rename'
+            break
+          }
+        }
+        if ($OutputPath -eq $OriginalPath) { throw "No collision-free extraction path could be allocated for: $OriginalPath" }
+      }
+    }
+  }
+
+  if ($ShouldWrite -and $ReservedPath) { $null = $ReservedPath.Add($OutputPath) }
+  return [pscustomobject]@{
+    Path         = $OutputPath
+    OriginalPath = $OriginalPath
+    ShouldWrite  = $ShouldWrite
+    Disposition  = $Disposition
+  }
 }
 
 function Test-ExtractionPattern {
@@ -265,4 +417,4 @@ function Test-ExtractionPattern {
   return $NormalizedPath -like $NormalizedPattern -or [IO.Path]::GetFileName($NormalizedPath) -like $NormalizedPattern
 }
 
-Export-ModuleMember -Function Import-BinaryPatternSearch, New-BoundedReadStream, New-InstallerSeekableStream, Read-BinaryBytes, Read-BinaryInteger, Find-BinaryPattern, Copy-BoundedStream, Copy-BinaryStreamRange, Copy-BinaryXorStream, Get-BinaryCrc32, Test-BinarySequence, Resolve-SafeExtractionPath, Test-ExtractionPattern
+Export-ModuleMember -Function Import-BinaryPatternSearch, New-BoundedReadStream, New-InstallerSeekableStream, Read-BinaryBytes, Read-BinaryInteger, Find-BinaryPattern, Copy-BoundedStream, Copy-BinaryStreamRange, Copy-BinaryXorStream, Get-BinaryCrc32, Test-BinarySequence, Resolve-InstallerFileSystemPath, Resolve-SafeExtractionPath, Read-InstallerCollisionAction, Resolve-InstallerExtractionTarget, Test-ExtractionPattern

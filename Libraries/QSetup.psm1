@@ -343,6 +343,8 @@ function Export-QSetupRecord {
     Current structured format node or record being interpreted.
   .PARAMETER DestinationPath
     Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
+  .PARAMETER OutputName
+    Optional output name used after the caller has applied collision handling.
   .PARAMETER MaximumBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
@@ -351,6 +353,7 @@ function Export-QSetupRecord {
     [Parameter(Mandatory)][string]$Path,
     [Parameter(Mandatory)][psobject]$Record,
     [Parameter(Mandatory)][string]$DestinationPath,
+    [string]$OutputName,
     [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes
   )
 
@@ -365,7 +368,8 @@ function Export-QSetupRecord {
       # as the actual file body named by the validated catalog record.
       while ($HeaderLength -lt 4096 -and $PipeCount -lt 3) { $Value = $Decoder.ReadByte(); if ($Value -lt 0) { break }; $HeaderLength++; if ($Value -eq 0x7C) { $PipeCount++ } }
       if ($PipeCount -ne 3) { throw 'The QSetup record header is invalid during extraction' }
-      $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Record.Name
+      $RelativePath = [string]::IsNullOrWhiteSpace($OutputName) ? $Record.Name : $OutputName
+      $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
       $Parent = [IO.Path]::GetDirectoryName($OutputPath)
       if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
       $Output = [IO.File]::Open($OutputPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -389,12 +393,15 @@ function Expand-QSetupInstaller {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
 
@@ -402,16 +409,22 @@ function Expand-QSetupInstaller {
     $Layout = Get-QSetupLayout -Path $Path
     if (-not $Layout.Complete) { throw "The QSetup record table is incomplete: $($Layout.Warnings -join '; ')" }
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-QSetup-$([guid]::NewGuid().ToString('N'))") }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
     $Written = 0L
     $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     # Enforce one aggregate output budget across all selected records, not a new
     # full allowance for each independently compressed member.
     foreach ($Record in $Layout.Records) {
       if (-not (Test-ExtractionPattern -Path $Record.Name -Pattern $Name)) { continue }
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Record.Name `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if (-not $Target.ShouldWrite) { continue }
       $Remaining = $MaximumExpandedBytes - $Written
       if ($Remaining -le 0) { throw 'QSetup extraction exceeds the configured output limit' }
-      $File = Export-QSetupRecord -Path $Path -Record $Record -DestinationPath $DestinationPath -MaximumBytes $Remaining
+      $File = Export-QSetupRecord -Path $Path -Record $Record -DestinationPath ([IO.Path]::GetDirectoryName($Target.Path)) `
+        -OutputName ([IO.Path]::GetFileName($Target.Path)) -MaximumBytes $Remaining
       $Written += $File.Length
       $Result.Add($File)
     }

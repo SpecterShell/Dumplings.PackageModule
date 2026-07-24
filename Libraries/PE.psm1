@@ -353,16 +353,22 @@ function Export-PEResourceData {
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][psobject]$Resource,
     [Parameter(Mandatory)][string]$DestinationPath,
-    [ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes = 1073741824
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes = 1073741824,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename'
   )
   process {
     if ($Resource.Size -gt $MaximumBytes) { throw "The PE resource exceeds the $MaximumBytes-byte output limit." }
-    $Parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($DestinationPath)); if ($Parent) { $null = New-Item $Parent -ItemType Directory -Force }
-    $Output = [IO.File]::Open($DestinationPath, 'Create', 'Write', 'None')
-    $InputStream = if ($Resource.SourceStream) { $Resource.SourceStream } else { [IO.File]::Open($Resource.Path, 'Open', 'Read', 'ReadWrite') }
+    $ResolvedDestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    $Parent = [IO.Path]::GetDirectoryName($ResolvedDestinationPath)
+    $Target = Resolve-InstallerExtractionTarget -DestinationPath $Parent -RelativePath ([IO.Path]::GetFileName($ResolvedDestinationPath)) -CollisionAction $CollisionAction
+    if (-not $Target.ShouldWrite) { return $null }
+    $ResolvedDestinationPath = $Target.Path
+    $Parent = [IO.Path]::GetDirectoryName($ResolvedDestinationPath); if ($Parent) { $null = New-Item $Parent -ItemType Directory -Force }
+    $Output = [IO.File]::Open($ResolvedDestinationPath, 'Create', 'Write', 'None')
+    $InputStream = if ($Resource.SourceStream) { $Resource.SourceStream } else { [IO.File]::Open((Resolve-InstallerFileSystemPath -Path $Resource.Path -PathType Leaf), 'Open', 'Read', 'ReadWrite') }
     try { Copy-BinaryStreamRange -Source $InputStream -Destination $Output -Offset $Resource.Offset -Length $Resource.Size }
     finally { $Output.Dispose(); if (-not $Resource.SourceStream) { $InputStream.Dispose() } }
-    Get-Item -LiteralPath $DestinationPath -Force
+    Get-Item -LiteralPath $ResolvedDestinationPath -Force
   }
 }
 

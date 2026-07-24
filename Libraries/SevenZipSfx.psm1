@@ -240,6 +240,8 @@ function Expand-SevenZipSfx {
     Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
   .PARAMETER Name
     Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
@@ -248,11 +250,13 @@ function Expand-SevenZipSfx {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
 
   process {
     if (-not $DestinationPath) { $DestinationPath = New-TempFolder }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $Info = Get-SevenZipSfxInfo -Path $Path
     $Installer = Get-Item -LiteralPath $Path -Force
     $ArchivePath = New-TempFile
@@ -267,15 +271,9 @@ function Expand-SevenZipSfx {
     try {
       $Archive = Get-InstallerArchive -Path $ArchivePath
       try {
-        # Calculate selected output before writing and resolve each archive name
-        # beneath the caller destination to reject traversal.
-        $Entries = @(Get-InstallerArchiveEntry -Archive $Archive | Where-Object { Test-ExtractionPattern -Path $_.FullName -Pattern $Name })
-        $Total = [long](($Entries | Measure-Object Length -Sum).Sum)
-        if ($Total -gt $MaximumExpandedBytes) { throw 'The selected 7-Zip entries exceed the configured output limit.' }
-        foreach ($Entry in $Entries) {
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
-          (Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes).FullName
-        }
+        $Selection = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $DestinationPath `
+          -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
+        $Selection.Files.FullName
       } finally {
         $Archive.Dispose()
       }

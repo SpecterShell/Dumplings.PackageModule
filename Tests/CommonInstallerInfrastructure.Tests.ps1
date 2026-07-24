@@ -419,6 +419,61 @@ Describe 'Get-PEVersionStringTable' {
 }
 
 Describe 'Shared archive helpers' {
+  It 'resolves relative paths against the PowerShell filesystem location' {
+    $PowerShellRoot = Join-Path $TestDrive 'PowerShellLocation'
+    $null = New-Item -Path $PowerShellRoot -ItemType Directory
+    $SourcePath = Join-Path $PowerShellRoot 'source.bin'
+    [IO.File]::WriteAllBytes($SourcePath, [byte[]](1, 2, 3))
+    $OriginalDotNetDirectory = [Environment]::CurrentDirectory
+    Push-Location $PowerShellRoot
+    try {
+      [Environment]::CurrentDirectory = $Script:TemporaryRoot
+      Resolve-InstallerFileSystemPath -Path '.\source.bin' -PathType Leaf | Should -Be $SourcePath
+      Resolve-InstallerFileSystemPath -Path '.\output' -AllowNonexistent | Should -Be (Join-Path $PowerShellRoot 'output')
+    } finally {
+      [Environment]::CurrentDirectory = $OriginalDotNetDirectory
+      Pop-Location
+    }
+  }
+
+  It 'applies deterministic extraction collision policies' {
+    $OutputRoot = Join-Path $TestDrive 'Collisions'
+    $null = New-Item -Path $OutputRoot -ItemType Directory
+    $ExistingPath = Join-Path $OutputRoot 'payload.txt'
+    [IO.File]::WriteAllText($ExistingPath, 'existing')
+
+    { Resolve-InstallerExtractionTarget -DestinationPath $OutputRoot -RelativePath 'payload.txt' -CollisionAction Error } |
+      Should -Throw '*already exists*'
+    (Resolve-InstallerExtractionTarget -DestinationPath $OutputRoot -RelativePath 'payload.txt' -CollisionAction Skip).ShouldWrite |
+      Should -BeFalse
+    (Resolve-InstallerExtractionTarget -DestinationPath $OutputRoot -RelativePath 'payload.txt' -CollisionAction Overwrite).Path |
+      Should -Be $ExistingPath
+    $Renamed = Resolve-InstallerExtractionTarget -DestinationPath $OutputRoot -RelativePath 'payload.txt' -CollisionAction Rename
+    $Renamed.Path | Should -Be (Join-Path $OutputRoot 'payload (1).txt')
+    $Renamed.Disposition | Should -Be 'Rename'
+
+    $Reserved = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $null = $Reserved.Add((Join-Path $OutputRoot 'new.bin'))
+    (Resolve-InstallerExtractionTarget -DestinationPath $OutputRoot -RelativePath 'new.bin' -CollisionAction Rename -ReservedPath $Reserved).Path |
+      Should -Be (Join-Path $OutputRoot 'new (1).bin')
+  }
+
+  It 'prompts only when the Prompt policy encounters a collision' {
+    $OutputRoot = Join-Path $TestDrive 'PromptCollision'
+    $null = New-Item -Path $OutputRoot -ItemType Directory
+    [IO.File]::WriteAllText((Join-Path $OutputRoot 'payload.txt'), 'existing')
+    Mock Read-InstallerCollisionAction -ModuleName Binary { 'Skip' }
+
+    $Collision = Resolve-InstallerExtractionTarget -DestinationPath $OutputRoot -RelativePath 'payload.txt' -CollisionAction Prompt
+    $Collision.ShouldWrite | Should -BeFalse
+    $Available = Resolve-InstallerExtractionTarget -DestinationPath $OutputRoot -RelativePath 'available.txt' -CollisionAction Prompt
+    $Available.ShouldWrite | Should -BeTrue
+
+    Should -Invoke Read-InstallerCollisionAction -ModuleName Binary -Times 1 -Exactly -ParameterFilter {
+      $CollisionAction -eq 'Prompt' -and $Path -eq (Join-Path $OutputRoot 'payload.txt')
+    }
+  }
+
   It 'decodes a bounded four-stream BCJ2 payload through SharpCompress' {
     $Expected = [byte[]](1, 2, 3, 4, 5, 6)
     $Streams = [System.IO.Stream[]]@(
@@ -450,6 +505,15 @@ Describe 'Shared archive helpers' {
       $Result = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes 1024
       $Result | Should -Exist
       [IO.File]::ReadAllText($Result.FullName) | Should -Be 'shared archive'
+
+      $Renamed = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes 1024 -CollisionAction Rename
+      $Renamed.Name | Should -Be 'source (1).txt'
+      (Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes 1024 -CollisionAction Skip) |
+        Should -BeNullOrEmpty
+      { Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes 1024 -CollisionAction Error } |
+        Should -Throw '*already exists*'
+      (Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes 1024 -CollisionAction Overwrite).FullName |
+        Should -Be $OutputPath
     } finally {
       $Archive.Dispose()
     }

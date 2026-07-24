@@ -35,6 +35,58 @@ function Get-NSISInfo {
   }
 }
 
+function Expand-NSISInstaller {
+  <#
+  .SYNOPSIS
+    Extract selected files from an NSIS installer through the separate GPL parser module
+  .PARAMETER Path
+    The path to the NSIS installer.
+  .PARAMETER DestinationPath
+    The directory where matching files should be written. A temporary directory is used when omitted.
+  .PARAMETER Name
+    A payload path or wildcard pattern. The default selects all compiled File commands.
+  .PARAMETER MaximumExpandedBytes
+    Maximum total bytes written by the GPL parser, including payload aliases.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or multiple File commands resolve to the same path.
+  #>
+  [OutputType([System.IO.FileInfo[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The directory where matching files should be written')]
+    [string]$DestinationPath,
+
+    [Parameter(HelpMessage = 'The payload path or wildcard pattern to extract')]
+    [ValidateNotNullOrEmpty()]
+    [string]$Name = '*',
+
+    [Parameter(HelpMessage = 'The maximum total number of extracted bytes')]
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = 1073741824,
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt'
+  )
+
+  process {
+    # Resolve interactive policy before invoking the JSON bridge, whose standard output is not an interactive console.
+    $CollisionAction = Read-InstallerCollisionAction -CollisionAction $CollisionAction
+    $Arguments = @{
+      Path                 = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+      Name                 = $Name
+      CollisionAction      = $CollisionAction
+      MaximumExpandedBytes = $MaximumExpandedBytes
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
+      $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    }
+    $Result = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.Expand' -Argument $Arguments
+    return Convert-InstallerBridgePathsToFileInfo -Path $Result
+  }
+}
+
 function Get-ElectronBuilderNSISInfo {
   <#
   .SYNOPSIS
@@ -278,4 +330,4 @@ function Read-AdditionalInstallerSwitchesFromNSIS {
   }
 }
 
-Export-ModuleMember -Function Get-NSISInfo, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, ConvertFrom-ElectronBuilderUpdateFeed, ConvertFrom-ElectronBuilderLatestYaml, Read-ProtocolsFromNSIS, Read-FileExtensionsFromNSIS, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS
+Export-ModuleMember -Function Get-NSISInfo, Expand-NSISInstaller, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, ConvertFrom-ElectronBuilderUpdateFeed, ConvertFrom-ElectronBuilderLatestYaml, Read-ProtocolsFromNSIS, Read-FileExtensionsFromNSIS, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS

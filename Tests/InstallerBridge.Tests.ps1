@@ -164,13 +164,29 @@ stagingPercentage: 25
     $Info.DisplayVersion | Should -Be '3.60.0'
   }
 
+  It 'Should return FileInfo objects from the InstallerParsers NSIS extraction bridge' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-bridge-expanded'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'alist-desktop.exe' -MaximumExpandedBytes 33554432 -CollisionAction Rename)
+
+      $Extracted | Should -HaveCount 1
+      $Extracted[0] | Should -BeOfType ([System.IO.FileInfo])
+      $Extracted[0].VersionInfo.FileVersion | Should -Be '3.60.0'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   It 'Should return FileInfo objects from the InstallerParsers Inno extraction bridge' {
     $Fixture = Get-InstallerFixture -Name 'BankLinkBooks.exe' -Url 'https://download.myob.com/BankLinkBooks.exe'
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'myob-bridge-expanded'
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'BK5WIN.EXE'
+      $Extracted = Expand-InnoInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'BK5WIN.EXE' -CollisionAction Rename
 
       $Extracted | Should -HaveCount 1
       $Extracted[0] | Should -BeOfType ([System.IO.FileInfo])
@@ -190,7 +206,7 @@ stagingPercentage: 25
 
   It 'Should reproduce Advanced Installer mixed-platform payload selection' {
     $Archive = Get-InstallerFixture -Name 'AccountResetInstaller.zip' -Url 'https://cjwdev.com/Software/AccountReset/AccountResetInstaller.zip'
-    $ExpandedPath = Expand-TempArchive -Path $Archive -RelativeFilePath 'AccountResetInstaller.exe'
+    $ExpandedPath = Expand-TempArchive -Path $Archive -RelativeFilePath 'AccountResetInstaller.exe' -CollisionAction Rename
 
     try {
       $InstallerPath = Join-Path $ExpandedPath 'AccountResetInstaller.exe'
@@ -278,7 +294,7 @@ stagingPercentage: 25
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Result = Expand-QtInstallerFramework -Path $Fixture -DestinationPath $ExpandedPath -Name '*.rcc'
+      $Result = Expand-QtInstallerFramework -Path $Fixture -DestinationPath $ExpandedPath -Name '*.rcc' -CollisionAction Rename
       $ResourcePath = Join-Path $Result 'metadata\QResources\0.rcc'
 
       $ResourcePath | Should -Exist

@@ -142,6 +142,8 @@ function Expand-PaquetBuilderInstaller {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER ArchiveKind
     Detected format variant controlling version-specific parsing rules.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
@@ -151,12 +153,14 @@ function Expand-PaquetBuilderInstaller {
     [string]$DestinationPath,
     [string]$Name = '*',
     [ValidateSet('Payload', 'Runtime', 'All')][string]$ArchiveKind = 'Payload',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
 
   process {
     $ArchiveData = Get-PaquetBuilderArchiveData -Path $Path
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-PaquetBuilder-$([guid]::NewGuid().ToString('N'))") }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
 
     # Select payload, runtime, or both explicitly so helper binaries are not
@@ -168,6 +172,7 @@ function Expand-PaquetBuilderInstaller {
     }
     $Written = 0L
     $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
     # Keep each archive in its own bounded context and account declared output
     # across all selected archives before resolving traversal-safe paths.
@@ -176,11 +181,15 @@ function Expand-PaquetBuilderInstaller {
       try {
         foreach ($Entry in Get-InstallerArchiveEntry -Archive $Context.Archive) {
           if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
-          $Written += $Entry.Length
-          if ($Written -gt $MaximumExpandedBytes) { throw 'Paquet Builder extraction exceeds the configured output limit' }
           $RelativePath = if ($ArchiveKind -eq 'All') { Join-Path $ArchiveRecord.Kind $Entry.FullName } else { $Entry.FullName }
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
-          $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
+          $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
+            -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+          if (-not $Target.ShouldWrite) { continue }
+          if ($Entry.Length -gt $MaximumExpandedBytes - $Written) { throw 'Paquet Builder extraction exceeds the configured output limit' }
+          $File = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $Target.Path `
+            -MaximumBytes ($MaximumExpandedBytes - $Written) -CollisionAction Overwrite
+          $Written += $File.Length
+          $Result.Add($File)
         }
       } finally { Close-InstallerArchiveRange -Context $Context }
     }

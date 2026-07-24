@@ -884,12 +884,15 @@ function Expand-CreateInstallInstaller {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
 
@@ -898,19 +901,24 @@ function Expand-CreateInstallInstaller {
     $Layout = Get-CreateInstallArchiveLayout -Path $Path
     if ($Layout.PasswordCount -gt 0) { throw 'Password-protected CreateInstall GEA archives are intentionally unsupported' }
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-CreateInstall-$([guid]::NewGuid().ToString('N'))") }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
     $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $ExpandedBytes = 0L
     $SolidHistory = [byte[]]::new(0)
     $PpmdDecoder = $null
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
     # Resolve the complete selection before decoding. The last selected index bounds the work while
     # every earlier entry still advances LZGE or PPMd solid state exactly as Gentee does.
     $SelectedEntries = [bool[]]::new($Layout.Entries.Count)
+    $OutputTargets = [object[]]::new($Layout.Entries.Count)
     $LastSelectedIndex = -1
     for ($EntryIndex = 0; $EntryIndex -lt $Layout.Entries.Count; $EntryIndex++) {
       if (Test-ExtractionPattern -Path $Layout.Entries[$EntryIndex].FullName -Pattern $Name) {
         $SelectedEntries[$EntryIndex] = $true
+        $OutputTargets[$EntryIndex] = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath `
+          -RelativePath $Layout.Entries[$EntryIndex].FullName -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
         $LastSelectedIndex = $EntryIndex
       }
     }
@@ -921,12 +929,12 @@ function Expand-CreateInstallInstaller {
         $Entry = $Layout.Entries[$EntryIndex]
         if ($Entry.PasswordId -gt 0) { throw "The CreateInstall entry '$($Entry.FullName)' is password-protected and cannot be extracted" }
         if (-not $Entry.IsSolid) { $SolidHistory = [byte[]]::new(0) }
-        $Selected = $SelectedEntries[$EntryIndex]
+        $Selected = $SelectedEntries[$EntryIndex] -and $OutputTargets[$EntryIndex].ShouldWrite
         $OutputPath = $null
         if ($Selected) {
           $ExpandedBytes += [long]$Entry.Size
           if ($ExpandedBytes -gt $MaximumExpandedBytes) { throw 'CreateInstall extraction exceeds the configured output limit' }
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
+          $OutputPath = $OutputTargets[$EntryIndex].Path
           $Parent = [IO.Path]::GetDirectoryName($OutputPath)
           if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
           $Output = [IO.File]::Open($OutputPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)

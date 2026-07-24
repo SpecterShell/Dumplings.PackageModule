@@ -159,15 +159,21 @@ function Export-InstallerArchiveEntry {
   param (
     [Parameter(Mandatory)]$Entry,
     [Parameter(Mandatory)][string]$DestinationPath,
-    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes
+    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename'
   )
 
   $Length = if ($Entry.PSObject.Properties.Name -contains 'Length') { [long]$Entry.Length } else { [long]$Entry.Size }
   if ($Length -gt $MaximumBytes) { throw "The archive entry exceeds the $MaximumBytes-byte output limit" }
-  $Parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($DestinationPath))
+  $ResolvedDestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  $Parent = [IO.Path]::GetDirectoryName($ResolvedDestinationPath)
+  $Target = Resolve-InstallerExtractionTarget -DestinationPath $Parent -RelativePath ([IO.Path]::GetFileName($ResolvedDestinationPath)) -CollisionAction $CollisionAction
+  if (-not $Target.ShouldWrite) { return $null }
+  $ResolvedDestinationPath = $Target.Path
+  $Parent = [IO.Path]::GetDirectoryName($ResolvedDestinationPath)
   if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
   $EntryStream = Open-InstallerArchiveEntry -Entry $Entry
-  $Output = [IO.File]::Open($DestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $Output = [IO.File]::Open($ResolvedDestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
   try {
     $CopyArguments = @{ Source = $EntryStream; Destination = $Output; MaximumBytes = $MaximumBytes }
     if ($Length -ge 0) { $CopyArguments.ExpectedBytes = $Length }
@@ -176,7 +182,7 @@ function Export-InstallerArchiveEntry {
     $Output.Dispose()
     $EntryStream.Dispose()
   }
-  return Get-Item -LiteralPath $DestinationPath
+  return Get-Item -LiteralPath $ResolvedDestinationPath
 }
 
 function Export-InstallerArchiveSelection {
@@ -188,23 +194,24 @@ function Export-InstallerArchiveSelection {
     [Parameter(Mandatory)]$Archive,
     [Parameter(Mandatory)][string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 2147483648,
     [ValidateRange(1, [int]::MaxValue)][int]$MaximumEntries = 65536
   )
   $Files = [Collections.Generic.List[IO.FileInfo]]::new()
-  $Seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $ExpandedBytes = 0L
   $EntryCount = 0
   foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
     if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
     if (++$EntryCount -gt $MaximumEntries) { throw "The archive selection exceeds the $MaximumEntries-entry limit." }
     if (-not [string]::IsNullOrWhiteSpace($Entry.LinkTarget)) { throw "Archive links are not extracted: $($Entry.FullName)" }
-    $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
-    if (-not $Seen.Add($OutputPath)) { throw "The archive contains a duplicate output path: $($Entry.FullName)" }
-    if (Test-Path -LiteralPath $OutputPath) { throw "The archive output already exists: $OutputPath" }
+    $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.FullName -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+    if (-not $Target.ShouldWrite) { continue }
     $Remaining = $MaximumExpandedBytes - $ExpandedBytes
     if ($Remaining -le 0 -or $Entry.Length -gt $Remaining) { throw "The archive selection exceeds the $MaximumExpandedBytes-byte output limit." }
-    $File = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $Remaining
+    $File = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $Target.Path -MaximumBytes $Remaining -CollisionAction Overwrite
     $ExpandedBytes += $File.Length
     $Files.Add($File)
   }
@@ -221,15 +228,22 @@ function Export-InstallerArchiveRange {
     [Parameter(Mandatory)][string]$Path,
     [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Offset,
     [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$Length,
-    [Parameter(Mandatory)][string]$DestinationPath
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename'
   )
 
-  $Parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($DestinationPath))
+  $SourcePath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $ResolvedDestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  $Parent = [IO.Path]::GetDirectoryName($ResolvedDestinationPath)
+  $Target = Resolve-InstallerExtractionTarget -DestinationPath $Parent -RelativePath ([IO.Path]::GetFileName($ResolvedDestinationPath)) -CollisionAction $CollisionAction
+  if (-not $Target.ShouldWrite) { return $null }
+  $ResolvedDestinationPath = $Target.Path
+  $Parent = [IO.Path]::GetDirectoryName($ResolvedDestinationPath)
   if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
-  $Source = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-  $Destination = [IO.File]::Open($DestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $Source = [IO.File]::Open($SourcePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  $Destination = [IO.File]::Open($ResolvedDestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
   try { Copy-BinaryStreamRange -Source $Source -Destination $Destination -Offset $Offset -Length $Length } finally { $Destination.Dispose(); $Source.Dispose() }
-  return Get-Item -LiteralPath $DestinationPath -Force
+  return Get-Item -LiteralPath $ResolvedDestinationPath -Force
 }
 
 function Get-EmbeddedZipArchiveRange {

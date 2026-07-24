@@ -280,7 +280,7 @@ Describe 'install4j parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Result = Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'i4jparams.conf'
+      $Result = Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'i4jparams.conf' -CollisionAction Rename
       $ConfigPath = Join-Path $Result 'i4jparams.conf'
 
       $ConfigPath | Should -Exist
@@ -298,7 +298,7 @@ Describe 'install4j parser' {
     Remove-Item -Path $EscapedPath -Force -ErrorAction SilentlyContinue
 
     try {
-      { Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name '*' } | Should -Throw '*escapes the destination*'
+      { Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name '*' -CollisionAction Rename } | Should -Throw '*escapes the destination*'
       $EscapedPath | Should -Not -Exist
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -330,7 +330,7 @@ Describe 'install4j parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Result = Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'i4jparams.conf'
+      $Result = Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'i4jparams.conf' -CollisionAction Rename
       $ConfigText = Get-Content -LiteralPath (Join-Path $Result 'i4jparams.conf') -Raw
 
       $ConfigText | Should -BeLike '*applicationId="8611-7263-0882-4541"*'
@@ -346,7 +346,7 @@ Describe 'install4j parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      $Result = Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'README.txt'
+      $Result = Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'README.txt' -CollisionAction Rename
       $ReadmePath = Join-Path $Result 'README.txt'
 
       $ReadmePath | Should -Exist
@@ -366,7 +366,7 @@ Describe 'install4j parser' {
     Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
 
     try {
-      { Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'README.txt' -MaximumExpandedBytes 1048576 } | Should -Throw '*exceeding the 1048576-byte limit*'
+      { Expand-Install4jInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'README.txt' -MaximumExpandedBytes 1048576 -CollisionAction Rename } | Should -Throw '*exceeding the 1048576-byte limit*'
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }

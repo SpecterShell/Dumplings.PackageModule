@@ -163,6 +163,10 @@ function Expand-AdvancedInstaller {
     The parsed Advanced Installer metadata object
   .PARAMETER DestinationPath
     The destination directory for the extracted payloads
+  .PARAMETER Name
+    Optional wildcard selecting payload paths or file names. All payloads are extracted when omitted.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or multiple payloads resolve to the same path.
   #>
   [OutputType([string])]
   param (
@@ -173,20 +177,32 @@ function Expand-AdvancedInstaller {
     [psobject]$Installer,
 
     [Parameter(HelpMessage = 'The destination directory for the extracted payloads')]
-    [string]$DestinationPath
+    [string]$DestinationPath,
+
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt'
   )
 
   process {
+    # Resolve interactive policy in the parent host before the bridge redirects child-process output as JSON.
+    $CollisionAction = Read-InstallerCollisionAction -CollisionAction $CollisionAction
     $InstallerPath = switch ($PSCmdlet.ParameterSetName) {
-      'Path' { (Get-Item -Path $Path -Force).FullName }
-      'Installer' { (Get-Item -Path $Installer.Path -Force).FullName }
+      'Path' { Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf }
+      'Installer' { Resolve-InstallerFileSystemPath -Path $Installer.Path -PathType Leaf }
       default { throw 'Invalid parameter set.' }
     }
 
-    return Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'AdvancedInstaller.Expand' -Argument @{
+    $Arguments = @{
       Path            = $InstallerPath
-      DestinationPath = $DestinationPath
+      Name            = $Name
+      CollisionAction = $CollisionAction
     }
+    if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
+      $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    }
+    return Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'AdvancedInstaller.Expand' -Argument $Arguments
   }
 }
 
@@ -230,7 +246,7 @@ function Get-AdvancedInstallerMsiInfo {
     $ExpandedPath = New-TempFolder
 
     try {
-      Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath | Out-Null
+      Expand-AdvancedInstaller -Installer $Installer -DestinationPath $ExpandedPath -CollisionAction Rename | Out-Null
       $MsiFiles = @(Get-ChildItem -Path $ExpandedPath -Filter '*.msi' -Recurse -File | Sort-Object -Property FullName)
       $MsiFile = Resolve-AdvancedInstallerMsiFile -Installer $Installer -Item $MsiFiles -ExtractionPath $ExpandedPath -Pattern $Name -Architecture $Architecture -NameWasSpecified $NameWasSpecified
       $MsiInfo = Get-MsiInstallerInfo -Path $MsiFile.FullName

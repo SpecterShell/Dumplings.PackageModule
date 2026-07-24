@@ -156,6 +156,8 @@ function Expand-ActualInstallerInstaller {
     Extraction root. Relative payload paths are resolved beneath this directory and cannot escape it.
   .PARAMETER Name
     Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   .PARAMETER MaximumExpandedBytes
     Maximum cumulative extracted output, in bytes; exceeding it rejects the installer.
   #>
@@ -164,6 +166,7 @@ function Expand-ActualInstallerInstaller {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
   process {
@@ -171,20 +174,12 @@ function Expand-ActualInstallerInstaller {
     $Context = Open-InstallerArchiveRange -Path $ArchiveData.SourcePath -Range $ArchiveData.Range
     try {
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-ActualInstaller-$([guid]::NewGuid().ToString('N'))") }
+      $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
       $null = New-Item -Path $DestinationPath -ItemType Directory -Force
-      $Archive = $Context.Archive
-      $Written = 0L; $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-
-      # Filter against catalog names before extraction, account declared output
-      # cumulatively, and resolve every result beneath the destination root.
-      foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
-        if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
-        $Written += $Entry.Length
-        if ($Written -gt $MaximumExpandedBytes) { throw 'Actual Installer extraction exceeds the configured output limit' }
-        $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath (Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName) -MaximumBytes $MaximumExpandedBytes))
-      }
-      if ($Result.Count -eq 0) { throw "No Actual Installer files matched '$Name'" }
-      return $Result.ToArray()
+      $Selection = Export-InstallerArchiveSelection -Archive $Context.Archive -DestinationPath $DestinationPath `
+        -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
+      if ($Selection.Files.Count -eq 0) { throw "No Actual Installer files matched '$Name'" }
+      return $Selection.Files
     } finally { Close-InstallerArchiveRange -Context $Context }
   }
 }

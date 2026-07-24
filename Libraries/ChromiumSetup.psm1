@@ -399,13 +399,13 @@ function Export-ChromiumMiniInstallerSetupFromContext {
   # Chromium's stub selects one setup representation by resource precedence. Decode only that
   # representation so metadata inspection follows the same payload that the stub would execute.
   if ($Evidence.Type -eq 'BN') {
-    return Export-PEResourceData -Resource $Evidence.Resource -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes
+    return Export-PEResourceData -Resource $Evidence.Resource -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes -CollisionAction Overwrite
   }
   if ($Evidence.Type -eq 'BL') {
     $CabinetPath = New-TempFile
     try {
-      $null = Export-PEResourceData -Resource $Evidence.Resource -DestinationPath $CabinetPath -MaximumBytes $Script:ChromiumMaximumResourceBytes
-      $Files = @(Export-CabinetEntry -Path $CabinetPath -DestinationPath $DestinationPath -Name 'setup.exe' -MaximumExpandedBytes $MaximumExpandedBytes)
+      $null = Export-PEResourceData -Resource $Evidence.Resource -DestinationPath $CabinetPath -MaximumBytes $Script:ChromiumMaximumResourceBytes -CollisionAction Overwrite
+      $Files = @(Export-CabinetEntry -Path $CabinetPath -DestinationPath $DestinationPath -Name 'setup.exe' -CollisionAction Overwrite -MaximumExpandedBytes $MaximumExpandedBytes)
       if ($Files.Count -ne 1) { throw 'The selected Chromium BL resource does not contain exactly one setup.exe.' }
       return Get-Item -LiteralPath $Files[0] -Force
     } finally {
@@ -1607,6 +1607,8 @@ function Open-ChromiumOmahaArchive {
     Validated PE resource evidence with file-relative offsets and bounded lengths.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -1735,12 +1737,13 @@ function Expand-ChromiumOmahaPayload {
     [Parameter(Mandatory)][psobject]$Resource,
     [Parameter(Mandatory)][string]$DestinationPath,
     [Parameter(Mandatory)][string]$Name,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename',
     [Parameter(Mandatory)][long]$MaximumExpandedBytes
   )
 
   $Context = Open-ChromiumOmahaArchive -Resource $Resource -MaximumExpandedBytes $MaximumExpandedBytes
   try {
-    $Selection = Export-InstallerArchiveSelection -Archive $Context.Archive -DestinationPath $DestinationPath -Name $Name -MaximumExpandedBytes $MaximumExpandedBytes
+    $Selection = Export-InstallerArchiveSelection -Archive $Context.Archive -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
     return $Selection.Files
   } finally { Close-ChromiumOmahaArchive -Context $Context }
 }
@@ -1757,12 +1760,15 @@ function Expand-ChromiumSetupInstaller {
     A wildcard matching full payload paths or file names
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 4294967296
   )
 
@@ -1770,30 +1776,33 @@ function Expand-ChromiumSetupInstaller {
     $Context = Open-ChromiumSetupContext -Path $Path
     try {
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = New-TempFolder }
+      $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
       $null = New-Item -Path $DestinationPath -ItemType Directory -Force
       $Results = [Collections.Generic.List[System.IO.FileInfo]]::new(); $Expanded = 0L
+      $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
       # Each variant has a distinct physical encoding path: raw resources, CAB/LZMA resources,
       # ordinary 7z archives, or Omaha's LZMA+BCJ2+TAR stack.
       foreach ($Evidence in $Context.Evidence.SelectedResources) {
         $Resource = $Evidence.Resource
         if ($Context.Evidence.Variant -eq 'Omaha') {
-          foreach ($Result in (Expand-ChromiumOmahaPayload -Resource $Resource -DestinationPath $DestinationPath -Name $Name -MaximumExpandedBytes $MaximumExpandedBytes)) { $Results.Add($Result) }
+          foreach ($Result in (Expand-ChromiumOmahaPayload -Resource $Resource -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes)) { $Results.Add($Result) }
           continue
         }
         if ($Evidence.Type -eq 'BN' -or $Evidence.Type -eq 'BD') {
           if (-not (Test-ExtractionPattern -Path $Evidence.Name -Pattern $Name)) { continue }
+          $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Evidence.Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+          if (-not $Target.ShouldWrite) { continue }
           $Expanded += $Evidence.Size
           if ($Expanded -gt $MaximumExpandedBytes) { throw 'Chromium resource extraction exceeds the configured output limit.' }
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Evidence.Name
-          $Results.Add((Export-PEResourceData -Resource $Resource -DestinationPath $OutputPath -MaximumBytes ($MaximumExpandedBytes - $Expanded + $Evidence.Size)))
+          $Results.Add((Export-PEResourceData -Resource $Resource -DestinationPath $Target.Path -MaximumBytes ($MaximumExpandedBytes - $Expanded + $Evidence.Size) -CollisionAction Overwrite))
           continue
         }
         if ($Evidence.Type -eq 'BL') {
           # BL setup.ex_ resources are cabinet streams rather than 7z archives.
           $TemporaryPath = New-TempFile
           try {
-            $null = Export-PEResourceData -Resource $Resource -DestinationPath $TemporaryPath -MaximumBytes $Script:ChromiumMaximumResourceBytes
-            foreach ($Result in (Export-CabinetEntry -Path $TemporaryPath -DestinationPath $DestinationPath -Name $Name -MaximumExpandedBytes ($MaximumExpandedBytes - $Expanded))) {
+            $null = Export-PEResourceData -Resource $Resource -DestinationPath $TemporaryPath -MaximumBytes $Script:ChromiumMaximumResourceBytes -CollisionAction Overwrite
+            foreach ($Result in (Export-CabinetEntry -Path $TemporaryPath -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes ($MaximumExpandedBytes - $Expanded))) {
               $File = Get-Item -LiteralPath $Result -Force
               $Expanded += $File.Length
               $Results.Add($File)
@@ -1820,10 +1829,11 @@ function Expand-ChromiumSetupInstaller {
                 $NestedArchive = Get-InstallerArchive -Stream $NestedContext.Stream
                 foreach ($NestedEntry in (Get-InstallerArchiveEntry -Archive $NestedArchive)) {
                   if (-not (Test-ExtractionPattern -Path $NestedEntry.FullName -Pattern $Name)) { continue }
+                  $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $NestedEntry.FullName -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+                  if (-not $Target.ShouldWrite) { continue }
                   $Expanded += $NestedEntry.Length
                   if ($Expanded -gt $MaximumExpandedBytes) { throw 'Chromium updater archive extraction exceeds the configured output limit.' }
-                  $NestedOutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $NestedEntry.FullName
-                  $Results.Add((Export-InstallerArchiveEntry -Entry $NestedEntry -DestinationPath $NestedOutputPath -MaximumBytes ($MaximumExpandedBytes - $Expanded + $NestedEntry.Length)))
+                  $Results.Add((Export-InstallerArchiveEntry -Entry $NestedEntry -DestinationPath $Target.Path -MaximumBytes ($MaximumExpandedBytes - $Expanded + $NestedEntry.Length) -CollisionAction Overwrite))
                 }
               } finally {
                 if ($NestedArchive) { $NestedArchive.Dispose() }
@@ -1832,10 +1842,11 @@ function Expand-ChromiumSetupInstaller {
               }
             }
             if (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name) {
+              $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.FullName -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+              if (-not $Target.ShouldWrite) { continue }
               $Expanded += $Entry.Length
               if ($Expanded -gt $MaximumExpandedBytes) { throw 'Chromium archive extraction exceeds the configured output limit.' }
-              $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
-              $Results.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes ($MaximumExpandedBytes - $Expanded + $Entry.Length)))
+              $Results.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $Target.Path -MaximumBytes ($MaximumExpandedBytes - $Expanded + $Entry.Length) -CollisionAction Overwrite))
             }
           }
         } finally {

@@ -472,20 +472,25 @@ function Expand-InstallMateInstaller {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
   process {
     $File = Get-Item -LiteralPath $Path -Force
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallMate-$([guid]::NewGuid().ToString('N'))") }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
     $ArchiveInfo = Get-InstallMateArchiveInfo -Path $File.FullName
     $Context = Open-InstallMateDecoderContext -Path $File.FullName -ArchiveInfo $ArchiveInfo
     $Results = [Collections.Generic.List[object]]::new()
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     try {
       # Decode the catalog once, then match sequential tzf3 payload segments by
       # their structured type and uncompressed size rather than physical names.
@@ -514,14 +519,18 @@ function Expand-InstallMateInstaller {
         $IsSelected = $null -ne $Record -and (Test-ExtractionPattern -Path "Payload/$($Record.Key)/$($Record.FileName)" -Pattern $Name)
         if ($IsSelected) {
           $RelativePath = "Payload/$($Record.Key)/$($Record.FileName)"
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
-          $Parent = [IO.Path]::GetDirectoryName($OutputPath)
-          if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
-          if (Test-Path -LiteralPath $OutputPath) { throw "The InstallMate payload contains a duplicate output path: $RelativePath" }
-          $Output = [IO.File]::Open($OutputPath, 'CreateNew', 'Write', 'None')
-          try { $null = Copy-BoundedStream -Source $Context.Decoder -Destination $Output -MaximumBytes ([long]$SegmentLength) -ExpectedBytes ([long]$SegmentLength) }
-          finally { $Output.Dispose() }
-          $Results.Add((Get-Item -LiteralPath $OutputPath -Force))
+          $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
+            -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+          if ($Target.ShouldWrite) {
+            $Parent = [IO.Path]::GetDirectoryName($Target.Path)
+            if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
+            $Output = [IO.File]::Open($Target.Path, 'Create', 'Write', 'None')
+            try { $null = Copy-BoundedStream -Source $Context.Decoder -Destination $Output -MaximumBytes ([long]$SegmentLength) -ExpectedBytes ([long]$SegmentLength) }
+            finally { $Output.Dispose() }
+            $Results.Add((Get-Item -LiteralPath $Target.Path -Force))
+          } else {
+            $null = Copy-BoundedStream -Source $Context.Decoder -Destination ([IO.Stream]::Null) -MaximumBytes ([long]$SegmentLength) -ExpectedBytes ([long]$SegmentLength)
+          }
           $RemainingSelected--
         } else {
           $null = Copy-BoundedStream -Source $Context.Decoder -Destination ([IO.Stream]::Null) -MaximumBytes ([long]$SegmentLength) -ExpectedBytes ([long]$SegmentLength)

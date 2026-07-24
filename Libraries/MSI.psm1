@@ -49,28 +49,60 @@ function Expand-Msp {
     The path to the MSP file
   .PARAMETER Database
     The patch package database object
+  .PARAMETER DestinationPath
+    Optional output directory. Temporary files are used when omitted.
+  .PARAMETER Name
+    Optional wildcard selecting transform names. All transforms are extracted when omitted.
+  .PARAMETER CollisionAction
+    Behavior when a destination transform path already exists.
   #>
   param (
     [Parameter(ParameterSetName = 'Path', Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the MSP file')]
     [string]$Path,
 
     [Parameter(ParameterSetName = 'Database', Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The patch package database object')]
-    [Microsoft.Deployment.WindowsInstaller.Package.PatchPackage]$Database
+    [Microsoft.Deployment.WindowsInstaller.Package.PatchPackage]$Database,
+
+    [string]$DestinationPath,
+
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt'
   )
 
   process {
     $Database = switch ($PSCmdlet.ParameterSetName) {
-      'Path' { [Microsoft.Deployment.WindowsInstaller.Package.PatchPackage]::new((Convert-Path -Path $Path)) }
+      'Path' { [Microsoft.Deployment.WindowsInstaller.Package.PatchPackage]::new((Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf)) }
       'Database' { $Database }
       default { throw 'Invalid parameter set.' }
     }
 
     try {
-      $Transforms = $Database.GetTransforms()
+      $Transforms = @($Database.GetTransforms())
+      $OutputRoot = if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $null } else {
+        Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+      }
+      if ($OutputRoot) { $null = New-Item -Path $OutputRoot -ItemType Directory -Force }
+      $TemporaryOutputRoot = if ($OutputRoot) { $null } else { New-TempFolder }
+      $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      $Index = 0
       foreach ($Transform in $Transforms) {
-        $File = New-TempFile
+        $Index++
+        if (-not (Test-ExtractionPattern -Path ([string]$Transform) -Pattern $Name)) { continue }
+        if ($OutputRoot) {
+          $LeafName = [IO.Path]::GetFileName([string]$Transform)
+          if ([string]::IsNullOrWhiteSpace($LeafName)) { $LeafName = "Transform$Index.mst" }
+          if ([IO.Path]::GetExtension($LeafName) -ine '.mst') { $LeafName += '.mst' }
+          $Target = Resolve-InstallerExtractionTarget -DestinationPath $OutputRoot -RelativePath $LeafName `
+            -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+          if (-not $Target.ShouldWrite) { continue }
+          $File = $Target.Path
+        } else {
+          $File = Join-Path $TemporaryOutputRoot "Transform$Index.mst"
+        }
         $Database.ExtractTransform($Transform, $File)
-        Write-Output -InputObject $File
+        Write-Output -InputObject (Resolve-InstallerFileSystemPath -Path $File -PathType Leaf)
       }
     } finally {
       switch ($PSCmdlet.ParameterSetName) {
@@ -148,7 +180,7 @@ function Read-MsiProperty {
     # Apply the patch if specified
     if ($PatchPath) {
       $PatchPath = Convert-Path -Path $PatchPath
-      $TransformPaths = Expand-Msp -Path $PatchPath
+      $TransformPaths = Expand-Msp -Path $PatchPath -CollisionAction Rename
       foreach ($TransformPath in $TransformPaths) {
         $Database.ApplyTransform($TransformPath)
         Remove-Item -Path $TransformPath -Force -ErrorAction SilentlyContinue
@@ -679,7 +711,7 @@ function Get-MsiAppsAndFeaturesInfo {
 
       if ($PatchPath) {
         $PatchPath = Convert-Path -Path $PatchPath
-        $TransformPaths = Expand-Msp -Path $PatchPath
+        $TransformPaths = Expand-Msp -Path $PatchPath -CollisionAction Rename
         foreach ($ExtractedTransformPath in $TransformPaths) {
           $Database.ApplyTransform($ExtractedTransformPath)
           Remove-Item -Path $ExtractedTransformPath -Force -ErrorAction SilentlyContinue
@@ -945,7 +977,7 @@ function Get-MsiInstallerInfo {
 
       if ($PatchPath) {
         $PatchPath = Convert-Path -Path $PatchPath
-        $TransformPaths = Expand-Msp -Path $PatchPath
+        $TransformPaths = Expand-Msp -Path $PatchPath -CollisionAction Rename
         foreach ($ExtractedTransformPath in $TransformPaths) {
           $Database.ApplyTransform($ExtractedTransformPath)
           Remove-Item -Path $ExtractedTransformPath -Force -ErrorAction SilentlyContinue
@@ -1495,7 +1527,7 @@ function Test-WiXInstaller {
 
       if ($PatchPath) {
         $PatchPath = Convert-Path -Path $PatchPath
-        $TransformPaths = Expand-Msp -Path $PatchPath
+        $TransformPaths = Expand-Msp -Path $PatchPath -CollisionAction Rename
         foreach ($TransformPath in $TransformPaths) {
           $Database.ApplyTransform($TransformPath)
           Remove-Item -Path $TransformPath -Force -ErrorAction SilentlyContinue

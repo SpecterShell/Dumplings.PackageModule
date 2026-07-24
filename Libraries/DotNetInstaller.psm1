@@ -228,7 +228,7 @@ function Get-DotNetInstallerInfo {
       # safe temporary names prevent a resource name from escaping the staging root.
       foreach ($Resource in @($CabinetResources | Sort-Object Offset)) {
         $CabinetPath = Resolve-SafeExtractionPath -DestinationPath $CabinetFolder -RelativePath $Resource.Name
-        $null = Export-PEResourceData -Resource $Resource -DestinationPath $CabinetPath -MaximumBytes 1073741824
+        $null = Export-PEResourceData -Resource $Resource -DestinationPath $CabinetPath -MaximumBytes 1073741824 -CollisionAction Error
         $CabinetPaths.Add($CabinetPath)
         $Cabinets.Add([pscustomobject]@{
             ResourceName = $Resource.Name
@@ -299,16 +299,20 @@ function Expand-DotNetInstaller {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([string[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 4294967296
   )
   process {
     if (-not $DestinationPath) { $DestinationPath = New-TempFolder }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $Resources = @(Get-PEResourceInfo -Path (Get-Item -LiteralPath $Path -Force).FullName | Where-Object { $_.TypeName -eq 'RES_CAB' })
     if ($Resources.Count -eq 0) { throw 'The dotNetInstaller RES_CAB resources were not found.' }
     $CabinetFolder = New-TempFolder
@@ -319,10 +323,10 @@ function Expand-DotNetInstaller {
       # command, then delegate bounded selection/extraction to the CAB helper.
       foreach ($Resource in @($Resources | Sort-Object Offset)) {
         $CabinetPath = Resolve-SafeExtractionPath -DestinationPath $CabinetFolder -RelativePath $Resource.Name
-        $null = Export-PEResourceData -Resource $Resource -DestinationPath $CabinetPath -MaximumBytes 1073741824
+        $null = Export-PEResourceData -Resource $Resource -DestinationPath $CabinetPath -MaximumBytes 1073741824 -CollisionAction Error
         $CabinetPaths.Add($CabinetPath)
       }
-      Export-CabinetEntry -Path $CabinetPaths -DestinationPath $DestinationPath -Name $Name -MaximumExpandedBytes $MaximumExpandedBytes
+      Export-CabinetEntry -Path $CabinetPaths -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
     } finally {
       Remove-Item -LiteralPath $CabinetFolder -Recurse -Force -ErrorAction SilentlyContinue
     }

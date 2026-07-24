@@ -79,7 +79,7 @@ function Get-IExpressInfo {
     foreach ($CabinetResource in $CabinetResources) {
       $CabinetPath = New-TempFile
       try {
-        $null = Export-PEResourceData -Resource $CabinetResource -DestinationPath $CabinetPath -MaximumBytes 1073741824
+        $null = Export-PEResourceData -Resource $CabinetResource -DestinationPath $CabinetPath -MaximumBytes 1073741824 -CollisionAction Overwrite
         $Entries = @(Get-CabinetEntry -Path $CabinetPath)
         foreach ($Entry in $Entries) { $NestedFiles.Add($Entry.FullName) }
         $CabinetEvidence.Add([pscustomobject]@{
@@ -150,16 +150,20 @@ function Expand-IExpressInstaller {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([string[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 4294967296
   )
   process {
     if (-not $DestinationPath) { $DestinationPath = New-TempFolder }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $Resources = @(Get-PEResourceInfo -Path (Get-Item -LiteralPath $Path -Force).FullName)
     $CabinetResources = @($Resources | Where-Object { $_.Name -and $_.Name.ToUpperInvariant() -like 'CABINET*' })
     if ($CabinetResources.Count -eq 0) { throw 'The IExpress cabinet resource was not found.' }
@@ -169,8 +173,8 @@ function Expand-IExpressInstaller {
     foreach ($CabinetResource in $CabinetResources) {
       $CabinetPath = New-TempFile
       try {
-        $null = Export-PEResourceData -Resource $CabinetResource -DestinationPath $CabinetPath -MaximumBytes 1073741824
-        Export-CabinetEntry -Path $CabinetPath -DestinationPath $DestinationPath -Name $Name -MaximumExpandedBytes $MaximumExpandedBytes
+        $null = Export-PEResourceData -Resource $CabinetResource -DestinationPath $CabinetPath -MaximumBytes 1073741824 -CollisionAction Overwrite
+        Export-CabinetEntry -Path $CabinetPath -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
       } finally {
         Remove-Item -LiteralPath $CabinetPath -Force -ErrorAction SilentlyContinue
       }

@@ -567,8 +567,12 @@ function Expand-TempArchive {
     Extract files from the given ZIP archive to a temporary folder and return the path of the destination folder
   .PARAMETER Path
     The path of the ZIP archive to be extracted
-  .PARAMETER RelativeFilePath
-    The exact relative path of one archive entry to extract. If omitted, all entries are extracted.
+  .PARAMETER Name
+    Optional wildcard selecting archive paths or file names. All entries are extracted when omitted.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or multiple entries resolve to the same path.
+  .PARAMETER MaximumExpandedBytes
+    Maximum aggregate number of bytes written from the archive.
   .OUTPUTS
     The path of the destination folder
   #>
@@ -577,38 +581,33 @@ function Expand-TempArchive {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the ZIP archive')]
     [string]$Path,
 
-    [Parameter(HelpMessage = 'The exact relative path of one archive entry to extract')]
-    [string]$RelativeFilePath
+    [Alias('RelativeFilePath')]
+    [Parameter(HelpMessage = 'The wildcard selecting archive entries to extract')]
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt',
+
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = 2147483648
   )
 
   process {
     $TempFolderPath = New-TempFolder
     try {
-      $ArchivePath = (Get-Item -LiteralPath $Path -Force).FullName
-      if ([string]::IsNullOrWhiteSpace($RelativeFilePath)) {
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $TempFolderPath)
-      } else {
-        $NormalizedRelativeFilePath = $RelativeFilePath.Replace('\', '/').TrimStart('/')
-        $Archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
-        try {
-          $MatchingEntry = $Archive.GetEntry($NormalizedRelativeFilePath)
-          if (-not $MatchingEntry) {
-            $MatchingEntries = @($Archive.Entries | Where-Object {
-                -not [string]::IsNullOrEmpty($_.Name) -and
-                $_.FullName.Replace('\', '/').TrimStart('/').Equals($NormalizedRelativeFilePath, [StringComparison]::OrdinalIgnoreCase)
-              })
-            if ($MatchingEntries.Count -eq 0) { throw "The ZIP archive does not contain the requested entry: $RelativeFilePath" }
-            if ($MatchingEntries.Count -gt 1) { throw "The ZIP archive contains multiple entries matching: $RelativeFilePath" }
-            $MatchingEntry = $MatchingEntries[0]
-          }
-
-          $OutputPath = Resolve-SafeExtractionPath -DestinationPath $TempFolderPath -RelativePath $RelativeFilePath
-          $OutputDirectory = [IO.Path]::GetDirectoryName($OutputPath)
-          if ($OutputDirectory) { $null = New-Item -Path $OutputDirectory -ItemType Directory -Force }
-          [System.IO.Compression.ZipFileExtensions]::ExtractToFile($MatchingEntry, $OutputPath, $false)
-        } finally {
-          $Archive.Dispose()
+      $ArchivePath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+      $Archive = Get-InstallerArchive -Path $ArchivePath
+      try {
+        # Route ZIP extraction through the shared bounded archive layer so large
+        # archives are streamed and every selected path receives the same
+        # traversal, collision, and aggregate-output handling as installers.
+        $Result = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $TempFolderPath -Name $Name `
+          -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
+        if ($Name -ne '*' -and $Result.EntryCount -eq 0) {
+          throw "The ZIP archive does not contain an entry matching: $Name"
         }
+      } finally {
+        $Archive.Dispose()
       }
       return $TempFolderPath
     } catch {

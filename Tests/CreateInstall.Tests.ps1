@@ -75,7 +75,7 @@ Describe 'CreateInstall static parser' {
       Mock Get-PEOverlayOffset { 512 }
       Mock Get-PERequestedExecutionLevel { 'requireAdministrator' }
       $Info = Get-CreateInstallInfo -Path $FixturePath
-      $Files = @(Expand-CreateInstallInstaller -Path $FixturePath -DestinationPath $DestinationPath)
+      $Files = @(Expand-CreateInstallInstaller -Path $FixturePath -DestinationPath $DestinationPath -CollisionAction Rename)
 
       $Info.GEA.MajorVersion | Should -Be 2
       $Info.GEA.EntryCount | Should -Be 1
@@ -135,7 +135,7 @@ Describe 'CreateInstall static parser' {
     $DestinationPath = Join-Path $Script:FixtureDirectory 'createinstall-ppmd-expanded'
     Remove-Item -LiteralPath $DestinationPath -Recurse -Force -ErrorAction SilentlyContinue
 
-    $Wave = @(Expand-CreateInstallInstaller -Path $FixturePath -DestinationPath $DestinationPath -Name 'clipboard.wav')
+    $Wave = @(Expand-CreateInstallInstaller -Path $FixturePath -DestinationPath $DestinationPath -Name 'clipboard.wav' -CollisionAction Rename)
     $Wave.Length | Should -Be 1
     $Wave[0].Length | Should -Be 10328
     (Get-FileHash -LiteralPath $Wave[0].FullName -Algorithm SHA256).Hash |
@@ -143,7 +143,7 @@ Describe 'CreateInstall static parser' {
 
     # This executable spans one model-initializing block and six order-1 continuation blocks,
     # exercising allocator exhaustion and the source-matched glue pass.
-    $Executable = @(Expand-CreateInstallInstaller -Path $FixturePath -DestinationPath $DestinationPath -Name 'balabolka.exe')
+    $Executable = @(Expand-CreateInstallInstaller -Path $FixturePath -DestinationPath $DestinationPath -Name 'balabolka.exe' -CollisionAction Rename)
     $Executable.Length | Should -Be 1
     $Executable[0].Length | Should -Be 12807680
     (Get-FileHash -LiteralPath $Executable[0].FullName -Algorithm SHA256).Hash |

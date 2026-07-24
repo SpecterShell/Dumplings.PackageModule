@@ -472,17 +472,21 @@ function Expand-ZeroInstallInstaller {
     Wildcard matched against normalized relative resource paths.
   .PARAMETER MaximumExpandedBytes
     Maximum cumulative output bytes.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([IO.FileInfo[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 1073741824
   )
   process {
     $File = Get-Item -LiteralPath $Path -Force
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) "Dumplings-ZeroInstall-$([guid]::NewGuid().ToString('N'))" }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
 
     $Stream = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite')
@@ -497,13 +501,16 @@ function Expand-ZeroInstallInstaller {
 
       $ExpandedBytes = 0L
       $Files = [Collections.Generic.List[IO.FileInfo]]::new()
+      $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
       foreach ($Resource in $Resources) {
         $RelativePath = Get-ZeroInstallExtractableResourceName -ResourceName $Resource.Name
         if (-not $RelativePath -or -not (Test-ExtractionPattern -Path $RelativePath -Pattern $Name)) { continue }
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
+          -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        if (-not $Target.ShouldWrite) { continue }
         if ($Resource.Size -gt $MaximumExpandedBytes - $ExpandedBytes) { throw 'Zero Install extraction exceeds the configured output limit.' }
-        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
-        if (Test-Path -LiteralPath $OutputPath) { throw "Zero Install extraction refuses to overwrite '$OutputPath'." }
-        $Files.Add((Export-PEResourceData -Resource $Resource -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
+        $Files.Add((Export-PEResourceData -Resource $Resource -DestinationPath $Target.Path `
+              -MaximumBytes ($MaximumExpandedBytes - $ExpandedBytes) -CollisionAction Overwrite))
         $ExpandedBytes += $Resource.Size
       }
       if ($Files.Count -eq 0) { throw "No Zero Install resources matched '$Name'." }

@@ -224,9 +224,13 @@ function Expand-InnoInstaller {
   .PARAMETER DestinationPath
     The directory where matching files should be written
   .PARAMETER Name
-    The exact source, destination, or base file name to extract; wildcard extraction is not supported
+    Optional source, destination, or base file wildcard to extract. All files are extracted when omitted.
   .PARAMETER Language
     An optional Inno Setup language name used to disambiguate language-specific payloads
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or multiple records resolve to the same path.
+  .PARAMETER MaximumExpandedBytes
+    Maximum aggregate bytes written, including aliases that share one payload location.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -236,20 +240,33 @@ function Expand-InnoInstaller {
     [Parameter(HelpMessage = 'The directory where matching files should be written')]
     [string]$DestinationPath,
 
-    [Parameter(Mandatory, HelpMessage = 'The exact source, destination, or base file name to extract')]
-    [string]$Name,
+    [Parameter(HelpMessage = 'The source, destination, or base file wildcard to extract')]
+    [string]$Name = '*',
 
     [Parameter(HelpMessage = 'An optional Inno Setup language name used to disambiguate language-specific payloads')]
-    [string]$Language
+    [string]$Language,
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt',
+
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = 17179869184
   )
 
   process {
-    $Result = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.Expand' -Argument @{
-      Path            = (Get-Item -Path $Path -Force).FullName
-      DestinationPath = $DestinationPath
-      Name            = $Name
-      Language        = $Language
+    # Resolve interactive policy before invoking the JSON bridge, whose standard output is not an interactive console.
+    $CollisionAction = Read-InstallerCollisionAction -CollisionAction $CollisionAction
+    $Arguments = @{
+      Path                 = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+      Name                 = $Name
+      Language             = $Language
+      CollisionAction      = $CollisionAction
+      MaximumExpandedBytes = $MaximumExpandedBytes
     }
+    if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
+      $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    }
+    $Result = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.Expand' -Argument $Arguments
 
     return Convert-InstallerBridgePathsToFileInfo -Path $Result
   }

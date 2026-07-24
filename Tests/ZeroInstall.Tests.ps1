@@ -145,7 +145,7 @@ integrate_args = --add-all
 
   It 'exports selected resources without executing the bootstrapper' {
     $Destination = Join-Path $TestDrive 'ZeroInstallExpansion'
-    $Files = @(Expand-ZeroInstallInstaller -Path $Script:DeepLInstaller -DestinationPath $Destination -Name 'BootstrapConfig.ini')
+    $Files = @(Expand-ZeroInstallInstaller -Path $Script:DeepLInstaller -DestinationPath $Destination -Name 'BootstrapConfig.ini' -CollisionAction Rename)
 
     $Files | Should -HaveCount 1
     $Files[0].Name | Should -Be 'BootstrapConfig.ini'

@@ -376,7 +376,7 @@ Describe 'Chromium real installer fixtures' {
     $Info = Get-ChromiumSetupInfo -Path $Installer
     $Destination = Join-Path $Script:FixtureDirectory "GoogleUpdateSetup-$Version-expanded"
     Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
-    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name '*.exe')
+    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name '*.exe' -CollisionAction Rename)
 
     $Info.Variant | Should -Be 'Omaha'
     $Info.OuterProductVersion | Should -Be $Version
@@ -394,7 +394,7 @@ Describe 'Chromium real installer fixtures' {
     $Info = Get-ChromiumSetupInfo -Path $Installer
     $Destination = Join-Path $Script:FixtureDirectory 'GoogleUpdater-Expanded'
     Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
-    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name 'bin\updater.exe')
+    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name 'bin\updater.exe' -CollisionAction Rename)
 
     $Info.Variant | Should -Be 'ChromiumUpdater'
     $Info.IsOnlineBootstrapper | Should -BeFalse
@@ -468,7 +468,7 @@ Describe 'Chromium real installer fixtures' {
     Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
 
     $Info = Get-ChromiumSetupInfo -Path $Installer
-    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name 'setup.exe')
+    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name 'setup.exe' -CollisionAction Rename)
 
     $Info.Variant | Should -Be 'ChromiumMiniInstaller'
     $Info.ArchiveResourceName | Should -Be 'VIVALDI.PACKED.7Z'
@@ -489,7 +489,7 @@ Describe 'Chromium real installer fixtures' {
     $Info = Get-ChromiumSetupInfo -Path $Installer
     $Destination = Join-Path $Script:FixtureDirectory 'Brave-Omaha-Expanded'
     Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
-    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name '*.exe' -MaximumExpandedBytes 1073741824)
+    $Files = @(Expand-ChromiumSetupInstaller -Path $Installer -DestinationPath $Destination -Name '*.exe' -MaximumExpandedBytes 1073741824 -CollisionAction Rename)
 
     $Files[0].Name | Should -Be 'BraveUpdate.exe'
     $Files.Name | Should -Contain 'BraveUpdateCore.exe'

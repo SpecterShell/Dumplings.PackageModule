@@ -219,6 +219,8 @@ function Expand-InstallAnywhereInstaller {
     Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
   .PARAMETER Name
     Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   #>
@@ -227,6 +229,7 @@ function Expand-InstallAnywhereInstaller {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
   process {
@@ -234,18 +237,12 @@ function Expand-InstallAnywhereInstaller {
     $Context = Open-InstallerArchiveRange -Path $ArchiveData.SourcePath -Range $ArchiveData.Range
     try {
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallAnywhere-$([guid]::NewGuid().ToString('N'))") }
+      $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
       $null = New-Item -Path $DestinationPath -ItemType Directory -Force
-      $Archive = $Context.Archive
-      $Written = 0L; $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-      foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
-        if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
-        $Written += $Entry.Length
-        if ($Written -gt $MaximumExpandedBytes) { throw 'InstallAnywhere extraction exceeds the configured output limit' }
-        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.FullName
-        $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
-      }
-      if ($Result.Count -eq 0) { throw "No InstallAnywhere files matched '$Name'" }
-      return $Result.ToArray()
+      $Selection = Export-InstallerArchiveSelection -Archive $Context.Archive -DestinationPath $DestinationPath `
+        -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
+      if ($Selection.Files.Count -eq 0) { throw "No InstallAnywhere files matched '$Name'" }
+      return $Selection.Files
     } finally { Close-InstallerArchiveRange -Context $Context }
   }
 }

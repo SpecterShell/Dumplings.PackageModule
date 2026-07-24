@@ -40,21 +40,30 @@ function Expand-SetupFactoryInstaller {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or multiple records resolve to the same path.
   #>
   [OutputType([string[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
   process {
-    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'SetupFactory.Expand' -Argument @{
-      Path                 = (Get-Item -LiteralPath $Path -Force).FullName
-      DestinationPath      = $DestinationPath
+    # Resolve interactive policy before invoking the JSON bridge, whose standard output is not an interactive console.
+    $CollisionAction = Read-InstallerCollisionAction -CollisionAction $CollisionAction
+    $Arguments = @{
+      Path                 = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
       Name                 = $Name
+      CollisionAction      = $CollisionAction
       MaximumExpandedBytes = $MaximumExpandedBytes
     }
+    if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
+      $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    }
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'SetupFactory.Expand' -Argument $Arguments
   }
 }
 

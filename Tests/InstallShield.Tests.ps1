@@ -37,7 +37,7 @@ Describe 'InstallShield parser' {
     InModuleScope InstallShield {
       Mock Expand-InstallShieldInstaller { 'C:\Extracted\Setup_u' }
 
-      Expand-InstallShield -Path 'C:\Fixtures\Setup.exe' | Should -Be 'C:\Extracted\Setup_u'
+      Expand-InstallShield -Path 'C:\Fixtures\Setup.exe' -CollisionAction Rename | Should -Be 'C:\Extracted\Setup_u'
       Should -Invoke Expand-InstallShieldInstaller -Exactly 1 -ParameterFilter {
         $Path -eq 'C:\Fixtures\Setup.exe' -and [string]::IsNullOrEmpty($DestinationPath)
       }

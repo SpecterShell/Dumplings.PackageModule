@@ -188,6 +188,8 @@ function Read-InstallForgeConfigurationText {
     Previously validated layout evidence containing the coordinate ranges needed by this operation.
   .PARAMETER Name
     Exact name or wildcard used to select format records or payload entries.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([string])]
   param (
@@ -313,6 +315,7 @@ function Expand-InstallForgeInstaller {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
 
@@ -321,21 +324,27 @@ function Expand-InstallForgeInstaller {
     $Context = Open-InstallerArchiveRange -Path $ArchiveData.SourcePath -Range $ArchiveData.Range
     try {
       if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallForge-$([guid]::NewGuid().ToString('N'))") }
+      $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
       $null = New-Item -Path $DestinationPath -ItemType Directory -Force
       $Archive = $Context.Archive
       $Written = 0L
       $Result = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+      $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
       # Match decoded logical names, reopen by encoded catalog identity, and
       # account output cumulatively before writing traversal-safe destinations.
       foreach ($EntryData in $ArchiveData.Entries) {
         if ([IO.Path]::GetFileName($EntryData.FullName) -ieq 'empty.empty' -or -not (Test-ExtractionPattern -Path $EntryData.FullName -Pattern $Name)) { continue }
-        $Written += $EntryData.Length
-        if ($Written -gt $MaximumExpandedBytes) { throw 'InstallForge extraction exceeds the configured output limit' }
         $Entry = Get-InstallerArchiveEntry -Archive $Archive | Where-Object { $_.FullName -ieq $EntryData.EncodedName } | Select-Object -First 1
         if (-not $Entry) { throw "The InstallForge payload entry '$($EntryData.FullName)' could not be reopened" }
-        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $EntryData.FullName
-        $Result.Add((Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $OutputPath -MaximumBytes $MaximumExpandedBytes))
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $EntryData.FullName `
+          -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        if (-not $Target.ShouldWrite) { continue }
+        if ($EntryData.Length -gt $MaximumExpandedBytes - $Written) { throw 'InstallForge extraction exceeds the configured output limit' }
+        $File = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $Target.Path `
+          -MaximumBytes ($MaximumExpandedBytes - $Written) -CollisionAction Overwrite
+        $Written += $File.Length
+        $Result.Add($File)
       }
       if ($Result.Count -eq 0) { throw "No InstallForge payload files matched '$Name'" }
       return $Result.ToArray()

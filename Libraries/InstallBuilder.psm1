@@ -90,6 +90,8 @@ function Read-InstallBuilderZlibProject {
     Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -700,23 +702,29 @@ function Expand-InstallBuilderInstaller {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1024, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
   process {
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallBuilder-$([guid]::NewGuid().ToString('N'))") }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $Extracted = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     [long]$TotalWritten = 0
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
     # project.xml and CookFS payloads share one output budget but have independent recovery paths.
     if (Test-ExtractionPattern -Path 'project.xml' -Pattern $Name) {
       $Project = Get-InstallBuilderProjectData -Path $Path -MaximumExpandedBytes ([Math]::Min($MaximumExpandedBytes, $Script:InstallBuilderMaximumProjectBytes))
       $Bytes = [Text.Encoding]::UTF8.GetBytes($Project.Content)
-      if ($Bytes.Length -gt $MaximumExpandedBytes) { throw 'The recovered InstallBuilder project exceeds the configured output limit' }
-      $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath 'project.xml'
-      $null = New-Item -Path ([IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
-      [IO.File]::WriteAllBytes($OutputPath, $Bytes)
-      $TotalWritten += $Bytes.Length
-      $Extracted.Add((Get-Item -LiteralPath $OutputPath -Force))
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath 'project.xml' `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if ($Target.ShouldWrite) {
+        if ($Bytes.Length -gt $MaximumExpandedBytes) { throw 'The recovered InstallBuilder project exceeds the configured output limit' }
+        $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+        [IO.File]::WriteAllBytes($Target.Path, $Bytes)
+        $TotalWritten += $Bytes.Length
+        $Extracted.Add((Get-Item -LiteralPath $Target.Path -Force))
+      }
     }
 
     $Cookfs = $null
@@ -728,15 +736,17 @@ function Expand-InstallBuilderInstaller {
       if ($LogicalEntries.Count -gt 0 -and $Cookfs.HasUnsupportedCompression) { throw 'The CookFS payload uses unsupported custom or encrypted compression and cannot be extracted without the project password' }
       # Export logical rather than physical split-file names.
       foreach ($Entry in $LogicalEntries) {
-        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.Path
-        $null = New-Item -Path ([IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
-        $Destination = [IO.File]::Open($OutputPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Path `
+          -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        if (-not $Target.ShouldWrite) { continue }
+        $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+        $Destination = [IO.File]::Open($Target.Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try {
           Copy-InstallBuilderCookfsEntry -Path $Path -Cookfs $Cookfs -Entry $Entry -Destination $Destination -TotalWritten ([ref]$TotalWritten) -MaximumExpandedBytes $MaximumExpandedBytes
         } finally {
           $Destination.Dispose()
         }
-        $Extracted.Add((Get-Item -LiteralPath $OutputPath -Force))
+        $Extracted.Add((Get-Item -LiteralPath $Target.Path -Force))
       }
     }
     if ($Extracted.Count -eq 0) { throw "No InstallBuilder project or payload file matches selector '$Name'" }

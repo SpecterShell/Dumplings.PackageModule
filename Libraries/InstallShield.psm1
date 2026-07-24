@@ -312,6 +312,10 @@ function Export-InstallShieldDecodedFile {
     Extraction root. The record name is resolved beneath this root with traversal checks.
   .PARAMETER StreamMode
     Select the ISSetupStream block transform instead of the legacy transform.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
+  .PARAMETER ReservedPath
+    Output paths already assigned during the current extraction operation.
   #>
   [OutputType([string])]
   param (
@@ -324,6 +328,11 @@ function Export-InstallShieldDecodedFile {
     [Parameter(Mandatory)]
     [string]$DestinationPath,
 
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Rename',
+
+    [System.Collections.Generic.ISet[string]]$ReservedPath,
+
     [Parameter()]
     [switch]$StreamMode
   )
@@ -332,7 +341,10 @@ function Export-InstallShieldDecodedFile {
   # the optional zlib layer applied by Unicode launcher records.
   $HasType2Or4 = ($Attribute.EncodedFlags -band 6) -ne 0
   $HasType4 = ($Attribute.EncodedFlags -band 4) -ne 0
-  $OutputPath = Join-InstallShieldSafePath -Root $DestinationPath -RelativePath $Attribute.FileName
+  $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Attribute.FileName `
+    -CollisionAction $CollisionAction -ReservedPath $ReservedPath
+  if (-not $Target.ShouldWrite) { return $null }
+  $OutputPath = $Target.Path
   $Parent = Split-Path -Path $OutputPath -Parent
   if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
 
@@ -384,6 +396,12 @@ function Expand-InstallShieldEncryptedPayload {
     Absolute offset of the decoded InstallShield/ISSetupStream header candidate.
   .PARAMETER DestinationPath
     Safe extraction root for decoded entries.
+  .PARAMETER Name
+    Optional wildcard matched against logical payload paths and base names.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
+  .PARAMETER ReservedPath
+    Output paths already assigned during the current extraction operation.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -394,7 +412,14 @@ function Expand-InstallShieldEncryptedPayload {
     [long]$Offset,
 
     [Parameter(Mandatory)]
-    [string]$DestinationPath
+    [string]$DestinationPath,
+
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Rename',
+
+    [System.Collections.Generic.ISet[string]]$ReservedPath
   )
 
   # Authenticate the catalog header before selecting the generation-specific
@@ -404,6 +429,7 @@ function Expand-InstallShieldEncryptedPayload {
 
   $Cursor = $Header.NextOffset
   $Files = [System.Collections.Generic.List[string]]::new()
+  $RecordCount = 0
   for ($Index = 0; $Index -lt $Header.NumFiles; $Index++) {
     $Attribute = if ($Header.IsSetupStream) {
       Get-InstallShieldStreamAttribute -Stream $Stream -Offset $Cursor -Type $Header.Type
@@ -413,17 +439,22 @@ function Expand-InstallShieldEncryptedPayload {
     # Stop at the first malformed or non-advancing record. Continuing would
     # reinterpret payload bytes as catalog entries and could amplify output.
     if (-not $Attribute -or $Attribute.NextOffset -le $Cursor) { break }
-
-    $Files.Add((Export-InstallShieldDecodedFile -Stream $Stream -Attribute $Attribute -DestinationPath $DestinationPath -StreamMode:$Header.IsSetupStream))
+    $RecordCount++
+    if (Test-ExtractionPattern -Path $Attribute.FileName -Pattern $Name) {
+      $ExtractedPath = Export-InstallShieldDecodedFile -Stream $Stream -Attribute $Attribute -DestinationPath $DestinationPath `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPath -StreamMode:$Header.IsSetupStream
+      if ($ExtractedPath) { $Files.Add($ExtractedPath) }
+    }
     $Cursor = $Attribute.NextOffset + $Attribute.FileLength
   }
 
-  if ($Files.Count -eq 0) { return $null }
+  if ($RecordCount -eq 0) { return $null }
 
   [pscustomobject]@{
     Format         = $Header.Signature
     ConsumedOffset = $Cursor
     ExtractedFiles = @($Files)
+    RecordCount    = $RecordCount
   }
 }
 
@@ -563,6 +594,12 @@ function Expand-InstallShieldPlainPayload {
     Safe extraction root for record destination names.
   .PARAMETER Unicode
     Select the UTF-16LE plain-record layout.
+  .PARAMETER Name
+    Optional wildcard matched against logical payload paths and base names.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
+  .PARAMETER ReservedPath
+    Output paths already assigned during the current extraction operation.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -575,6 +612,13 @@ function Expand-InstallShieldPlainPayload {
     [Parameter(Mandatory)]
     [string]$DestinationPath,
 
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Rename',
+
+    [System.Collections.Generic.ISet[string]]$ReservedPath,
+
     [Parameter()]
     [switch]$Unicode
   )
@@ -583,22 +627,30 @@ function Expand-InstallShieldPlainPayload {
   # ANSI records begin directly at the candidate overlay offset.
   $Cursor = if ($Unicode) { $Offset + 4 } else { $Offset }
   $Files = [System.Collections.Generic.List[string]]::new()
+  $RecordCount = 0
   while ($Cursor -lt $Stream.Length) {
     $Record = Get-InstallShieldPlainRecord -Stream $Stream -Offset $Cursor -Unicode:$Unicode
     # A failed record terminates this layout attempt. The caller can then try
     # another known layout without scanning through untrusted payload bytes.
     if (-not $Record) { break }
-    $OutputPath = Join-InstallShieldSafePath -Root $DestinationPath -RelativePath $Record.DestinationName
-    $Files.Add((Save-InstallShieldRange -Stream $Stream -Offset $Record.DataOffset -Length $Record.FileLength -Path $OutputPath))
+    $RecordCount++
+    if (Test-ExtractionPattern -Path $Record.DestinationName -Pattern $Name) {
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Record.DestinationName `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPath
+      if ($Target.ShouldWrite) {
+        $Files.Add((Save-InstallShieldRange -Stream $Stream -Offset $Record.DataOffset -Length $Record.FileLength -Path $Target.Path))
+      }
+    }
     $Cursor = $Record.DataOffset + $Record.FileLength
   }
 
-  if ($Files.Count -eq 0) { return $null }
+  if ($RecordCount -eq 0) { return $null }
 
   [pscustomobject]@{
     Format         = if ($Unicode) { 'PlainUnicode' } else { 'Plain' }
     ConsumedOffset = $Cursor
     ExtractedFiles = @($Files)
+    RecordCount    = $RecordCount
   }
 }
 
@@ -610,6 +662,10 @@ function Invoke-InstallShieldExtraction {
     The path to the InstallShield installer
   .PARAMETER DestinationPath
     The destination directory for extracted files
+  .PARAMETER Name
+    Optional wildcard selecting payload paths or file names. All files are extracted when omitted.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or another payload resolves to the same path.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -617,11 +673,18 @@ function Invoke-InstallShieldExtraction {
     [string]$Path,
 
     [Parameter(Mandatory)]
-    [string]$DestinationPath
+    [string]$DestinationPath,
+
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Rename'
   )
 
-  $File = Get-Item -Path $Path -Force
+  $File = Get-Item -LiteralPath $Path -Force
+  $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
   $null = New-Item -Path $DestinationPath -ItemType Directory -Force
+  $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
   try {
     # InstallShield records live after the complete PE image. Preserve the PE
@@ -630,22 +693,32 @@ function Invoke-InstallShieldExtraction {
     if ($DataOffset -le 0) { throw 'Not a PE InstallShield file.' }
     if ($DataOffset -ge $Stream.Length) { throw 'No InstallShield overlay data found.' }
 
-    $LauncherPath = Join-Path $DestinationPath ($File.BaseName + '_sfx' + $File.Extension)
-    $LauncherPath = Save-InstallShieldRange -Stream $Stream -Offset 0 -Length $DataOffset -Path $LauncherPath
+    $LauncherPath = $null
+    $LauncherName = $File.BaseName + '_sfx' + $File.Extension
+    if (Test-ExtractionPattern -Path $LauncherName -Pattern $Name) {
+      $LauncherTarget = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $LauncherName `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if ($LauncherTarget.ShouldWrite) {
+        $LauncherPath = Save-InstallShieldRange -Stream $Stream -Offset 0 -Length $DataOffset -Path $LauncherTarget.Path
+      }
+    }
     $CandidateOffset = Skip-InstallShieldNb10Prefix -Stream $Stream -Offset $DataOffset
 
     # Prefer authenticated encoded catalogs. Plain Unicode and ANSI records are
     # generation-specific fallbacks attempted only from the same overlay start.
-    $Result = Expand-InstallShieldEncryptedPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath
+    $Result = Expand-InstallShieldEncryptedPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath `
+      -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
     if (-not $Result) {
-      $Result = Expand-InstallShieldPlainPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath -Unicode
+      $Result = Expand-InstallShieldPlainPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath `
+        -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths -Unicode
     }
     if (-not $Result) {
-      $Result = Expand-InstallShieldPlainPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath
+      $Result = Expand-InstallShieldPlainPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath `
+        -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
     }
 
     if (-not $Result) {
-      Remove-Item -Path $LauncherPath -Force -ErrorAction SilentlyContinue
+      if ($LauncherPath) { Remove-Item -LiteralPath $LauncherPath -Force -ErrorAction SilentlyContinue }
       throw 'No InstallShield payload records were decoded.'
     }
 
@@ -654,7 +727,7 @@ function Invoke-InstallShieldExtraction {
       DataOffset      = $DataOffset
       ConsumedOffset  = $Result.ConsumedOffset
       Format          = $Result.Format
-      ExtractedFiles  = @($LauncherPath) + @($Result.ExtractedFiles)
+      ExtractedFiles  = @($LauncherPath | Where-Object { $_ }) + @($Result.ExtractedFiles)
     }
   } finally {
     $Stream.Dispose()
@@ -960,17 +1033,22 @@ function Expand-InstallShieldInstaller {
     [string]$Path,
 
     [Parameter(HelpMessage = 'The destination directory for extracted files')]
-    [string]$DestinationPath
+    [string]$DestinationPath,
+
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt'
   )
 
   process {
-    $InstallerPath = (Get-Item -Path $Path -Force).FullName
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
       $DestinationPath = Join-Path (Split-Path -Path $InstallerPath -Parent) ((Split-Path -Path $InstallerPath -LeafBase) + '_u')
     }
 
-    $DestinationPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DestinationPath)
-    Invoke-InstallShieldExtraction -Path $InstallerPath -DestinationPath $DestinationPath | Out-Null
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    Invoke-InstallShieldExtraction -Path $InstallerPath -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction | Out-Null
     return $DestinationPath
   }
 }
@@ -988,6 +1066,10 @@ function Expand-InstallShield {
   .PARAMETER DestinationPath
     The destination directory for extracted files. When omitted, extraction uses
     the legacy sibling directory named after the installer with an `_u` suffix.
+  .PARAMETER Name
+    Optional wildcard selecting payload paths or file names. All files are extracted when omitted.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or another payload resolves to the same path.
   #>
   [OutputType([string])]
   param (
@@ -995,13 +1077,18 @@ function Expand-InstallShield {
     [string]$Path,
 
     [Parameter(HelpMessage = 'The destination directory for extracted files')]
-    [string]$DestinationPath
+    [string]$DestinationPath,
+
+    [string]$Name = '*',
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt'
   )
 
   process {
     # Keep existing callers on the same output contract while routing all bytes
     # through the bounded in-process InstallShield parser.
-    Expand-InstallShieldInstaller -Path $Path -DestinationPath $DestinationPath
+    Expand-InstallShieldInstaller -Path $Path -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction
   }
 }
 
@@ -1025,7 +1112,7 @@ function Get-InstallShieldInfo {
 
   process {
     $InstallerPath = (Get-Item -Path $Path -Force).FullName
-    $ExtractedPath = Expand-InstallShieldInstaller -Path $InstallerPath -DestinationPath $DestinationPath
+    $ExtractedPath = Expand-InstallShieldInstaller -Path $InstallerPath -DestinationPath $DestinationPath -CollisionAction Rename
 
     # Classify the extracted payload from format artifacts rather than launcher
     # branding, which is shared by Basic MSI and InstallScript variants.

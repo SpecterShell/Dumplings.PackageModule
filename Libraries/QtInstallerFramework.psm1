@@ -47,6 +47,8 @@ function Expand-QtInstallerFramework {
     The file name or wildcard pattern to extract
   .PARAMETER MaximumExpandedBytes
     The maximum total number of bytes written to the destination
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or multiple package entries resolve to the same path.
   #>
   [OutputType([string])]
   param (
@@ -61,16 +63,25 @@ function Expand-QtInstallerFramework {
 
     [Parameter(HelpMessage = 'The maximum total number of expanded bytes')]
     [ValidateRange(1, [long]::MaxValue)]
-    [long]$MaximumExpandedBytes = 17179869184
+    [long]$MaximumExpandedBytes = 17179869184,
+
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt'
   )
 
   process {
-    return Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'QtInstallerFramework.Expand' -Argument @{
-      Path                 = (Get-Item -Path $Path -Force).FullName
-      DestinationPath      = $DestinationPath
+    # Resolve interactive policy before invoking the JSON bridge, whose standard output is not an interactive console.
+    $CollisionAction = Read-InstallerCollisionAction -CollisionAction $CollisionAction
+    $Arguments = @{
+      Path                 = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
       Name                 = $Name
+      CollisionAction      = $CollisionAction
       MaximumExpandedBytes = $MaximumExpandedBytes
     }
+    if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
+      $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    }
+    return Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'QtInstallerFramework.Expand' -Argument $Arguments
   }
 }
 

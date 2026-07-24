@@ -816,7 +816,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     $EffectiveInstallerType = $Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType
     $EffectiveInstallerPath = if ($Installer.InstallerType -cin @('zip') -and $Installer.NestedInstallerType -cne 'portable') {
       $NestedInstallerRelativePath = $Installer.NestedInstallerFiles[0].RelativeFilePath
-      Expand-TempArchive -Path $InstallerPath -RelativeFilePath $NestedInstallerRelativePath | Join-Path -ChildPath $NestedInstallerRelativePath
+      Expand-TempArchive -Path $InstallerPath -RelativeFilePath $NestedInstallerRelativePath -CollisionAction Rename | Join-Path -ChildPath $NestedInstallerRelativePath
     } else {
       $InstallerPath
     }

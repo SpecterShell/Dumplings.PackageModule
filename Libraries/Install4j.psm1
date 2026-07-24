@@ -852,6 +852,9 @@ function Expand-Install4jLzmaZipEntry {
     [Parameter(Mandatory, HelpMessage = 'The file name or wildcard pattern')]
     [string]$Name,
 
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Rename',
+
     [Parameter(Mandatory, HelpMessage = 'The maximum total number of expanded bytes')]
     [long]$MaximumExpandedBytes
   )
@@ -895,7 +898,8 @@ function Expand-Install4jLzmaZipEntry {
     # original installer remains streamed and bounded.
     $Archive = Get-InstallerArchive -Path $DecodedArchivePath
     try {
-      $Result = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $DestinationPath -Name $Name -MaximumExpandedBytes $MaximumExpandedBytes -MaximumEntries $Script:Install4jMaximumArchiveEntries
+      $Result = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $DestinationPath -Name $Name `
+        -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes -MaximumEntries $Script:Install4jMaximumArchiveEntries
       return $Result.Files
     } finally {
       $Archive.Dispose()
@@ -1295,6 +1299,8 @@ function Expand-Install4jInstaller {
     The file name or wildcard pattern to extract
   .PARAMETER MaximumExpandedBytes
     The maximum number of bytes that one compressed content archive may expand to
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   [OutputType([string])]
   param (
@@ -1307,13 +1313,16 @@ function Expand-Install4jInstaller {
     [Parameter(HelpMessage = 'The file name or wildcard pattern to extract')]
     [string]$Name = '*',
 
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
+    [string]$CollisionAction = 'Prompt',
+
     [Parameter(HelpMessage = 'The maximum number of expanded bytes')]
     [ValidateRange(1, [long]::MaxValue)]
     [long]$MaximumExpandedBytes = $Script:Install4jMaximumExpandedBytes
   )
 
   process {
-    $InstallerPath = (Get-Item -Path $Path -Force).FullName
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
     $EmbeddedFileTables = @(Get-Install4jEmbeddedFileTable -Path $InstallerPath)
     $LauncherConfiguration = try { Get-Install4jLauncherConfiguration -Path $InstallerPath } catch { $null }
     if (-not $EmbeddedFileTables -and -not $LauncherConfiguration) {
@@ -1321,10 +1330,11 @@ function Expand-Install4jInstaller {
     }
 
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = New-TempFolder }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $DestinationPath = (New-Item -Path $DestinationPath -ItemType Directory -Force).FullName
 
     $ExtractedFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    $WrittenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $ReservedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     # Startup entries require the launcher's XOR transform; direct embedded entries do not.
     foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $null -ne $_ })) {
       if (-not (Test-Install4jExtractionMatch -Path $Entry.Name -Name $Name)) { continue }
@@ -1332,8 +1342,10 @@ function Expand-Install4jInstaller {
         throw "The install4j startup file '$($Entry.Name)' exceeds the $MaximumExpandedBytes-byte limit"
       }
 
-      $OutputPath = Resolve-Install4jExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.Name
-      if (-not $WrittenPaths.Add($OutputPath)) { throw "The install4j installer contains a duplicate output path: $($Entry.Name)" }
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Name `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if (-not $Target.ShouldWrite) { continue }
+      $OutputPath = $Target.Path
       $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
       $SourceStream = [System.IO.File]::Open($InstallerPath, 'Open', 'Read', 'ReadWrite')
       $OutputStream = [System.IO.File]::Open($OutputPath, 'Create', 'Write', 'Read')
@@ -1350,8 +1362,10 @@ function Expand-Install4jInstaller {
     foreach ($Entry in @($EmbeddedFileTables.Entries)) {
       if ($Entry.Name -ieq '0.dat') {
         # 0.dat contains the application archive rather than one directly exportable file.
-        foreach ($ExtractedFile in Expand-Install4jLzmaZipEntry -Path $InstallerPath -Entry $Entry -DestinationPath $DestinationPath -Name $Name -MaximumExpandedBytes $MaximumExpandedBytes) {
-          if ($WrittenPaths.Add($ExtractedFile.FullName)) { $ExtractedFiles.Add($ExtractedFile) }
+        foreach ($ExtractedFile in Expand-Install4jLzmaZipEntry -Path $InstallerPath -Entry $Entry -DestinationPath $DestinationPath `
+            -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes) {
+          $null = $ReservedPaths.Add($ExtractedFile.FullName)
+          $ExtractedFiles.Add($ExtractedFile)
         }
         continue
       }
@@ -1361,8 +1375,10 @@ function Expand-Install4jInstaller {
         throw "The install4j embedded file '$($Entry.Name)' exceeds the $MaximumExpandedBytes-byte limit"
       }
 
-      $OutputPath = Resolve-Install4jExtractionPath -DestinationPath $DestinationPath -RelativePath $Entry.Name
-      if (-not $WrittenPaths.Add($OutputPath)) { throw "The install4j installer contains a duplicate output path: $($Entry.Name)" }
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Name `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if (-not $Target.ShouldWrite) { continue }
+      $OutputPath = $Target.Path
       $null = New-Item -Path ([System.IO.Path]::GetDirectoryName($OutputPath)) -ItemType Directory -Force
 
       $SourceStream = [System.IO.File]::Open($InstallerPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)

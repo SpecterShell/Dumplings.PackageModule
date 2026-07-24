@@ -157,11 +157,11 @@ Describe 'InstallBuilder static parser' {
     $Destination = Join-Path $Script:FixtureDirectory 'expanded'
     Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
     try {
-      $Extracted = Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination
+      $Extracted = Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -CollisionAction Rename
       $Extracted | Should -HaveCount 1
       $Extracted[0].Name | Should -Be 'project.xml'
       (Get-Content -LiteralPath $Extracted[0].FullName -Raw) | Should -Match '<shortName>Expand</shortName>'
-      { Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name '*.exe' } | Should -Throw '*CFS0002*'
+      { Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name '*.exe' -CollisionAction Rename } | Should -Throw '*CFS0002*'
     } finally {
       Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -178,7 +178,7 @@ Describe 'InstallBuilder static parser' {
       $Info.PayloadFiles | Should -Not -Contain 'app.exe___bitrockBigFile1'
       $Info.CookfsInfo.CompressionTypes | Should -Be @('None')
 
-      $Extracted = Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name 'app.exe'
+      $Extracted = Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name 'app.exe' -CollisionAction Rename
       $Extracted | Should -HaveCount 1
       $Extracted[0].Name | Should -Be 'app.exe'
       [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Extracted[0].FullName)) | Should -Be 'first-second'
@@ -195,7 +195,7 @@ Describe 'InstallBuilder static parser' {
       $Info = Get-InstallBuilderInfo -Path $Fixture
       $Info.CookfsInfo.HasUnsupportedCompression | Should -BeTrue
       $Info.Warnings | Should -Contain 'The CookFS payload uses unsupported custom or encrypted compression and cannot be extracted without the project password.'
-      { Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name 'app.exe' } | Should -Throw '*unsupported custom or encrypted compression*'
+      { Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name 'app.exe' -CollisionAction Rename } | Should -Throw '*unsupported custom or encrypted compression*'
       Test-Path -LiteralPath (Join-Path $Destination 'app.exe') | Should -BeFalse
     } finally {
       Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue

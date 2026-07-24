@@ -1534,7 +1534,7 @@ Describe 'WinGet installer manifest metadata updates' {
         $Archive.Dispose()
       }
 
-      $ExpandedPath = Expand-TempArchive -Path $ArchivePath
+      $ExpandedPath = Expand-TempArchive -Path $ArchivePath -CollisionAction Rename
       try {
         Join-Path $ExpandedPath 'first.txt' | Should -Exist
         Join-Path $ExpandedPath 'nested\second.txt' | Should -Exist

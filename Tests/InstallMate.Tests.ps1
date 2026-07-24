@@ -68,7 +68,7 @@ Describe 'InstallMate static parser' {
     if (-not (Test-Path -LiteralPath $Script:InstallMateLegacyFixture)) { Set-ItResult -Skipped -Because 'The legacy InstallMate fixture is not cached.'; return }
     $DestinationPath = Join-Path $TestDrive 'installmate-legacy'
     $Info = Get-InstallMateInfo -Path $Script:InstallMateLegacyFixture
-    $Files = @(Expand-InstallMateInstaller -Path $Script:InstallMateLegacyFixture -DestinationPath $DestinationPath -Name 'WebView2Loader.dll')
+    $Files = @(Expand-InstallMateInstaller -Path $Script:InstallMateLegacyFixture -DestinationPath $DestinationPath -Name 'WebView2Loader.dll' -CollisionAction Rename)
 
     $Info.DisplayName | Should -Be "Harzing's Publish or Perish"
     $Info.DisplayVersion | Should -Be '8.19.5300.9483'
@@ -111,7 +111,7 @@ Describe 'InstallMate static parser' {
       $Info.ScopeConfidence | Should -Be 'conditional'
       $Info.CanExpand | Should -BeFalse
       @($Info.Warnings | Where-Object { $_ -like '*setup database could not be decoded*' }).Count | Should -Be 1
-      { Expand-InstallMateInstaller -Path $FixturePath } | Should -Throw
+      { Expand-InstallMateInstaller -Path $FixturePath -CollisionAction Rename } | Should -Throw
     }
   }
 }

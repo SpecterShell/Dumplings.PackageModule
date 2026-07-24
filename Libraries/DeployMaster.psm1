@@ -905,21 +905,26 @@ function Expand-DeployMasterInstaller {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER CollisionAction
+    Behavior when an output path already exists or is selected more than once.
   #>
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
 
   process {
     $File = Get-Item -LiteralPath $Path -Force
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-DeployMaster-$([guid]::NewGuid().ToString('N'))") }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force
     $Stream = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite')
     $Results = [Collections.Generic.List[object]]::new()
     $ExpandedBytes = 0L
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     try {
       $PackageData = Read-DeployMasterPackageData -Stream $Stream
       # Normalize runtime cores, decoded metadata blocks, and application files into one extraction
@@ -937,11 +942,13 @@ function Expand-DeployMasterInstaller {
       # Check the aggregate uncompressed size and destination identity before writing each item.
       foreach ($Item in $Items) {
         if (-not (Test-ExtractionPattern -Path $Item.FullName -Pattern $Name)) { continue }
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Item.FullName `
+          -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        if (-not $Target.ShouldWrite) { continue }
         if ($ExpandedBytes + $Item.UncompressedSize -gt $MaximumExpandedBytes) { throw "The DeployMaster expansion exceeds the $MaximumExpandedBytes-byte output limit." }
-        $OutputPath = Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $Item.FullName
+        $OutputPath = $Target.Path
         $Parent = [IO.Path]::GetDirectoryName($OutputPath)
         if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
-        if (Test-Path -LiteralPath $OutputPath) { throw "The DeployMaster payload contains a duplicate output path: $($Item.FullName)" }
         if ($Item.Kind -eq 'Bytes') {
           [IO.File]::WriteAllBytes($OutputPath, $Item.Bytes)
           $Result = Get-Item -LiteralPath $OutputPath -Force

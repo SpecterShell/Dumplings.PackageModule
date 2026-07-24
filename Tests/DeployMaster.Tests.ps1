@@ -43,7 +43,7 @@ Describe 'DeployMaster static parser' {
     if (-not (Test-Path -LiteralPath $AssociationFixture)) { Set-ItResult -Skipped -Because 'The controlled DeployMaster association fixture is not cached.'; return }
     $DestinationPath = Join-Path $TestDrive 'deploymaster-expanded'
     $Info = Get-DeployMasterInfo -Path $AssociationFixture
-    $Files = @(Expand-DeployMasterInstaller -Path $AssociationFixture -DestinationPath $DestinationPath)
+    $Files = @(Expand-DeployMasterInstaller -Path $AssociationFixture -DestinationPath $DestinationPath -CollisionAction Rename)
 
     $Info.DisplayName | Should -Be 'DMDeployMasterKnown'
     $Info.DisplayVersion | Should -Be '12.34.56'
@@ -60,7 +60,7 @@ Describe 'DeployMaster static parser' {
     if (-not (Test-Path -LiteralPath $Script:DeployMasterLegacyFixture)) { Set-ItResult -Skipped -Because 'The legacy DeployMaster fixture is not cached.'; return }
     $DestinationPath = Join-Path $TestDrive 'deploymaster-legacy'
     $Info = Get-DeployMasterInfo -Path $Script:DeployMasterLegacyFixture
-    $Files = @(Expand-DeployMasterInstaller -Path $Script:DeployMasterLegacyFixture -DestinationPath $DestinationPath -Name 'bvplay.exe')
+    $Files = @(Expand-DeployMasterInstaller -Path $Script:DeployMasterLegacyFixture -DestinationPath $DestinationPath -Name 'bvplay.exe' -CollisionAction Rename)
 
     $Info.DisplayName | Should -Be 'Brinno Video Player'
     $Info.DisplayVersion | Should -Be '1.139.00'

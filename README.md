@@ -48,6 +48,8 @@ Some implementations are maintained in the separately licensed InstallerParsers 
 
 Each aggregate parser constructs the canonical identity/ARP envelope directly and returns diagnostics through `Warnings` and `UnresolvedFields`; parsers do not write log messages directly. This keeps family-specific ARP decisions in the parser that understands the format instead of deriving them from a shared normalizer. Family-specific layout, payload, association, scope, and architecture evidence remains additive.
 
+Public installer expansion functions resolve source and destination paths against PowerShell's filesystem location before passing them to .NET or a parser child process. Their optional `Name` selector defaults to `*`, so omitting it expands every catalogued payload within the parser's entry and byte limits. Extractors that can produce multiple files accept `CollisionAction Prompt|Error|Skip|Overwrite|Rename`; `Prompt` is the interactive default and offers `Rename` as its preselected choice. Functions and unattended automation that compose extractors pass `Rename` explicitly, allocating deterministic names such as `payload (1).dll` without opening a prompt.
+
 Manifest updates run a known manifest-declared parser before generic detection. If metadata parsing fails, structural evidence classifies the result as matched, mismatched, or indeterminate. Only a definitive incompatible format throws; matched or indeterminate failures preserve existing fields and emit warnings, while resolved fields from a partial successful result are applied independently.
 
 Use the [`analyze-winget-installer` skill](../../.agents/skills/analyze-winget-installer/SKILL.md) for the supported workflow, parser routing, manifest interpretation, and VM-only validation rules.
