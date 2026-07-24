@@ -1339,6 +1339,9 @@ function Update-WinGetManifest {
   }
 
   $UpdatedModel = New-WinGetManifestModel -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -Channel ([string]$Manifest.Channel) -Moniker ([string]$Manifest.Moniker) -ManifestVersion $Script:WinGetAuthoringManifestVersion -InstallerDefaults ([ordered]@{}) -Installers ([System.Collections.IDictionary[]]$UpdatedInstallers) -DefaultLocalization $DefaultLocalization -Localizations ([System.Collections.IDictionary[]]$Localizations.ToArray()) -SourceFormat Memory
+  # Return the same post-processed authored state that serialization emits so
+  # task callers do not observe redundant locale or ARP fields temporarily.
+  $UpdatedModel = Optimize-WinGetManifest -Manifest $UpdatedModel
   $Compacted = Get-WinGetManifestCompactedInstallerData -Manifest $UpdatedModel
   $UpdatedModel.InstallerDefaults = $Compacted.Defaults
   return $UpdatedModel

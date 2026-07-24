@@ -5,6 +5,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\YamlSchema.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSchema.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestModel.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetARP.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSerialization.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerBridge.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\MSI.psm1') -Force

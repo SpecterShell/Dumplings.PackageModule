@@ -60,7 +60,7 @@ Manifest processing is separated into explicit layers:
 | --- | --- |
 | `YamlSchema.psm1` | Offline structured JSON-schema validation for YAML objects. |
 | `WinGetManifestSchema.psm1` | WinGet schema selection, field ordering, and vendored schema access. |
-| `WinGetManifestModel.psm1` | Logical manifest model, installer inheritance, compaction, and merged projections. |
+| `WinGetManifestModel.psm1` | Logical manifest model, installer inheritance, post-processing, compaction, and merged projections. |
 | `WinGetManifestSerialization.psm1` | Multi-file parsing, formatting, document sets, headers, and YAML output. |
 | `WinGetManifestValidation.psm1` | Structural, schema, and semantic validation compatible with WinGet's local validation path. |
 | `WinGetManifestUpdate.psm1` | Installer download, matching, parser metadata, and safe updates to existing authored fields. |
@@ -76,6 +76,9 @@ $Manifest = Read-WinGetManifest -Path C:\Manifests\Vendor.Package\1.2.3
 # Validate a path or an in-memory logical model.
 $Result = Get-WinGetManifestValidationResult -Manifest $Manifest
 
+# Explicitly inspect the detached post-processed model when needed.
+$Optimized = Optimize-WinGetManifest -Manifest $Manifest
+
 # Format one authored document without adding or deleting fields.
 $Formatted = Format-WinGetManifest -Manifest $InstallerDocument
 
@@ -83,7 +86,7 @@ $Formatted = Format-WinGetManifest -Manifest $InstallerDocument
 $Analysis = Get-WinGetInstallerAnalysis -Path C:\Installers\setup.exe
 ```
 
-The logical model stores authored values, not WinGet-generated default switches or return codes. Serialization compacts values shared by every installer back to manifest level while preserving installer-level overrides, recursive dictionary atoms, and atomic arrays.
+The logical model stores authored values, not WinGet-generated default switches or return codes. Complete-manifest serialization first removes a common `InstallerLocale` and redundant ProductCode, InstallerType, name, and publisher fields from a sole Apps & Features entry, then compacts values shared by every installer back to manifest level while preserving installer-level overrides, recursive dictionary atoms, and atomic arrays. The isolated `Format-WinGetManifest` path remains non-destructive because it has no locale-document context.
 
 ### Supporting Services
 

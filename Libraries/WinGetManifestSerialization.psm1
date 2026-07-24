@@ -389,6 +389,10 @@ function ConvertTo-WinGetManifestDocumentSet {
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)]$Manifest)
 
   process {
+    # Cross-document cleanup requires the complete logical model. Run it here,
+    # before compaction, so redundant locale and ARP fields cannot be promoted
+    # back to the installer-manifest root.
+    $Manifest = Optimize-WinGetManifest -Manifest $Manifest
     $Version = [ordered]@{
       PackageIdentifier = [string]$Manifest.PackageIdentifier
       PackageVersion    = [string]$Manifest.PackageVersion

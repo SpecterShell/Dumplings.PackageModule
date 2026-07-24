@@ -27,9 +27,10 @@ if (Test-Path -Path $LibraryPath) {
     Import-Module (Join-Path $LibraryPath $UtilityModule) -Force
   }
 
-  # Manifest parsing has an explicit dependency chain. Load the schema/model/serialization
-  # boundary before parser libraries, and finally validation, update, and submission orchestration.
-  $Private:ManifestFoundationModules = @('YamlSchema.psm1', 'WinGetManifestSchema.psm1', 'WinGetManifestModel.psm1', 'WinGetManifestSerialization.psm1')
+  # Manifest parsing has an explicit dependency chain. Load schema/model and
+  # ARP normalization before serialization, then load validation, update, and
+  # submission orchestration around the remaining parser libraries.
+  $Private:ManifestFoundationModules = @('YamlSchema.psm1', 'WinGetManifestSchema.psm1', 'WinGetManifestModel.psm1', 'WinGetARP.psm1', 'WinGetManifestSerialization.psm1')
   foreach ($ManifestModule in $ManifestFoundationModules) {
     Import-Module (Join-Path $LibraryPath $ManifestModule) -Force
   }

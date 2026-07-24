@@ -411,6 +411,125 @@ function New-WinGetManifestModel {
   }
 }
 
+function Optimize-WinGetManifest {
+  <#
+  .SYNOPSIS
+    Remove redundant authored fields using the complete logical manifest.
+  .DESCRIPTION
+    The optimization pass deep-copies the logical model before applying rules
+    that require effective installer and localization evidence. It removes a
+    common InstallerLocale and redundant fields from a sole Apps & Features
+    entry without changing meaningful ARP overrides.
+  .PARAMETER Manifest
+    The logical WinGet manifest model to optimize.
+  .OUTPUTS
+    A detached Dumplings.WinGet.ManifestModel object.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)]$Manifest)
+
+  process {
+    $Installers = @($Manifest.Installers | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
+    $InstallerDefaults = Copy-WinGetManifestValue -Value $Manifest.InstallerDefaults
+
+    # InstallerLocale is useful only when it distinguishes selectable payloads.
+    # A common value also causes WinGet validation to force that locale onto
+    # dependencies, so remove it from every effective installer before common
+    # values are compacted back to the installer-manifest root.
+    if ($Installers.Count -gt 0) {
+      $InstallerLocales = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      $EveryInstallerHasLocale = $true
+      foreach ($Installer in $Installers) {
+        if (-not $Installer.Contains('InstallerLocale') -or [string]::IsNullOrWhiteSpace([string]$Installer['InstallerLocale'])) {
+          $EveryInstallerHasLocale = $false
+          break
+        }
+        $null = $InstallerLocales.Add([string]$Installer['InstallerLocale'])
+      }
+      if ($EveryInstallerHasLocale -and $InstallerLocales.Count -eq 1) {
+        foreach ($Installer in $Installers) { $Installer.Remove('InstallerLocale') }
+        if ($InstallerDefaults.Contains('InstallerLocale')) { $InstallerDefaults.Remove('InstallerLocale') }
+      }
+    }
+
+    $NormalizedDefaultLocalization = $null
+    $AppsAndFeaturesEntriesChanged = $false
+    foreach ($Installer in $Installers) {
+      if (-not $Installer.Contains('AppsAndFeaturesEntries')) { continue }
+      $Entries = @($Installer['AppsAndFeaturesEntries'])
+      if ($Entries.Count -ne 1 -or $Entries[0] -isnot [System.Collections.IDictionary]) { continue }
+
+      $Entry = $Entries[0]
+      $EntryChanged = $false
+
+      # AppsAndFeaturesEntries.InstallerType overrides the effective installer
+      # family only when it differs. Normalize aliases and ZIP nested types
+      # through the same resolver used by manifest inheritance.
+      if ($Entry.Contains('InstallerType')) {
+        $EntryTypeProbe = [ordered]@{ InstallerType = [string]$Entry['InstallerType'] }
+        $EntryInstallerType = Get-WinGetManifestEffectiveInstallerType -Installer $EntryTypeProbe
+        $EffectiveInstallerType = Get-WinGetManifestEffectiveInstallerType -Installer $Installer
+        if (-not [string]::IsNullOrWhiteSpace($EntryInstallerType) -and $EntryInstallerType -ieq $EffectiveInstallerType) {
+          $Entry.Remove('InstallerType')
+          $EntryChanged = $true
+        }
+      }
+
+      $HasRedundantProductCode = $Installer.Contains('ProductCode') -and $Entry.Contains('ProductCode') -and [string]$Installer['ProductCode'] -ieq [string]$Entry['ProductCode']
+      if ($HasRedundantProductCode) {
+        # ProductCode at installer level already supplies the exact ARP key.
+        $Entry.Remove('ProductCode')
+        $EntryChanged = $true
+      }
+
+      # Name and publisher overrides are redundant independently of ProductCode
+      # when WinGet normalization matches the default locale manifest.
+      if ($Entry.Contains('DisplayName') -or $Entry.Contains('Publisher')) {
+        if ($null -eq $NormalizedDefaultLocalization) {
+          $Normalizer = Get-Command -Name ConvertTo-WinGetNormalizedNameAndPublisher -CommandType Function -ErrorAction SilentlyContinue
+          if (-not $Normalizer) { throw 'WinGet ARP normalization is unavailable; load WinGetARP.psm1 before optimizing manifests' }
+
+          $DefaultName = [string]$Manifest.DefaultLocalization['PackageName']
+          $DefaultPublisher = [string]$Manifest.DefaultLocalization['Publisher']
+          if ([string]::IsNullOrWhiteSpace($DefaultName)) { $DefaultName = '_' }
+          $NormalizedDefaultLocalization = ConvertTo-WinGetNormalizedNameAndPublisher -Name $DefaultName -Publisher $DefaultPublisher
+        }
+
+        if ($Entry.Contains('DisplayName') -and -not [string]::IsNullOrWhiteSpace([string]$Entry['DisplayName'])) {
+          $NormalizedDisplayName = (ConvertTo-WinGetNormalizedNameAndPublisher -Name ([string]$Entry['DisplayName']) -Publisher '').NormalizedName
+          if (-not [string]::IsNullOrWhiteSpace($NormalizedDisplayName) -and $NormalizedDisplayName -ieq $NormalizedDefaultLocalization.NormalizedName) {
+            $Entry.Remove('DisplayName')
+            $EntryChanged = $true
+          }
+        }
+        if ($Entry.Contains('Publisher') -and -not [string]::IsNullOrWhiteSpace([string]$Entry['Publisher'])) {
+          $NameForNormalization = [string]$Manifest.DefaultLocalization['PackageName']
+          if ([string]::IsNullOrWhiteSpace($NameForNormalization)) { $NameForNormalization = '_' }
+          $NormalizedPublisher = (ConvertTo-WinGetNormalizedNameAndPublisher -Name $NameForNormalization -Publisher ([string]$Entry['Publisher'])).NormalizedPublisher
+          if (-not [string]::IsNullOrWhiteSpace($NormalizedPublisher) -and $NormalizedPublisher -ieq $NormalizedDefaultLocalization.NormalizedPublisher) {
+            $Entry.Remove('Publisher')
+            $EntryChanged = $true
+          }
+        }
+      }
+
+      if ($EntryChanged) {
+        $AppsAndFeaturesEntriesChanged = $true
+        if ($Entry.Count -eq 0) {
+          $Installer.Remove('AppsAndFeaturesEntries')
+        } else {
+          $Installer['AppsAndFeaturesEntries'] = @($Entry)
+        }
+      }
+    }
+    if ($AppsAndFeaturesEntriesChanged -and $InstallerDefaults.Contains('AppsAndFeaturesEntries')) {
+      $InstallerDefaults.Remove('AppsAndFeaturesEntries')
+    }
+
+    return New-WinGetManifestModel -PackageIdentifier ([string]$Manifest.PackageIdentifier) -PackageVersion ([string]$Manifest.PackageVersion) -Channel ([string]$Manifest.Channel) -Moniker ([string]$Manifest.Moniker) -ManifestVersion ([string]$Manifest.ManifestVersion) -InstallerDefaults $InstallerDefaults -Installers ([System.Collections.IDictionary[]]$Installers) -DefaultLocalization $Manifest.DefaultLocalization -Localizations ([System.Collections.IDictionary[]]@($Manifest.Localizations)) -SourceFormat ([string]$Manifest.SourceFormat)
+  }
+}
+
 function ConvertFrom-WinGetMergedManifest {
   <#
   .SYNOPSIS
@@ -466,6 +585,7 @@ function ConvertTo-WinGetMergedManifest {
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)]$Manifest)
 
   process {
+    $Manifest = Optimize-WinGetManifest -Manifest $Manifest
     $Compacted = Get-WinGetManifestCompactedInstallerData -Manifest $Manifest
     $Merged = [ordered]@{
       PackageIdentifier = [string]$Manifest.PackageIdentifier
@@ -485,4 +605,4 @@ function ConvertTo-WinGetMergedManifest {
   }
 }
 
-Export-ModuleMember -Function Copy-WinGetManifestValue, Test-WinGetManifestValueEqual, Merge-WinGetManifestDictionary, Get-WinGetManifestEffectiveInstallerType, Get-WinGetInstallerPropertyCatalog, Get-WinGetAuthoredEffectiveInstallers, Get-WinGetManifestCompactedInstallerData, New-WinGetManifestModel, ConvertFrom-WinGetMergedManifest, ConvertTo-WinGetMergedManifest
+Export-ModuleMember -Function Copy-WinGetManifestValue, Test-WinGetManifestValueEqual, Merge-WinGetManifestDictionary, Get-WinGetManifestEffectiveInstallerType, Get-WinGetInstallerPropertyCatalog, Get-WinGetAuthoredEffectiveInstallers, Get-WinGetManifestCompactedInstallerData, New-WinGetManifestModel, Optimize-WinGetManifest, ConvertFrom-WinGetMergedManifest, ConvertTo-WinGetMergedManifest
