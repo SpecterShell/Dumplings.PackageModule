@@ -254,8 +254,6 @@ function Expand-InnoInstaller {
   )
 
   process {
-    # Resolve interactive policy before invoking the JSON bridge, whose standard output is not an interactive console.
-    $CollisionAction = Read-InstallerCollisionAction -CollisionAction $CollisionAction
     $Arguments = @{
       Path                 = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
       Name                 = $Name

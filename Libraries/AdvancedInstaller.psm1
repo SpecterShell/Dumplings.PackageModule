@@ -186,8 +186,6 @@ function Expand-AdvancedInstaller {
   )
 
   process {
-    # Resolve interactive policy in the parent host before the bridge redirects child-process output as JSON.
-    $CollisionAction = Read-InstallerCollisionAction -CollisionAction $CollisionAction
     $InstallerPath = switch ($PSCmdlet.ParameterSetName) {
       'Path' { Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf }
       'Installer' { Resolve-InstallerFileSystemPath -Path $Installer.Path -PathType Leaf }

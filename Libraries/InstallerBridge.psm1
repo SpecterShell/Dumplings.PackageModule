@@ -185,13 +185,20 @@ function Invoke-InstallerBridgeCommand {
 
   $PowerShellPath = (Get-InstallerBridgePowerShell).FullName
   $CliPath = (Resolve-InstallerBridgeCliPath -Name $ModuleName).FullName
+  $InteractiveCollisionPrompt = $Argument.ContainsKey('CollisionAction') -and $Argument.CollisionAction -eq 'Prompt'
+  $BridgeResultPath = $null
 
   $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
   $StartInfo.FileName = $PowerShellPath
   $StartInfo.UseShellExecute = $false
-  $StartInfo.RedirectStandardOutput = $true
+  # Prompt-mode extraction inherits the parent console just like native file
+  # cmdlets. The parser writes its machine-readable result to a temporary file
+  # so host prompts cannot corrupt the JSON transport stream.
+  $StartInfo.RedirectStandardOutput = -not $InteractiveCollisionPrompt
   $StartInfo.RedirectStandardError = $true
-  $StartInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  if ($StartInfo.RedirectStandardOutput) {
+    $StartInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  }
   $StartInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
 
   foreach ($Value in @('-NoLogo', '-NoProfile', '-File', $CliPath, '-Action', $Action)) {
@@ -206,6 +213,12 @@ function Invoke-InstallerBridgeCommand {
     $null = $StartInfo.ArgumentList.Add([string]$Entry.Value)
   }
 
+  if ($InteractiveCollisionPrompt) {
+    $BridgeResultPath = Join-Path ([IO.Path]::GetTempPath()) "Dumplings-InstallerBridge-$([guid]::NewGuid().ToString('N')).json"
+    $null = $StartInfo.ArgumentList.Add('-ResultPath')
+    $null = $StartInfo.ArgumentList.Add($BridgeResultPath)
+  }
+
   $Process = [System.Diagnostics.Process]::new()
   $Process.StartInfo = $StartInfo
 
@@ -213,14 +226,13 @@ function Invoke-InstallerBridgeCommand {
     $null = $Process.Start()
     # Drain both redirected streams concurrently so a verbose parser cannot
     # deadlock while its sibling pipe is waiting to be read.
-    $StandardOutputTask = $Process.StandardOutput.ReadToEndAsync()
+    $StandardOutputTask = if ($StartInfo.RedirectStandardOutput) { $Process.StandardOutput.ReadToEndAsync() } else { $null }
     $StandardErrorTask = $Process.StandardError.ReadToEndAsync()
     if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
       try { $Process.Kill($true) } catch { }
       throw "The installer parser CLI '$Action' exceeded the $TimeoutSeconds-second timeout"
     }
     $Process.WaitForExit()
-    $StandardOutput = $StandardOutputTask.GetAwaiter().GetResult()
     $StandardError = $StandardErrorTask.GetAwaiter().GetResult()
 
     if ($Process.ExitCode -ne 0) {
@@ -232,11 +244,23 @@ function Invoke-InstallerBridgeCommand {
       throw $Message.Trim()
     }
 
+    $StandardOutput = if ($InteractiveCollisionPrompt) {
+      if (-not (Test-Path -LiteralPath $BridgeResultPath -PathType Leaf)) {
+        throw "The installer parser CLI '$Action' did not produce its interactive result"
+      }
+      [IO.File]::ReadAllText($BridgeResultPath, [Text.Encoding]::UTF8)
+    } else {
+      $StandardOutputTask.GetAwaiter().GetResult()
+    }
+
     if ([string]::IsNullOrWhiteSpace($StandardOutput)) { return $null }
     return $StandardOutput | ConvertFrom-InstallerBridgeJson
   } finally {
     try { if (-not $Process.HasExited) { $Process.Kill($true) } } catch { }
     $Process.Dispose()
+    if ($BridgeResultPath) {
+      try { [IO.File]::Delete($BridgeResultPath) } catch { }
+    }
   }
 }
 

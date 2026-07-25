@@ -180,6 +180,23 @@ stagingPercentage: 25
     }
   }
 
+  It 'Should not prompt for the default collision policy when bridge outputs are available' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-bridge-prompt-without-collision'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    try {
+      # Omitting CollisionAction forwards Prompt to the parser. A fresh output
+      # path must complete without consulting the host for a choice.
+      $Extracted = @(Expand-NSISInstaller -Path $Fixture -DestinationPath $ExpandedPath -Name 'alist-desktop.exe' -MaximumExpandedBytes 33554432)
+
+      $Extracted | Should -HaveCount 1
+      $Extracted[0].VersionInfo.FileVersion | Should -Be '3.60.0'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   It 'Should return FileInfo objects from the InstallerParsers Inno extraction bridge' {
     $Fixture = Get-InstallerFixture -Name 'BankLinkBooks.exe' -Url 'https://download.myob.com/BankLinkBooks.exe'
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'myob-bridge-expanded'
