@@ -230,6 +230,50 @@ Describe 'WinGet installer analyzer content detection' {
     $Result.Result.Metadata.EmbeddedFiles | Should -Contain 'i4jparams.conf'
   }
 
+  It 'Should expose localized NSIS ARP entries and parser notices' {
+    InModuleScope WinGetInstallerAnalyzer {
+      $Notice = 'NSIS uninstall DisplayName or Publisher varies by installer language (en-US, zh-CN).'
+      $Warning = 'The NSIS parser recovered incomplete optional metadata.'
+      Mock Get-NSISInfo {
+        [pscustomobject]@{
+          InstallerType                      = 'Nullsoft'
+          DisplayName                        = 'Tencent Meeting'
+          DisplayVersion                     = '3.44.10.457'
+          Publisher                          = 'Tencent Technology (Shenzhen) Co. Ltd.'
+          ProductCode                        = 'WeMeet'
+          Scope                              = 'machine'
+          AppsAndFeaturesEntries             = @(
+            [pscustomobject]@{ DisplayName = 'Tencent Meeting'; Publisher = 'Tencent Technology (Shenzhen) Co. Ltd.'; ProductCode = 'WeMeet' },
+            [pscustomobject]@{ DisplayName = '腾讯会议'; Publisher = '腾讯科技(深圳)有限公司'; ProductCode = 'WeMeet' }
+          )
+          AppsAndFeaturesEntryEvidence       = @(
+            [pscustomobject]@{ LanguageId = 1033; Locale = 'en-US'; DisplayName = 'Tencent Meeting' },
+            [pscustomobject]@{ LanguageId = 2052; Locale = 'zh-CN'; DisplayName = '腾讯会议' }
+          )
+          HasLocalizedAppsAndFeaturesEntries = $true
+          Notices                            = @($Notice)
+          Warnings                           = @($Warning)
+          Protocols                          = @()
+          FileExtensions                     = @()
+          RegistryAssociationInfo            = $null
+        }
+      }
+
+      $Candidate = [pscustomobject]@{ Family = 'NSIS/Nullsoft'; Confidence = 'high' }
+      $ParserResult = @(Invoke-WinGetInstallerExeParser -InstallerPath 'localized-nsis.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
+          Where-Object { $_.Name -eq 'NSIS' -and $_.Success })[0].Result
+
+      @($ParserResult.AppsAndFeaturesEntries).Count | Should -Be 2
+      $ParserResult.AppsAndFeaturesEntries.DisplayName | Should -Contain '腾讯会议'
+      $ParserResult.AppsAndFeaturesEvidence.Locale | Should -Contain 'zh-CN'
+      $ParserResult.HasLocalizedAppsAndFeaturesEntries | Should -BeTrue
+      $ParserResult.Notices | Should -Contain $Notice
+      $ParserResult.Warnings | Should -Contain $Warning
+      $ParserResult.Warnings | Should -Not -Contain $Notice
+      $ParserResult.Warnings | Should -HaveCount 1
+    }
+  }
+
   It 'Should expose the configured nested launcher for WinRAR GUI SFX installers' {
     $Installer = Get-AnalyzerInstallerFixture -Name 'Lakes_SCREENView_4.0.1.exe' -Url 'https://www.weblakes.com/products/screen/update/Lakes_Environmental_SCREEN_View_V.4.0.1_Install.exe'
 

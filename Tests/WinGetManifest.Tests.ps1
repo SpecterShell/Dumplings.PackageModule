@@ -1,6 +1,8 @@
 BeforeDiscovery {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\YamlSchema.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSchema.psm1') -Force
@@ -146,6 +148,8 @@ Describe 'WinGet installer manifest metadata updates' {
     It 'Updates NSIS ProductCode and AppsAndFeaturesEntries from one parser result' {
       Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
       Mock Get-NSISInfo {
+        param($Path, $Architecture)
+        $Architecture | Should -Be 'x64'
         [pscustomobject]@{
           ProductCode                = 'New.NSIS.Product'
           DisplayName                = 'New NSIS Name'
@@ -176,7 +180,106 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New NSIS Publisher'
       $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'New.NSIS.Product'
       Should -Invoke Get-NSISInfo -Exactly 1
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x64' }
       Should -Invoke Get-WinGetInstallerAnalysis -Exactly 0
+    }
+
+    It 'Uses each installer entry architecture when one NSIS URL exposes different ProductCodes' {
+      Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
+      Mock Get-NSISInfo {
+        param($Path, $Architecture)
+        [pscustomobject]@{
+          InstallerType              = 'Nullsoft'
+          ProductCode                = $Architecture -eq 'x64' ? 'BitComet_x64' : 'BitComet'
+          DisplayName                = 'BitComet 2.21'
+          DisplayVersion             = '2.21'
+          Publisher                  = 'CometNetwork'
+          WritesAppsAndFeaturesEntry = $true
+          Warnings                   = @()
+          Notices                    = @()
+        }
+      }
+
+      $Results = foreach ($Architecture in @('x86', 'x64')) {
+        $Installer = [ordered]@{
+          Architecture  = $Architecture
+          InstallerType = 'nullsoft'
+          InstallerUrl  = $Script:InstallerUrl
+          ProductCode   = 'Old.ProductCode'
+        }
+        Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+      }
+
+      $Results[0].ProductCode | Should -Be 'BitComet'
+      $Results[1].ProductCode | Should -Be 'BitComet_x64'
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x86' }
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x64' }
+    }
+
+    It 'Uses each installer entry scope when one NSIS URL exposes different ProductCodes' {
+      Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
+      Mock Get-NSISInfo {
+        param($Path, $Architecture, $Scope)
+        [pscustomobject]@{
+          InstallerType              = 'Nullsoft'
+          ProductCode                = $Scope -eq 'user' ? 'DBeaver (current user)' : 'DBeaver'
+          DisplayName                = $Scope -eq 'user' ? 'DBeaver 26.1.3 (current user)' : 'DBeaver 26.1.3'
+          DisplayVersion             = '26.1.3'
+          Publisher                  = 'DBeaver Corp'
+          Scope                      = $Scope
+          WritesAppsAndFeaturesEntry = $true
+          Warnings                   = @()
+          Notices                    = @()
+        }
+      }
+
+      $Results = foreach ($Scope in @('user', 'machine')) {
+        $Installer = [ordered]@{
+          Architecture  = 'x64'
+          InstallerType = 'nullsoft'
+          Scope         = $Scope
+          InstallerUrl  = $Script:InstallerUrl
+          ProductCode   = 'Old.ProductCode'
+        }
+        Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+      }
+
+      $Results[0].ProductCode | Should -Be 'DBeaver (current user)'
+      $Results[1].ProductCode | Should -Be 'DBeaver'
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Scope -eq 'user' }
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Scope -eq 'machine' }
+    }
+
+    It 'Does not reuse same-URL NSIS metadata across different scopes' {
+      Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
+      Mock Get-NSISInfo {
+        param($Path, $Architecture, $Scope)
+        [pscustomobject]@{
+          InstallerType              = 'Nullsoft'
+          ProductCode                = $Scope -eq 'user' ? 'DBeaver (current user)' : 'DBeaver'
+          DisplayName                = $Scope -eq 'user' ? 'DBeaver 26.1.3 (current user)' : 'DBeaver 26.1.3'
+          DisplayVersion             = '26.1.3'
+          Publisher                  = 'DBeaver Corp'
+          WritesAppsAndFeaturesEntry = $true
+          Warnings                   = @()
+          Notices                    = @()
+        }
+      }
+      $OldInstallers = @(
+        [ordered]@{ Architecture = 'x64'; InstallerType = 'nullsoft'; Scope = 'user'; InstallerUrl = 'https://example.test/old.exe'; ProductCode = 'Old.User' },
+        [ordered]@{ Architecture = 'x64'; InstallerType = 'nullsoft'; Scope = 'machine'; InstallerUrl = 'https://example.test/old.exe'; ProductCode = 'Old.Machine' }
+      )
+      $InstallerEntries = @(
+        [ordered]@{ Architecture = 'x64'; Scope = 'user'; InstallerUrl = $Script:InstallerUrl },
+        [ordered]@{ Architecture = 'x64'; Scope = 'machine'; InstallerUrl = $Script:InstallerUrl }
+      )
+
+      $Results = Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Results[0].ProductCode | Should -Be 'DBeaver (current user)'
+      $Results[1].ProductCode | Should -Be 'DBeaver'
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Scope -eq 'user' }
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Scope -eq 'machine' }
     }
 
     It 'Updates source-derived Inno ProductCode and directory metadata' {

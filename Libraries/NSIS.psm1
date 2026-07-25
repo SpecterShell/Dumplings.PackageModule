@@ -21,16 +21,31 @@ function Get-NSISInfo {
     Get static metadata from a Nullsoft Scriptable Install System installer through the separate GPL parser module
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used when the installer selects architecture-specific ARP metadata
+  .PARAMETER Scope
+    The target installation scope used when the installer selects scope-specific ARP metadata
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [Parameter(HelpMessage = 'The target Windows architecture used to resolve architecture-specific ARP metadata')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [Parameter(HelpMessage = 'The target installation scope used to resolve scope-specific ARP metadata')]
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
     $InstallerPath = (Get-Item -Path $Path -Force).FullName
-    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetInfo' -Argument @{ Path = $InstallerPath }
+    $Arguments = @{ Path = $InstallerPath }
+    if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $Arguments.Architecture = $Architecture }
+    if (-not [string]::IsNullOrWhiteSpace($Scope)) { $Arguments.Scope = $Scope }
+    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetInfo' -Argument $Arguments
     return $Info
   }
 }
@@ -212,10 +227,23 @@ function Read-ProtocolsFromNSIS {
     Read literal URL protocol names written by an NSIS installer
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific registry writes.
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific registry writes.
   #>
   [OutputType([string[]])]
-  param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
-  process { (Get-NSISInfo -Path $Path).Protocols }
+  param (
+    [Parameter(ValueFromPipeline, Mandatory)][string]$Path,
+    [ValidateSet('x86', 'x64', 'arm64')][string]$Architecture,
+    [ValidateSet('user', 'machine')][string]$Scope
+  )
+  process {
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    (Get-NSISInfo @Arguments).Protocols
+  }
 }
 
 function Read-FileExtensionsFromNSIS {
@@ -224,10 +252,23 @@ function Read-FileExtensionsFromNSIS {
     Read literal file extensions written by an NSIS installer
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific registry writes.
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific registry writes.
   #>
   [OutputType([string[]])]
-  param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
-  process { (Get-NSISInfo -Path $Path).FileExtensions }
+  param (
+    [Parameter(ValueFromPipeline, Mandatory)][string]$Path,
+    [ValidateSet('x86', 'x64', 'arm64')][string]$Architecture,
+    [ValidateSet('user', 'machine')][string]$Scope
+  )
+  process {
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    (Get-NSISInfo @Arguments).FileExtensions
+  }
 }
 
 function Read-ProductVersionFromNSIS {
@@ -236,15 +277,28 @@ function Read-ProductVersionFromNSIS {
     Read the product version from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific metadata
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific metadata
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Info = Get-NSISInfo -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    $Info = Get-NSISInfo @Arguments
     if ([string]::IsNullOrWhiteSpace($Info.DisplayVersion)) { throw 'The NSIS installer does not expose a DisplayVersion value' }
     return $Info.DisplayVersion
   }
@@ -256,15 +310,28 @@ function Read-ProductNameFromNSIS {
     Read the product name from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific metadata
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific metadata
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Info = Get-NSISInfo -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    $Info = Get-NSISInfo @Arguments
     if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { throw 'The NSIS installer does not expose a DisplayName value' }
     return $Info.DisplayName
   }
@@ -276,15 +343,28 @@ function Read-PublisherFromNSIS {
     Read the publisher from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific metadata
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific metadata
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Info = Get-NSISInfo -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    $Info = Get-NSISInfo @Arguments
     if ([string]::IsNullOrWhiteSpace($Info.Publisher)) { throw 'The NSIS installer does not expose a Publisher value' }
     return $Info.Publisher
   }
@@ -296,15 +376,28 @@ function Read-ProductCodeFromNSIS {
     Read the uninstall registry key name from a Nullsoft installer
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    The target Windows architecture used to resolve architecture-specific metadata
+  .PARAMETER Scope
+    The target installation scope used to resolve scope-specific metadata
   #>
   [OutputType([string])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture,
+
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   process {
-    $Info = Get-NSISInfo -Path $Path
+    $Arguments = @{ Path = $Path }
+    if ($Architecture) { $Arguments.Architecture = $Architecture }
+    if ($Scope) { $Arguments.Scope = $Scope }
+    $Info = Get-NSISInfo @Arguments
     if ([string]::IsNullOrWhiteSpace($Info.ProductCode)) { throw 'The NSIS installer does not expose an uninstall registry key' }
     return $Info.ProductCode
   }

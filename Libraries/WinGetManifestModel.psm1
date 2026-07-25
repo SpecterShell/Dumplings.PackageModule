@@ -452,7 +452,8 @@ function Optimize-WinGetManifest {
       }
     }
 
-    $NormalizedDefaultLocalization = $null
+    $NormalizedLocalizationNames = $null
+    $NormalizedLocalizationPublishers = $null
     $AppsAndFeaturesEntriesChanged = $false
     foreach ($Installer in $Installers) {
       if (-not $Installer.Contains('AppsAndFeaturesEntries')) { continue }
@@ -483,30 +484,49 @@ function Optimize-WinGetManifest {
       }
 
       # Name and publisher overrides are redundant independently of ProductCode
-      # when WinGet normalization matches the default locale manifest.
+      # when WinGet normalization matches any authored localization. The source
+      # index stores localized names and publishers in independent lookup tables,
+      # so compare each field independently rather than requiring a locale pair.
       if ($Entry.Contains('DisplayName') -or $Entry.Contains('Publisher')) {
-        if ($null -eq $NormalizedDefaultLocalization) {
+        if ($null -eq $NormalizedLocalizationNames) {
           $Normalizer = Get-Command -Name ConvertTo-WinGetNormalizedNameAndPublisher -CommandType Function -ErrorAction SilentlyContinue
           if (-not $Normalizer) { throw 'WinGet ARP normalization is unavailable; load WinGetARP.psm1 before optimizing manifests' }
 
-          $DefaultName = [string]$Manifest.DefaultLocalization['PackageName']
-          $DefaultPublisher = [string]$Manifest.DefaultLocalization['Publisher']
-          if ([string]::IsNullOrWhiteSpace($DefaultName)) { $DefaultName = '_' }
-          $NormalizedDefaultLocalization = ConvertTo-WinGetNormalizedNameAndPublisher -Name $DefaultName -Publisher $DefaultPublisher
+          $NormalizedLocalizationNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+          $NormalizedLocalizationPublishers = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+          $Localizations = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
+          $Localizations.Add($Manifest.DefaultLocalization)
+          foreach ($Localization in @($Manifest.Localizations)) {
+            if ($Localization -is [System.Collections.IDictionary]) { $Localizations.Add($Localization) }
+          }
+
+          # Only explicitly authored locale values enter these sets. An omitted
+          # additional-locale field inherits the already-recorded default value.
+          foreach ($Localization in $Localizations) {
+            $PackageName = [string]$Localization['PackageName']
+            if (-not [string]::IsNullOrWhiteSpace($PackageName)) {
+              $NormalizedName = (ConvertTo-WinGetNormalizedNameAndPublisher -Name $PackageName -Publisher '').NormalizedName
+              if (-not [string]::IsNullOrWhiteSpace($NormalizedName)) { $null = $NormalizedLocalizationNames.Add($NormalizedName) }
+            }
+
+            $Publisher = [string]$Localization['Publisher']
+            if (-not [string]::IsNullOrWhiteSpace($Publisher)) {
+              $NormalizedPublisher = (ConvertTo-WinGetNormalizedNameAndPublisher -Name 'Dumplings Package' -Publisher $Publisher).NormalizedPublisher
+              if (-not [string]::IsNullOrWhiteSpace($NormalizedPublisher)) { $null = $NormalizedLocalizationPublishers.Add($NormalizedPublisher) }
+            }
+          }
         }
 
         if ($Entry.Contains('DisplayName') -and -not [string]::IsNullOrWhiteSpace([string]$Entry['DisplayName'])) {
           $NormalizedDisplayName = (ConvertTo-WinGetNormalizedNameAndPublisher -Name ([string]$Entry['DisplayName']) -Publisher '').NormalizedName
-          if (-not [string]::IsNullOrWhiteSpace($NormalizedDisplayName) -and $NormalizedDisplayName -ieq $NormalizedDefaultLocalization.NormalizedName) {
+          if (-not [string]::IsNullOrWhiteSpace($NormalizedDisplayName) -and $NormalizedLocalizationNames.Contains($NormalizedDisplayName)) {
             $Entry.Remove('DisplayName')
             $EntryChanged = $true
           }
         }
         if ($Entry.Contains('Publisher') -and -not [string]::IsNullOrWhiteSpace([string]$Entry['Publisher'])) {
-          $NameForNormalization = [string]$Manifest.DefaultLocalization['PackageName']
-          if ([string]::IsNullOrWhiteSpace($NameForNormalization)) { $NameForNormalization = '_' }
-          $NormalizedPublisher = (ConvertTo-WinGetNormalizedNameAndPublisher -Name $NameForNormalization -Publisher ([string]$Entry['Publisher'])).NormalizedPublisher
-          if (-not [string]::IsNullOrWhiteSpace($NormalizedPublisher) -and $NormalizedPublisher -ieq $NormalizedDefaultLocalization.NormalizedPublisher) {
+          $NormalizedPublisher = (ConvertTo-WinGetNormalizedNameAndPublisher -Name 'Dumplings Package' -Publisher ([string]$Entry['Publisher'])).NormalizedPublisher
+          if (-not [string]::IsNullOrWhiteSpace($NormalizedPublisher) -and $NormalizedLocalizationPublishers.Contains($NormalizedPublisher)) {
             $Entry.Remove('Publisher')
             $EntryChanged = $true
           }

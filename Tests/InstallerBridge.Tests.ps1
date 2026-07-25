@@ -25,10 +25,19 @@ BeforeAll {
       [Parameter(Mandatory)]
       [string]$Url,
 
+      [string]$Sha256,
+
       [switch]$UseSourceForgeMetaRefresh
     )
 
-    Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url -UseSourceForgeMetaRefresh:$UseSourceForgeMetaRefresh
+    $Arguments = @{
+      Directory                 = $Script:FixtureDirectory
+      Name                      = $Name
+      Uri                       = $Url
+      UseSourceForgeMetaRefresh = $UseSourceForgeMetaRefresh
+    }
+    if ($Sha256) { $Arguments.Sha256 = $Sha256 }
+    Get-DumplingsTestFixture @Arguments
   }
 
   function Add-TestInt64LE {
@@ -99,10 +108,11 @@ Describe 'Installer bridge' {
 
   It 'Should restore canonical diagnostic array types returned by a parser CLI' {
     $Result = InModuleScope InstallerBridge {
-      '{"Warnings":["Incomplete metadata"],"UnresolvedFields":[],"Files":["payload.exe"]}' | ConvertFrom-InstallerBridgeJson
+      '{"Warnings":["Incomplete metadata"],"Notices":["Localized ARP identity"],"UnresolvedFields":[],"Files":["payload.exe"]}' | ConvertFrom-InstallerBridgeJson
     }
 
     $Result.Warnings.GetType() | Should -Be ([string[]])
+    $Result.Notices.GetType() | Should -Be ([string[]])
     $Result.UnresolvedFields.GetType() | Should -Be ([string[]])
     $Result.Files.GetType() | Should -Not -Be ([string[]])
   }
@@ -162,6 +172,31 @@ stagingPercentage: 25
     $Info.InstallerType | Should -Be 'Nullsoft'
     $Info.DisplayName | Should -Be 'alist-desktop'
     $Info.DisplayVersion | Should -Be '3.60.0'
+  }
+
+  It 'Should forward target architecture to the NSIS parser bridge' {
+    $Fixture = Get-InstallerFixture -Name 'BitComet_2.21_setup.exe' -Url 'https://download.bitcomet.com/achive/BitComet_2.21_setup.exe' -Sha256 '2BB0AC769FE8B75B1B1B8CA42FA55D29D94AAF68480611538DBB4395D05082D2'
+
+    $X86Info = Get-NSISInfo -Path $Fixture -Architecture x86
+    $X64Info = Get-NSISInfo -Path $Fixture -Architecture x64
+
+    $X86Info.ProductCode | Should -Be 'BitComet'
+    $X64Info.ProductCode | Should -Be 'BitComet_x64'
+    $X64Info.Notices.GetType() | Should -Be ([string[]])
+  }
+
+  It 'Should forward target scope to the NSIS parser bridge' {
+    $Fixture = Get-InstallerFixture -Name 'dbeaver-ce-26.1.3-windows-x86_64.exe' -Url 'https://github.com/dbeaver/dbeaver/releases/download/26.1.3/dbeaver-ce-26.1.3-windows-x86_64.exe' -Sha256 'DF3E522E3DBD4E6A7F91DCD8E422A0BE13220D2E895A681B5B6732ADB518297D'
+
+    $UserInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+    $MachineInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $UserInfo.ProductCode | Should -Be 'DBeaver (current user)'
+    $UserInfo.Scope | Should -Be 'user'
+    $UserInfo.AppsAndFeaturesEntries.ProductCode | Should -Contain 'DBeaver (current user)'
+    $MachineInfo.ProductCode | Should -Be 'DBeaver'
+    $MachineInfo.Scope | Should -Be 'machine'
+    $MachineInfo.AppsAndFeaturesEntries.ProductCode | Should -Contain 'DBeaver'
   }
 
   It 'Should return FileInfo objects from the InstallerParsers NSIS extraction bridge' {

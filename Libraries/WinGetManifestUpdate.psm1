@@ -126,6 +126,10 @@ function Get-WinGetKnownInstallerManifestInfo {
     The installer path
   .PARAMETER InstallerType
     The manifest-declared effective installer type
+  .PARAMETER Architecture
+    The target architecture from the effective WinGet installer entry
+  .PARAMETER Scope
+    The target scope from the effective WinGet installer entry
   #>
   [OutputType([pscustomobject])]
   param (
@@ -134,7 +138,15 @@ function Get-WinGetKnownInstallerManifestInfo {
 
     [Parameter(Mandatory, HelpMessage = 'The manifest-declared effective installer type')]
     [ValidateSet('msi', 'wix', 'burn', 'nullsoft', 'inno', 'msix', 'appx')]
-    [string]$InstallerType
+    [string]$InstallerType,
+
+    [Parameter(HelpMessage = 'The target architecture from the effective WinGet installer entry')]
+    [ValidateSet('x86', 'x64', 'arm64', 'neutral')]
+    [string]$Architecture,
+
+    [Parameter(HelpMessage = 'The target scope from the effective WinGet installer entry')]
+    [ValidateSet('user', 'machine')]
+    [string]$Scope
   )
 
   try {
@@ -142,6 +154,11 @@ function Get-WinGetKnownInstallerManifestInfo {
       param($Info)
       $WarningsProperty = $Info.PSObject.Properties['Warnings']
       return $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
+    }
+    $NoticesFor = {
+      param($Info)
+      $NoticesProperty = $Info.PSObject.Properties['Notices']
+      return $null -eq $NoticesProperty ? @() : @($NoticesProperty.Value)
     }
     $InstallerTypeFor = {
       param($Info)
@@ -156,23 +173,27 @@ function Get-WinGetKnownInstallerManifestInfo {
           DetectedInstallerType = (& $InstallerTypeFor $Info)
           InputObject           = @($Info)
           Warnings              = (& $WarningsFor $Info)
+          Notices               = (& $NoticesFor $Info)
         }
       }
       'burn' {
         $Info = Get-BurnInfo -Path $Path
-        return [pscustomobject]@{ ParserName = 'Burn'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
+        return [pscustomobject]@{ ParserName = 'Burn'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
       }
       'nullsoft' {
-        $Info = Get-NSISInfo -Path $Path
-        return [pscustomobject]@{ ParserName = 'NSIS'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
+        $Arguments = @{ Path = $Path }
+        if ($Architecture -in @('x86', 'x64', 'arm64')) { $Arguments.Architecture = $Architecture }
+        if ($Scope -in @('user', 'machine')) { $Arguments.Scope = $Scope }
+        $Info = Get-NSISInfo @Arguments
+        return [pscustomobject]@{ ParserName = 'NSIS'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
       }
       'inno' {
         $Info = Get-InnoInfo -Path $Path
-        return [pscustomobject]@{ ParserName = 'Inno Setup'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
+        return [pscustomobject]@{ ParserName = 'Inno Setup'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
       }
       { $_ -cin @('msix', 'appx') } {
         $Info = Get-MSIXInfo -Path $Path -InstallerTypeHint $InstallerType
-        return [pscustomobject]@{ ParserName = 'MSIX/AppX'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info) }
+        return [pscustomobject]@{ ParserName = 'MSIX/AppX'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
       }
     }
   } catch {
@@ -775,8 +796,13 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   $Installer.InstallerUrl = $Installer.InstallerUrl.Replace(' ', '%20')
 
   # Update the installer using the matching installer
-  # The same bootstrapper URL can select different nested payloads by host architecture.
-  $MatchingInstaller = $Installers | Where-Object -FilterScript { $_.InstallerUrl -ceq $Installer.InstallerUrl -and $_.Architecture -ceq $Installer.Architecture } | Select-Object -First 1
+  # Reuse metadata only for the same effective manifest branch. One URL can
+  # expose different payloads by architecture or different ARP keys by scope.
+  $MatchingInstaller = $Installers | Where-Object -FilterScript {
+    $_.InstallerUrl -ceq $Installer.InstallerUrl -and
+    $_['Architecture'] -ceq $Installer['Architecture'] -and
+    $_['Scope'] -ceq $Installer['Scope']
+  } | Select-Object -First 1
   if ($MatchingInstaller -and ($Installer.Contains('NestedInstallerFiles') ? ((ConvertTo-Json -InputObject $Installer.NestedInstallerFiles -Depth 10 -Compress) -ceq (ConvertTo-Json -InputObject $MatchingInstaller.NestedInstallerFiles -Depth 10 -Compress)) : $true)) {
     foreach ($Key in @('InstallerSha256', 'SignatureSha256', 'PackageFamilyName', 'ProductCode', 'ReleaseDate', 'AppsAndFeaturesEntries')) {
       if ($MatchingInstaller.Contains($Key) -and -not $InstallerEntry.Contains($Key)) {
@@ -828,7 +854,17 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       # NSIS/Inno payloads, from overriding a valid outer installer family.
       $ParserInfo = $null
       try {
-        $ParserInfo = Get-WinGetKnownInstallerManifestInfo -Path $EffectiveInstallerPath -InstallerType $EffectiveInstallerType
+        $KnownParserArguments = @{
+          Path          = $EffectiveInstallerPath
+          InstallerType = $EffectiveInstallerType
+          Architecture  = $Installer.Architecture
+        }
+        # Scope remains author-controlled and is forwarded only when present.
+        # Avoid reading an absent dictionary key under strict mode.
+        if ($Installer.Contains('Scope') -and $Installer.Scope -in @('user', 'machine')) {
+          $KnownParserArguments.Scope = $Installer.Scope
+        }
+        $ParserInfo = Get-WinGetKnownInstallerManifestInfo @KnownParserArguments
       } catch {
         $ParserFailure = $_
         $Analysis = try { Get-WinGetInstallerAnalysis -Path $EffectiveInstallerPath } catch { $null }
@@ -856,6 +892,11 @@ function Update-WinGetInstallerManifestInstallerMetadata {
         $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
         foreach ($Warning in @($ParserWarnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
           $Logger.Invoke("$($ParserInfo.ParserName): $Warning", 'Warning')
+        }
+        $NoticesProperty = $ParserInfo.PSObject.Properties['Notices']
+        $ParserNotices = $null -eq $NoticesProperty ? @() : @($NoticesProperty.Value)
+        foreach ($Notice in @($ParserNotices | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
+          $Logger.Invoke("$($ParserInfo.ParserName): $Notice", 'Info')
         }
 
         # Apply each resolved value independently. Missing or explicitly

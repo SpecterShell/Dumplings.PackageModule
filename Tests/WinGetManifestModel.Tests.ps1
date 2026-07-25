@@ -164,7 +164,7 @@ Describe 'WinGet logical manifest model' {
     $Entry.Contains('Publisher') | Should -BeFalse
   }
 
-  It 'does not compare ARP names and publishers with additional locale manifests' {
+  It 'removes ARP names and publishers represented by an additional locale manifest' {
     $Model = New-WinGetManifestModel -PackageIdentifier 'Test.Localized' -PackageVersion '1.0.0' -ManifestVersion '1.12.0' -InstallerDefaults ([ordered]@{}) -Installers @(
       [ordered]@{
         Architecture = 'x64'; InstallerType = 'nullsoft'; InstallerUrl = 'https://example.test/setup.exe'; InstallerSha256 = 'A' * 64
@@ -176,11 +176,27 @@ Describe 'WinGet logical manifest model' {
     )
 
     $Optimized = Optimize-WinGetManifest -Manifest $Model
+
+    $Optimized.Installers[0].Contains('AppsAndFeaturesEntries') | Should -BeFalse
+  }
+
+  It 'retains ARP identity fields absent from every locale manifest' {
+    $Model = New-WinGetManifestModel -PackageIdentifier 'Test.Unlocalized' -PackageVersion '1.0.0' -ManifestVersion '1.12.0' -InstallerDefaults ([ordered]@{}) -Installers @(
+      [ordered]@{
+        Architecture = 'x64'; InstallerType = 'nullsoft'; InstallerUrl = 'https://example.test/setup.exe'; InstallerSha256 = 'A' * 64
+        ProductCode = 'Test.Unlocalized'
+        AppsAndFeaturesEntries = @([ordered]@{ DisplayName = 'Unauthored App'; Publisher = 'Unauthored Company'; ProductCode = 'Test.Unlocalized' })
+      }
+    ) -DefaultLocalization ([ordered]@{ PackageLocale = 'en-US'; Publisher = 'Default Company'; PackageName = 'Default App'; License = 'MIT'; ShortDescription = 'Test.' }) -Localizations @(
+      [ordered]@{ PackageLocale = 'fr-FR'; Publisher = 'Localized Company'; PackageName = 'Localized App' }
+    )
+
+    $Optimized = Optimize-WinGetManifest -Manifest $Model
     $Entry = $Optimized.Installers[0].AppsAndFeaturesEntries[0]
 
     $Entry.Contains('ProductCode') | Should -BeFalse
-    $Entry.DisplayName | Should -Be 'Localized App'
-    $Entry.Publisher | Should -Be 'Localized Company'
+    $Entry.DisplayName | Should -Be 'Unauthored App'
+    $Entry.Publisher | Should -Be 'Unauthored Company'
   }
 
   It 'removes a redundant versioned DisplayName when the ARP publisher is inherited' {

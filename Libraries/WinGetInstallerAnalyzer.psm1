@@ -1986,19 +1986,24 @@ function Invoke-WinGetInstallerExeParser {
     $KnownResult = Invoke-WinGetInstallerDetector -Name 'NSIS' -ScriptBlock {
       $Info = Get-NSISInfo -Path $AnalyzerInstallerPath
       [pscustomobject]@{
-        Family                  = 'NSIS/Nullsoft'
-        Confidence              = 'high'
-        InstallerType           = 'nullsoft'
-        Metadata                = $Info
-        ProductVersion          = $Info.DisplayVersion
-        ProductName             = $Info.DisplayName
-        Publisher               = $Info.Publisher
-        ProductCode             = $Info.ProductCode
-        Scope                   = $Info.Scope
-        Protocols               = $Info.Protocols
-        FileExtensions          = $Info.FileExtensions
-        RegistryAssociationInfo = $Info.RegistryAssociationInfo
-        SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'nullsoft'; Scope = $Info.Scope; Notes = @('Create duplicate user/machine entries only when switch or registry-write evidence proves both modes.', 'Check decompiled strings/control flow for TestParameter, IfSilent, GetOptions, and custom silent-mode rejection.') }
+        Family                             = 'NSIS/Nullsoft'
+        Confidence                         = 'high'
+        InstallerType                      = 'nullsoft'
+        Metadata                           = $Info
+        ProductVersion                     = $Info.DisplayVersion
+        ProductName                        = $Info.DisplayName
+        Publisher                          = $Info.Publisher
+        ProductCode                        = $Info.ProductCode
+        Scope                              = $Info.Scope
+        AppsAndFeaturesEntries             = @($Info.AppsAndFeaturesEntries)
+        AppsAndFeaturesEvidence            = @($Info.AppsAndFeaturesEntryEvidence)
+        HasLocalizedAppsAndFeaturesEntries = [bool]$Info.HasLocalizedAppsAndFeaturesEntries
+        Notices                            = $Info.Notices
+        Warnings                           = $Info.Warnings
+        Protocols                          = $Info.Protocols
+        FileExtensions                     = $Info.FileExtensions
+        RegistryAssociationInfo            = $Info.RegistryAssociationInfo
+        SuggestedManifestFields            = [pscustomobject]@{ InstallerType = 'nullsoft'; Scope = $Info.Scope; Notes = @('Create duplicate user/machine entries only when switch or registry-write evidence proves both modes.', 'Check decompiled strings/control flow for TestParameter, IfSilent, GetOptions, and custom silent-mode rejection.') }
       }
     }
     $KnownResult
