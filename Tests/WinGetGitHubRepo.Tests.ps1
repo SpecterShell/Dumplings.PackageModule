@@ -136,6 +136,22 @@ Describe 'Get-WinGetGitHubComparison' {
 }
 
 Describe 'Get-WinGetGitHubPullRequestFile' {
+  It 'enumerates a JSON array returned as one Invoke-RestMethod pipeline object' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      $Page = [object[]]@(
+        [pscustomobject]@{ filename = 'manifest-1.yaml'; status = 'modified'; sha = ('a' * 40) }
+        [pscustomobject]@{ filename = 'manifest-2.yaml'; status = 'added'; sha = ('b' * 40) }
+      )
+      Write-Output -NoEnumerate $Page
+    }
+
+    $Files = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber 42 -RepoOwner microsoft -RepoName winget-pkgs)
+
+    $Files.Count | Should -Be 2
+    $Files.filename | Should -Be @('manifest-1.yaml', 'manifest-2.yaml')
+    $Files.status | Should -Be @('modified', 'added')
+  }
+
   It 'reads all pages until GitHub returns fewer than 100 files' {
     $Script:GitHubApiUris = [System.Collections.Generic.List[string]]::new()
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {

@@ -903,7 +903,12 @@ function Get-WinGetGitHubPullRequestFile {
 
   $Files = [System.Collections.Generic.List[object]]::new()
   for ($Page = 1; $Page -le 30; $Page++) {
-    $Response = @(Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}/files?per_page=100&page=${Page}")
+    # Invoke-RestMethod deliberately returns a JSON array as one pipeline
+    # object. Wrapping that call in @() therefore creates a nested Object[] and
+    # makes the complete page look like one file without filename/status
+    # properties. Assignment preserves the JSON array itself, which foreach
+    # can enumerate exactly once for both one-file and multi-file responses.
+    $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}/files?per_page=100&page=${Page}"
     foreach ($File in $Response) { $Files.Add($File) }
 
     if ($Response.Count -lt 100) { return $Files.ToArray() }
