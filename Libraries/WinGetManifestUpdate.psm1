@@ -577,7 +577,9 @@ function Set-WinGetInstallerManifestMetadata {
     return
   }
 
-  foreach ($Field in @('ProductCode', 'SignatureSha256', 'PackageFamilyName', 'MinimumOSVersion')) {
+  # ProductCode is meaningful across installer families and remains parser-owned
+  # whenever the authored entry already contains it.
+  foreach ($Field in @('ProductCode')) {
     if (-not $Installer.Contains($Field) -or $InstallerEntry.Contains($Field) -or $UnresolvedFields.Contains($Field)) { continue }
     if ($Metadata.Contains($Field) -and (& $HasScalarValue $Metadata[$Field])) {
       $Installer[$Field] = $Metadata[$Field]
@@ -586,13 +588,34 @@ function Set-WinGetInstallerManifestMetadata {
     }
   }
 
-  foreach ($Field in @('Platform', 'Capabilities', 'RestrictedCapabilities')) {
-    if (-not $Installer.Contains($Field) -or $InstallerEntry.Contains($Field)) { continue }
-    if ($Metadata.Contains($Field)) {
-      $Installer[$Field] = @($Metadata[$Field])
-    } else {
-      & $ReportFailure $Field
+  $EffectiveInstallerType = [string]($Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType)
+  $IsPackageInstaller = $EffectiveInstallerType -cin @('msix', 'appx')
+  if ($IsPackageInstaller) {
+    # These fields describe AppX/MSIX package identity and package-manifest
+    # capabilities. In a mixed manifest they can be inherited by MSI/EXE
+    # entries, but those parsers cannot authoritatively reproduce them.
+    foreach ($Field in @('SignatureSha256', 'PackageFamilyName', 'MinimumOSVersion')) {
+      if (-not $Installer.Contains($Field) -or $InstallerEntry.Contains($Field) -or $UnresolvedFields.Contains($Field)) { continue }
+      if ($Metadata.Contains($Field) -and (& $HasScalarValue $Metadata[$Field])) {
+        $Installer[$Field] = $Metadata[$Field]
+      } else {
+        & $ReportFailure $Field
+      }
     }
+
+    foreach ($Field in @('Platform', 'Capabilities', 'RestrictedCapabilities')) {
+      if (-not $Installer.Contains($Field) -or $InstallerEntry.Contains($Field)) { continue }
+      if ($Metadata.Contains($Field)) {
+        $Installer[$Field] = @($Metadata[$Field])
+      } else {
+        & $ReportFailure $Field
+      }
+    }
+  } elseif ($Installer.Contains('MinimumOSVersion') -and -not $InstallerEntry.Contains('MinimumOSVersion') -and -not $UnresolvedFields.Contains('MinimumOSVersion') -and $Metadata.Contains('MinimumOSVersion') -and (& $HasScalarValue $Metadata.MinimumOSVersion)) {
+    # Non-package installers may expose a trustworthy minimum OS version. Use
+    # it when available, but otherwise preserve the authored/inherited value
+    # without asking an unrelated parser to synthesize package metadata.
+    $Installer.MinimumOSVersion = $Metadata.MinimumOSVersion
   }
 
   $TaskOverridesDefaultInstallLocation = $InstallerEntry.Contains('InstallationMetadata') -and $InstallerEntry.InstallationMetadata -is [System.Collections.IDictionary] -and $InstallerEntry.InstallationMetadata.Contains('DefaultInstallLocation')
@@ -757,6 +780,44 @@ function Get-WinGetInstallerReleaseDate {
     return $null
   }
   return $Parsed.ToUniversalTime().ToString('yyyy-MM-dd')
+}
+
+function New-WinGetInstallerDiagnosticLogger {
+  <#
+  .SYNOPSIS
+    Create a manifest-update logger that suppresses duplicate installer diagnostics.
+  .DESCRIPTION
+    One physical installer may back several effective WinGet entries, such as
+    user/machine scopes or architecture variants. Those entries still require
+    independent parsing, but identical parser warnings and notices should be
+    recorded only once in the task message. Verbose progress remains unfiltered
+    so each installer entry can still be diagnosed from the automation log.
+  .PARAMETER Logger
+    The original task logger whose Invoke method accepts message and level.
+  .OUTPUTS
+    A closure with the same two-argument logger contract.
+  #>
+  [OutputType([scriptblock])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The original task logger')]
+    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
+    $Logger
+  )
+
+  $ReportedDiagnostics = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  $OriginalLogger = $Logger
+  return {
+    param($Message, $Level)
+
+    $LevelName = [string]$Level
+    if ($LevelName -cin @('Warning', 'Info')) {
+      # Include severity in the identity so an informational notice promoted to
+      # a warning is not hidden by an earlier lower-severity occurrence.
+      $Identity = "${LevelName}`0${Message}"
+      if (-not $ReportedDiagnostics.Add($Identity)) { return }
+    }
+    $OriginalLogger.Invoke($Message, $Level)
+  }.GetNewClosure()
 }
 
 function Update-WinGetInstallerManifestInstallerMetadata {
@@ -995,11 +1056,14 @@ function Update-WinGetInstallerManifestInstallers {
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
+  # Scope and architecture entries can repeat source-backed parser warnings.
+  # Share one diagnostic set across this complete manifest update.
+  $InstallerLogger = New-WinGetInstallerDiagnosticLogger -Logger $Logger
   $iteration = 0
   $Installers = @()
   foreach ($OldInstaller in $OldInstallers) {
     $iteration += 1
-    $Logger.Invoke("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
+    $InstallerLogger.Invoke("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
 
     # Apply inputs
     $MatchingInstallerEntry = $null
@@ -1073,12 +1137,12 @@ function Update-WinGetInstallerManifestInstallers {
           }
           $Installer.$Key = $MatchingInstallerEntry.$Key
         } catch {
-          $Logger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
+          $InstallerLogger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
         }
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -Logger $Logger
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -Logger $InstallerLogger
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -1116,11 +1180,14 @@ function Set-WinGetInstallerManifestInstallers {
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
+  # Replacement mode has the same duplicate-diagnostic behavior as matching
+  # mode when multiple authored entries point to equivalent parser evidence.
+  $InstallerLogger = New-WinGetInstallerDiagnosticLogger -Logger $Logger
   $iteration = 0
   $Installers = @()
   foreach ($InstallerEntry in $InstallerEntries) {
     $iteration += 1
-    $Logger.Invoke("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
+    $InstallerLogger.Invoke("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
 
     # Find matching installer
     $MatchingInstaller = $null
@@ -1181,12 +1248,12 @@ function Set-WinGetInstallerManifestInstallers {
           }
           $Installer.$Key = $InstallerEntry.$Key
         } catch {
-          $Logger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
+          $InstallerLogger.Invoke("The new value of the installer property `"${Key}`" is invalid and thus discarded: ${_}", 'Warning')
         }
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -Logger $Logger
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -Logger $InstallerLogger
 
     # Add the updated installer to the new installers array
     $Installers += $Installer

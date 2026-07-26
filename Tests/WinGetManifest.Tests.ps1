@@ -634,6 +634,31 @@ Describe 'WinGet installer manifest metadata updates' {
       $Script:LogMessages.Message | Should -Not -Contain "Windows Installer did not return a value for existing installer field 'InstallationMetadata.DefaultInstallLocation'"
     }
 
+    It 'Preserves inherited AppX identity fields on WiX entries without parser warnings' {
+      $Installer = [ordered]@{
+        Architecture       = 'x64'
+        InstallerType      = 'wix'
+        ProductCode        = '{OLD-WIX-PRODUCT}'
+        PackageFamilyName  = 'MicrosoftCorporationII.WindowsSubsystemForLinux_8wekyb3d8bbwe'
+        MinimumOSVersion   = '10.0.19041.0'
+        Platform           = @('Windows.Desktop')
+      }
+      $Metadata = [ordered]@{
+        ProductCode = '{NEW-WIX-PRODUCT}'
+      }
+
+      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -Logger $Script:Logger
+
+      $Installer.ProductCode | Should -Be '{NEW-WIX-PRODUCT}'
+      $Installer.PackageFamilyName | Should -Be 'MicrosoftCorporationII.WindowsSubsystemForLinux_8wekyb3d8bbwe'
+      $Installer.MinimumOSVersion | Should -Be '10.0.19041.0'
+      $Installer.Platform | Should -Be @('Windows.Desktop')
+      $Messages = @($Script:LogMessages | ForEach-Object Message)
+      $Messages | Should -Not -Contain "Windows Installer did not return a value for existing installer field 'PackageFamilyName'"
+      $Messages | Should -Not -Contain "Windows Installer did not return a value for existing installer field 'MinimumOSVersion'"
+      $Messages | Should -Not -Contain "Windows Installer did not return a value for existing installer field 'Platform'"
+    }
+
     It 'Materializes an EXE ARP type for a Velopack MSI custom uninstall key' {
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
@@ -848,6 +873,45 @@ Describe 'WinGet installer manifest metadata updates' {
 
       $Result.ProductCode | Should -Be 'Inno.Product'
       $Script:LogMessages.Message | Should -Contain 'Inno Setup: Inno parser caveat'
+    }
+
+    It 'Logs identical parser diagnostics once across scope-specific installer entries' {
+      Mock Get-NSISInfo {
+        [pscustomobject]@{
+          InstallerType              = 'Nullsoft'
+          ProductCode                = $null
+          WritesAppsAndFeaturesEntry = $false
+          Warnings                   = @('Nested payload warning')
+        }
+      }
+      $OldInstallers = @(
+        [ordered]@{
+          Architecture  = 'x64'
+          InstallerType = 'nullsoft'
+          InstallerUrl  = $Script:InstallerUrl
+          Scope         = 'user'
+          ProductCode   = 'Existing.Product'
+        }
+        [ordered]@{
+          Architecture  = 'x64'
+          InstallerType = 'nullsoft'
+          InstallerUrl  = $Script:InstallerUrl
+          Scope         = 'machine'
+          ProductCode   = 'Existing.Product'
+        }
+      )
+      $InstallerEntries = @([ordered]@{
+          Architecture = 'x64'
+          InstallerUrl = $Script:InstallerUrl
+        })
+
+      $Result = @(Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger)
+
+      $Result.Count | Should -Be 2
+      @($Script:LogMessages.Where({ $_.Message -ceq 'NSIS: Nested payload warning' })).Count | Should -Be 1
+      @($Script:LogMessages.Where({ $_.Message -ceq 'NSIS reports that the outer installer does not write a visible Apps & Features entry; existing ARP metadata belongs to a nested payload or custom registration' })).Count | Should -Be 1
+      @($Script:LogMessages.Where({ $_.Level -ceq 'Verbose' -and $_.Message -like 'Updating installer #*' })).Count | Should -Be 2
+      Should -Invoke Get-NSISInfo -Exactly 2
     }
 
     It 'Throws on a cross-major-type mismatch between script installer families' {
