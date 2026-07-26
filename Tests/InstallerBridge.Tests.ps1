@@ -117,16 +117,16 @@ Describe 'Installer bridge' {
     $Result.Files.GetType() | Should -Not -Be ([string[]])
   }
 
-  It 'Should parse Readest while preserving its unnamed uninstall registry value' {
+  It 'Should parse Readest while resolving its MultiUser registry value name' {
     $Fixture = Get-InstallerFixture -Name 'Readest_0.11.20_x64-setup.exe' -Url 'https://github.com/readest/readest/releases/download/v0.11.20/Readest_0.11.20_x64-setup.exe'
-    $Info = Get-NSISInfo -Path $Fixture
+    $Info = Get-NSISInfo -Path $Fixture -Scope user
 
     $Info.InstallerType | Should -Be 'Nullsoft'
     $Info.DisplayName | Should -Be 'Readest'
     $Info.DisplayVersion | Should -Be '0.11.20'
-    $Info.RegistryValues.Contains('') | Should -BeTrue
-    $Info.RegistryValues[''] | Should -Be '1'
-    @($Info.RegistryWrites | Where-Object { $_.IsUninstallKey -and $_.Name -eq '' }) | Should -Not -BeNullOrEmpty
+    $Info.RegistryValues.CurrentUser | Should -Be '1'
+    @($Info.RegistryWrites | Where-Object { $_.IsUninstallKey -and $_.Name -eq 'CurrentUser' }) | Should -Not -BeNullOrEmpty
+    @($Info.RegistryWrites | Where-Object { $_.IsUninstallKey -and $_.Name -eq '' }) | Should -BeNullOrEmpty
   }
 
   It 'Should parse Setup Factory metadata through the Apache-2.0 wrapper' {
@@ -197,6 +197,18 @@ stagingPercentage: 25
     $MachineInfo.ProductCode | Should -Be 'DBeaver'
     $MachineInfo.Scope | Should -Be 'machine'
     $MachineInfo.AppsAndFeaturesEntries.ProductCode | Should -Contain 'DBeaver'
+  }
+
+  It 'Should preserve Tauri NSIS mode evidence across the GPL parser bridge' {
+    $Fixture = Get-InstallerFixture -Name 'Readest_0.11.20_x64-setup.exe' -Url 'https://github.com/readest/readest/releases/download/v0.11.20/Readest_0.11.20_x64-setup.exe' -Sha256 'DF8C9E2763CC9EC3E453CCE6320DF442798D115F9127C0C6BA831B800CBDB7DD'
+    $Info = Get-NSISInfo -Path $Fixture -Scope user
+
+    $Info.IsTauri | Should -BeTrue
+    $Info.TauriInstallerMode | Should -Be 'both'
+    $Info.RequestedExecutionLevel | Should -Be 'highestAvailable'
+    $Info.SupportedScopes | Should -Be @('user', 'machine')
+    $Info.DefaultInstallLocation | Should -Be '%LocalAppData%\Programs\Readest'
+    $Info.TauriEvidence | Should -Contain 'String:nsis_tauri_utils.dll'
   }
 
   It 'Should return FileInfo objects from the InstallerParsers NSIS extraction bridge' {
