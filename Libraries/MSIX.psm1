@@ -811,48 +811,57 @@ function Get-MSIXInfo {
 
     $DisplayName = ($Manifests | ForEach-Object { $_.GetElementsByTagName('DisplayName')[0] } | Where-Object { $_ } | Select-Object -First 1).'#text'
     $PublisherDisplayName = ($Manifests | ForEach-Object { $_.GetElementsByTagName('PublisherDisplayName')[0] } | Where-Object { $_ } | Select-Object -First 1).'#text'
-    $MinimumOSVersion = ($TargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.MinVersion) } | Sort-Object -Property { [System.Version]$_.MinVersion } | Select-Object -First 1).MinVersion
+
+    # WinGet can represent only the desktop and universal target families in
+    # its Platform enum. Keep vendor-specific families such as MSIXCore.Desktop
+    # as raw evidence, but do not emit them into a manifest or let their lower
+    # MinVersion replace the minimum for a WinGet-supported platform.
+    # Source: winget-cli AppInstallerCommonCore/MsixManifest.cpp
+    $SupportedTargetDeviceFamilies = @($TargetDeviceFamilies | Where-Object { $_.Name -cin @('Windows.Desktop', 'Windows.Universal') })
+    $MinimumOSVersion = ($SupportedTargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.MinVersion) } | Sort-Object -Property { [System.Version]$_.MinVersion } | Select-Object -First 1).MinVersion
 
     # Package identity and registration are defined by AppxManifest.xml rather
     # than an uninstall registry key. Keep ProductCode null and expose PFN as
     # its own structured identity field.
     [pscustomobject][ordered]@{
-      Path                         = $File.FullName
-      InstallerType                = $PackageTypeInfo.InstallerType
-      ProductCode                  = $null
-      UpgradeCode                  = $null
-      DisplayName                  = [string]$DisplayName
-      DisplayVersion               = [string]$Identity.Version
-      Publisher                    = [string]$PublisherDisplayName
-      Scope                        = $null
-      DefaultInstallLocation       = $null
-      WritesAppsAndFeaturesEntry   = $true
-      AppsAndFeaturesProductCode   = $null
-      AppsAndFeaturesInstallerType = $PackageTypeInfo.InstallerType.ToLowerInvariant()
-      Warnings                     = [string[]]@($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-      UnresolvedFields             = [string[]]@()
-      PackageKind                  = $PackageTypeInfo.PackageKind
-      InstallerTypeEvidence        = $PackageTypeInfo.Evidence
-      InstallerTypeAmbiguous       = $PackageTypeInfo.IsAmbiguous
-      IdentityName                 = [string]$Identity.Name
-      Name                         = [string]$Identity.Name
-      IdentityPublisher            = [string]$Identity.Publisher
-      IdentityVersion              = [string]$Identity.Version
-      Version                      = [string]$Identity.Version
-      Architecture                 = [string]$Identity.ProcessorArchitecture
-      PublisherDisplayName         = [string]$PublisherDisplayName
-      PackageFamilyName            = "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
-      Platform                     = @($TargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Name) } | Select-Object -ExpandProperty Name -Unique)
-      MinimumOSVersion             = $MinimumOSVersion
-      Dependencies                 = $DependencyInfo.Dependencies
-      UnknownPackageDependencies   = $DependencyInfo.UnknownPackageDependencies
-      Protocols                    = $AssociationInfo.Protocols
-      FileExtensions               = $AssociationInfo.FileExtensions
-      RegistryAssociationInfo      = $AssociationInfo
-      Capabilities                 = @($Capabilities | Sort-Object -Unique)
-      RestrictedCapabilities       = @($RestrictedCapabilities | Sort-Object -Unique)
-      SignatureSha256              = Read-SignatureSha256FromMSIX -Path $File.FullName
-      AppsAndFeaturesEntries       = @([pscustomobject]@{
+      Path                            = $File.FullName
+      InstallerType                   = $PackageTypeInfo.InstallerType
+      ProductCode                     = $null
+      UpgradeCode                     = $null
+      DisplayName                     = [string]$DisplayName
+      DisplayVersion                  = [string]$Identity.Version
+      Publisher                       = [string]$PublisherDisplayName
+      Scope                           = $null
+      DefaultInstallLocation          = $null
+      WritesAppsAndFeaturesEntry      = $true
+      AppsAndFeaturesProductCode      = $null
+      AppsAndFeaturesInstallerType    = $PackageTypeInfo.InstallerType.ToLowerInvariant()
+      Warnings                        = [string[]]@($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      UnresolvedFields                = [string[]]@()
+      PackageKind                     = $PackageTypeInfo.PackageKind
+      InstallerTypeEvidence           = $PackageTypeInfo.Evidence
+      InstallerTypeAmbiguous          = $PackageTypeInfo.IsAmbiguous
+      IdentityName                    = [string]$Identity.Name
+      Name                            = [string]$Identity.Name
+      IdentityPublisher               = [string]$Identity.Publisher
+      IdentityVersion                 = [string]$Identity.Version
+      Version                         = [string]$Identity.Version
+      Architecture                    = [string]$Identity.ProcessorArchitecture
+      PublisherDisplayName            = [string]$PublisherDisplayName
+      PackageFamilyName               = "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)"
+      Platform                        = @($SupportedTargetDeviceFamilies | Select-Object -ExpandProperty Name -Unique)
+      MinimumOSVersion                = $MinimumOSVersion
+      TargetDeviceFamilies            = @($TargetDeviceFamilies)
+      UnsupportedTargetDeviceFamilies = @($TargetDeviceFamilies | Where-Object { $_.Name -cnotin @('Windows.Desktop', 'Windows.Universal') })
+      Dependencies                    = $DependencyInfo.Dependencies
+      UnknownPackageDependencies      = $DependencyInfo.UnknownPackageDependencies
+      Protocols                       = $AssociationInfo.Protocols
+      FileExtensions                  = $AssociationInfo.FileExtensions
+      RegistryAssociationInfo         = $AssociationInfo
+      Capabilities                    = @($Capabilities | Sort-Object -Unique)
+      RestrictedCapabilities          = @($RestrictedCapabilities | Sort-Object -Unique)
+      SignatureSha256                 = Read-SignatureSha256FromMSIX -Path $File.FullName
+      AppsAndFeaturesEntries          = @([pscustomobject]@{
           DisplayName    = [string]$DisplayName
           Publisher      = [string]$PublisherDisplayName
           DisplayVersion = [string]$Identity.Version

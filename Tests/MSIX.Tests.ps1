@@ -51,6 +51,33 @@ Describe 'MSIX/AppX dependency filtering' {
     $Info.PackageFamilyName | Should -Be 'Example.App_s2ne61n4j7kre'
   }
 
+  It 'Should emit only WinGet-supported target device families and their minimum version' {
+    $PackageDirectory = New-Item -Path (Join-Path $TestDrive 'mixed-platform-content') -ItemType Directory
+    Set-Content -LiteralPath (Join-Path $PackageDirectory.FullName 'AppxManifest.xml') -Value @'
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity Name="Example.MixedPlatform" Publisher="CN=Example" Version="1.2.3.4" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Example Mixed Platform App</DisplayName>
+    <PublisherDisplayName>Example Publisher</PublisherDisplayName>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="MSIXCore.Desktop" MinVersion="6.1.7601.0" MaxVersionTested="10.0.26100.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+</Package>
+'@
+    [System.IO.File]::WriteAllBytes((Join-Path $PackageDirectory.FullName 'AppxSignature.p7x'), [byte[]](1, 2, 3, 4))
+    $PackagePath = Join-Path $TestDrive 'mixed-platform.msix'
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($PackageDirectory.FullName, $PackagePath)
+
+    $Info = Get-MSIXInfo -Path $PackagePath
+
+    $Info.Platform | Should -Be @('Windows.Desktop')
+    $Info.MinimumOSVersion | Should -Be '10.0.17763.0'
+    $Info.TargetDeviceFamilies.Name | Should -Be @('MSIXCore.Desktop', 'Windows.Desktop')
+    $Info.UnsupportedTargetDeviceFamilies.Name | Should -Be @('MSIXCore.Desktop')
+  }
+
   It 'Should resolve an extensionless bundle from embedded payload filenames' {
     $BundleDirectory = New-Item -Path (Join-Path $TestDrive 'bundle-content') -ItemType Directory
     $MetadataDirectory = New-Item -Path (Join-Path $BundleDirectory.FullName 'AppxMetadata') -ItemType Directory

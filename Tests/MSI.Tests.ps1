@@ -141,6 +141,26 @@ Describe 'MSI builder and install-location parser' {
 
       Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'
     }
+
+    It 'Should not treat the ordinary IsLight property as InstallShield before WixSharp evidence' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties          = @{
+          IsLight                 = 'true'
+          WixSharp_InstallDialogs = 'WixSharpSetup, Version=1.0.0.0|Example.Dialogs'
+        }
+        Tables              = @('Property', 'CustomAction', 'MsiEmbeddedUI')
+        CustomActionRows    = @([pscustomobject]@{
+            Action = 'WixSharp_InitRuntime_Action'
+            Source = 'WixSharp_InitRuntime_Action_File'
+            Target = 'WixSharp_InitRuntime_Action'
+          })
+        UpgradeRows         = @()
+        LaunchConditionRows = @()
+        SummaryInfo         = [pscustomobject]@{ CreatingApp = $null; Comments = $null }
+      }
+
+      Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'
+    }
   }
 
   It 'Should read Extension, ProgId, and Verb table associations from draw.io' {
@@ -212,6 +232,28 @@ Describe 'MSI builder and install-location parser' {
     $DrawInfo.InstallerBuilder | Should -Be 'WiX'
     $DrawInfo.InstallLocationProperty | Should -Be 'APPLICATIONFOLDER'
     $DrawInfo.InstallLocationSource | Should -Be 'WIXUI_INSTALLDIR'
+  }
+
+  It 'Should classify the current ScreenToGif WixSharp MSI as WiX' {
+    $Fixture = Get-InstallerFixture -Name 'ScreenToGif-2.43.2-x64.msi' -Url 'https://github.com/NickeManarin/ScreenToGif/releases/download/2.43.2/ScreenToGif.2.43.2.Light.Setup.x64.msi'
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.InstallerBuilder | Should -Be 'WiX'
+    $Info.InstallerType | Should -Be 'wix'
+    $Info.AppsAndFeaturesInstallerType | Should -Be 'wix'
+    $Info.InstallLocationProperty | Should -Be 'INSTALLDIR'
+  }
+
+  It 'Should classify Belgian eID Viewer from its WiX Summary Information Program Name' {
+    $Fixture = Get-InstallerFixture -Name 'BeidViewer-5.1.31.6342.msi' -Url 'https://eid.belgium.be/sites/default/files/software/BeidViewer%205.1.31.6342.msi'
+    (Get-FileHash -Path $Fixture -Algorithm SHA256).Hash | Should -Be '6780CE11049E29FA25A2BEE0377CFABBDAC048B61258989DFDB610EBF649DAA9'
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.InstallerBuilder | Should -Be 'WiX'
+    $Info.InstallerType | Should -Be 'wix'
+    $Info.AppsAndFeaturesInstallerType | Should -Be 'wix'
+    $Info.HidesMsiAppsAndFeaturesEntry | Should -BeFalse
+    $Info.HasCustomAppsAndFeaturesEntry | Should -BeFalse
   }
 }
 

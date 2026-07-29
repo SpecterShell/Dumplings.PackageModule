@@ -591,9 +591,12 @@ function Get-MsiBuilderFromStaticTableInfo {
   if ($Properties.Keys | Where-Object { $_ -like 'AI_*' -or $_ -in @('AI_PACKAGE_TYPE', 'AI_PRODUCTNAME_ARP') }) { return 'AdvancedInstaller' }
   if ($CustomActionNames | Where-Object { $_ -like 'AI_*' }) { return 'AdvancedInstaller' }
 
-  if ($Tables | Where-Object { $_ -like 'IS*' -or $_ -like 'InstallShield*' }) { return 'InstallShield' }
-  if ($Properties.Keys | Where-Object { $_ -like 'IS*' -or $_ -like 'InstallShield*' }) { return 'InstallShield' }
-  if ($CustomActionNames | Where-Object { $_ -like 'IS*' -or $_ -like 'InstallShield*' }) { return 'InstallShield' }
+  # InstallShield-owned identifiers conventionally use an uppercase IS prefix.
+  # Match that prefix case-sensitively so ordinary properties such as IsLight
+  # do not outrank explicit WiX/WixSharp authoring evidence.
+  if ($Tables | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
+  if ($Properties.Keys | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
+  if ($CustomActionNames | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
   if ($SummaryInfoText -match '(?i)\bInstallShield\b') { return 'InstallShield' }
 
   # Chromium enterprise MSIs are compiled from WiX source but do not retain

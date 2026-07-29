@@ -402,6 +402,35 @@ stagingPercentage: 25
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-32.7z'
   }
 
+  It 'Should return scoped AionUi ARP identity through the Apache-2.0 bridge' {
+    $Fixture = Get-InstallerFixture -Name 'AionUi-2.1.42-win-x64.exe' -Url 'https://github.com/iOfficeAI/AionUi/releases/download/v2.1.42/AionUi-2.1.42-win-x64.exe'
+
+    $UserInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope user
+    $MachineInfo = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $UserInfo.ProductCode | Should -Be 'f3bfde38-8429-545c-a4e9-a078d87dee6c'
+    $UserInfo.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $UserInfo.Scope | Should -Be 'user'
+    @($UserInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKCU'
+
+    $MachineInfo.ProductCode | Should -Be 'f3bfde38-8429-545c-a4e9-a078d87dee6c'
+    $MachineInfo.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $MachineInfo.Scope | Should -Be 'machine'
+    @($MachineInfo.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
+  }
+
+  It 'Should preserve RivonClaw machine-scope evidence through the Apache-2.0 bridge' {
+    $Fixture = Get-InstallerFixture -Name 'TK-Copilot.Setup.1.8.82.exe' -Url 'https://github.com/gaoyangz77/rivonclaw/releases/download/v1.8.82/TK-Copilot.Setup.1.8.82.exe'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $Info.ProductCode | Should -Be '51492edb-6d67-582c-a781-6b48bbf5f3bf'
+    $Info.Scope | Should -Be 'machine'
+    $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\TK Copilot'
+    @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
   It 'Should classify the documented electron-builder example <PackageIdentifier>' -ForEach @(
     @{
       PackageIdentifier = 'GameSir.GameSirT4kApp'
