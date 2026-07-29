@@ -478,10 +478,15 @@ function Send-WinGetManifest {
     5. Create pull requests in upstream.
   .PARAMETER Task
     The task object to be handled
+  .PARAMETER SkipInstallerAnalysis
+    Skip static installer parsing and family detection while retaining downloads, hashes, release-date handling, validation, and submission
   #>
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The task object to be handled')]
-    $Task
+    $Task,
+
+    [Parameter(HelpMessage = 'Skip static installer parsing and family detection')]
+    [switch]$SkipInstallerAnalysis
   )
 
   process {
@@ -586,7 +591,10 @@ function Send-WinGetManifest {
       $RefManifest = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch -RootPath $RootPath | ConvertFrom-WinGetManifestYaml
     }
     # Update the manifests
-    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -Logger $Task.Log
+    if ($SkipInstallerAnalysis) {
+      $Task.Log('Skipping installer analysis while generating WinGet manifests as configured', 'Info')
+    }
+    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Task.Log
     $NewManifests = $NewManifest | ConvertTo-WinGetManifestYaml
     #endregion
 

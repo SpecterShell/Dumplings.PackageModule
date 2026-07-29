@@ -34,6 +34,8 @@
   Allow Message() to send states to Telegram
 .PARAMETER EnableSubmit
   Allow Submit() to submit new manifests to upstream
+.PARAMETER SkipInstallerAnalysis
+  Skip static installer parsing and family detection while generating submitted manifests. This can be set globally or in a task Config.yaml
 .PARAMETER UpstreamOwner
   The owner of the upstream repository
 .PARAMETER UpstreamRepo
@@ -513,7 +515,8 @@ class PackageTask: System.IDisposable {
         }
 
         $this.Log('Submitting WinGet manifests', 'Info')
-        Send-WinGetManifest -Task $this
+        [bool]$SkipInstallerAnalysis = [bool]($Global:DumplingsPreference['SkipInstallerAnalysis'] -or $this.Config['SkipInstallerAnalysis'])
+        Send-WinGetManifest -Task $this -SkipInstallerAnalysis:$SkipInstallerAnalysis
       }
       #endregion
     }

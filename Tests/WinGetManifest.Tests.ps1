@@ -130,6 +130,29 @@ Describe 'WinGet installer manifest metadata updates' {
       Mock Get-WinGetInstallerReleaseDate { return $null }
     }
 
+    It 'updates the hash without extracting or analyzing when installer analysis is skipped' {
+      Mock Get-WinGetKnownInstallerManifestInfo { throw 'The declared parser must not run' }
+      Mock Get-WinGetInstallerAnalysis { throw 'The generic analyzer must not run' }
+      Mock Expand-TempArchive { throw 'Nested payload extraction must not run' }
+      $ArchiveUrl = 'https://example.test/package.zip'
+      $Installer = [ordered]@{
+        Architecture         = 'x64'
+        InstallerType        = 'zip'
+        NestedInstallerType  = 'nullsoft'
+        NestedInstallerFiles = @([ordered]@{ RelativeFilePath = 'payload\setup.exe' })
+        InstallerUrl         = $ArchiveUrl
+        ProductCode          = 'Existing.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles ([ordered]@{ $ArchiveUrl = $Script:InstallerPath }) -SkipInstallerAnalysis -Logger $Script:Logger
+
+      $Result.InstallerSha256 | Should -Be (Get-FileHash -LiteralPath $Script:InstallerPath -Algorithm SHA256).Hash
+      $Result.ProductCode | Should -Be 'Existing.Product'
+      Should -Invoke Get-WinGetKnownInstallerManifestInfo -Exactly 0
+      Should -Invoke Get-WinGetInstallerAnalysis -Exactly 0
+      Should -Invoke Expand-TempArchive -Exactly 0
+    }
+
     It 'Excludes non-authoritative parser fields from manifest metadata' {
       $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject @([pscustomobject]@{
           PackageName    = 'Parser package name'
@@ -636,12 +659,12 @@ Describe 'WinGet installer manifest metadata updates' {
 
     It 'Preserves inherited AppX identity fields on WiX entries without parser warnings' {
       $Installer = [ordered]@{
-        Architecture       = 'x64'
-        InstallerType      = 'wix'
-        ProductCode        = '{OLD-WIX-PRODUCT}'
-        PackageFamilyName  = 'MicrosoftCorporationII.WindowsSubsystemForLinux_8wekyb3d8bbwe'
-        MinimumOSVersion   = '10.0.19041.0'
-        Platform           = @('Windows.Desktop')
+        Architecture      = 'x64'
+        InstallerType     = 'wix'
+        ProductCode       = '{OLD-WIX-PRODUCT}'
+        PackageFamilyName = 'MicrosoftCorporationII.WindowsSubsystemForLinux_8wekyb3d8bbwe'
+        MinimumOSVersion  = '10.0.19041.0'
+        Platform          = @('Windows.Desktop')
       }
       $Metadata = [ordered]@{
         ProductCode = '{NEW-WIX-PRODUCT}'

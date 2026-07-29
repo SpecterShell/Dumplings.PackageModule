@@ -52,6 +52,8 @@ Public installer expansion functions resolve source and destination paths agains
 
 Manifest updates run a known manifest-declared parser before generic detection. If metadata parsing fails, structural evidence classifies the result as matched, mismatched, or indeterminate. Only a definitive incompatible format throws; matched or indeterminate failures preserve existing fields and emit warnings, while resolved fields from a partial successful result are applied independently.
 
+Submission can bypass this parser stage globally with `-SkipInstallerAnalysis` or per task with `SkipInstallerAnalysis: true` in `Config.yaml`. The bypass preserves existing installer metadata and skips nested payload extraction, family detection, and static parsers; downloads required for SHA-256, release-date handling, manifest formatting, validation, and repository submission still run normally.
+
 Use the [`analyze-winget-installer` skill](../../.agents/skills/analyze-winget-installer/SKILL.md) for the supported workflow, parser routing, manifest interpretation, and VM-only validation rules.
 
 ### WinGet Manifests

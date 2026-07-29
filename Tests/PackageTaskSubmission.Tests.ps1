@@ -7,9 +7,10 @@ BeforeAll {
   }
 
   function global:Send-WinGetManifest {
-    param ($Task)
+    param ($Task, [switch]$SkipInstallerAnalysis)
     if ($Global:SubmissionTestShouldFail) { throw 'synthetic submission failure' }
     $Global:SubmissionTestCalls.Add($Task.Name)
+    $Global:SubmissionTestSkipInstallerAnalysis.Add($SkipInstallerAnalysis.IsPresent)
   }
 
   function New-SubmissionTestTask {
@@ -55,6 +56,7 @@ Describe 'PackageTask WinGet submission claims' {
     $Global:DumplingsStorage['__DumplingsWinGetSubmissionClaims'] =
     [Collections.Concurrent.ConcurrentDictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
     $Global:SubmissionTestCalls = [Collections.Generic.List[string]]::new()
+    $Global:SubmissionTestSkipInstallerAnalysis = [Collections.Generic.List[bool]]::new()
     $Global:SubmissionTestShouldFail = $false
   }
 
@@ -110,6 +112,26 @@ Describe 'PackageTask WinGet submission claims' {
 
     $Global:SubmissionTestCalls | Should -BeNullOrEmpty
     $Global:DumplingsStorage['__DumplingsWinGetSubmissionClaims']['Example.Package'] | Should -BeExactly 'First'
+  }
+
+  It 'passes the global installer-analysis skip preference to submission' {
+    $Global:DumplingsPreference.SkipInstallerAnalysis = $true
+    $Task = New-SubmissionTestTask -Name GlobalSkip -Config ([ordered]@{ WinGetIdentifier = 'Example.GlobalSkip' })
+
+    $Task.Submit()
+
+    $Global:SubmissionTestSkipInstallerAnalysis.ToArray() | Should -Be @($true)
+  }
+
+  It 'passes the task installer-analysis skip setting to submission' {
+    $Task = New-SubmissionTestTask -Name TaskSkip -Config ([ordered]@{
+        WinGetIdentifier      = 'Example.TaskSkip'
+        SkipInstallerAnalysis = $true
+      })
+
+    $Task.Submit()
+
+    $Global:SubmissionTestSkipInstallerAnalysis.ToArray() | Should -Be @($true)
   }
 }
 
@@ -178,5 +200,5 @@ Describe 'PackageTask Check domain-change warning' {
 AfterAll {
   Remove-Item -Path 'Function:\Write-Log' -Force -ErrorAction Ignore
   Remove-Item -Path 'Function:\Send-WinGetManifest' -Force -ErrorAction Ignore
-  Remove-Variable -Name SubmissionTestCalls, SubmissionTestShouldFail -Scope Global -ErrorAction Ignore
+  Remove-Variable -Name SubmissionTestCalls, SubmissionTestSkipInstallerAnalysis, SubmissionTestShouldFail -Scope Global -ErrorAction Ignore
 }

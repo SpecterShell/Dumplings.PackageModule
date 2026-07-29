@@ -834,6 +834,8 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     The installer entry to use for updating the installer
   .PARAMETER Installers
     The installers that have updated for reference (e.g., hashes)
+  .PARAMETER SkipInstallerAnalysis
+    Skip nested payload extraction, installer-family detection, and static metadata parsers
   #>
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The installer to update')]
@@ -846,6 +848,8 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     [System.Collections.IDictionary[]]$Installers = @(),
     [Parameter(HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
     [System.Collections.IDictionary]$InstallerFiles,
+    [Parameter(HelpMessage = 'Skip nested payload extraction, installer-family detection, and static metadata parsers')]
+    [switch]$SkipInstallerAnalysis,
     [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
     $Logger = { param($Message, $Level) Write-Host $Message }
@@ -900,15 +904,18 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     $Installer.InstallerSha256 = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash
 
     # Extract only the selected nested installer instead of expanding a potentially giant ZIP archive.
+    # This extraction exists solely for static analysis and is omitted when the caller opts out.
     $EffectiveInstallerType = $Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType
-    $EffectiveInstallerPath = if ($Installer.InstallerType -cin @('zip') -and $Installer.NestedInstallerType -cne 'portable') {
+    $EffectiveInstallerPath = if ($SkipInstallerAnalysis) {
+      $InstallerPath
+    } elseif ($Installer.InstallerType -cin @('zip') -and $Installer.NestedInstallerType -cne 'portable') {
       $NestedInstallerRelativePath = $Installer.NestedInstallerFiles[0].RelativeFilePath
       Expand-TempArchive -Path $InstallerPath -RelativeFilePath $NestedInstallerRelativePath -CollisionAction Rename | Join-Path -ChildPath $NestedInstallerRelativePath
     } else {
       $InstallerPath
     }
 
-    $KnownInstallerTypes = @('msi', 'wix', 'burn', 'nullsoft', 'inno', 'msix', 'appx')
+    $KnownInstallerTypes = $SkipInstallerAnalysis ? @() : @('msi', 'wix', 'burn', 'nullsoft', 'inno', 'msix', 'appx')
     if ($EffectiveInstallerType -cin $KnownInstallerTypes) {
       # The declared parser is authoritative when it succeeds. This avoids
       # broad generic-family candidates, including structures embedded inside
@@ -979,7 +986,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
           $Logger.Invoke("Failed to apply $($ParserInfo.ParserName) metadata: $($_.Exception.Message); existing fields are preserved", 'Warning')
         }
       }
-    } elseif ($EffectiveInstallerType -ceq 'exe') {
+    } elseif ($EffectiveInstallerType -ceq 'exe' -and -not $SkipInstallerAnalysis) {
       # Generic EXE families remain best effort because static detection can be
       # ambiguous and the manifest intentionally does not declare a known type.
       try {
@@ -1043,6 +1050,8 @@ function Update-WinGetInstallerManifestInstallers {
     The old installers to update
   .PARAMETER InstallerEntries
     The installer entries to use for updating the installers
+  .PARAMETER SkipInstallerAnalysis
+    Skip nested payload extraction, installer-family detection, and static metadata parsers
   #>
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installers to update')]
@@ -1051,6 +1060,8 @@ function Update-WinGetInstallerManifestInstallers {
     [System.Collections.IDictionary[]]$InstallerEntries,
     [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
     [System.Collections.IDictionary]$InstallerFiles,
+    [Parameter(HelpMessage = 'Skip nested payload extraction, installer-family detection, and static metadata parsers')]
+    [switch]$SkipInstallerAnalysis,
     [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
     $Logger = { param($Message, $Level) Write-Host $Message }
@@ -1142,7 +1153,7 @@ function Update-WinGetInstallerManifestInstallers {
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -Logger $InstallerLogger
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $InstallerLogger
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -1167,6 +1178,8 @@ function Set-WinGetInstallerManifestInstallers {
     The old installers to update
   .PARAMETER InstallerEntries
     The installer entries to use for updating the installers
+  .PARAMETER SkipInstallerAnalysis
+    Skip nested payload extraction, installer-family detection, and static metadata parsers
   #>
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The old installers to update')]
@@ -1175,6 +1188,8 @@ function Set-WinGetInstallerManifestInstallers {
     [System.Collections.IDictionary[]]$InstallerEntries,
     [Parameter(DontShow, HelpMessage = 'The hashtable of downloaded installer files, with installer URL as the key and installer path as the value')]
     [System.Collections.IDictionary]$InstallerFiles,
+    [Parameter(HelpMessage = 'Skip nested payload extraction, installer-family detection, and static metadata parsers')]
+    [switch]$SkipInstallerAnalysis,
     [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
     $Logger = { param($Message, $Level) Write-Host $Message }
@@ -1253,7 +1268,7 @@ function Set-WinGetInstallerManifestInstallers {
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -Logger $InstallerLogger
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $InstallerLogger
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -1381,6 +1396,8 @@ function Update-WinGetManifest {
     Already downloaded installer files keyed by installer URL.
   .PARAMETER ReplaceInstallers
     Replace instead of matching and updating existing installer entries.
+  .PARAMETER SkipInstallerAnalysis
+    Skip nested payload extraction, installer-family detection, and static metadata parsers.
   .PARAMETER Logger
     Dumplings logging callback.
   #>
@@ -1393,6 +1410,7 @@ function Update-WinGetManifest {
     [System.Collections.IDictionary[]]$LocaleEntries = @(),
     [System.Collections.IDictionary]$InstallerFiles = @{},
     [switch]$ReplaceInstallers,
+    [switch]$SkipInstallerAnalysis,
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType Method })]
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
@@ -1400,9 +1418,9 @@ function Update-WinGetManifest {
   $PackageIdentifier = [string]::IsNullOrWhiteSpace($NewPackageIdentifier) ? [string]$Manifest.PackageIdentifier : $NewPackageIdentifier
   $OldInstallers = [System.Collections.IDictionary[]]@($Manifest.Installers | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
   if ($ReplaceInstallers) {
-    $UpdatedInstallers = @(Set-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger)
+    $UpdatedInstallers = @(Set-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Logger)
   } else {
-    $UpdatedInstallers = @(Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Logger $Logger)
+    $UpdatedInstallers = @(Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Logger)
   }
 
   # Locale update behavior is retained, but identity/document fields are added
