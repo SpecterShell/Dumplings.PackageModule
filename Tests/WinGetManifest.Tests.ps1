@@ -164,13 +164,12 @@ Describe 'WinGet installer manifest metadata updates' {
         }) -InstallerType 'exe' -OldInstaller ([ordered]@{})
 
       $Metadata.Contains('DisplayName') | Should -BeFalse
-      $Metadata.ElevationRequirement | Should -Be 'elevationRequired'
-      foreach ($Field in @('Scope', 'Protocols', 'FileExtensions', 'Dependencies')) {
+      foreach ($Field in @('Scope', 'ElevationRequirement', 'Protocols', 'FileExtensions', 'Dependencies')) {
         $Metadata.Contains($Field) | Should -BeFalse
       }
     }
 
-    It 'Updates an existing elevation requirement from parser evidence' {
+    It 'Preserves an existing elevation requirement despite parser evidence' {
       $Installer = [ordered]@{
         Architecture         = 'x64'
         InstallerType        = 'wix'
@@ -185,7 +184,39 @@ Describe 'WinGet installer manifest metadata updates' {
       Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -Logger $Script:Logger
 
       $Installer.ProductCode | Should -Be '{NEW-PRODUCT}'
-      $Installer.ElevationRequirement | Should -Be 'elevationRequired'
+      $Installer.ElevationRequirement | Should -Be 'elevatesSelf'
+    }
+
+    It 'Preserves different elevation requirements on scope-specific entries' {
+      $Installers = @(
+        [ordered]@{
+          Architecture         = 'x64'
+          InstallerType        = 'exe'
+          Scope                = 'user'
+          ElevationRequirement = 'elevationProhibited'
+          ProductCode          = 'User.Product'
+        },
+        [ordered]@{
+          Architecture         = 'x64'
+          InstallerType        = 'exe'
+          Scope                = 'machine'
+          ElevationRequirement = 'elevationRequired'
+          ProductCode          = 'Machine.Product'
+        }
+      )
+
+      foreach ($Installer in $Installers) {
+        $Metadata = [ordered]@{
+          ProductCode          = "Updated.$($Installer.Scope).Product"
+          ElevationRequirement = 'elevatesSelf'
+        }
+        Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Generic EXE' -Logger $Script:Logger
+      }
+
+      $Installers[0].ProductCode | Should -Be 'Updated.user.Product'
+      $Installers[0].ElevationRequirement | Should -Be 'elevationProhibited'
+      $Installers[1].ProductCode | Should -Be 'Updated.machine.Product'
+      $Installers[1].ElevationRequirement | Should -Be 'elevationRequired'
     }
 
     It 'Does not add an elevation requirement that was not authored' {

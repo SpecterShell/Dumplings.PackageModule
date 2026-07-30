@@ -90,7 +90,9 @@ function ConvertTo-WinGetInstallerManifestMetadata {
   )
 
   $Metadata = [ordered]@{}
-  # Scope, associations, dependencies, and locale identity remain author-controlled.
+  # Scope, elevation, associations, dependencies, and locale identity remain
+  # author-controlled. Parser elevation evidence is useful for review, but one
+  # artifact cannot safely rewrite scope-specific manifest behavior.
   # Publisher here is used only for an existing AppsAndFeaturesEntries.Publisher field.
   $PropertyMap = [ordered]@{
     ProductCode                  = @('AppsAndFeaturesProductCode', 'ProductCode')
@@ -99,7 +101,6 @@ function ConvertTo-WinGetInstallerManifestMetadata {
     DisplayVersion               = @('DisplayVersion')
     Publisher                    = @('Publisher')
     DefaultInstallLocation       = @('DefaultInstallLocation')
-    ElevationRequirement         = @('ElevationRequirement')
     AppsAndFeaturesInstallerType = @('AppsAndFeaturesInstallerType')
     WritesAppsAndFeaturesEntry   = @('WritesAppsAndFeaturesEntry')
     SignatureSha256              = @('SignatureSha256')
@@ -600,15 +601,15 @@ function Set-WinGetInstallerManifestMetadata {
     return
   }
 
-  # These scalar fields remain parser-owned whenever the authored entry already
-  # contains them. ElevationRequirement is refreshed only from explicit parser
-  # evidence; this path never adds it to a manifest that omitted the field.
-  foreach ($Field in @('ProductCode', 'ElevationRequirement')) {
-    if (-not $Installer.Contains($Field) -or $InstallerEntry.Contains($Field) -or $UnresolvedFields.Contains($Field)) { continue }
-    if ($Metadata.Contains($Field) -and (& $HasScalarValue $Metadata[$Field])) {
-      $Installer[$Field] = $Metadata[$Field]
+  # ProductCode remains parser-owned whenever the authored entry already
+  # contains it. ElevationRequirement is deliberately excluded: package updates
+  # must preserve author-selected behavior, including different requirements
+  # for separate scope entries that share one installer artifact.
+  if ($Installer.Contains('ProductCode') -and -not $InstallerEntry.Contains('ProductCode') -and -not $UnresolvedFields.Contains('ProductCode')) {
+    if ($Metadata.Contains('ProductCode') -and (& $HasScalarValue $Metadata.ProductCode)) {
+      $Installer.ProductCode = $Metadata.ProductCode
     } else {
-      & $ReportFailure $Field
+      & $ReportFailure 'ProductCode'
     }
   }
 
