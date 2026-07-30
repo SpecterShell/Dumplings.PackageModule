@@ -29,6 +29,12 @@ $Script:MSIXDependencyPackageMappings = @(
     PackageIdentifier       = 'Microsoft.VCLibs.14'
   }
   [pscustomobject][ordered]@{
+    # Windows App Runtime 2 uses a major-only framework identity in some
+    # packages, while winget-pkgs publishes that runtime line as 2.0.
+    PackageIdentityPatterns = @('Microsoft.WindowsAppRuntime.2')
+    PackageIdentifier       = 'Microsoft.WindowsAppRuntime.2.0'
+  }
+  [pscustomobject][ordered]@{
     PackageIdentityPatterns = @('Microsoft.WindowsAppRuntime.*.*')
     PackageIdentifier       = $null
   }

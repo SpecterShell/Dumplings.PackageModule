@@ -142,6 +142,7 @@ Describe 'MSIX/AppX dependency filtering' {
       [pscustomobject]@{ PackageIdentifier = 'Microsoft.VCLibs.Desktop.14'; MinimumVersion = '14.0.33728.0'; Publisher = 'CN=Microsoft Corporation' },
       [pscustomobject]@{ PackageIdentifier = 'Microsoft.VCLibs.14'; MinimumVersion = '14.0.33519.0'; Publisher = 'CN=Microsoft Corporation' },
       [pscustomobject]@{ PackageIdentifier = 'Microsoft.WindowsAppRuntime.1.6'; MinimumVersion = '6000.0.0.0'; Publisher = 'CN=Microsoft Corporation' },
+      [pscustomobject]@{ PackageIdentifier = 'Microsoft.WindowsAppRuntime.2'; MinimumVersion = '2000.0.0.0'; Publisher = 'CN=Microsoft Corporation' },
       [pscustomobject]@{ PackageIdentifier = 'Microsoft.UI.Xaml.2.8'; MinimumVersion = '8.2310.30001.0'; Publisher = 'CN=Microsoft Corporation' },
       [pscustomobject]@{ PackageIdentifier = 'Contoso.CustomFramework'; MinimumVersion = '1.0.0.0'; Publisher = 'CN=Contoso' }
     )
@@ -151,6 +152,7 @@ Describe 'MSIX/AppX dependency filtering' {
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Contain 'Microsoft.VCLibs.Desktop.14'
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Contain 'Microsoft.VCLibs.14'
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Contain 'Microsoft.WindowsAppRuntime.1.6'
+    $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Contain 'Microsoft.WindowsAppRuntime.2.0'
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Contain 'Microsoft.UI.Xaml.2.8'
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Not -Contain 'Contoso.CustomFramework'
     ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.WindowsAppRuntime.1.6').MinimumVersion | Should -Be '6000.0.0.0'
@@ -161,13 +163,16 @@ Describe 'MSIX/AppX dependency filtering' {
   It 'Should keep the highest minimum version for duplicate allowed dependencies' {
     $Dependencies = @(
       [pscustomobject]@{ PackageIdentifier = 'Microsoft.UI.Xaml.2.8'; MinimumVersion = '8.2200.0.0'; Publisher = 'CN=Microsoft Corporation' },
-      [pscustomobject]@{ PackageIdentifier = 'Microsoft.UI.Xaml.2.8'; MinimumVersion = '8.2310.30001.0'; Publisher = 'CN=Microsoft Corporation' }
+      [pscustomobject]@{ PackageIdentifier = 'Microsoft.UI.Xaml.2.8'; MinimumVersion = '8.2310.30001.0'; Publisher = 'CN=Microsoft Corporation' },
+      [pscustomobject]@{ PackageIdentifier = 'Microsoft.WindowsAppRuntime.2'; MinimumVersion = '2000.0.0.0'; Publisher = 'CN=Microsoft Corporation' },
+      [pscustomobject]@{ PackageIdentifier = 'Microsoft.WindowsAppRuntime.2.0'; MinimumVersion = '2000.1.0.0'; Publisher = 'CN=Microsoft Corporation' }
     )
 
     $Info = ConvertTo-MSIXManifestDependencyInfo -PackageDependencies $Dependencies
 
-    $Info.Dependencies.PackageDependencies | Should -HaveCount 1
-    $Info.Dependencies.PackageDependencies[0].MinimumVersion | Should -Be '8.2310.30001.0'
+    $Info.Dependencies.PackageDependencies | Should -HaveCount 2
+    ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.UI.Xaml.2.8').MinimumVersion | Should -Be '8.2310.30001.0'
+    ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.WindowsAppRuntime.2.0').MinimumVersion | Should -Be '2000.1.0.0'
   }
 
   It 'Should map VCLibs framework identities to their WinGet dependency packages' {
@@ -190,6 +195,8 @@ Describe 'MSIX/AppX dependency filtering' {
     Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.VCLibs.140.00.UWPDesktop' | Should -BeExactly 'Microsoft.VCLibs.Desktop.14'
     Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.VCLibs.140.00' | Should -BeExactly 'Microsoft.VCLibs.14'
     Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.WindowsAppRuntime.1.7' | Should -BeExactly 'Microsoft.WindowsAppRuntime.1.7'
+    Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.WindowsAppRuntime.2' | Should -BeExactly 'Microsoft.WindowsAppRuntime.2.0'
+    Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.WindowsAppRuntime.2.0' | Should -BeExactly 'Microsoft.WindowsAppRuntime.2.0'
     Resolve-MSIXManifestDependencyPackageIdentifier 'Microsoft.UI.Xaml.2.8' | Should -BeExactly 'Microsoft.UI.Xaml.2.8'
   }
 
@@ -199,6 +206,8 @@ Describe 'MSIX/AppX dependency filtering' {
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.VCLibs.14' | Should -BeTrue
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.VCLibs.140.00' | Should -BeTrue
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.WindowsAppRuntime.1.7' | Should -BeTrue
+    Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.WindowsAppRuntime.2' | Should -BeTrue
+    Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.WindowsAppRuntime.2.0' | Should -BeTrue
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.UI.Xaml.2.8' | Should -BeTrue
     Test-MSIXAllowedDependencyPackage -PackageIdentifier 'Microsoft.NET.Native.Framework.2.2' | Should -BeFalse
   }
