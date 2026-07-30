@@ -155,17 +155,54 @@ Describe 'WinGet installer manifest metadata updates' {
 
     It 'Excludes non-authoritative parser fields from manifest metadata' {
       $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject @([pscustomobject]@{
-          PackageName    = 'Parser package name'
-          Scope          = 'machine'
-          Protocols      = @('parser-protocol')
-          FileExtensions = @('parserext')
-          Dependencies   = [ordered]@{ PackageDependencies = @([ordered]@{ PackageIdentifier = 'Parser.Dependency' }) }
+          PackageName          = 'Parser package name'
+          Scope                = 'machine'
+          Protocols            = @('parser-protocol')
+          FileExtensions       = @('parserext')
+          Dependencies         = [ordered]@{ PackageDependencies = @([ordered]@{ PackageIdentifier = 'Parser.Dependency' }) }
+          ElevationRequirement = 'elevationRequired'
         }) -InstallerType 'exe' -OldInstaller ([ordered]@{})
 
       $Metadata.Contains('DisplayName') | Should -BeFalse
+      $Metadata.ElevationRequirement | Should -Be 'elevationRequired'
       foreach ($Field in @('Scope', 'Protocols', 'FileExtensions', 'Dependencies')) {
         $Metadata.Contains($Field) | Should -BeFalse
       }
+    }
+
+    It 'Updates an existing elevation requirement from parser evidence' {
+      $Installer = [ordered]@{
+        Architecture         = 'x64'
+        InstallerType        = 'wix'
+        ProductCode          = '{OLD-PRODUCT}'
+        ElevationRequirement = 'elevatesSelf'
+      }
+      $Metadata = [ordered]@{
+        ProductCode          = '{NEW-PRODUCT}'
+        ElevationRequirement = 'elevationRequired'
+      }
+
+      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -Logger $Script:Logger
+
+      $Installer.ProductCode | Should -Be '{NEW-PRODUCT}'
+      $Installer.ElevationRequirement | Should -Be 'elevationRequired'
+    }
+
+    It 'Does not add an elevation requirement that was not authored' {
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'wix'
+        ProductCode   = '{OLD-PRODUCT}'
+      }
+      $Metadata = [ordered]@{
+        ProductCode          = '{NEW-PRODUCT}'
+        ElevationRequirement = 'elevationRequired'
+      }
+
+      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -Logger $Script:Logger
+
+      $Installer.ProductCode | Should -Be '{NEW-PRODUCT}'
+      $Installer.Contains('ElevationRequirement') | Should -BeFalse
     }
 
     It 'Updates NSIS ProductCode and AppsAndFeaturesEntries from one parser result' {
@@ -1554,7 +1591,57 @@ Describe 'WinGet installer manifest metadata updates' {
       Should -Invoke Get-InstallShieldMsiInfo -Exactly 1 -ParameterFilter { $Installer.MsiPayloadSelection.SelectedMsiPath -ceq 'payload.msi' -and -not $Name }
     }
 
-    It 'Warns and preserves metadata for InstallShield payloads without an MSI' {
+    It 'Uses detached MSI metadata from a successful InstallShield analyzer result' {
+      $MsiInfo = [pscustomobject]@{
+        DisplayName                  = 'Detached InstallShield Product'
+        DisplayVersion               = '5.0.0'
+        Publisher                    = 'Detached Publisher'
+        ProductCode                  = '{DETACHED-INSTALLSHIELD-MSI}'
+        AppsAndFeaturesProductCode   = '{DETACHED-INSTALLSHIELD-MSI}'
+        UpgradeCode                  = '{DETACHED-INSTALLSHIELD-UPGRADE}'
+        AppsAndFeaturesInstallerType = 'msi'
+        SelectedMsiPath              = 'payload\Detached.msi'
+        SelectionMethod              = 'SetupIni'
+      }
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults      = @([pscustomobject]@{
+              Name    = 'InstallShield'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Family   = 'InstallShield'
+                Metadata = [pscustomobject]@{ HasMsi = $true; Variant = 'Basic MSI or InstallScript MSI'; Warnings = @() }
+                MsiInfo  = $MsiInfo
+              }
+            })
+          DetectedFamilies   = @()
+          RoutingHints       = @()
+          RejectedCandidates = @()
+        }
+      }
+      Mock Get-InstallShieldInfo { throw 'The outer InstallShield package must not be extracted again' }
+      Mock Get-InstallShieldMsiInfo { throw 'Detached MSI metadata must not be reparsed after cleanup' }
+      $Installer = [ordered]@{
+        Architecture           = 'x64'
+        InstallerType          = 'exe'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = '{OLD-INSTALLSHIELD}'
+        AppsAndFeaturesEntries = @([ordered]@{
+            DisplayName = 'Old InstallShield Product'
+            ProductCode = '{OLD-INSTALLSHIELD}'
+            UpgradeCode = '{DETACHED-INSTALLSHIELD-UPGRADE}'
+          })
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be '{DETACHED-INSTALLSHIELD-MSI}'
+      $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'Detached InstallShield Product'
+      Should -Invoke Get-InstallShieldInfo -Exactly 0
+      Should -Invoke Get-InstallShieldMsiInfo -Exactly 0
+    }
+
+    It 'Uses InstallScript ARP evidence when an InstallShield payload has no MSI' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
           ParserResults = @()
@@ -1562,26 +1649,54 @@ Describe 'WinGet installer manifest metadata updates' {
         }
       }
       Mock Get-InstallShieldInfo {
+        $InstallScriptInfo = [pscustomobject]@{
+          InstallerType                = 'InstallShield InstallScript'
+          ProductCode                  = '{INSTALLSCRIPT-PRODUCT}'
+          DisplayName                  = 'InstallScript Product'
+          DisplayVersion               = $null
+          Publisher                    = 'InstallScript Publisher'
+          Scope                        = $null
+          DefaultInstallLocation       = $null
+          WritesAppsAndFeaturesEntry   = $true
+          AppsAndFeaturesProductCode   = '{INSTALLSCRIPT-PRODUCT}'
+          AppsAndFeaturesInstallerType = 'exe'
+          AppsAndFeaturesEntries       = @([pscustomobject]@{
+              ProductCode   = '{INSTALLSCRIPT-PRODUCT}'
+              DisplayName   = 'InstallScript Product'
+              Publisher     = 'InstallScript Publisher'
+              InstallerType = 'exe'
+            })
+          UnresolvedFields             = @('DisplayVersion', 'Scope', 'DefaultInstallLocation')
+          Warnings                     = @('InstallScript ARP defaults require VM validation')
+        }
         [pscustomobject]@{
-          InstallerType = 'InstallShield'
-          Variant       = 'InstallScript'
-          HasMsi        = $false
-          MsiFiles      = @()
-          Warnings      = @()
+          InstallerType     = 'InstallShield'
+          Variant           = 'InstallScript'
+          HasMsi            = $false
+          MsiFiles          = @()
+          InstallScriptInfo = $InstallScriptInfo
+          Warnings          = @('InstallScript ARP defaults require VM validation')
         }
       }
       Mock Get-InstallShieldMsiInfo { throw 'The MSI parser should not be called' }
       $Installer = [ordered]@{
-        Architecture  = 'x64'
-        InstallerType = 'exe'
-        InstallerUrl  = $Script:InstallerUrl
-        ProductCode   = 'Existing.InstallShield.Product'
+        Architecture           = 'x64'
+        InstallerType          = 'exe'
+        InstallerUrl           = $Script:InstallerUrl
+        ProductCode            = 'Existing.InstallShield.Product'
+        AppsAndFeaturesEntries = @([ordered]@{
+            DisplayName = 'Old InstallScript Product'
+            Publisher   = 'Old InstallScript Publisher'
+            ProductCode = 'Existing.InstallShield.Product'
+          })
       }
 
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
-      $Result.ProductCode | Should -Be 'Existing.InstallShield.Product'
-      ($Script:LogMessages.Where({ $_.Level -eq 'Verbose' }).Message -join "`n") | Should -BeLike "*'InstallScript' payload does not contain an MSI*"
+      $Result.ProductCode | Should -Be '{INSTALLSCRIPT-PRODUCT}'
+      $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'InstallScript Product'
+      $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'InstallScript Publisher'
+      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Contain 'InstallShield InstallScript: InstallScript ARP defaults require VM validation'
       Should -Invoke Get-InstallShieldMsiInfo -Exactly 0
     }
 

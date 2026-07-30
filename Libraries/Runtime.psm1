@@ -85,6 +85,46 @@ function Import-InstallerManagedAssembly {
   }
 }
 
+function Import-InstallerManagedSource {
+  <#
+  .SYNOPSIS
+    Compile a related set of managed source files exactly once per process
+  .PARAMETER Path
+    Source files compiled together. Paths are resolved before Add-Type because the .NET
+    process current directory can differ from PowerShell's provider location.
+  .PARAMETER TypeName
+    A fully qualified type published by the source set and used as the load sentinel.
+  .OUTPUTS
+    The assembly containing TypeName.
+  #>
+  [OutputType([System.Reflection.Assembly])]
+  param (
+    [Parameter(Mandatory)][string[]]$Path,
+    [Parameter(Mandatory)][string]$TypeName
+  )
+
+  $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
+  if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
+
+  # Resolve the complete source set before taking the process-wide compiler lock. This keeps
+  # slow filesystem failures outside the critical section and gives Add-Type absolute paths.
+  $SourceFiles = [Collections.Generic.List[string]]::new()
+  foreach ($SourcePath in $Path) {
+    $SourceFiles.Add((Get-Item -LiteralPath $SourcePath -Force -ErrorAction Stop).FullName)
+  }
+  if ($SourceFiles.Count -eq 0) { throw 'At least one managed source file is required.' }
+
+  return Use-InstallerRuntimeLoadLock {
+    # A competing runspace may have compiled this source set while this caller waited.
+    $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
+    if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
+    Add-Type -Path @($SourceFiles) -ErrorAction Stop
+    $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
+    if (-not $LoadedType.Type) { throw "Managed source compilation did not publish the expected type '$TypeName'." }
+    return $LoadedType.Type.Assembly
+  }
+}
+
 function Import-InstallerArchiveDependency {
   <#
   .SYNOPSIS
@@ -95,4 +135,4 @@ function Import-InstallerArchiveDependency {
   $null = Import-InstallerManagedAssembly -Name 'SharpCompress.dll' -TypeName 'SharpCompress.Archives.ArchiveFactory'
 }
 
-Export-ModuleMember -Function Use-InstallerRuntimeLoadLock, Import-InstallerInfrastructure, Import-InstallerManagedAssembly, Import-InstallerArchiveDependency
+Export-ModuleMember -Function Use-InstallerRuntimeLoadLock, Import-InstallerInfrastructure, Import-InstallerManagedAssembly, Import-InstallerManagedSource, Import-InstallerArchiveDependency

@@ -1,4 +1,6 @@
 BeforeDiscovery {
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Binary.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'RegistryAssociations.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'MSI.psm1') -Force
 }
@@ -7,6 +9,7 @@ BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\MSI'
+  $Script:ElevationFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\MSI\Elevation'
   $Script:SquirrelFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Squirrel'
 
   function Get-InstallerFixture {
@@ -110,6 +113,50 @@ Describe 'MSI Apps & Features parser' {
 
 Describe 'MSI builder and install-location parser' {
   InModuleScope MSI {
+    It 'Should distinguish InstallScript MSI from Basic MSI using compiled database markers' {
+      $InstallScriptMsi = [pscustomobject]@{
+        Properties       = @{}
+        Tables           = @('Property', 'ISComponentExtended')
+        CustomActionRows = @([pscustomobject]@{ Action = 'ISVerifyScriptingRuntime' })
+        SummaryInfo      = [pscustomobject]@{ CreatingApp = 'InstallShield'; Comments = $null }
+      }
+      $BasicMsi = [pscustomobject]@{
+        Properties       = @{}
+        Tables           = @('Property', 'ISComponentExtended', 'ISSetupType')
+        CustomActionRows = @([pscustomobject]@{ Action = 'ISPreventDowngrade' })
+        SummaryInfo      = [pscustomobject]@{ CreatingApp = 'InstallShield'; Comments = $null }
+      }
+
+      $InstallScriptResult = Get-MsiInstallShieldProjectTypeFromStaticTableInfo -StaticTableInfo $InstallScriptMsi
+      $BasicResult = Get-MsiInstallShieldProjectTypeFromStaticTableInfo -StaticTableInfo $BasicMsi
+
+      $InstallScriptResult.ProjectType | Should -Be 'InstallScript MSI'
+      $InstallScriptResult.CustomActions | Should -Be @('ISVerifyScriptingRuntime')
+      $BasicResult.ProjectType | Should -Be 'Basic MSI'
+      $BasicResult.CustomActions | Should -BeNullOrEmpty
+    }
+
+    It 'Should retain InstallScript MSI sequence conditions without evaluating them' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties       = @{}
+        Tables           = @('Property', 'CustomAction', 'InstallExecuteSequence')
+        SummaryInfo      = [pscustomobject]@{ CreatingApp = 'InstallShield'; Comments = $null }
+        CustomActionRows = @(
+          [pscustomobject]@{ Action = 'ISVerifyScriptingRuntime'; Type = 1; Source = 'ISSetup.dll'; Target = 'VerifyScriptingRuntime' },
+          [pscustomobject]@{ Action = 'ISInstallScriptStartup'; Type = 1; Source = 'ISSetup.dll'; Target = 'InstallScriptStartup' }
+        )
+        SequenceRows     = @(
+          [pscustomobject]@{ Table = 'InstallExecuteSequence'; Action = 'ISVerifyScriptingRuntime'; Condition = 'VersionNT'; Sequence = 100 },
+          [pscustomobject]@{ Table = 'InstallExecuteSequence'; Action = 'ISInstallScriptStartup'; Condition = 'NOT Installed'; Sequence = 110 }
+        )
+      }
+
+      $Actions = Get-MsiInstallShieldScriptActionInfo -StaticTableInfo $StaticTableInfo
+      $Actions.Action | Should -Be @('ISInstallScriptStartup', 'ISVerifyScriptingRuntime')
+      ($Actions | Where-Object Action -EQ 'ISInstallScriptStartup').Sequences.Condition | Should -Be 'NOT Installed'
+      ($Actions | Where-Object Action -EQ 'ISInstallScriptStartup').Scheduled | Should -BeTrue
+    }
+
     It 'Should classify Chromium enterprise MSIs compiled from WiX source' {
       $StaticTableInfo = [pscustomobject]@{
         Properties       = @{}
@@ -203,6 +250,8 @@ Describe 'MSI builder and install-location parser' {
     $Info.AppsAndFeaturesProductCode | Should -Be '{F84F95F3-5AE8-4676-8BA2-F6294C8A7F5E}'
     $Info.HasCustomAppsAndFeaturesEntry | Should -BeFalse
     $Info.HidesMsiAppsAndFeaturesEntry | Should -BeFalse
+    $Info.ElevationRequirement | Should -BeNullOrEmpty
+    $Info.ElevationRequirementEvidence | Should -BeNullOrEmpty
     Read-AppsAndFeaturesInstallerTypeFromMsi -Path $Fixture | Should -Be 'msi'
   }
 
@@ -211,6 +260,7 @@ Describe 'MSI builder and install-location parser' {
     $Info = Get-MsiInstallerInfo -Path $Fixture
 
     $Info.InstallerBuilder | Should -Be 'InstallShield'
+    $Info.InstallShieldProjectType | Should -Be 'Basic MSI'
     $Info.InstallLocationProperty | Should -Be 'INSTALLDIR'
     $Info.InstallLocationSwitch | Should -Be 'INSTALLDIR="<INSTALLPATH>"'
     $Info.AppsAndFeaturesInstallerType | Should -Be 'msi'
@@ -271,6 +321,171 @@ Describe 'MSI package architecture parser' {
     ) {
       Convert-MsiTemplatePlatformToPackageArchitecture -Template $Template | Should -Be $Expected
     }
+  }
+}
+
+Describe 'MSI elevation requirement parser' {
+  InModuleScope MSI {
+    It 'Should require explicit MSI elevation evidence rather than machine metadata alone' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties          = @{ ALLUSERS = '1' }
+        LaunchConditionRows = @()
+        CustomActionRows    = @()
+        SequenceRows        = @()
+        SummaryInfo         = [pscustomobject]@{ WordCount = 2 }
+      }
+
+      $Result = Get-MsiElevationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+
+      $Result.ElevationRequirement | Should -BeNullOrEmpty
+      $Result.AllowsInstallWithoutElevation | Should -BeFalse
+      $Result.Evidence | Should -BeNullOrEmpty
+    }
+
+    It 'Should detect authored elevation launch conditions' {
+      $StaticTableInfo = [pscustomobject]@{
+        LaunchConditionRows = @([pscustomobject]@{
+            Condition   = 'SCM_IS_ACCESSIBLE'
+            Description = 'This installation requires elevated privileges. Please run it as an administrator.'
+          })
+        CustomActionRows    = @()
+        SequenceRows        = @()
+        SummaryInfo         = [pscustomobject]@{ WordCount = 2 }
+      }
+
+      $Result = Get-MsiElevationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+
+      $Result.ElevationRequirement | Should -Be 'elevationRequired'
+      $Result.Evidence.Kind | Should -Be 'LaunchCondition'
+      $Result.Evidence.Confidence | Should -Be 'Explicit'
+    }
+
+    It 'Should detect Chromium product tags and scheduled restart-as-admin actions' {
+      $StaticTableInfo = [pscustomobject]@{
+        LaunchConditionRows = @()
+        CustomActionRows    = @(
+          [pscustomobject]@{ Action = 'SetProductTagProperty'; Type = 51; Source = 'ProductTag'; Target = 'appguid={ID}&needsAdmin=True' },
+          [pscustomobject]@{ Action = 'RestartAsAdmin'; Type = 257; Source = 'Actions'; Target = 'RestartAsAdmin' }
+        )
+        SequenceRows        = @([pscustomobject]@{ Table = 'InstallExecuteSequence'; Action = 'RestartAsAdmin'; Condition = ''; Sequence = 57 })
+        SummaryInfo         = [pscustomobject]@{ WordCount = 2 }
+      }
+
+      $Result = Get-MsiElevationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+
+      $Result.ElevationRequirement | Should -Be 'elevationRequired'
+      $Result.Evidence.Kind | Should -Be @('NestedInstallerProductTag', 'ElevationCustomAction')
+    }
+
+    It 'Should distinguish a vendor no-UI silent modifier from basic UI' {
+      $StaticTableInfo = [pscustomobject]@{
+        LaunchConditionRows = @()
+        CustomActionRows    = @(
+          [pscustomobject]@{ Action = 'SetProductTagProperty'; Type = 51; Source = 'ProductTag'; Target = 'appguid={ID}&needsAdmin=True' },
+          [pscustomobject]@{ Action = 'BuildInstallCommand'; Type = 51; Source = 'InstallCommand'; Target = '--install="[ProductTag]"' },
+          [pscustomobject]@{ Action = 'AppendSilent'; Type = 51; Source = 'InstallCommand'; Target = '[InstallCommand] --silent' },
+          [pscustomobject]@{ Action = 'ExtractTagInfoFromInstaller'; Type = 1; Source = 'MsiInstallerCustomActionDll'; Target = 'ExtractTagInfoFromInstaller' },
+          [pscustomobject]@{ Action = 'DoInstall'; Type = 3074; Source = 'NestedInstaller'; Target = '[InstallCommand]' }
+        )
+        SequenceRows        = @(
+          [pscustomobject]@{ Table = 'InstallExecuteSequence'; Action = 'ExtractTagInfoFromInstaller'; Condition = 'NOT Installed'; Sequence = 100 },
+          [pscustomobject]@{ Table = 'InstallExecuteSequence'; Action = 'AppendSilent'; Condition = 'NOT Installed AND (UILevel = 2)'; Sequence = 200 },
+          [pscustomobject]@{ Table = 'InstallExecuteSequence'; Action = 'DoInstall'; Condition = 'NOT Installed'; Sequence = 300 }
+        )
+        SummaryInfo         = [pscustomobject]@{ WordCount = 2 }
+      }
+
+      $ChromiumInfo = Get-MsiChromiumEnterpriseInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $ElevationInfo = Get-MsiElevationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo -ChromiumEnterpriseInfo $ChromiumInfo
+
+      $ChromiumInfo.IsDetected | Should -BeTrue
+      $ChromiumInfo.IsSilentAtNoUi | Should -BeTrue
+      $ChromiumInfo.IsSilentAtBasicUi | Should -BeFalse
+      $ChromiumInfo.SilentElevationBehavior | Should -Be 'RequiresPreElevation'
+      $ChromiumInfo.HasImmediateTagExtraction | Should -BeTrue
+      $ChromiumInfo.DeferredInstallerAction.IsDeferred | Should -BeTrue
+      $ChromiumInfo.DeferredInstallerAction.NoImpersonate | Should -BeTrue
+      $ElevationInfo.Evidence.Kind | Should -Be 'ChromiumUpdaterSilentPreElevation'
+    }
+
+    It 'Should detect an early InstallShield context action only when non-elevated support is not declared' {
+      $StaticTableInfo = [pscustomobject]@{
+        LaunchConditionRows = @()
+        CustomActionRows    = @([pscustomobject]@{ Action = 'ISSetAllUsers'; Type = 257; Source = 'SetAllUsers.dll'; Target = 'SetAllUsers' })
+        SequenceRows        = @([pscustomobject]@{ Table = 'InstallExecuteSequence'; Action = 'ISSetAllUsers'; Condition = 'Not Installed'; Sequence = 10 })
+        SummaryInfo         = [pscustomobject]@{ WordCount = 0 }
+      }
+
+      $Result = Get-MsiElevationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $StaticTableInfo.SummaryInfo.WordCount = 8
+      $NonElevatedResult = Get-MsiElevationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+
+      $Result.ElevationRequirement | Should -Be 'elevationRequired'
+      $Result.Evidence.Kind | Should -Be 'InstallShieldEarlyContextAction'
+      $Result.Evidence.Confidence | Should -Be 'Observed'
+      $NonElevatedResult.ElevationRequirement | Should -BeNullOrEmpty
+    }
+  }
+
+  It 'Should parse the distinct cached real-world elevation layouts' -ForEach @(
+    @{ Name = 'CatoNetworks.CatoClient.x64.msi'; Kind = 'LaunchCondition' }
+    @{ Name = 'Cribl.CriblEdge.x64.msi'; Kind = 'ElevationCustomAction' }
+    @{ Name = 'Cisco.NetworkRecordingPlayer.x86.msi'; Kind = 'InstallShieldEarlyContextAction' }
+    @{ Name = 'CrisisGo.CrisisGo.x86.msi'; Kind = 'InstallShieldEarlyContextAction' }
+    @{ Name = 'PaloAltoNetworks.PrismaAccessBrowser.x64.msi'; Kind = 'ChromiumUpdaterSilentPreElevation' }
+  ) {
+    $Fixture = Join-Path $Script:ElevationFixtureDirectory $Name
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because "The durable MSI elevation fixture '$Name' is not cached."
+      return
+    }
+
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.ElevationRequirement | Should -Be 'elevationRequired'
+    $Info.ElevationRequirementEvidence.Kind | Should -Contain $Kind
+    Read-ElevationRequirementFromMsi -Path $Fixture | Should -Be 'elevationRequired'
+  }
+
+  It 'Should model the untagged Chrome enterprise MSI as always-silent nested installation' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'GoogleChromeStandaloneEnterprise-current-x64.msi'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The durable Google Chrome enterprise MSI fixture is not cached.'
+      return
+    }
+
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+    $ChromiumInfo = $Info.ChromiumEnterpriseMsiInfo
+
+    $ChromiumInfo.IsDetected | Should -BeTrue
+    $ChromiumInfo.OuterTag.IsTagged | Should -BeFalse
+    $ChromiumInfo.ProductTagSource | Should -Be 'DefaultProductTag'
+    $ChromiumInfo.EffectiveNeedsAdmin | Should -Be 'True'
+    $ChromiumInfo.IsSilentAtNoUi | Should -BeTrue
+    $ChromiumInfo.IsSilentAtBasicUi | Should -BeTrue
+    $ChromiumInfo.RequiresPreElevationForSilent | Should -BeTrue
+    $Info.ElevationRequirementEvidence.Kind | Should -Contain 'ChromiumUpdaterSilentPreElevation'
+  }
+
+  It 'Should ignore the embedded Prisma tag and retain its no-UI-only silent modifier' {
+    $Fixture = Join-Path $Script:ElevationFixtureDirectory 'PaloAltoNetworks.PrismaAccessBrowser.x64.msi'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The durable Prisma Access Browser MSI fixture is not cached.'
+      return
+    }
+
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+    $ChromiumInfo = $Info.ChromiumEnterpriseMsiInfo
+
+    $ChromiumInfo.IsDetected | Should -BeTrue
+    $ChromiumInfo.OuterTag.IsTagged | Should -BeFalse
+    $ChromiumInfo.ProductTagSource | Should -Be 'DefaultProductTag'
+    $ChromiumInfo.EffectiveNeedsAdmin | Should -Be 'True'
+    $ChromiumInfo.IsSilentAtNoUi | Should -BeTrue
+    $ChromiumInfo.IsSilentAtBasicUi | Should -BeFalse
+    $ChromiumInfo.RequiresPreElevationForSilent | Should -BeTrue
+    $ChromiumInfo.SilentModifierActions.Action | Should -Contain 'TalonAppendSilentToInstallCommand'
+    $Info.ElevationRequirementEvidence.Kind | Should -Contain 'ChromiumUpdaterSilentPreElevation'
   }
 }
 

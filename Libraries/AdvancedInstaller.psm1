@@ -35,16 +35,7 @@ function Resolve-AdvancedInstallerMatch {
     [string]$Pattern
   )
 
-  if (-not $Item) { throw 'No MSI files were extracted from the Advanced Installer payload' }
-
-  $Match = @($Item.Where({ $_.Name -like $Pattern -or $_.FullName -like $Pattern }))
-  if (-not $Match) { throw "No Advanced Installer MSI matched the pattern: $Pattern" }
-
-  $ExactMatch = @($Match.Where({ $_.Name -ieq $Pattern -or $_.FullName -ieq $Pattern }))
-  if ($ExactMatch.Count -eq 1) { return $ExactMatch[0] }
-  if ($Match.Count -eq 1) { return $Match[0] }
-
-  throw "Multiple MSI files matched the Advanced Installer pattern: $Pattern"
+  return Resolve-UniqueInstallerFile -Item $Item -Pattern $Pattern -Description 'Advanced Installer MSI'
 }
 
 function Resolve-AdvancedInstallerMsiFile {

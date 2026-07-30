@@ -7,6 +7,7 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\RegistryAssociations.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerCondition.psm1') -Force
   if (-not ([Management.Automation.PSTypeName]'Dumplings.Tests.VirtualLargeReadStream').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -134,6 +135,29 @@ $Jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction Stop
     $LASTEXITCODE | Should -Be 0
   }
 
+  It 'compiles a related managed source set once under concurrent calls' {
+    $SourceDirectory = Join-Path $TestDrive 'ManagedSource'
+    $null = New-Item -Path $SourceDirectory -ItemType Directory
+    $FirstSource = Join-Path $SourceDirectory 'Model.cs'
+    $SecondSource = Join-Path $SourceDirectory 'Reader.cs'
+    [IO.File]::WriteAllText($FirstSource, 'namespace Dumplings.Tests.ManagedSourceSet { public sealed partial class Marker { public static string Model => "model"; } }')
+    [IO.File]::WriteAllText($SecondSource, 'namespace Dumplings.Tests.ManagedSourceSet { public sealed partial class Marker { public static string Reader => "reader"; } }')
+    $RuntimeModule = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1'))
+
+    $Jobs = 1..8 | ForEach-Object {
+      Start-ThreadJob -ArgumentList $RuntimeModule, $FirstSource, $SecondSource -ScriptBlock {
+        param($ModulePath, $First, $Second)
+        Import-Module $ModulePath -Force
+        (Import-InstallerManagedSource -Path @($First, $Second) -TypeName 'Dumplings.Tests.ManagedSourceSet.Marker').FullName
+      }
+    }
+    $Assemblies = @($Jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction Stop)
+
+    $Assemblies | Select-Object -Unique | Should -HaveCount 1
+    [Dumplings.Tests.ManagedSourceSet.Marker]::Model | Should -Be 'model'
+    [Dumplings.Tests.ManagedSourceSet.Marker]::Reader | Should -Be 'reader'
+  }
+
   It 'prevents parser-local whole-file buffers and decoder constructors' {
     $Roots = @(
       [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries')),
@@ -141,7 +165,7 @@ $Jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction Stop
     )
     $Violations = [Collections.Generic.List[string]]::new()
     foreach ($Root in $Roots) {
-      foreach ($File in Get-ChildItem -LiteralPath $Root -Filter '*.psm1' -File) {
+      foreach ($File in Get-ChildItem -LiteralPath $Root -Include '*.psm1', '*.ps1' -Recurse -File) {
         if ($File.Name -eq 'Compression.psm1') { continue }
         $Text = Get-Content -LiteralPath $File.FullName -Raw
         if ($Text -match '(?i)ReadAllBytes\s*\(') { $Violations.Add("$($File.FullName): unbounded ReadAllBytes") }
@@ -357,6 +381,42 @@ Describe 'Test-ExtractionPattern' {
   It 'matches archive paths across slash conventions' {
     Test-ExtractionPattern -Path 'bin/updater.exe' -Pattern 'bin\updater.exe' | Should -BeTrue
     Test-ExtractionPattern -Path 'bin\updater.exe' -Pattern 'bin/updater.exe' | Should -BeTrue
+  }
+}
+
+Describe 'Resolve-UniqueInstallerFile' {
+  It 'prefers one exact relative path over wildcard interpretation' {
+    $Root = Join-Path $TestDrive 'UniqueSelection'
+    $null = New-Item -Path (Join-Path $Root 'x64') -ItemType Directory -Force
+    $null = New-Item -Path (Join-Path $Root 'arm64') -ItemType Directory -Force
+    [IO.File]::WriteAllText((Join-Path $Root 'x64\package.msi'), 'x64')
+    [IO.File]::WriteAllText((Join-Path $Root 'arm64\package.msi'), 'arm64')
+    $Files = @(Get-ChildItem -LiteralPath $Root -Recurse -File)
+
+    (Resolve-UniqueInstallerFile -Item $Files -Pattern 'x64\package.msi' -BasePath $Root).FullName |
+      Should -Be (Join-Path $Root 'x64\package.msi')
+    { Resolve-UniqueInstallerFile -Item $Files -Pattern '*.msi' -BasePath $Root } | Should -Throw '*Multiple files matched*'
+  }
+}
+
+Describe 'Installer condition evaluation' {
+  It 'applies Boolean precedence while preserving unknown identifiers' {
+    $Result = Resolve-InstallerBooleanExpression -Expression 'WINDOWS || DYNAMIC && false' -IdentifierState ([ordered]@{
+        WINDOWS = 'True'
+        DYNAMIC = 'Unknown'
+      })
+
+    $Result.State | Should -Be 'True'
+    $Result.Identifiers | Should -Be @('DYNAMIC', 'WINDOWS')
+    $Result.UnknownIdentifiers | Should -Contain 'DYNAMIC'
+    Merge-InstallerConditionState -State @('False', 'Unknown') -Operator All | Should -Be 'False'
+    Merge-InstallerConditionState -State @('False', 'Unknown') -Operator Any | Should -Be 'Unknown'
+    Merge-InstallerConditionState -State @('False', 'False') -Operator None | Should -Be 'True'
+  }
+
+  It 'rejects malformed and over-deep expressions without throwing' {
+    (Resolve-InstallerBooleanExpression -Expression 'a + b' -IdentifierState @{}).State | Should -Be 'Unknown'
+    (Resolve-InstallerBooleanExpression -Expression ('(' * 40 + 'true' + ')' * 40) -IdentifierState @{} -MaximumDepth 8).State | Should -Be 'Unknown'
   }
 }
 

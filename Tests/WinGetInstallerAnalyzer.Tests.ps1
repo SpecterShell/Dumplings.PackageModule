@@ -285,6 +285,87 @@ Describe 'WinGet installer analyzer content detection' {
     $Result.Result.Metadata.Commands[0].Command.ArgumentList | Should -Contain '/w'
   }
 
+  It 'Should detach selected InstallShield MSI metadata before extraction cleanup' {
+    InModuleScope WinGetInstallerAnalyzer {
+      Mock New-TempFolder { 'C:\Temporary\InstallShieldAnalyzer' }
+      Mock Remove-Item {}
+      Mock Get-InstallShieldInfo {
+        [pscustomobject]@{
+          InstallerType     = 'InstallShield'
+          Variant           = 'Basic MSI or InstallScript MSI'
+          HasMsi            = $true
+          InstallScriptInfo = $null
+          Warnings          = @()
+        }
+      }
+      Mock Get-InstallShieldMsiInfo {
+        [pscustomobject]@{
+          InstallerType      = 'wix'
+          ProductCode        = '{INSTALLSHIELD-MSI}'
+          DisplayName        = 'InstallShield MSI Product'
+          DisplayVersion     = '1.2.3'
+          Publisher          = 'Contoso'
+          SelectedMsiPath    = 'payload\Product.msi'
+          SelectionMethod    = 'SetupIni'
+          Warnings           = @()
+        }
+      }
+
+      $Candidate = [pscustomobject]@{ Family = 'InstallShield'; Confidence = 'high' }
+      $Result = @(Invoke-WinGetInstallerExeParser -InstallerPath 'synthetic-installshield.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
+          Where-Object { $_.Name -eq 'InstallShield' -and $_.Success })[0].Result
+
+      $Result.ProductCode | Should -Be '{INSTALLSHIELD-MSI}'
+      $Result.Metadata.Variant | Should -Be 'Basic MSI or InstallScript MSI'
+      $Result.MsiInfo.SelectedMsiPath | Should -Be 'payload\Product.msi'
+      Should -Invoke Get-InstallShieldMsiInfo -Exactly 1
+      Should -Invoke Remove-Item -Exactly 1 -ParameterFilter { $LiteralPath -ceq 'C:\Temporary\InstallShieldAnalyzer' }
+    }
+  }
+
+  It 'Should expose InstallScript ARP evidence without claiming progress-mode support' {
+    InModuleScope WinGetInstallerAnalyzer {
+      Mock New-TempFolder { 'C:\Temporary\InstallScriptAnalyzer' }
+      Mock Remove-Item {}
+      Mock Get-InstallShieldInfo {
+        $InstallScriptInfo = [pscustomobject]@{
+          SilentSupport                = 'Supported'
+          ProductCode                  = '{INSTALLSCRIPT-PRODUCT}'
+          DisplayName                  = 'InstallScript Product'
+          Publisher                    = 'Contoso'
+          WritesAppsAndFeaturesEntry   = $true
+          AppsAndFeaturesProductCode   = '{INSTALLSCRIPT-PRODUCT}'
+          AppsAndFeaturesInstallerType = 'exe'
+          Warnings                     = @()
+        }
+        [pscustomobject]@{
+          InstallerType                = 'InstallShield'
+          Variant                      = 'InstallScript'
+          HasMsi                       = $false
+          ProductCode                  = $InstallScriptInfo.ProductCode
+          DisplayName                  = $InstallScriptInfo.DisplayName
+          Publisher                    = $InstallScriptInfo.Publisher
+          WritesAppsAndFeaturesEntry   = $true
+          AppsAndFeaturesProductCode   = $InstallScriptInfo.AppsAndFeaturesProductCode
+          AppsAndFeaturesInstallerType = 'exe'
+          InstallScriptInfo            = $InstallScriptInfo
+          Warnings                     = @()
+        }
+      }
+      Mock Get-InstallShieldMsiInfo { throw 'MSI parsing must not run for InstallScript-only media' }
+
+      $Candidate = [pscustomobject]@{ Family = 'InstallShield'; Confidence = 'high' }
+      $Result = @(Invoke-WinGetInstallerExeParser -InstallerPath 'synthetic-installscript.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
+          Where-Object { $_.Name -eq 'InstallShield' -and $_.Success })[0].Result
+
+      $Result.ProductCode | Should -Be '{INSTALLSCRIPT-PRODUCT}'
+      $Result.SuggestedManifestFields.InstallModes | Should -Be @('interactive', 'silent')
+      $Result.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/s'
+      $Result.SuggestedManifestFields.InstallerSwitches.Contains('SilentWithProgress') | Should -BeFalse
+      Should -Invoke Get-InstallShieldMsiInfo -Exactly 0
+    }
+  }
+
   It 'Should expose script and MSI payload evidence for IExpress installers' {
     $Installer = Get-AnalyzerInstallerFixture -Name 'NM34_x64.exe' -Url 'https://download.microsoft.com/download/7/1/0/7105C7FF-768E-4472-AFD5-F29108D1E383/NM34_x64.exe'
 

@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Format sources: https://github.com/wixtoolset/wix
+# MSI Word Count elevation bit: https://learn.microsoft.com/windows/win32/msi/word-count-summary
+# MSI runtime elevation properties: https://learn.microsoft.com/windows/win32/msi/msirunningelevated-
+# InstallShield ISSetAllUsers behavior: https://docs.revenera.com/installshield27helplib/helplibrary/IHelpISSetAllUsers.htm
+# Chromium enterprise MSI product tag: https://chromium.googlesource.com/chromium/src/+/main/chrome/updater/win/signing/enterprise_standalone_installer.wxs.xml
 # Binary structure consumed here; MSI/MSP/MST are CFB containers:
 #
 #   D0 CF 11 E0 A1 B1 1A E1 header -> FAT/DIFAT/mini-FAT
@@ -12,9 +16,6 @@
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
-
-# Force stop on error
-$ErrorActionPreference = 'Stop'
 
 function Import-Assembly {
   <#
@@ -40,6 +41,112 @@ function Import-Assembly {
 }
 
 Import-Assembly
+
+# Keep InstallShield authoring-system interpretation separate from generic MSI mechanics.
+function Get-MsiInstallShieldPrerequisiteTableInfo {
+  <#
+  .SYNOPSIS
+    Project InstallShield prerequisite tables from an already-open MSI database.
+  .PARAMETER Database
+    Caller-owned DTF database. The helper does not close it.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][Microsoft.Deployment.WindowsInstaller.Database]$Database)
+
+  # The referenced .prq document owns downloads, conditions, and command lines. These rows
+  # preserve authored ordering and feature attachment without guessing missing definitions.
+  return [pscustomobject][ordered]@{
+    Prerequisites = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `ISSetupPrerequisites`, `ISBuildSourcePath`, `Order`, `ISSetupLocation`, `ISReleaseFlags` FROM `ISSetupPrerequisites`' -FieldNames @('Name', 'BuildSourcePath', 'Order', 'SetupLocation', 'ReleaseFlags'))
+    Features      = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Feature_`, `ISSetupPrerequisites_` FROM `ISFeatureSetupPrerequisites`' -FieldNames @('Feature', 'Name'))
+  }
+}
+
+function Get-MsiInstallShieldProjectTypeFromStaticTableInfo {
+  <#
+  .SYNOPSIS
+    Distinguish Basic MSI from InstallScript MSI using compiled MSI database evidence.
+  .DESCRIPTION
+    InstallShield can place setup.inx beside both Basic MSI and InstallScript MSI
+    media, so bootstrapper files are not an authoritative project-type marker.
+    InstallScript MSI projects instead retain the InstallScript runtime verifier
+    and, depending on the InstallShield generation and authored script, dedicated
+    InstallScript tables in the MSI database.
+  .PARAMETER StaticTableInfo
+    Immutable MSI table projection returned by Get-MsiStaticTableInfo.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]
+    [psobject]$StaticTableInfo
+  )
+
+  $Builder = Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+  if ($Builder -ne 'InstallShield') {
+    return [pscustomobject]@{
+      ProjectType   = $null
+      Tables        = [string[]]@()
+      CustomActions = [string[]]@()
+    }
+  }
+
+  # ISVerifyScriptingRuntime is added by InstallShield to InstallScript MSI
+  # projects. Older and script-heavy projects may additionally expose one of
+  # the InstallScript table families below. Generic IS-prefixed tables such as
+  # ISSetupType are intentionally excluded because Basic MSI uses them too.
+  $InstallScriptTables = [string[]]@($StaticTableInfo.Tables | Where-Object {
+      $_ -in @('ISInstallScriptAction', 'ISScriptFile') -or $_ -like 'ISInstallScript*'
+    } | Sort-Object -Unique)
+  $InstallScriptActions = [string[]]@($StaticTableInfo.CustomActionRows.Action | Where-Object {
+      $_ -eq 'ISVerifyScriptingRuntime' -or $_ -like 'ISInstallScript*'
+    } | Sort-Object -Unique)
+
+  return [pscustomobject]@{
+    ProjectType   = ($InstallScriptTables.Count -or $InstallScriptActions.Count) ? 'InstallScript MSI' : 'Basic MSI'
+    Tables        = $InstallScriptTables
+    CustomActions = $InstallScriptActions
+  }
+}
+
+function Get-MsiInstallShieldScriptActionInfo {
+  <#
+  .SYNOPSIS
+    Project InstallScript MSI custom actions into their authored sequence slots.
+  .DESCRIPTION
+    Conditions are returned verbatim. They are not evaluated because MSI
+    properties, feature states, and installed-product state exist only inside a
+    Windows Installer session on the target system.
+  .PARAMETER StaticTableInfo
+    Immutable MSI table projection returned by Get-MsiStaticTableInfo.
+  .PARAMETER ProjectTypeInfo
+    Optional cached result from Get-MsiInstallShieldProjectTypeFromStaticTableInfo.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][psobject]$StaticTableInfo,
+    [psobject]$ProjectTypeInfo
+  )
+
+  if (-not $ProjectTypeInfo) {
+    $ProjectTypeInfo = Get-MsiInstallShieldProjectTypeFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+  }
+  if ($ProjectTypeInfo.ProjectType -ne 'InstallScript MSI') { return [object[]]@() }
+
+  $ActionNames = [string[]]@($StaticTableInfo.CustomActionRows.Action | Where-Object {
+      $_ -eq 'ISVerifyScriptingRuntime' -or $_ -like 'ISInstallScript*'
+    } | Sort-Object -Unique)
+  foreach ($ActionName in $ActionNames) {
+    $CustomAction = $StaticTableInfo.CustomActionRows | Where-Object Action -CEQ $ActionName | Select-Object -First 1
+    $Sequences = [object[]]@($StaticTableInfo.SequenceRows | Where-Object Action -CEQ $ActionName | Sort-Object Table, Sequence)
+    [pscustomobject][ordered]@{
+      Action    = $ActionName
+      Type      = $CustomAction.Type
+      Source    = $CustomAction.Source
+      Target    = $CustomAction.Target
+      Sequences = $Sequences
+      Scheduled = $Sequences.Count -gt 0
+    }
+  }
+}
 
 function Expand-Msp {
   <#
@@ -308,6 +415,16 @@ function Get-MsiStaticTableInfo {
   $DirectoryRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' -FieldNames @('Directory', 'DirectoryParent', 'DefaultDir'))
   $ComponentRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Component`, `Directory_`, `KeyPath` FROM `Component`' -FieldNames @('Component', 'Directory', 'KeyPath'))
   $CustomActionRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Action`, `Type`, `Source`, `Target` FROM `CustomAction`' -FieldNames @('Action', 'Type', 'Source', 'Target'))
+  $SequenceRows = foreach ($SequenceTable in @('InstallExecuteSequence', 'InstallUISequence', 'AdminExecuteSequence', 'AdminUISequence', 'AdvtExecuteSequence')) {
+    foreach ($Row in @(Get-MsiQueryRow -Database $Database -Query "SELECT ``Action``, ``Condition``, ``Sequence`` FROM ``$SequenceTable``" -FieldNames @('Action', 'Condition', 'Sequence'))) {
+      [pscustomobject][ordered]@{
+        Table     = $SequenceTable
+        Action    = $Row.Action
+        Condition = $Row.Condition
+        Sequence  = $Row.Sequence
+      }
+    }
+  }
   # Resolve only literal Property-table substitutions in Registry rows. Other MSI formatted-string
   # constructs remain intact rather than being evaluated outside Windows Installer.
   $RegistryRows = foreach ($Row in (Get-MsiQueryRow -Database $Database -Query 'SELECT `Registry`, `Root`, `Key`, `Name`, `Value`, `Component_` FROM `Registry`' -FieldNames @('Registry', 'Root', 'Key', 'Name', 'Value', 'Component'))) {
@@ -328,20 +445,24 @@ function Get-MsiStaticTableInfo {
   $ProgIdRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `ProgId`, `ProgId_Parent`, `Class_`, `Description`, `Icon_`, `IconIndex` FROM `ProgId`' -FieldNames @('ProgId', 'ParentProgId', 'Class', 'Description', 'Icon', 'IconIndex'))
   $VerbRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Extension_`, `Verb`, `Sequence`, `Command`, `Argument` FROM `Verb`' -FieldNames @('Extension', 'Verb', 'Sequence', 'Command', 'Argument'))
   $MimeRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `ContentType`, `Extension_`, `CLSID` FROM `MIME`' -FieldNames @('ContentType', 'Extension', 'ClassId'))
+  $InstallShieldTableInfo = Get-MsiInstallShieldPrerequisiteTableInfo -Database $Database
 
   [PSCustomObject]@{
-    Properties          = $Properties
-    Tables              = $Tables
-    DirectoryRows       = $DirectoryRows
-    ComponentRows       = $ComponentRows
-    CustomActionRows    = $CustomActionRows
-    LaunchConditionRows = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Condition`, `Description` FROM `LaunchCondition`' -FieldNames @('Condition', 'Description'))
-    RegistryRows        = @($RegistryRows)
-    ExtensionRows       = $ExtensionRows
-    ProgIdRows          = $ProgIdRows
-    VerbRows            = $VerbRows
-    MimeRows            = $MimeRows
-    SummaryInfo         = $Database.SummaryInfo
+    Properties                           = $Properties
+    Tables                               = $Tables
+    DirectoryRows                        = $DirectoryRows
+    ComponentRows                        = $ComponentRows
+    CustomActionRows                     = $CustomActionRows
+    SequenceRows                         = [object[]]@($SequenceRows)
+    LaunchConditionRows                  = @(Get-MsiQueryRow -Database $Database -Query 'SELECT `Condition`, `Description` FROM `LaunchCondition`' -FieldNames @('Condition', 'Description'))
+    RegistryRows                         = @($RegistryRows)
+    ExtensionRows                        = $ExtensionRows
+    ProgIdRows                           = $ProgIdRows
+    VerbRows                             = $VerbRows
+    MimeRows                             = $MimeRows
+    InstallShieldPrerequisiteRows        = $InstallShieldTableInfo.Prerequisites
+    InstallShieldFeaturePrerequisiteRows = $InstallShieldTableInfo.Features
+    SummaryInfo                          = $Database.SummaryInfo
   }
 }
 
@@ -558,6 +679,460 @@ function Get-MsiArchitectureInfoFromStaticTableInfo {
   }
 }
 
+function Read-MsiChromiumUpdaterTag {
+  <#
+  .SYNOPSIS
+    Read an appended Omaha product tag from a Chromium enterprise MSI.
+  .DESCRIPTION
+    Chromium's MSI signing pipeline stores the signed package data in the MSI
+    DigitalSignature stream. This helper reads only that stream, validates the
+    length framing, strict UTF-8 text, query keys, and recognized updater
+    fields, and therefore cannot confuse a tagged embedded EXE with the MSI's
+    TAGSTRING override.
+  .PARAMETER Path
+    Resolved or relative path to the MSI file. The package is opened read-only.
+  .PARAMETER Database
+    Open caller-owned Windows Installer database. The helper closes only its
+    query records and stream, never the supplied database.
+  .PARAMETER MaximumSignatureBytes
+    Maximum number of bytes read from the MSI DigitalSignature stream.
+  .OUTPUTS
+    Normalized updater-tag evidence. IsTagged is false when no valid non-empty
+    outer tag is present.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(ParameterSetName = 'Path', Mandatory)]
+    [string]$Path,
+
+    [Parameter(ParameterSetName = 'Database', Mandatory)]
+    [Microsoft.Deployment.WindowsInstaller.Database]$Database,
+
+    [ValidateRange(65549, 67108864)]
+    [int]$MaximumSignatureBytes = 16777216
+  )
+
+  $OwnsDatabase = $PSCmdlet.ParameterSetName -eq 'Path'
+  if ($OwnsDatabase) {
+    $ResolvedPath = Convert-Path -Path $Path
+    $Database = [Microsoft.Deployment.WindowsInstaller.Package.InstallPackage]::new($ResolvedPath, 'ReadOnly')
+  }
+
+  $View = $null
+  $ParameterRecord = $null
+  $DataRecord = $null
+  $SignatureStream = $null
+  try {
+    $View = $Database.OpenView('SELECT `Data` FROM `_Streams` WHERE `Name` = ?')
+    $ParameterRecord = [Microsoft.Deployment.WindowsInstaller.Record]::new(1)
+    $ParameterRecord.SetString(1, "$([char]5)DigitalSignature")
+    $View.Execute($ParameterRecord)
+    $DataRecord = $View.Fetch()
+    if (-not $DataRecord) { $SignatureBytes = [byte[]]::new(0) } else {
+      $SignatureStream = $DataRecord.GetStream(1)
+      if ($SignatureStream.Length -gt $MaximumSignatureBytes) {
+        throw 'The MSI DigitalSignature stream exceeds the Chromium tag parser limit.'
+      }
+      $SignatureBytes = [byte[]]::new([int]$SignatureStream.Length)
+      $SignatureStream.ReadExactly($SignatureBytes)
+    }
+  } finally {
+    if ($SignatureStream) { $SignatureStream.Dispose() }
+    if ($DataRecord) { $DataRecord.Close() }
+    if ($ParameterRecord) { $ParameterRecord.Close() }
+    if ($View) { $View.Close() }
+    if ($OwnsDatabase -and $Database) { $Database.Close() }
+  }
+
+  $Marker = [Text.Encoding]::ASCII.GetBytes('Gact2.0Omaha')
+  $Offsets = @(Find-BinaryPattern -Bytes $SignatureBytes -Pattern $Marker -Maximum 256)
+  $EmptyMarkerOffset = $null
+  $Utf8 = [Text.UTF8Encoding]::new($false, $true)
+
+  # Inspect candidates from the end of the signed file. Embedded updater
+  # binaries can contain the marker as program data, so framing alone is not
+  # sufficient: a non-empty tag must also be a valid query with updater keys.
+  for ($Index = $Offsets.Count - 1; $Index -ge 0; $Index--) {
+    $Offset = [int]$Offsets[$Index]
+    $LengthOffset = $Offset + $Marker.Length
+    if ($LengthOffset + 2 -gt $SignatureBytes.Length) { continue }
+    $Length = ([int]$SignatureBytes[$LengthOffset] -shl 8) -bor [int]$SignatureBytes[$LengthOffset + 1]
+    $TagOffset = $LengthOffset + 2
+    if ($TagOffset + $Length -gt $SignatureBytes.Length) { continue }
+    if ($Length -eq 0) {
+      if ($null -eq $EmptyMarkerOffset) { $EmptyMarkerOffset = $Offset }
+      continue
+    }
+
+    try {
+      $RawTag = $Utf8.GetString($SignatureBytes, $TagOffset, $Length)
+    } catch {
+      continue
+    }
+    if ($RawTag -match '[\x00-\x1F\x7F]') { continue }
+
+    $Parameters = [ordered]@{}
+    $ValidQuery = $true
+    foreach ($Part in ($RawTag -split '&')) {
+      $Pair = $Part -split '=', 2
+      if ($Pair.Count -ne 2 -or $Pair[0] -notmatch '^[A-Za-z][A-Za-z0-9_.-]*$') {
+        $ValidQuery = $false
+        break
+      }
+      try {
+        $Key = [Uri]::UnescapeDataString($Pair[0].Replace('+', ' '))
+        $Parameters[$Key] = [Uri]::UnescapeDataString($Pair[1].Replace('+', ' '))
+      } catch {
+        $ValidQuery = $false
+        break
+      }
+    }
+    if (-not $ValidQuery -or
+      -not ($Parameters.Contains('appguid') -or $Parameters.Contains('appid') -or $Parameters.Contains('needsadmin'))) {
+      continue
+    }
+
+    return [pscustomobject][ordered]@{
+      MarkerFound     = $true
+      IsTagged        = $true
+      TagFormat       = 'OmahaMsiTailTag'
+      Offset          = $Offset
+      Length          = $Length
+      RawTag          = $RawTag
+      Parameters      = [pscustomobject]$Parameters
+      ApplicationId   = $Parameters['appguid'] ?? $Parameters['appid']
+      ApplicationName = $Parameters['appname']
+      NeedsAdmin      = $Parameters['needsadmin']
+      Brand           = $Parameters['brand']
+    }
+  }
+
+  return [pscustomobject][ordered]@{
+    MarkerFound     = $null -ne $EmptyMarkerOffset
+    IsTagged        = $false
+    TagFormat       = $null -ne $EmptyMarkerOffset ? 'OmahaMsiTailTag' : $null
+    Offset          = $EmptyMarkerOffset
+    Length          = 0
+    RawTag          = $null
+    Parameters      = [pscustomobject][ordered]@{}
+    ApplicationId   = $null
+    ApplicationName = $null
+    NeedsAdmin      = $null
+    Brand           = $null
+  }
+}
+
+function Get-MsiChromiumEnterpriseInfoFromStaticTableInfo {
+  <#
+  .SYNOPSIS
+    Interpret Chromium enterprise MSI custom actions and product-tag behavior.
+  .DESCRIPTION
+    Recognizes the source-defined SetProductTagProperty, tag override,
+    BuildInstallCommand, ExtractTagInfoFromInstaller, and deferred DoInstall
+    layout. Vendor-authored property actions are retained as conditional command
+    modifiers instead of being treated as Chromium defaults.
+  .PARAMETER StaticTableInfo
+    Immutable MSI table projection returned by Get-MsiStaticTableInfo.
+  .PARAMETER Database
+    Optional caller-owned database used to read the outer MSI signature tag.
+    Synthetic table-only callers still receive action evidence.
+  .OUTPUTS
+    Structured evidence describing the effective product tag, nested silent
+    mode, immediate tag extraction, deferred execution, and whether the nested
+    updater requires an already elevated caller in silent mode.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]
+    [psobject]$StaticTableInfo,
+
+    [AllowNull()]
+    [Microsoft.Deployment.WindowsInstaller.Database]$Database
+  )
+
+  $Actions = @($StaticTableInfo.CustomActionRows)
+  $ActionNames = @($Actions.Action)
+  $RequiredActions = @('SetProductTagProperty', 'BuildInstallCommand', 'ExtractTagInfoFromInstaller', 'DoInstall')
+  $IsDetected = -not ($RequiredActions | Where-Object { $_ -notin $ActionNames })
+  if (-not $IsDetected) {
+    return [pscustomobject][ordered]@{
+      IsDetected                    = $false
+      DefaultProductTag             = $null
+      DefaultNeedsAdmin             = $null
+      OuterTag                      = $null
+      ProductTagSource              = $null
+      EffectiveProductTag           = $null
+      EffectiveNeedsAdmin           = $null
+      InstallCommand                = $null
+      SilentModifierActions         = [object[]]@()
+      UsesPlainSilent               = $false
+      AllowsSilentUac               = $false
+      IsSilentAtNoUi                = $false
+      IsSilentAtBasicUi             = $false
+      SilentElevationBehavior       = 'NotApplicable'
+      RequiresPreElevationForSilent = $false
+      HasImmediateTagExtraction     = $false
+      DeferredInstallerAction       = $null
+      Notices                       = [string[]]@()
+    }
+  }
+
+  $SetTagAction = $Actions | Where-Object Action -CEQ 'SetProductTagProperty' | Select-Object -First 1
+  $BuildAction = $Actions | Where-Object Action -CEQ 'BuildInstallCommand' | Select-Object -First 1
+  $ExtractAction = $Actions | Where-Object Action -CEQ 'ExtractTagInfoFromInstaller' | Select-Object -First 1
+  $InstallAction = $Actions | Where-Object Action -CEQ 'DoInstall' | Select-Object -First 1
+  $DefaultProductTag = [string]$SetTagAction.Target
+  $DefaultNeedsAdmin = if ($DefaultProductTag -match '(?i)(?:^|&)needsAdmin=([^&]+)') { $Matches[1] } else { $null }
+
+  $OuterTag = if ($Database) { Read-MsiChromiumUpdaterTag -Database $Database } else { $null }
+  $EffectiveProductTag = $OuterTag -and $OuterTag.IsTagged ? $OuterTag.RawTag : $DefaultProductTag
+  $EffectiveNeedsAdmin = $OuterTag -and $OuterTag.IsTagged ? $OuterTag.NeedsAdmin : $DefaultNeedsAdmin
+  $ProductTagSource = $OuterTag -and $OuterTag.IsTagged ? 'OuterMsiTag' : 'DefaultProductTag'
+  $InstallCommand = [string]$BuildAction.Target
+
+  # Property-setting custom actions can append vendor switches after the source
+  # template builds InstallCommand. Preserve their MSI conditions so UILevel=2
+  # (none/quiet) is not confused with UILevel=3 (basic/passive).
+  $SilentModifierActions = [System.Collections.Generic.List[object]]::new()
+  foreach ($Action in @($Actions | Where-Object {
+        [int]$_.Type -eq 51 -and $_.Source -ceq 'InstallCommand' -and $_.Action -cne 'BuildInstallCommand' -and
+        [string]$_.Target -match '(?i)(?:^|\s)--silent(?:=\S+)?(?:\s|$)'
+      })) {
+    $Sequences = @($StaticTableInfo.SequenceRows | Where-Object Action -CEQ $Action.Action)
+    $SilentModifierActions.Add([pscustomobject][ordered]@{
+        Action     = [string]$Action.Action
+        Target     = [string]$Action.Target
+        Conditions = [string[]]@($Sequences.Condition | Where-Object { $_ })
+        Sequences  = [object[]]$Sequences
+      })
+  }
+
+  $BaseSilentMatch = [regex]::Match($InstallCommand, '(?i)(?:^|\s)--silent(?:=([^\s"]+))?(?=\s|$)')
+  $UsesPlainSilent = $BaseSilentMatch.Success -and [string]::IsNullOrWhiteSpace($BaseSilentMatch.Groups[1].Value)
+  $AllowsSilentUac = $BaseSilentMatch.Success -and $BaseSilentMatch.Groups[1].Value -ieq 'allow-uac'
+  $IsSilentAtNoUi = $BaseSilentMatch.Success
+  $IsSilentAtBasicUi = $BaseSilentMatch.Success
+  foreach ($Modifier in $SilentModifierActions) {
+    $ModifierAllowsUac = [string]$Modifier.Target -match '(?i)--silent=allow-uac(?:\s|$)'
+    $ModifierUsesPlainSilent = [string]$Modifier.Target -match '(?i)(?:^|\s)--silent(?=\s|$)'
+    foreach ($Condition in @($Modifier.Conditions)) {
+      if ($Condition -match '(?i)\bUILevel\s*=\s*2\b') {
+        $IsSilentAtNoUi = $true
+        $UsesPlainSilent = $UsesPlainSilent -or $ModifierUsesPlainSilent
+        $AllowsSilentUac = $AllowsSilentUac -or $ModifierAllowsUac
+      }
+      if ($Condition -match '(?i)\bUILevel\s*=\s*3\b') { $IsSilentAtBasicUi = $true }
+    }
+  }
+
+  $NeedsElevation = $EffectiveNeedsAdmin -in @('true', 'prefers')
+  $RequiresPreElevation = $IsSilentAtNoUi -and $UsesPlainSilent -and -not $AllowsSilentUac -and $NeedsElevation
+  $SilentElevationBehavior = if ($RequiresPreElevation) {
+    'RequiresPreElevation'
+  } elseif ($IsSilentAtNoUi -and $AllowsSilentUac -and $NeedsElevation) {
+    'CanPromptForElevation'
+  } elseif ($EffectiveNeedsAdmin -ieq 'false') {
+    'ProductTagDoesNotRequireElevation'
+  } else {
+    'Unknown'
+  }
+
+  $ExtractSequences = @($StaticTableInfo.SequenceRows | Where-Object Action -CEQ 'ExtractTagInfoFromInstaller')
+  $InstallType = [int]$InstallAction.Type
+  $Notices = [System.Collections.Generic.List[string]]::new()
+  if ($RequiresPreElevation) {
+    $Notices.Add('The nested Chromium Updater receives plain --silent. Chromium suppresses UAC in that mode, so the silent MSI path requires an already elevated Windows Installer context.')
+  }
+  if ([int]$ExtractAction.Type -eq 1 -and $ExtractSequences.Count -gt 0) {
+    $Notices.Add('ExtractTagInfoFromInstaller is an immediate custom action. NoImpersonate does not elevate immediate actions, so a vendor-modified tag extractor can fail before deferred installation begins.')
+  }
+
+  return [pscustomobject][ordered]@{
+    IsDetected                    = $true
+    DefaultProductTag             = $DefaultProductTag
+    DefaultNeedsAdmin             = $DefaultNeedsAdmin
+    OuterTag                      = $OuterTag
+    ProductTagSource              = $ProductTagSource
+    EffectiveProductTag           = $EffectiveProductTag
+    EffectiveNeedsAdmin           = $EffectiveNeedsAdmin
+    InstallCommand                = $InstallCommand
+    SilentModifierActions         = [object[]]$SilentModifierActions.ToArray()
+    UsesPlainSilent               = $UsesPlainSilent
+    AllowsSilentUac               = $AllowsSilentUac
+    IsSilentAtNoUi                = $IsSilentAtNoUi
+    IsSilentAtBasicUi             = $IsSilentAtBasicUi
+    SilentElevationBehavior       = $SilentElevationBehavior
+    RequiresPreElevationForSilent = $RequiresPreElevation
+    HasImmediateTagExtraction     = [int]$ExtractAction.Type -eq 1 -and $ExtractSequences.Count -gt 0
+    DeferredInstallerAction       = [pscustomobject][ordered]@{
+      Action        = [string]$InstallAction.Action
+      Type          = $InstallType
+      Source        = [string]$InstallAction.Source
+      Target        = [string]$InstallAction.Target
+      IsDeferred    = ($InstallType -band 0x0400) -ne 0
+      NoImpersonate = ($InstallType -band 0x0800) -ne 0
+      Sequences     = [object[]]@($StaticTableInfo.SequenceRows | Where-Object Action -CEQ 'DoInstall')
+    }
+    Notices                       = [string[]]$Notices.ToArray()
+  }
+}
+
+function Get-MsiElevationInfoFromStaticTableInfo {
+  <#
+  .SYNOPSIS
+    Derive a WinGet elevation requirement from explicit MSI database behavior.
+  .DESCRIPTION
+    Treats launch conditions and scheduled custom actions as behavioral evidence.
+    ALLUSERS, machine directories, privileged deferred actions, and a clear Word
+    Count bit 3 are deliberately insufficient by themselves: Windows Installer
+    documents a clear bit only as "elevation can be required".
+  .PARAMETER StaticTableInfo
+    Immutable table projection returned by Get-MsiStaticTableInfo. The function
+    does not query or mutate the underlying MSI database.
+  .PARAMETER ChromiumEnterpriseInfo
+    Optional source-grounded Chromium enterprise MSI evidence. When supplied,
+    an appended product tag overrides the default ProductTag action exactly as
+    the MSI custom-action sequence does.
+  .OUTPUTS
+    An object containing ElevationRequirement, structured Evidence, the summary
+    bit interpretation, and parser warnings for contradictory authored metadata.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]
+    [psobject]$StaticTableInfo,
+
+    [AllowNull()]
+    [psobject]$ChromiumEnterpriseInfo
+  )
+
+  $Evidence = [System.Collections.Generic.List[object]]::new()
+  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $SummaryWordCount = [int]$StaticTableInfo.SummaryInfo.WordCount
+  $AllowsInstallWithoutElevation = ($SummaryWordCount -band 0x08) -ne 0
+
+  # A LaunchCondition row is authoritative when its authored message explicitly
+  # states that elevation is required. Also accept the simple standard-property
+  # forms whose truth directly requires an elevated Windows Installer context.
+  $ElevationRequirementPattern = '(?i)(?:\b(?:requires?|required|needs?|needed|must)\b.{0,80}\b(?:elevat(?:e|ed|ion)|administrator|administrative|admin(?:istrator)?(?:\s+rights?)?|privileg(?:e|es|ed))\b|\b(?:elevat(?:e|ed|ion)|administrator|administrative|admin(?:istrator)?(?:\s+rights?)?|privileg(?:e|es|ed))\b.{0,80}\b(?:requires?|required|needs?|needed|must)\b)'
+  $SimpleElevationConditionPattern = '(?i)^\s*\(*\s*(?:(?:Installed|REMOVE\s*~?=\s*"ALL")\s+OR\s+)?(?:MsiRunningElevated|Privileged|AdminUser)\s*\)*\s*$'
+  foreach ($Row in @($StaticTableInfo.LaunchConditionRows)) {
+    $Condition = [string]$Row.Condition
+    $Description = [string]$Row.Description
+    if ($Description -match $ElevationRequirementPattern -or $Condition -match $SimpleElevationConditionPattern) {
+      $Evidence.Add([pscustomobject][ordered]@{
+          Kind        = 'LaunchCondition'
+          Confidence  = 'Explicit'
+          Action      = 'LaunchConditions'
+          Condition   = $Condition
+          Description = $Description
+          Source      = 'LaunchCondition table'
+        })
+    }
+  }
+
+  $SequenceRows = @($StaticTableInfo.SequenceRows)
+  foreach ($Action in @($StaticTableInfo.CustomActionRows)) {
+    $ActionName = [string]$Action.Action
+    $ActionSource = [string]$Action.Source
+    $ActionTarget = [string]$Action.Target
+    $ScheduledRows = @($SequenceRows | Where-Object {
+        $_.Action -ceq $ActionName -and $_.Table -in @('InstallExecuteSequence', 'InstallUISequence')
+      })
+
+    # Chromium's enterprise MSI source passes needsAdmin=True to the nested
+    # updater. This literal field is target-installer behavior, not a heuristic
+    # based on the product name or the presence of a deferred custom action.
+    if ([int]$Action.Type -eq 51 -and $ActionTarget -match '(?i)(?:^|[&;])needsAdmin\s*=\s*True(?:[&;]|$)') {
+      # The source-defined default is superseded by TAGSTRING in tagged MSI
+      # variants. ChromiumEnterpriseInfo adds evidence for the effective value.
+      if ($ChromiumEnterpriseInfo -and $ChromiumEnterpriseInfo.IsDetected) { continue }
+      $Evidence.Add([pscustomobject][ordered]@{
+          Kind        = 'NestedInstallerProductTag'
+          Confidence  = 'Explicit'
+          Action      = $ActionName
+          Condition   = $null
+          Description = 'The nested installer product tag contains needsAdmin=True.'
+          Source      = $ActionSource
+        })
+      continue
+    }
+
+    # Some packages schedule an immediate action whose declared purpose is to
+    # restart as administrator. Require an actual sequence row so an unused
+    # Binary/CustomAction-table remnant does not affect the result.
+    if ($ScheduledRows.Count -gt 0 -and ($ActionName -ieq 'RestartAsAdmin' -or $ActionTarget -ieq 'RestartAsAdmin')) {
+      $Evidence.Add([pscustomobject][ordered]@{
+          Kind        = 'ElevationCustomAction'
+          Confidence  = 'Explicit'
+          Action      = $ActionName
+          Condition   = ($ScheduledRows.Condition -join '; ')
+          Description = 'A scheduled custom action attempts to restart installation as administrator; successful unattended continuation is not implied.'
+          Source      = $ActionSource
+        })
+      continue
+    }
+
+    # InstallShield inserts ISSetAllUsers to synchronize upgrade context. It is
+    # not itself an elevation declaration, but the early immediate action runs
+    # before the normal installation transaction and is observed to terminate
+    # quiet non-elevated installs in affected Basic MSI packages. Require the
+    # exact vendor action layout, an early execute-sequence row, and a package
+    # that has not declared non-elevated support.
+    $EarlyInstallShieldRows = @($ScheduledRows | Where-Object {
+        $_.Table -eq 'InstallExecuteSequence' -and [int]$_.Sequence -gt 0 -and [int]$_.Sequence -lt 1500
+      })
+    if (-not $AllowsInstallWithoutElevation -and
+      $EarlyInstallShieldRows.Count -gt 0 -and
+      $ActionName -ceq 'ISSetAllUsers' -and
+      $ActionSource -ieq 'SetAllUsers.dll' -and
+      $ActionTarget -ieq 'SetAllUsers') {
+      $Evidence.Add([pscustomobject][ordered]@{
+          Kind        = 'InstallShieldEarlyContextAction'
+          Confidence  = 'Observed'
+          Action      = $ActionName
+          Condition   = ($EarlyInstallShieldRows.Condition -join '; ')
+          Description = 'InstallShield schedules ISSetAllUsers before the normal install transaction and does not declare non-elevated support.'
+          Source      = $ActionSource
+        })
+    }
+  }
+
+  if ($ChromiumEnterpriseInfo -and $ChromiumEnterpriseInfo.IsDetected) {
+    if ($ChromiumEnterpriseInfo.RequiresPreElevationForSilent) {
+      $Evidence.Add([pscustomobject][ordered]@{
+          Kind        = 'ChromiumUpdaterSilentPreElevation'
+          Confidence  = 'Explicit'
+          Action      = 'DoInstall'
+          Condition   = $ChromiumEnterpriseInfo.IsSilentAtBasicUi ? 'Nested updater is silent for no/basic UI.' : 'Nested updater is silent only for no UI.'
+          Description = "The effective needsadmin value is '$($ChromiumEnterpriseInfo.EffectiveNeedsAdmin)' and plain --silent suppresses Chromium Updater UAC; silent installation requires an already elevated MSI context."
+          Source      = $ChromiumEnterpriseInfo.ProductTagSource
+        })
+    } elseif ($ChromiumEnterpriseInfo.EffectiveNeedsAdmin -ieq 'true') {
+      $Evidence.Add([pscustomobject][ordered]@{
+          Kind        = 'NestedInstallerProductTag'
+          Confidence  = 'Explicit'
+          Action      = 'SetProductTagProperty'
+          Condition   = $null
+          Description = 'The effective Chromium updater product tag contains needsAdmin=True.'
+          Source      = $ChromiumEnterpriseInfo.ProductTagSource
+        })
+    }
+  }
+
+  if ($Evidence.Count -gt 0 -and $AllowsInstallWithoutElevation) {
+    $Warnings.Add('Explicit MSI elevation behavior conflicts with Summary Information Word Count bit 3, which declares that elevated privileges are not required.')
+  }
+
+  return [pscustomobject][ordered]@{
+    ElevationRequirement          = $Evidence.Count -gt 0 ? 'elevationRequired' : $null
+    Evidence                      = [object[]]$Evidence.ToArray()
+    SummaryWordCount              = $SummaryWordCount
+    AllowsInstallWithoutElevation = $AllowsInstallWithoutElevation
+    Warnings                      = [string[]]$Warnings.ToArray()
+  }
+}
+
 function Get-MsiBuilderFromStaticTableInfo {
   <#
   .SYNOPSIS
@@ -615,6 +1190,10 @@ function Get-MsiBuilderFromStaticTableInfo {
 
   return 'Unknown'
 }
+
+
+
+
 
 function Get-MsiInstallLocationInfoFromStaticTableInfo {
   <#
@@ -781,6 +1360,7 @@ function Get-MsiAppsAndFeaturesInfo {
         $ProductCode
       }
       $InstallerBuilder = Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $InstallShieldProjectInfo = Get-MsiInstallShieldProjectTypeFromStaticTableInfo -StaticTableInfo $StaticTableInfo
       $VisibleAppsAndFeaturesRegistryRows = if ($CustomAppsAndFeaturesProductCode) {
         $CustomAppsAndFeaturesRegistryRows
       } elseif ($HasMsqAppsAndFeaturesEntry) {
@@ -810,6 +1390,8 @@ function Get-MsiAppsAndFeaturesInfo {
         ProductVersion                    = $Properties['ProductVersion']
         UpgradeCode                       = $Properties['UpgradeCode']
         InstallerBuilder                  = $InstallerBuilder
+        InstallShieldProjectType          = $InstallShieldProjectInfo.ProjectType
+        InstallShieldProjectTypeEvidence  = $InstallShieldProjectInfo
         AppsAndFeaturesInstallerType      = $AppsAndFeaturesInstallerType
         AppsAndFeaturesWindowsInstaller   = $AppsAndFeaturesWindowsInstaller
         AppsAndFeaturesProductCode        = $AppsAndFeaturesProductCode
@@ -995,38 +1577,53 @@ function Get-MsiInstallerInfo {
       $AppsAndFeaturesInfo = Get-MsiAppsAndFeaturesInfo -Database $Database
       $ArchitectureInfo = Get-MsiArchitectureInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
       $AssociationInfo = Get-MsiAssociationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $InstallShieldProjectInfo = Get-MsiInstallShieldProjectTypeFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $InstallShieldScriptActions = Get-MsiInstallShieldScriptActionInfo -StaticTableInfo $StaticTableInfo -ProjectTypeInfo $InstallShieldProjectInfo
+      $ChromiumEnterpriseInfo = Get-MsiChromiumEnterpriseInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo -Database $Database
+      $ElevationInfo = Get-MsiElevationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo -ChromiumEnterpriseInfo $ChromiumEnterpriseInfo
 
       [pscustomobject][ordered]@{
-        Path                            = $PSCmdlet.ParameterSetName -eq 'Path' ? $Path : $null
-        InstallerType                   = $AppsAndFeaturesInfo.InstallerType
-        ProductCode                     = $Properties['ProductCode']
-        UpgradeCode                     = $Properties['UpgradeCode']
-        DisplayName                     = $Properties['ProductName']
-        DisplayVersion                  = $Properties['ProductVersion']
-        Publisher                       = $Properties['Manufacturer']
-        Scope                           = $Properties['ALLUSERS'] -ceq '1' ? 'machine' : $null
-        DefaultInstallLocation          = $null
-        WritesAppsAndFeaturesEntry      = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry -or -not $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
-        AppsAndFeaturesProductCode      = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
-        AppsAndFeaturesInstallerType    = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
-        Warnings                        = [string[]]@()
-        UnresolvedFields                = [string[]]@()
-        AllUsers                        = $Properties['ALLUSERS']
-        InstallerBuilder                = $AppsAndFeaturesInfo.InstallerBuilder
-        InstallLocationProperty         = $InstallLocationInfo.Property
-        InstallLocationSwitch           = $InstallLocationInfo.Switch
-        InstallLocationSource           = $InstallLocationInfo.Source
-        AppsAndFeaturesWindowsInstaller = $AppsAndFeaturesInfo.AppsAndFeaturesWindowsInstaller
-        HasCustomAppsAndFeaturesEntry   = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry
-        HidesMsiAppsAndFeaturesEntry    = $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
-        Template                        = $ArchitectureInfo.Template
-        PackageArchitecture             = Convert-MsiTemplatePlatformToPackageArchitecture -Template $ArchitectureInfo.Template
-        SupportedArchitectures          = $ArchitectureInfo.SupportedArchitectures
-        UnsupportedArchitectures        = $ArchitectureInfo.UnsupportedArchitectures
-        Protocols                       = $AssociationInfo.Protocols
-        FileExtensions                  = $AssociationInfo.FileExtensions
-        RegistryAssociationInfo         = $AssociationInfo
-        AppsAndFeaturesEntries          = $AppsAndFeaturesInfo
+        Path                                = $PSCmdlet.ParameterSetName -eq 'Path' ? $Path : $null
+        InstallerType                       = $AppsAndFeaturesInfo.InstallerType
+        ProductCode                         = $Properties['ProductCode']
+        UpgradeCode                         = $Properties['UpgradeCode']
+        DisplayName                         = $Properties['ProductName']
+        DisplayVersion                      = $Properties['ProductVersion']
+        Publisher                           = $Properties['Manufacturer']
+        Scope                               = $Properties['ALLUSERS'] -ceq '1' ? 'machine' : $null
+        DefaultInstallLocation              = $null
+        WritesAppsAndFeaturesEntry          = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry -or -not $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
+        AppsAndFeaturesProductCode          = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
+        AppsAndFeaturesInstallerType        = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
+        Warnings                            = [string[]]$ElevationInfo.Warnings
+        UnresolvedFields                    = [string[]]@()
+        AllUsers                            = $Properties['ALLUSERS']
+        InstallerBuilder                    = $AppsAndFeaturesInfo.InstallerBuilder
+        InstallShieldProjectType            = $InstallShieldProjectInfo.ProjectType
+        InstallShieldProjectTypeEvidence    = $InstallShieldProjectInfo
+        SummaryWordCount                    = $ElevationInfo.SummaryWordCount
+        AllowsInstallWithoutElevation       = $ElevationInfo.AllowsInstallWithoutElevation
+        ElevationRequirement                = $ElevationInfo.ElevationRequirement
+        ElevationRequirementEvidence        = [object[]]$ElevationInfo.Evidence
+        ChromiumEnterpriseMsiInfo           = $ChromiumEnterpriseInfo
+        InstallShieldScriptActions          = [object[]]@($InstallShieldScriptActions)
+        MsiSequenceRows                     = [object[]]@($StaticTableInfo.SequenceRows)
+        InstallShieldPrerequisiteReferences = [object[]]@($StaticTableInfo.InstallShieldPrerequisiteRows)
+        InstallShieldFeaturePrerequisites   = [object[]]@($StaticTableInfo.InstallShieldFeaturePrerequisiteRows)
+        InstallLocationProperty             = $InstallLocationInfo.Property
+        InstallLocationSwitch               = $InstallLocationInfo.Switch
+        InstallLocationSource               = $InstallLocationInfo.Source
+        AppsAndFeaturesWindowsInstaller     = $AppsAndFeaturesInfo.AppsAndFeaturesWindowsInstaller
+        HasCustomAppsAndFeaturesEntry       = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry
+        HidesMsiAppsAndFeaturesEntry        = $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
+        Template                            = $ArchitectureInfo.Template
+        PackageArchitecture                 = Convert-MsiTemplatePlatformToPackageArchitecture -Template $ArchitectureInfo.Template
+        SupportedArchitectures              = $ArchitectureInfo.SupportedArchitectures
+        UnsupportedArchitectures            = $ArchitectureInfo.UnsupportedArchitectures
+        Protocols                           = $AssociationInfo.Protocols
+        FileExtensions                      = $AssociationInfo.FileExtensions
+        RegistryAssociationInfo             = $AssociationInfo
+        AppsAndFeaturesEntries              = $AppsAndFeaturesInfo
       }
     } finally {
       switch ($PSCmdlet.ParameterSetName) {
@@ -1035,6 +1632,28 @@ function Get-MsiInstallerInfo {
         default { throw 'Invalid parameter set.' }
       }
     }
+  }
+}
+
+function Read-ElevationRequirementFromMsi {
+  <#
+  .SYNOPSIS
+    Read an explicit or source-backed WinGet elevation requirement from an MSI.
+  .PARAMETER Path
+    Path to the MSI database. The path is resolved before Windows Installer
+    opens the database.
+  .OUTPUTS
+    `elevationRequired` when the MSI contains supported elevation behavior;
+    otherwise no value. Use Get-MsiInstallerInfo when other metadata is needed.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory, Position = 0, ValueFromPipeline)]
+    [string]$Path
+  )
+
+  process {
+    (Get-MsiInstallerInfo -Path $Path).ElevationRequirement
   }
 }
 

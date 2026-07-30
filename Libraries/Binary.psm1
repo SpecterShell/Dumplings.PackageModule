@@ -417,4 +417,56 @@ function Test-ExtractionPattern {
   return $NormalizedPath -like $NormalizedPattern -or [IO.Path]::GetFileName($NormalizedPath) -like $NormalizedPattern
 }
 
-Export-ModuleMember -Function Import-BinaryPatternSearch, New-BoundedReadStream, New-InstallerSeekableStream, Read-BinaryBytes, Read-BinaryInteger, Find-BinaryPattern, Copy-BoundedStream, Copy-BinaryStreamRange, Copy-BinaryXorStream, Get-BinaryCrc32, Test-BinarySequence, Resolve-InstallerFileSystemPath, Resolve-SafeExtractionPath, Read-InstallerCollisionAction, Resolve-InstallerExtractionTarget, Test-ExtractionPattern
+function Resolve-UniqueInstallerFile {
+  <#
+  .SYNOPSIS
+    Resolve one deterministic file from exact or wildcard installer payload evidence
+  .PARAMETER Item
+    Candidate files. Null entries are ignored and the original FileInfo object is returned.
+  .PARAMETER Pattern
+    A file name, path relative to BasePath, absolute path, or wildcard selector.
+  .PARAMETER BasePath
+    Optional extraction root used to compare payload-relative paths.
+  .PARAMETER Description
+    Human-readable payload description used in deterministic failure messages.
+  #>
+  [OutputType([System.IO.FileInfo])]
+  param (
+    [Parameter(Mandatory)][System.IO.FileInfo[]]$Item,
+    [Parameter(Mandatory)][string]$Pattern,
+    [string]$BasePath,
+    [string]$Description = 'installer payload'
+  )
+
+  $Candidates = @($Item | Where-Object { $null -ne $_ })
+  if ($Candidates.Count -eq 0) { throw "No candidate files are available for the $Description." }
+  if ([string]::IsNullOrWhiteSpace($Pattern)) { throw "The $Description selection pattern is empty." }
+
+  $NormalizedPattern = $Pattern.Replace('\', '/')
+  $ExactMatches = [Collections.Generic.List[System.IO.FileInfo]]::new()
+  $WildcardMatches = [Collections.Generic.List[System.IO.FileInfo]]::new()
+  foreach ($Candidate in $Candidates) {
+    $FullName = $Candidate.FullName.Replace('\', '/')
+    $RelativeName = if ($BasePath) {
+      [IO.Path]::GetRelativePath($BasePath, $Candidate.FullName).Replace('\', '/')
+    } else {
+      $Candidate.Name
+    }
+    if ($Candidate.Name -ieq $Pattern -or $FullName -ieq $NormalizedPattern -or $RelativeName -ieq $NormalizedPattern) {
+      $ExactMatches.Add($Candidate)
+    }
+    if (Test-ExtractionPattern -Path $RelativeName -Pattern $NormalizedPattern) {
+      $WildcardMatches.Add($Candidate)
+    }
+  }
+
+  # Exact configured paths take precedence over wildcard interpretation. This matters when
+  # literal square brackets or wildcard characters are valid characters in a payload name.
+  if ($ExactMatches.Count -eq 1) { return $ExactMatches[0] }
+  if ($ExactMatches.Count -gt 1) { throw "Multiple files exactly matched the $Description pattern: $Pattern" }
+  if ($WildcardMatches.Count -eq 1) { return $WildcardMatches[0] }
+  if ($WildcardMatches.Count -eq 0) { throw "No $Description matched the pattern: $Pattern" }
+  throw "Multiple files matched the $Description pattern: $Pattern"
+}
+
+Export-ModuleMember -Function Import-BinaryPatternSearch, New-BoundedReadStream, New-InstallerSeekableStream, Read-BinaryBytes, Read-BinaryInteger, Find-BinaryPattern, Copy-BoundedStream, Copy-BinaryStreamRange, Copy-BinaryXorStream, Get-BinaryCrc32, Test-BinarySequence, Resolve-InstallerFileSystemPath, Resolve-SafeExtractionPath, Read-InstallerCollisionAction, Resolve-InstallerExtractionTarget, Test-ExtractionPattern, Resolve-UniqueInstallerFile

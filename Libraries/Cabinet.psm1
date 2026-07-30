@@ -20,25 +20,45 @@ function Get-CabinetEntry {
     Enumerate files in a cabinet without extracting them
   .PARAMETER Path
     The path to the cabinet
+  .PARAMETER MaximumEntries
+    The maximum number of catalog entries accepted across the cabinet set
   #>
   [OutputType([pscustomobject[]])]
-  param ([Parameter(Mandatory)][string[]]$Path)
+  param (
+    [Parameter(Mandatory)][string[]]$Path,
+    [ValidateRange(1, [int]::MaxValue)][int]$MaximumEntries = 65536
+  )
 
   Import-CabinetDependency
   $ArchivePaths = [Collections.Generic.List[string]]::new()
   foreach ($ArchivePath in $Path) { $ArchivePaths.Add((Get-Item -LiteralPath $ArchivePath -Force).FullName) }
   if ($ArchivePaths.Count -eq 1) {
     $Cabinet = [Microsoft.Deployment.Compression.Cab.CabInfo]::new($ArchivePaths[0])
-    $Entries = $Cabinet.GetFiles()
+    $Entries = @($Cabinet.GetFiles())
   } else {
     $Context = [Microsoft.Deployment.Compression.ArchiveFileStreamContext]::new($ArchivePaths, $null, $null)
     $Engine = [Microsoft.Deployment.Compression.Cab.CabEngine]::new()
-    try { $Entries = $Engine.GetFileInfo($Context, $null) } finally { $Engine.Dispose() }
+    try { $Entries = @($Engine.GetFileInfo($Context, $null)) } finally { $Engine.Dispose() }
   }
+  if ($Entries.Count -gt $MaximumEntries) { throw 'The cabinet catalog exceeds the configured entry limit.' }
   foreach ($Entry in $Entries) {
+    # Cabinet catalogs may store media-root paths beginning with a separator. Preserve the
+    # raw source name for decoder lookup while exposing a safe extraction-relative name.
+    # CabFileInfo.FullName may be a synthetic "cabinet-path\entry" filesystem
+    # path. Rebuild the authored lookup identity from its catalog path and name;
+    # PackageForTheWeb root entries intentionally retain a leading separator.
+    $CatalogPath = [string]$Entry.Path
+    $SourceName = if ([string]::IsNullOrEmpty($CatalogPath)) {
+      [string]$Entry.Name
+    } elseif ($CatalogPath.EndsWith('\') -or $CatalogPath.EndsWith('/')) {
+      $CatalogPath + [string]$Entry.Name
+    } else {
+      $CatalogPath + '\' + [string]$Entry.Name
+    }
     [pscustomobject]@{
-      FullName = [string]$Entry.Name
-      Length   = [long]$Entry.Length
+      FullName   = $SourceName.Replace('/', '\').TrimStart('\')
+      SourceName = $SourceName
+      Length     = [long]$Entry.Length
     }
   }
 }
@@ -55,6 +75,10 @@ function Export-CabinetEntry {
     The archive-path wildcard to export
   .PARAMETER CollisionAction
     Behavior when an output path already exists or is selected more than once.
+  .PARAMETER MaximumEntries
+    The maximum number of catalog entries accepted before selection
+  .PARAMETER ReservedPath
+    Optional case-insensitive target set shared with an outer extraction operation
   #>
   [OutputType([string[]])]
   param (
@@ -62,15 +86,19 @@ function Export-CabinetEntry {
     [Parameter(Mandatory)][string]$DestinationPath,
     [string]$Name = '*',
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
-    [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 4294967296
+    [ValidateRange(1, [int]::MaxValue)][int]$MaximumEntries = 65536,
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 4294967296,
+    [Collections.Generic.ISet[string]]$ReservedPath
   )
 
   Import-CabinetDependency
   $ArchivePaths = [Collections.Generic.List[string]]::new()
   foreach ($ArchivePath in $Path) { $ArchivePaths.Add((Resolve-InstallerFileSystemPath -Path $ArchivePath -PathType Leaf)) }
   $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
-  $Entries = @(Get-CabinetEntry -Path $ArchivePaths | Where-Object { Test-ExtractionPattern -Path $_.FullName -Pattern $Name })
-  $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $Entries = @(Get-CabinetEntry -Path $ArchivePaths -MaximumEntries $MaximumEntries | Where-Object { Test-ExtractionPattern -Path $_.FullName -Pattern $Name })
+  # Preserve an empty caller-owned set so outer extractors observe every path
+  # reserved by this cabinet operation. Truthiness would replace an empty set.
+  $ReservedPaths = $null -ne $ReservedPath ? $ReservedPath : [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $SelectedEntries = [Collections.Generic.List[object]]::new()
   $Results = [Collections.Generic.List[string]]::new()
   foreach ($Entry in $Entries) {
@@ -89,12 +117,24 @@ function Export-CabinetEntry {
   }
   if ($ArchivePaths.Count -eq 1 -and $SelectedEntries.Count -gt 0) {
     $Cabinet = [Microsoft.Deployment.Compression.Cab.CabInfo]::new($ArchivePaths[0])
-    foreach ($Index in 0..($SelectedEntries.Count - 1)) {
-      $Cabinet.UnpackFile($SelectedEntries[$Index].Entry.FullName, $Results[$Index])
-    }
+    # DTF's one-file API cannot address a cabinet entry whose authored path starts with a
+    # separator. Unpack a source-to-staging map, then copy to collision-resolved targets.
+    $StagingPath = New-TempFolder
+    try {
+      $FileMap = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+      foreach ($Index in 0..($SelectedEntries.Count - 1)) {
+        $FileMap.Add([string]$SelectedEntries[$Index].Entry.SourceName, ('entry-{0:D8}.bin' -f $Index))
+      }
+      $Cabinet.UnpackFileSet($FileMap, $StagingPath)
+      foreach ($Index in 0..($SelectedEntries.Count - 1)) {
+        $StagedPath = Join-Path $StagingPath ('entry-{0:D8}.bin' -f $Index)
+        if (-not (Test-Path -LiteralPath $StagedPath -PathType Leaf)) { throw "The cabinet entry was not extracted: $($SelectedEntries[$Index].Entry.FullName)" }
+        [IO.File]::Copy($StagedPath, $Results[$Index], $true)
+      }
+    } finally { Remove-Item -LiteralPath $StagingPath -Recurse -Force -ErrorAction SilentlyContinue }
   } elseif ($SelectedEntries.Count -gt 0) {
     $SelectedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($SelectedEntry in $SelectedEntries) { $null = $SelectedNames.Add($SelectedEntry.Entry.FullName) }
+    foreach ($SelectedEntry in $SelectedEntries) { $null = $SelectedNames.Add($SelectedEntry.Entry.SourceName) }
     $Predicate = [Predicate[string]] { param($EntryName) $SelectedNames.Contains($EntryName) }
     $StagingPath = New-TempFolder
     try {

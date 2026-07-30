@@ -1196,8 +1196,12 @@ function Invoke-WinGetInstallerMsiAnalysis {
   )
 
   $AnalyzerInstallerPath = $InstallerPath
-  $AllUsers = Read-MsiProperty -Path $AnalyzerInstallerPath -Query "SELECT Value FROM Property WHERE Property='ALLUSERS'" -ErrorAction SilentlyContinue
   $MsiInfo = Get-MsiInstallerInfo -Path $AnalyzerInstallerPath
+  $AllUsers = $MsiInfo.AllUsers
+  # WinGet distinguishes MSI databases authored by WiX from other MSI packages.
+  # Preserve that distinction only when the structured table classifier proves it;
+  # an unknown builder remains the schema-valid generic MSI type.
+  $ManifestInstallerType = $MsiInfo.InstallerBuilder -ceq 'WiX' ? 'wix' : 'msi'
   $ScopeRecommendation = if ($AllUsers -eq '1') {
     [pscustomobject]@{ Scope = 'machine'; Reason = 'MSI Property table contains ALLUSERS=1' }
   } elseif ([string]::IsNullOrWhiteSpace($AllUsers)) {
@@ -1209,17 +1213,27 @@ function Invoke-WinGetInstallerMsiAnalysis {
   [pscustomobject]@{
     Family                  = 'MSI'
     Confidence              = 'high'
-    InstallerType           = 'msi'
+    InstallerType           = $ManifestInstallerType
+    InstallerBuilder        = $MsiInfo.InstallerBuilder
     ProductVersion          = $MsiInfo.DisplayVersion
     ProductName             = $MsiInfo.DisplayName
+    Publisher               = $MsiInfo.Publisher
     ProductCode             = $MsiInfo.ProductCode
     UpgradeCode             = $MsiInfo.UpgradeCode
+    PackageArchitecture     = $MsiInfo.PackageArchitecture
+    SupportedArchitectures  = $MsiInfo.SupportedArchitectures
+    DefaultInstallLocation  = $MsiInfo.DefaultInstallLocation
+    InstallLocationSwitch   = $MsiInfo.InstallLocationSwitch
+    AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
+    AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
+    WritesAppsAndFeaturesEntry   = $MsiInfo.WritesAppsAndFeaturesEntry
     Protocols               = $MsiInfo.Protocols
     FileExtensions          = $MsiInfo.FileExtensions
     RegistryAssociationInfo = $MsiInfo.RegistryAssociationInfo
     AllUsers                = $AllUsers
+    Scope                   = $ScopeRecommendation.Scope
     ScopeRecommendation     = $ScopeRecommendation
-    SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msi'; Scope = $ScopeRecommendation.Scope }
+    SuggestedManifestFields = [pscustomobject]@{ InstallerType = $ManifestInstallerType; Scope = $ScopeRecommendation.Scope }
   }
 }
 
@@ -1252,6 +1266,23 @@ function Invoke-WinGetInstallerMsixAnalysis {
   }
   $DependencyInfo = ConvertTo-MSIXManifestDependencyInfo -PackageDependencies @($PackageDependencies)
   $AssociationInfo = ConvertTo-MSIXManifestAssociationInfo -Manifest $Manifests
+  $TargetDeviceFamilies = foreach ($Manifest in $Manifests) {
+    foreach ($Element in $Manifest.GetElementsByTagName('TargetDeviceFamily')) {
+      [pscustomobject]@{ Name = [string]$Element.Name; MinVersion = [string]$Element.MinVersion }
+    }
+  }
+  $SupportedTargetDeviceFamilies = @($TargetDeviceFamilies | Where-Object { $_.Name -cin @('Windows.Desktop', 'Windows.Universal') })
+  $MinimumOSVersion = ($SupportedTargetDeviceFamilies | Where-Object { -not [string]::IsNullOrWhiteSpace($_.MinVersion) } | Sort-Object -Property { [System.Version]$_.MinVersion } | Select-Object -First 1).MinVersion
+  $Capabilities = foreach ($Manifest in $Manifests) {
+    foreach ($Element in $Manifest.GetElementsByTagName('*')) {
+      if ($Element.LocalName -in @('Capability', 'DeviceCapability') -and $Element.Prefix -cne 'rescap' -and $Element.Name) { [string]$Element.Name }
+    }
+  }
+  $RestrictedCapabilities = foreach ($Manifest in $Manifests) {
+    foreach ($Element in $Manifest.GetElementsByTagName('*')) {
+      if ($Element.LocalName -ceq 'Capability' -and $Element.Prefix -ceq 'rescap' -and $Element.Name) { [string]$Element.Name }
+    }
+  }
 
   [pscustomobject]@{
     Family                     = 'MSIX/AppX'
@@ -1262,6 +1293,11 @@ function Invoke-WinGetInstallerMsixAnalysis {
     InstallerTypeAmbiguous     = $PackageTypeInfo.IsAmbiguous
     ProductVersion             = if ($Identity) { $Identity.Version } else { Read-ProductVersionFromMSIX -Path $AnalyzerInstallerPath -ErrorAction SilentlyContinue }
     PackageFamilyName          = if ($Identity) { "$($Identity.Name)_$(Get-MSIXPublisherHash -PublisherName $Identity.Publisher)" } else { Read-FamilyNameFromMSIX -Path $AnalyzerInstallerPath -ErrorAction SilentlyContinue }
+    Architecture               = if ($Identity) { [string]$Identity.ProcessorArchitecture } else { $null }
+    Platform                   = @($SupportedTargetDeviceFamilies | Select-Object -ExpandProperty Name -Unique)
+    MinimumOSVersion           = $MinimumOSVersion
+    Capabilities               = @($Capabilities | Sort-Object -Unique)
+    RestrictedCapabilities     = @($RestrictedCapabilities | Sort-Object -Unique)
     Dependencies               = $DependencyInfo.Dependencies
     UnknownPackageDependencies = $DependencyInfo.UnknownPackageDependencies
     Warnings                   = @($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings)
@@ -1854,6 +1890,44 @@ function Invoke-WinGetInstallerExeParser {
     if (Test-WinGetInstallerCandidateFamily -Family 'InstallMate') {
       Invoke-WinGetInstallerDetector -Name 'InstallMate' -ScriptBlock {
         ConvertTo-GenericExeParserEvidence -Family 'InstallMate' -Info (Get-InstallMateInfo -Path $AnalyzerInstallerPath)
+      }
+    }
+
+    if (Test-WinGetInstallerCandidateFamily -Family 'InstallShield' -MinimumConfidence medium) {
+      Invoke-WinGetInstallerDetector -Name 'InstallShield' -ScriptBlock {
+        $TemporaryPath = New-TempFolder
+        try {
+          $Info = Get-InstallShieldInfo -Path $AnalyzerInstallerPath -DestinationPath $TemporaryPath
+          # Parse a Setup.ini-selected MSI before deleting the extraction tree.
+          # The detached MSI result remains usable by manifest updates, while
+          # the outer metadata retains InstallShield variant/selection evidence.
+          $MsiInfo = $Info.HasMsi -and $Info.Variant -ne 'Advanced UI' ? (Get-InstallShieldMsiInfo -Installer $Info) : $null
+          $Evidence = ConvertTo-GenericExeParserEvidence -Family 'InstallShield' -Info ($null -eq $MsiInfo ? $Info : $MsiInfo)
+          $Evidence.Metadata = $Info
+          $Evidence | Add-Member -NotePropertyName Variant -NotePropertyValue $Info.Variant -Force
+          $Evidence | Add-Member -NotePropertyName MsiInfo -NotePropertyValue $MsiInfo -Force
+          $Evidence | Add-Member -NotePropertyName InstallScriptInfo -NotePropertyValue $Info.InstallScriptInfo -Force
+
+          # Basic MSI forwarding switches are not valid for InstallScript-only
+          # media. Recommend /s only when static analysis proves the package is
+          # self-contained, such as a valid embedded setup.iss.
+          if ($Info.Variant -eq 'InstallScript') {
+            $Evidence.SuggestedManifestFields = [pscustomobject][ordered]@{
+              InstallerType = 'exe # InstallShield InstallScript'
+              Notes = @("Static silent-support result: $($Info.InstallScriptInfo.SilentSupport).")
+            }
+            if ($Info.InstallScriptInfo.SilentSupport -eq 'Supported') {
+              $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName InstallModes -NotePropertyValue @('interactive', 'silent')
+              $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName InstallerSwitches -NotePropertyValue ([ordered]@{ Silent = '/s' })
+            }
+          } elseif ($Info.Variant -eq 'Advanced UI') {
+            $Evidence | Add-Member -NotePropertyName InstallerType -NotePropertyValue 'exe # InstallShield Advanced UI' -Force
+            $Evidence.SuggestedManifestFields = Get-WinGetInstallerExeFamilyDefault -Family 'InstallShield Advanced UI'
+          }
+          $Evidence
+        } finally {
+          Remove-Item -LiteralPath $TemporaryPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
       }
     }
   )

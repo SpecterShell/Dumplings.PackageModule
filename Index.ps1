@@ -16,7 +16,7 @@ $Private:LibraryPath = Join-Path $PSScriptRoot 'Libraries'
 if (Test-Path -Path $LibraryPath) {
   # Mechanical infrastructure has deterministic dependencies and must be
   # available before independently authored installer-format modules load.
-  $Private:InfrastructureModules = @('Runtime.psm1', 'Binary.psm1', 'Compression.psm1', 'Archive.psm1', 'PE.psm1', 'RegistryAssociations.psm1')
+  $Private:InfrastructureModules = @('Runtime.psm1', 'Binary.psm1', 'Compression.psm1', 'Archive.psm1', 'PE.psm1', 'RegistryAssociations.psm1', 'InstallerCondition.psm1')
   foreach ($InfrastructureModule in $InfrastructureModules) {
     Import-Module (Join-Path $LibraryPath $InfrastructureModule) -Force
   }
@@ -34,8 +34,14 @@ if (Test-Path -Path $LibraryPath) {
   foreach ($ManifestModule in $ManifestFoundationModules) {
     Import-Module (Join-Path $LibraryPath $ManifestModule) -Force
   }
-  $Private:ManifestConsumerModules = @('WinGetManifestValidation.psm1', 'WinGetManifestUpdate.psm1', 'WinGetSubmission.psm1')
-  $Private:OrderedModules = @($InfrastructureModules) + @($UtilityModules) + @($ManifestFoundationModules) + @($ManifestConsumerModules)
+  # InstallShield classification calls the independently testable compiled-
+  # script analyzer. Load it before the outer-container module is discovered.
+  $Private:ParserFoundationModules = @('InstallShieldInstallScript.psm1')
+  foreach ($ParserModule in $ParserFoundationModules) {
+    Import-Module (Join-Path $LibraryPath $ParserModule) -Force
+  }
+  $Private:ManifestConsumerModules = @('WinGetManifestValidation.psm1', 'WinGetManifestUpdate.psm1', 'WinGetManifestAuthoring.psm1', 'WinGetSubmission.psm1')
+  $Private:OrderedModules = @($InfrastructureModules) + @($UtilityModules) + @($ManifestFoundationModules) + @($ParserFoundationModules) + @($ManifestConsumerModules)
   Get-ChildItem -LiteralPath $LibraryPath -Filter '*.psm1' -Recurse -File |
     Where-Object Name -NotIn $OrderedModules |
     Import-Module -Force

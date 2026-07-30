@@ -68,6 +68,7 @@ Manifest processing is separated into explicit layers:
 | `WinGetManifestSerialization.psm1` | Multi-file parsing, formatting, document sets, headers, and YAML output. |
 | `WinGetManifestValidation.psm1` | Structural, schema, and semantic validation compatible with WinGet's local validation path. |
 | `WinGetManifestUpdate.psm1` | Installer download, matching, parser metadata, and safe updates to existing authored fields. |
+| `WinGetManifestAuthoring.psm1` | Immutable manifest creation/editing, conservative installer suggestions, and atomic local persistence. |
 | `WinGetSubmission.psm1` | Repository acquisition, manifest generation, validation, duplicate-PR policy, and submission. |
 | `SourceIdentity.psm1` | Forge- and storage-aware installer source identity normalization used by task state comparison to detect domain changes. |
 
@@ -88,9 +89,19 @@ $Formatted = Format-WinGetManifest -Manifest $InstallerDocument
 
 # Analyze an installer without executing it.
 $Analysis = Get-WinGetInstallerAnalysis -Path C:\Installers\setup.exe
+
+# Analyze once, add the proposed installer, and atomically replace the leaf set.
+$Suggestion = Get-WinGetInstallerManifestSuggestion `
+  -InstallerUrl https://downloads.example.test/setup.exe `
+  -InstallerPath C:\Installers\setup.exe `
+  -PackageVersion $Manifest.PackageVersion
+$Manifest = Add-WinGetManifestInstaller -Manifest $Manifest -Suggestion $Suggestion
+Save-WinGetManifest -Manifest $Manifest -Path C:\Manifests\Vendor.Package\1.2.3
 ```
 
 The logical model stores authored values, not WinGet-generated default switches or return codes. Complete-manifest serialization first removes a common `InstallerLocale` and redundant ProductCode, InstallerType, name, and publisher fields from a sole Apps & Features entry, then compacts values shared by every installer back to manifest level while preserving installer-level overrides, recursive dictionary atoms, and atomic arrays. The isolated `Format-WinGetManifest` path remains non-destructive because it has no locale-document context.
+
+`Utilities\WinGetManifest.ps1` exposes `new`, installer/locale/value add-set-remove operations, `validate`, and `show` for standalone workflows. Mutating commands stage and validate a complete multi-file set before replacing the target directory; they do not submit packages or execute installers.
 
 ### Supporting Services
 

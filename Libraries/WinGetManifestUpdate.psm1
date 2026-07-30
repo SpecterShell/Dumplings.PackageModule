@@ -99,6 +99,7 @@ function ConvertTo-WinGetInstallerManifestMetadata {
     DisplayVersion               = @('DisplayVersion')
     Publisher                    = @('Publisher')
     DefaultInstallLocation       = @('DefaultInstallLocation')
+    ElevationRequirement         = @('ElevationRequirement')
     AppsAndFeaturesInstallerType = @('AppsAndFeaturesInstallerType')
     WritesAppsAndFeaturesEntry   = @('WritesAppsAndFeaturesEntry')
     SignatureSha256              = @('SignatureSha256')
@@ -454,6 +455,8 @@ function Get-WinGetGenericInstallerManifestInfo {
       if ($Architecture -cin @('x86', 'x64', 'arm64')) { $MsiInfoArguments.Architecture = $Architecture }
       $MsiInfo = Get-AdvancedInstallerMsiInfo @MsiInfoArguments
     } else {
+      # InstallShield and Advanced Installer analyzer actions parse selected
+      # nested MSI metadata before their temporary extraction trees are removed.
       $MsiInfo = $SuccessfulParser.Result.PSObject.Properties.Name -contains 'MsiInfo' ? $SuccessfulParser.Result.MsiInfo : $null
     }
     $CommandLineMetadata = $null
@@ -474,9 +477,9 @@ function Get-WinGetGenericInstallerManifestInfo {
     }
   }
 
-  # InstallShield currently has bounded routing markers but no analyzer parser
-  # action. Attempt its parser explicitly, while keeping a rejection diagnostic
-  # separate from confirmed-family evidence.
+  # InstallShield routing covers both MSI-backed launchers and InstallScript-only
+  # media. Parse the outer container once, then select the nested MSI metadata or
+  # the focused InstallScript ARP/silent result according to the extracted variant.
   $DetectedProperty = $Analysis.PSObject.Properties['DetectedFamilies']
   $RoutingProperty = $Analysis.PSObject.Properties['RoutingHints']
   $LegacyProperty = $Analysis.PSObject.Properties['FamilyCandidates']
@@ -490,17 +493,37 @@ function Get-WinGetGenericInstallerManifestInfo {
     $TemporaryPath = New-TempFolder
     try {
       $Info = Get-InstallShieldInfo -Path $Path -DestinationPath $TemporaryPath
-      if (-not $Info.HasMsi) {
-        throw "The InstallShield '$($Info.Variant)' payload does not contain an MSI selected by the bootstrapper"
+      if ($Info.Variant -ceq 'Advanced UI') {
+        return [pscustomobject]@{
+          ParserName      = 'InstallShield Advanced UI'
+          InputObject     = @($Info.AdvancedUiInfo, $Info)
+          SelectedMsiPath = $null
+          SelectionMethod = 'AdvancedUiSuiteCatalog'
+          Warnings        = @($Info.Warnings)
+        }
       }
-      $MsiInfo = Get-InstallShieldMsiInfo -Installer $Info
-      return [pscustomobject]@{
-        ParserName      = 'InstallShield'
-        InputObject     = @($MsiInfo, $Info)
-        SelectedMsiPath = $MsiInfo.SelectedMsiPath
-        SelectionMethod = $MsiInfo.SelectionMethod
-        Warnings        = @($Info.Warnings)
+
+      if ($Info.HasMsi) {
+        $MsiInfo = Get-InstallShieldMsiInfo -Installer $Info
+        return [pscustomobject]@{
+          ParserName      = 'InstallShield'
+          InputObject     = @($MsiInfo, $Info)
+          SelectedMsiPath = $MsiInfo.SelectedMsiPath
+          SelectionMethod = $MsiInfo.SelectionMethod
+          Warnings        = @($Info.Warnings)
+        }
       }
+
+      if ($Info.Variant -ceq 'InstallScript' -and $Info.InstallScriptInfo) {
+        return [pscustomobject]@{
+          ParserName      = 'InstallShield InstallScript'
+          InputObject     = @($Info.InstallScriptInfo, $Info)
+          SelectedMsiPath = $null
+          SelectionMethod = 'InstallScriptMaintenanceStart'
+          Warnings        = @($Info.Warnings)
+        }
+      }
+      throw "The InstallShield '$($Info.Variant)' payload has neither a selected MSI nor supported InstallScript metadata"
     } catch {
       $Logger.Invoke("InstallShield routing evidence was rejected by its metadata parser: $($_.Exception.Message)", 'Verbose')
       return $null
@@ -577,9 +600,10 @@ function Set-WinGetInstallerManifestMetadata {
     return
   }
 
-  # ProductCode is meaningful across installer families and remains parser-owned
-  # whenever the authored entry already contains it.
-  foreach ($Field in @('ProductCode')) {
+  # These scalar fields remain parser-owned whenever the authored entry already
+  # contains them. ElevationRequirement is refreshed only from explicit parser
+  # evidence; this path never adds it to a manifest that omitted the field.
+  foreach ($Field in @('ProductCode', 'ElevationRequirement')) {
     if (-not $Installer.Contains($Field) -or $InstallerEntry.Contains($Field) -or $UnresolvedFields.Contains($Field)) { continue }
     if ($Metadata.Contains($Field) -and (& $HasScalarValue $Metadata[$Field])) {
       $Installer[$Field] = $Metadata[$Field]
