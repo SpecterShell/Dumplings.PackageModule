@@ -196,6 +196,109 @@ Describe 'WinGet native download compatibility probe' {
       Should -BeExactly 'WinINet: HTTP 503; Synthetic transport failure; stage Finalize; HRESULT 0x80070005; native error 5'
   }
 
+  It 'Retries a successful HTTP response that contains HTML instead of an installer' {
+    InModuleScope WinGetDownload {
+      $Script:ContentValidationAttempt = 0
+      Mock Start-Sleep { }
+      Mock Open-WinGetWinINetDownloadOperation {
+        $Script:ContentValidationAttempt++
+        if ($Script:ContentValidationAttempt -eq 1) {
+          [IO.File]::WriteAllText($DestinationPath, '<!DOCTYPE html><html><body>Download unavailable</body></html>')
+        } else {
+          Test-Path -LiteralPath $DestinationPath | Should -BeFalse
+          [IO.File]::WriteAllBytes($DestinationPath, [byte[]](0x4D, 0x5A, 0, 0))
+        }
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'WinINet'
+        $Result.HttpStatusCode = 200
+        $Result.ContentType = $Script:ContentValidationAttempt -eq 1 ? 'text/html; charset=utf-8' : 'application/octet-stream'
+        $Result.DestinationPath = $DestinationPath
+        $Result.Success = $true
+        $Operation = [pscustomobject]@{ IsCompleted = $true; Result = $Result }
+        $Operation | Add-Member ScriptMethod Wait { param($Milliseconds) $null = $Milliseconds; return $true }
+        $Operation | Add-Member ScriptMethod Cancel { }
+        $Operation | Add-Member ScriptMethod Dispose { }
+        return $Operation
+      }
+
+      $Path = Join-Path $TestDrive 'validated-installer.download'
+      $Result = Invoke-WinGetWinINetDownload -Uri 'https://example.com/installer.exe' -DestinationPath $Path `
+        -UserAgent 'Dumplings-Test' -ValidateInstallerContent -MaximumRetryCount 1 -RetryIntervalSec 1
+
+      $Result.Success | Should -BeTrue
+      $Script:ContentValidationAttempt | Should -Be 2
+      [IO.File]::ReadAllBytes($Path)[0..1] | Should -Be @(0x4D, 0x5A)
+      Should -Invoke Start-Sleep -Exactly 1 -ParameterFilter { $Seconds -eq 1 }
+    }
+  }
+
+  It 'Falls back to WinINet when Delivery Optimization receives an HTML landing page' {
+    InModuleScope WinGetDownload {
+      $DestinationPath = Join-Path $TestDrive 'html-fallback.download'
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        [IO.File]::WriteAllText($DestinationPath, '<html><body>Redirect landing page</body></html>')
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'DeliveryOptimization'
+        $Result.HttpStatusCode = 200
+        $Result.ContentType = 'text/html; charset=utf-8'
+        $Result.FinalUri = 'https://www.example.com/'
+        $Result.DestinationPath = $DestinationPath
+        $Result.Success = $true
+        $Result
+      }
+      Mock Invoke-WinGetWinINetDownload {
+        Test-Path -LiteralPath $DestinationPath | Should -BeFalse
+        [IO.File]::WriteAllBytes($DestinationPath, [byte[]](0x4D, 0x5A, 0, 0))
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'WinINet'
+        $Result.HttpStatusCode = 200
+        $Result.ContentType = 'application/octet-stream'
+        $Result.DestinationPath = $DestinationPath
+        $Result.Success = $true
+        $Result
+      }
+
+      $Warnings = $null
+      $Result = Invoke-WinGetInstallerDownload -Uri 'https://example.com/installer.exe' -DestinationPath $DestinationPath `
+        -WarningVariable Warnings -WarningAction SilentlyContinue
+
+      $Result.Method | Should -BeExactly 'WinINet'
+      $Result.FallbackOccurred | Should -BeTrue
+      [string]$Warnings | Should -BeLike "*returned 'text/html; charset=utf-8' instead of installer content*Trying WinINet*"
+    }
+  }
+
+  It 'Rejects HTML from both native installer transports and removes the response body' {
+    InModuleScope WinGetDownload {
+      $DestinationPath = Join-Path $TestDrive 'html-rejected.download'
+      Mock Invoke-WinGetDeliveryOptimizationDownload {
+        [IO.File]::WriteAllText($DestinationPath, '<!DOCTYPE html><html></html>')
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'DeliveryOptimization'
+        $Result.HttpStatusCode = 200
+        $Result.ContentType = 'application/octet-stream'
+        $Result.DestinationPath = $DestinationPath
+        $Result.Success = $true
+        $Result
+      }
+      Mock Invoke-WinGetWinINetDownload {
+        [IO.File]::WriteAllText($DestinationPath, '<!DOCTYPE html><html></html>')
+        $Result = [Dumplings.WinGetDownload.DownloadResult]::new()
+        $Result.Method = 'WinINet'
+        $Result.HttpStatusCode = 200
+        $Result.ContentType = 'text/html'
+        $Result.DestinationPath = $DestinationPath
+        $Result.Success = $true
+        $Result
+      }
+
+      {
+        Invoke-WinGetInstallerDownload -Uri 'https://example.com/installer.exe' -DestinationPath $DestinationPath -WarningAction SilentlyContinue
+      } | Should -Throw '*HTML document instead of an installer*'
+      Test-Path -LiteralPath $DestinationPath | Should -BeFalse
+    }
+  }
+
   It 'Downloads an installer through Delivery Optimization without invoking WinINet' {
     InModuleScope WinGetDownload {
       $DestinationPath = Join-Path $TestDrive 'delivery-optimization.download'

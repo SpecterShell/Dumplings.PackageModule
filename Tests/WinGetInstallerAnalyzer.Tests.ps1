@@ -149,6 +149,18 @@ Describe 'Installer manifest behavior defaults' {
 }
 
 Describe 'WinGet installer analyzer content detection' {
+  It 'Should identify an HTML response saved with an installer extension' {
+    $HtmlPath = Join-Path $Script:FixtureDirectory 'download-redirect.exe'
+    [IO.File]::WriteAllText($HtmlPath, '<!DOCTYPE html><html><body>Download unavailable</body></html>')
+
+    $Analysis = Get-WinGetInstallerAnalysis -Path $HtmlPath
+
+    $Analysis.DetectedFileType.Type | Should -BeExactly 'HTMLDocument'
+    $Analysis.DetectedFileType.Confidence | Should -BeExactly 'high'
+    $Analysis.BlockingIssues | Should -Contain 'The downloaded response is an HTML document, not an installer.'
+    $Analysis.ParserResults | Should -BeNullOrEmpty
+  }
+
   It 'Should classify MSI by CFB root CLSID even when the extension is wrong' {
     $Msi = Get-AnalyzerInstallerFixture -Name 'draw.io-30.2.6.msi' -Url 'https://github.com/jgraph/drawio-desktop/releases/download/v30.2.6/draw.io-30.2.6.msi'
     $RenamedMsi = Join-Path $Script:FixtureDirectory 'draw.io-30.2.6.bin'
@@ -300,14 +312,14 @@ Describe 'WinGet installer analyzer content detection' {
       }
       Mock Get-InstallShieldMsiInfo {
         [pscustomobject]@{
-          InstallerType      = 'wix'
-          ProductCode        = '{INSTALLSHIELD-MSI}'
-          DisplayName        = 'InstallShield MSI Product'
-          DisplayVersion     = '1.2.3'
-          Publisher          = 'Contoso'
-          SelectedMsiPath    = 'payload\Product.msi'
-          SelectionMethod    = 'SetupIni'
-          Warnings           = @()
+          InstallerType   = 'wix'
+          ProductCode     = '{INSTALLSHIELD-MSI}'
+          DisplayName     = 'InstallShield MSI Product'
+          DisplayVersion  = '1.2.3'
+          Publisher       = 'Contoso'
+          SelectedMsiPath = 'payload\Product.msi'
+          SelectionMethod = 'SetupIni'
+          Warnings        = @()
         }
       }
 

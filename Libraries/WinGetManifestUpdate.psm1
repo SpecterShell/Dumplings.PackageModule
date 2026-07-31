@@ -331,6 +331,9 @@ function Get-WinGetDeclaredInstallerFormatEvidence {
         return [pscustomobject]@{ Status = 'NotMatched'; DetectedInstallerType = 'zip'; Evidence = 'The file is a ZIP archive rather than the declared installer executable.' }
       }
     }
+    'HTMLDocument' {
+      return [pscustomobject]@{ Status = 'NotMatched'; DetectedInstallerType = 'HTML document'; Evidence = 'Content detection identified an HTML response instead of an installer.' }
+    }
     { $_ -cin @('Unknown', '') } { }
     default {
       if (-not [string]::IsNullOrWhiteSpace($FileType) -and $DeclaredGroup -cin @('msi', 'msix')) {

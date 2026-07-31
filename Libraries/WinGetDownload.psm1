@@ -205,6 +205,103 @@ function ConvertTo-WinGetDownloadSize {
   return "$Bytes B"
 }
 
+function Get-WinGetInstallerDownloadContentValidation {
+  <#
+  .SYNOPSIS
+    Reject obvious web documents returned in place of installer bytes.
+  .DESCRIPTION
+    Some download hosts redirect expired, throttled, or otherwise rejected
+    installer requests to an HTML page while still returning HTTP 200. This
+    bounded check uses the native response content type and the beginning of
+    the downloaded file. It intentionally does not require a particular
+    installer magic because WinGet supports several binary container formats.
+  .PARAMETER Result
+    Native WinINet or Delivery Optimization response evidence.
+  .PARAMETER Path
+    Path to the completed download. Only the first 4096 bytes are inspected.
+  .OUTPUTS
+    An object containing IsValid and a diagnostic Reason.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)]$Result,
+    [Parameter(Mandatory)][string]$Path
+  )
+
+  $FinalUri = if ([string]::IsNullOrWhiteSpace([string]$Result.FinalUri)) { [string]$Result.Uri } else { [string]$Result.FinalUri }
+  $ContentType = [string]$Result.ContentType
+  if ($ContentType -match '^(?i)\s*(?:text/html|application/xhtml\+xml)(?:\s*;|\s*$)') {
+    return [pscustomobject]@{
+      IsValid = $false
+      Reason  = "The server returned '$ContentType' instead of installer content$(if ($FinalUri) { " after redirecting to '$FinalUri'" })."
+    }
+  }
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return [pscustomobject]@{ IsValid = $false; Reason = 'The downloader reported success without creating the installer file.' }
+  }
+
+  $File = Get-Item -LiteralPath $Path -Force
+  if ($File.Length -eq 0) {
+    return [pscustomobject]@{ IsValid = $false; Reason = 'The server returned an empty installer file.' }
+  }
+
+  # Read only enough text to identify an HTML document. Binary installers are
+  # accepted without imposing extension- or family-specific assumptions here.
+  $Length = [int][Math]::Min(4096L, $File.Length)
+  $Bytes = [byte[]]::new($Length)
+  $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+  try {
+    $Read = $Stream.Read($Bytes, 0, $Bytes.Length)
+  } finally {
+    $Stream.Dispose()
+  }
+
+  $Text = if ($Read -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
+    [Text.Encoding]::Unicode.GetString($Bytes, 2, $Read - 2)
+  } elseif ($Read -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
+    [Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Read - 2)
+  } else {
+    $Offset = ($Read -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) ? 3 : 0
+    [Text.Encoding]::UTF8.GetString($Bytes, $Offset, $Read - $Offset)
+  }
+  if ($Text -match '(?is)^\s*(?:<\?xml\b[^>]*>\s*)?(?:<!doctype\s+html\b|<html(?:\s|>)|<head(?:\s|>)|<body(?:\s|>))') {
+    return [pscustomobject]@{
+      IsValid = $false
+      Reason  = "The downloaded bytes contain an HTML document instead of an installer$(if ($FinalUri) { " (final URL '$FinalUri')" })."
+    }
+  }
+
+  return [pscustomobject]@{ IsValid = $true; Reason = $null }
+}
+
+function Test-WinGetInstallerDownloadResult {
+  <#
+  .SYNOPSIS
+    Apply installer-content validation to a successful native result.
+  .PARAMETER Result
+    Native result to validate and annotate when rejected.
+  .PARAMETER Path
+    Completed download path.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)]$Result,
+    [Parameter(Mandatory)][string]$Path
+  )
+
+  if (-not $Result.Success) { return $false }
+  $Validation = Get-WinGetInstallerDownloadContentValidation -Result $Result -Path $Path
+  if ($Validation.IsValid) { return $true }
+
+  # Convert a misleading HTTP success into structured transport failure so the
+  # normal retry/fallback path handles it before an installer parser sees it.
+  $Result.Success = $false
+  $Result.ErrorMessage = $Validation.Reason
+  $Result.FailureStage = 'ValidateInstallerContent'
+  return $false
+}
+
 function Test-WinGetDownloadRetryStatus {
   <#
   .SYNOPSIS
@@ -269,7 +366,8 @@ function Invoke-WinGetDownloadOperation {
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60,
     [ValidateRange(0, [int]::MaxValue)][int]$ConnectionTimeoutSeconds = 15,
     [ValidateRange(0, [int]::MaxValue)][int]$OperationTimeoutSeconds = 15,
-    [ValidateRange(1, [int]::MaxValue)][int]$ProgressId = 174593042
+    [ValidateRange(1, [int]::MaxValue)][int]$ProgressId = 174593042,
+    [scriptblock]$ResultValidator
   )
 
   $MaximumAttempts = $MaximumRetryCount + 1
@@ -321,7 +419,23 @@ function Invoke-WinGetDownloadOperation {
       if ($WroteProgress) { Write-Progress -Id $ProgressId -Activity $Activity -Completed }
     }
 
-    if ($Attempt -ge $MaximumAttempts -or -not (Test-WinGetDownloadRetryStatus -StatusCode $Result.HttpStatusCode)) { return $Result }
+    $ValidationPassed = $true
+    if ($Result.Success -and $ResultValidator) {
+      try {
+        $ValidationPassed = [bool](& $ResultValidator $Result $OperationArgument)
+      } catch {
+        $Result.Success = $false
+        $Result.ErrorMessage = "Installer content validation failed: $($_.Exception.Message)"
+        $Result.FailureStage = 'ValidateInstallerContent'
+        $ValidationPassed = $false
+      }
+      if (-not $ValidationPassed -and $OperationArgument.ContainsKey('DestinationPath')) {
+        Remove-Item -LiteralPath $OperationArgument.DestinationPath -Force -ErrorAction SilentlyContinue
+      }
+    }
+
+    $Retryable = -not $ValidationPassed -or (Test-WinGetDownloadRetryStatus -StatusCode $Result.HttpStatusCode)
+    if ($Attempt -ge $MaximumAttempts -or -not $Retryable) { return $Result }
     $Delay = Get-WinGetDownloadRetryInterval -Result $Result -DefaultSeconds $RetryIntervalSec
     if ($Delay -gt $MaximumRetryDelaySeconds) {
       Write-Verbose "Not retrying $Activity because the requested $Delay-second delay exceeds the $MaximumRetryDelaySeconds-second per-retry limit."
@@ -332,7 +446,8 @@ function Invoke-WinGetDownloadOperation {
       Write-Verbose "Not retrying $Activity because the requested $Delay-second delay exceeds the $RemainingRetryDelaySeconds-second remaining retry-delay budget."
       return $Result
     }
-    Write-Verbose "Retrying $Activity in $Delay second(s) after HTTP status $($Result.HttpStatusCode); attempt $($Attempt + 1) of $MaximumAttempts."
+    $RetryReason = $ValidationPassed ? "HTTP status $($Result.HttpStatusCode)" : 'installer content validation failure'
+    Write-Verbose "Retrying $Activity in $Delay second(s) after $RetryReason; attempt $($Attempt + 1) of $MaximumAttempts."
     Start-Sleep -Seconds $Delay
     $TotalRetryDelaySeconds += $Delay
   }
@@ -438,6 +553,8 @@ function Invoke-WinGetWinINetDownload {
     Maximum delay permitted before any single retry
   .PARAMETER MaximumTotalRetryDelaySeconds
     Maximum cumulative delay permitted across all retries
+  .PARAMETER ValidateInstallerContent
+    Reject and retry obvious HTML documents returned in place of an installer
   #>
   [OutputType([Dumplings.WinGetDownload.DownloadResult])]
   param (
@@ -452,7 +569,8 @@ function Invoke-WinGetWinINetDownload {
     [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60,
-    [switch]$ResponseOnly
+    [switch]$ResponseOnly,
+    [switch]$ValidateInstallerContent
   )
 
   $Headers = ConvertTo-WinGetDownloadHeaderDictionary -Header $Header
@@ -466,13 +584,16 @@ function Invoke-WinGetWinINetDownload {
     ConnectionTimeoutSeconds = $ConnectionTimeoutSeconds
     OperationTimeoutSeconds  = $OperationTimeoutSeconds
   }
+  $ResultValidator = if ($ValidateInstallerContent -and -not $ResponseOnly) {
+    { param($Result, $Argument) Test-WinGetInstallerDownloadResult -Result $Result -Path $Argument.DestinationPath }
+  } else { $null }
   return Invoke-WinGetDownloadOperation -StartOperation {
     param($Attempt, $Argument)
     $null = $Attempt
     Open-WinGetWinINetDownloadOperation @Argument
   } -OperationArgument $OperationArgument -Activity 'Downloading installer with WinINet' -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
     -MaximumRetryDelaySeconds $MaximumRetryDelaySeconds -MaximumTotalRetryDelaySeconds $MaximumTotalRetryDelaySeconds `
-    -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
+    -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds -ResultValidator $ResultValidator
 }
 
 function Invoke-WinGetDeliveryOptimizationDownload {
@@ -501,6 +622,8 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     Maximum delay permitted before any single retry
   .PARAMETER MaximumTotalRetryDelaySeconds
     Maximum cumulative delay permitted across all retries
+  .PARAMETER ValidateInstallerContent
+    Reject and retry obvious HTML documents returned in place of an installer
   #>
   [OutputType([Dumplings.WinGetDownload.DownloadResult])]
   param (
@@ -517,7 +640,8 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     [ValidateRange(1, [int]::MaxValue)][int]$RetryIntervalSec = 3,
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumRetryDelaySeconds = 30,
     [ValidateRange(0, [int]::MaxValue)][int]$MaximumTotalRetryDelaySeconds = 60,
-    [switch]$ResponseOnly
+    [switch]$ResponseOnly,
+    [switch]$ValidateInstallerContent
   )
 
   $Headers = ConvertTo-WinGetDownloadHeaderDictionary -Header $Header
@@ -533,13 +657,16 @@ function Invoke-WinGetDeliveryOptimizationDownload {
     ConnectionTimeoutSeconds = $ConnectionTimeoutSeconds
     OperationTimeoutSeconds  = $OperationTimeoutSeconds
   }
+  $ResultValidator = if ($ValidateInstallerContent -and -not $ResponseOnly) {
+    { param($Result, $Argument) Test-WinGetInstallerDownloadResult -Result $Result -Path $Argument.DestinationPath }
+  } else { $null }
   return Invoke-WinGetDownloadOperation -StartOperation {
     param($Attempt, $Argument)
     $null = $Attempt
     Open-WinGetDeliveryOptimizationDownloadOperation @Argument
   } -OperationArgument $OperationArgument -Activity 'Downloading installer with Delivery Optimization' -MaximumRetryCount $MaximumRetryCount -RetryIntervalSec $RetryIntervalSec `
     -MaximumRetryDelaySeconds $MaximumRetryDelaySeconds -MaximumTotalRetryDelaySeconds $MaximumTotalRetryDelaySeconds `
-    -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds
+    -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds -OperationTimeoutSeconds $OperationTimeoutSeconds -ResultValidator $ResultValidator
 }
 
 function ConvertFrom-WinGetDownloadResponseHeader {
@@ -975,7 +1102,7 @@ function Invoke-WinGetInstallerDownload {
   )
 
   Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
-  $WinINetArguments = @{ Uri = $Uri; DestinationPath = $DestinationPath }
+  $WinINetArguments = @{ Uri = $Uri; DestinationPath = $DestinationPath; ValidateInstallerContent = $true }
   if ($Header) { $WinINetArguments.Header = $Header }
   if ($PSBoundParameters.ContainsKey('Proxy')) { $WinINetArguments.Proxy = $Proxy }
   if ($PSBoundParameters.ContainsKey('UserAgent')) { $WinINetArguments.UserAgent = $UserAgent }
@@ -992,7 +1119,7 @@ function Invoke-WinGetInstallerDownload {
       }
       $WinINetError = $_
     }
-    if ($WinINetResult -and $WinINetResult.Success -and (Test-Path -LiteralPath $DestinationPath -PathType Leaf)) { return $WinINetResult }
+    if ($WinINetResult -and (Test-WinGetInstallerDownloadResult -Result $WinINetResult -Path $DestinationPath)) { return $WinINetResult }
     $WinINetFailure = Format-WinGetDownloadFailure -Method 'WinINet' -Result $WinINetResult -ErrorRecord $WinINetError
     Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
     throw [IO.IOException]::new("Installer download failed. ${WinINetFailure}")
@@ -1001,7 +1128,7 @@ function Invoke-WinGetInstallerDownload {
   $DeliveryOptimizationResult = $null
   $DeliveryOptimizationError = $null
   try {
-    $DeliveryOptimizationArguments = @{ Uri = $Uri; DestinationPath = $DestinationPath }
+    $DeliveryOptimizationArguments = @{ Uri = $Uri; DestinationPath = $DestinationPath; ValidateInstallerContent = $true }
     if ($Header) { $DeliveryOptimizationArguments.Header = $Header }
     $DeliveryOptimizationResult = Invoke-WinGetDeliveryOptimizationDownload @DeliveryOptimizationArguments
   } catch {
@@ -1012,7 +1139,7 @@ function Invoke-WinGetInstallerDownload {
     $DeliveryOptimizationError = $_
   }
 
-  if ($DeliveryOptimizationResult -and $DeliveryOptimizationResult.Success -and (Test-Path -LiteralPath $DestinationPath -PathType Leaf)) {
+  if ($DeliveryOptimizationResult -and (Test-WinGetInstallerDownloadResult -Result $DeliveryOptimizationResult -Path $DestinationPath)) {
     return $DeliveryOptimizationResult
   }
 
@@ -1036,7 +1163,7 @@ function Invoke-WinGetInstallerDownload {
     $WinINetError = $_
   }
 
-  if ($WinINetResult -and $WinINetResult.Success -and (Test-Path -LiteralPath $DestinationPath -PathType Leaf)) {
+  if ($WinINetResult -and (Test-WinGetInstallerDownloadResult -Result $WinINetResult -Path $DestinationPath)) {
     $WinINetResult.FallbackOccurred = $true
     $WinINetResult.PreviousFailure = $DeliveryOptimizationFailure
     return $WinINetResult

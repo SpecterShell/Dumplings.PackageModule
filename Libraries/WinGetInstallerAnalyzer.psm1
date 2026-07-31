@@ -397,6 +397,19 @@ function Get-WinGetInstallerFileTypeEvidence {
     }
   }
 
+  # Download servers sometimes return a branded error or landing page with
+  # HTTP 200. Treat an explicit HTML document as content, not an unknown
+  # installer, so declared-family validation can report a definite mismatch.
+  if ($HeaderText -match '(?is)^\s*(?:<\?xml\b[^>]*>\s*)?(?:<!doctype\s+html\b|<html(?:\s|>)|<head(?:\s|>)|<body(?:\s|>))') {
+    return [pscustomobject]@{
+      Type       = 'HTMLDocument'
+      Confidence = 'high'
+      Magic      = 'HTML document'
+      Extension  = $Extension
+      Evidence   = [pscustomobject]@{ Note = 'The downloaded response is an HTML document rather than an installer.' }
+    }
+  }
+
   [pscustomobject]@{
     Type       = 'Unknown'
     Confidence = 'low'
@@ -1211,29 +1224,29 @@ function Invoke-WinGetInstallerMsiAnalysis {
   }
 
   [pscustomobject]@{
-    Family                  = 'MSI'
-    Confidence              = 'high'
-    InstallerType           = $ManifestInstallerType
-    InstallerBuilder        = $MsiInfo.InstallerBuilder
-    ProductVersion          = $MsiInfo.DisplayVersion
-    ProductName             = $MsiInfo.DisplayName
-    Publisher               = $MsiInfo.Publisher
-    ProductCode             = $MsiInfo.ProductCode
-    UpgradeCode             = $MsiInfo.UpgradeCode
-    PackageArchitecture     = $MsiInfo.PackageArchitecture
-    SupportedArchitectures  = $MsiInfo.SupportedArchitectures
-    DefaultInstallLocation  = $MsiInfo.DefaultInstallLocation
-    InstallLocationSwitch   = $MsiInfo.InstallLocationSwitch
+    Family                       = 'MSI'
+    Confidence                   = 'high'
+    InstallerType                = $ManifestInstallerType
+    InstallerBuilder             = $MsiInfo.InstallerBuilder
+    ProductVersion               = $MsiInfo.DisplayVersion
+    ProductName                  = $MsiInfo.DisplayName
+    Publisher                    = $MsiInfo.Publisher
+    ProductCode                  = $MsiInfo.ProductCode
+    UpgradeCode                  = $MsiInfo.UpgradeCode
+    PackageArchitecture          = $MsiInfo.PackageArchitecture
+    SupportedArchitectures       = $MsiInfo.SupportedArchitectures
+    DefaultInstallLocation       = $MsiInfo.DefaultInstallLocation
+    InstallLocationSwitch        = $MsiInfo.InstallLocationSwitch
     AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
     AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
     WritesAppsAndFeaturesEntry   = $MsiInfo.WritesAppsAndFeaturesEntry
-    Protocols               = $MsiInfo.Protocols
-    FileExtensions          = $MsiInfo.FileExtensions
-    RegistryAssociationInfo = $MsiInfo.RegistryAssociationInfo
-    AllUsers                = $AllUsers
-    Scope                   = $ScopeRecommendation.Scope
-    ScopeRecommendation     = $ScopeRecommendation
-    SuggestedManifestFields = [pscustomobject]@{ InstallerType = $ManifestInstallerType; Scope = $ScopeRecommendation.Scope }
+    Protocols                    = $MsiInfo.Protocols
+    FileExtensions               = $MsiInfo.FileExtensions
+    RegistryAssociationInfo      = $MsiInfo.RegistryAssociationInfo
+    AllUsers                     = $AllUsers
+    Scope                        = $ScopeRecommendation.Scope
+    ScopeRecommendation          = $ScopeRecommendation
+    SuggestedManifestFields      = [pscustomobject]@{ InstallerType = $ManifestInstallerType; Scope = $ScopeRecommendation.Scope }
   }
 }
 
@@ -1914,7 +1927,7 @@ function Invoke-WinGetInstallerExeParser {
           if ($Info.Variant -eq 'InstallScript') {
             $Evidence.SuggestedManifestFields = [pscustomobject][ordered]@{
               InstallerType = 'exe # InstallShield InstallScript'
-              Notes = @("Static silent-support result: $($Info.InstallScriptInfo.SilentSupport).")
+              Notes         = @("Static silent-support result: $($Info.InstallScriptInfo.SilentSupport).")
             }
             if ($Info.InstallScriptInfo.SilentSupport -eq 'Supported') {
               $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName InstallModes -NotePropertyValue @('interactive', 'silent')
@@ -2347,6 +2360,10 @@ function Get-WinGetInstallerAnalysis {
       }
       'AppInstaller' {
         $Analysis.SuggestedNextSteps += '.appinstaller is not accepted by winget-pkgs manifests. Parse its XML and analyze the referenced MSIX/AppX package instead.'
+      }
+      'HTMLDocument' {
+        $Analysis.BlockingIssues += 'The downloaded response is an HTML document, not an installer.'
+        $Analysis.SuggestedNextSteps += 'Retry the official installer URL or inspect its redirect, authentication, and rate-limit behavior.'
       }
       default {
         $Analysis.SuggestedNextSteps += 'Unknown file signature; inspect as archive or PE manually before choosing a WinGet installer type.'

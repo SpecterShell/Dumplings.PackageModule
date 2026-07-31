@@ -918,6 +918,19 @@ Describe 'WinGet installer manifest metadata updates' {
       $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'msix' installer: The package is not a valid MSIX package Static format analysis was unavailable. Existing installer fields are preserved."
     }
 
+    It 'Throws when an HTML response is supplied for a manifest-declared Inno installer' {
+      InModuleScope WinGetManifestUpdate {
+        $Evidence = Get-WinGetDeclaredInstallerFormatEvidence -InstallerType inno -Analysis ([pscustomobject]@{
+            DetectedFileType = [pscustomobject]@{ Type = 'HTMLDocument' }
+            DetectedFamilies = @()
+          })
+
+        $Evidence.Status | Should -BeExactly 'NotMatched'
+        $Evidence.DetectedInstallerType | Should -BeExactly 'HTML document'
+        $Evidence.Evidence | Should -BeLike '*HTML response instead of an installer*'
+      }
+    }
+
     It 'Returns a uniform result shape with warnings for every known family' {
       Mock Get-MsiInstallerInfo { [pscustomobject]@{ ProductCode = '{P}'; InstallerBuilder = 'WiX'; Warnings = @() } }
       Mock Get-BurnInfo { [pscustomobject]@{ InstallerType = 'Burn'; ProductCode = '{B}'; Warnings = @() } }
