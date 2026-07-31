@@ -40,7 +40,9 @@
 # The structural reader and bounded abstract interpreter never invoke imported
 # native functions. They reconstruct callsite-backed response dialog order,
 # documented registry/process/file/shortcut effects, localized resources, and
-# MaintenanceStart defaults. The cabinet reader supplies media-authored records;
+# MaintenanceStart defaults. Compiler-generated 0x003B property proxies are
+# returned as structural getter/setter/handle evidence but are not invoked. The
+# cabinet reader supplies media-authored records;
 # this module joins them to CreateRegistrySet/CreateShellObjects and component
 # transfer semantics. Unsupported behavior remains explicit rather than guessed.
 
@@ -183,14 +185,14 @@ function Read-InstallShieldResponseFile {
     }
   }
   [pscustomobject][ordered]@{
-    Path         = $File.FullName
-    Length       = $File.Length
-    ProductCode  = $ProductCode
-    Dialogs      = [string[]]$Dialogs.ToArray()
-    DialogNames  = [string[]]$DialogNames.ToArray()
-    DialogCount  = $Dialogs.Count
-    Sections     = $Sections
-    Content      = $Text
+    Path        = $File.FullName
+    Length      = $File.Length
+    ProductCode = $ProductCode
+    Dialogs     = [string[]]$Dialogs.ToArray()
+    DialogNames = [string[]]$DialogNames.ToArray()
+    DialogCount = $Dialogs.Count
+    Sections    = $Sections
+    Content     = $Text
   }
 }
 
@@ -408,14 +410,14 @@ function ConvertFrom-InstallShieldInstallScriptByteStream {
   # table vary across generations, so expose them as observed values and never
   # assign unsupported semantics to them.
   [pscustomobject][ordered]@{
-    Path          = $File.FullName
-    Bytes         = $Bytes
-    WasScrambled  = $WasScrambled
-    Checksum      = [BitConverter]::ToUInt32($Bytes, 0)
-    HeaderValue   = [BitConverter]::ToUInt16($Bytes, 4)
-    MarkerOffset  = $MarkerOffset
+    Path            = $File.FullName
+    Bytes           = $Bytes
+    WasScrambled    = $WasScrambled
+    Checksum        = [BitConverter]::ToUInt32($Bytes, 0)
+    HeaderValue     = [BitConverter]::ToUInt16($Bytes, 4)
+    MarkerOffset    = $MarkerOffset
     CopyrightMarker = $CopyrightMarker
-    Format        = if ($File.Extension -ieq '.ins') { 'Legacy INS' } else { 'INX' }
+    Format          = if ($File.Extension -ieq '.ins') { 'Legacy INS' } else { 'INX' }
   }
 }
 
@@ -580,8 +582,16 @@ function Invoke-InstallShieldInstallScriptAnalysis {
   .PARAMETER EmbeddedResponseFile
     Optional response file shipped beside the script and selected by InstallShield's default /s behavior.
   .PARAMETER StringTablePath
-    Optional extracted StringTable_*.ips files used to resolve localized
-    __LoadString calls during bounded static emulation.
+    Optional extracted StringTable_*.ips or String*.txt files used to resolve
+    localized __LoadString calls during bounded static emulation.
+  .PARAMETER EntryPoint
+    Optional compiled function names that own the operation being analyzed.
+    MSI and Advanced UI callers use this to avoid traversing unrelated
+    standalone setup callbacks in the same compiled script.
+  .PARAMETER AnalysisScope
+    StandaloneInstaller applies InstallShield Silent response-file rules.
+    EmbeddedAction records only behavior reachable from selected custom actions
+    because the containing MSI or suite owns silent invocation.
   .OUTPUTS
     Conservative silent-capability, opcode, registry, association, launch,
     file-operation, and shortcut evidence. No installer instruction is executed.
@@ -594,8 +604,15 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     [Parameter()]
     [string]$EmbeddedResponseFile,
 
-    [string[]]$StringTablePath
+    [string[]]$StringTablePath,
+
+    [string[]]$EntryPoint,
+
+    [ValidateSet('StandaloneInstaller', 'EmbeddedAction')]
+    [string]$AnalysisScope = 'StandaloneInstaller'
   )
+
+  $SelectedEntryPoints = [string[]]@($EntryPoint | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
 
   $Decoded = ConvertFrom-InstallShieldInstallScriptByteStream -Path $Path
   $Strings = Get-InstallShieldInstallScriptStringEvidence -Bytes $Decoded.Bytes
@@ -611,7 +628,7 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     # Parse the already-decoded bytes once. Passing the array directly avoids a
     # second file read and descramble pass when the higher-level analyzer is used.
     $Program = [Dumplings.InstallShield.InstallScript.InstallScriptBytecodeReader]::Read($Decoded.Bytes, 1000000)
-    $DialogTraces = @(Get-InstallShieldInstallScriptDialogTrace -Program $Program)
+    $DialogTraces = @(Get-InstallShieldInstallScriptDialogTrace -Program $Program -EntryPoint $SelectedEntryPoints)
     $Resources = if ($StringTablePath) {
       Read-InstallShieldInstallScriptStringTable -Path $StringTablePath
     } else {
@@ -623,7 +640,7 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     $StaticAnalysis = [Dumplings.InstallShield.InstallScript.InstallScriptStaticAnalyzer]::Analyze(
       $Program,
       $Resources,
-      $null,
+      $SelectedEntryPoints,
       1000000,
       16,
       50000
@@ -662,6 +679,9 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     [pscustomobject]@{ Protocols = @(); FileExtensions = @(); ProtocolAssociations = @(); FileExtensionAssociations = @(); Warnings = @() }
   }
   foreach ($Warning in @($AssociationInfo.Warnings)) { if ($Warning) { $Warnings.Add("InstallScript: $Warning") } }
+  if (@($StaticAnalysis.DllOperations).Count) {
+    $Warnings.Add('The compiled InstallScript loads an external DLL; its exported-function side effects remain opaque and require static inspection or VM validation.')
+  }
   $ResponseInfo = $null
   $ResponseValidation = $null
 
@@ -679,12 +699,29 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     }
   }
 
-  # A valid setup.iss beside setup.inx is the documented default source used by
-  # Setup.exe /s. This proves the package is self-contained even though the
-  # script still uses response-backed dialogs internally.
-  if ($ResponseInfo -and (-not $ResponseValidation -or $ResponseValidation.IsValid)) {
+  # Embedded custom actions inherit invocation and UI policy from their MSI or
+  # Advanced UI container. Standalone response-file conclusions would be
+  # misleading, but reachable dialogs remain important review evidence.
+  if ($AnalysisScope -eq 'EmbeddedAction') {
+    $SilentSupport = 'NotApplicable'
+    $ResponseRequirement = 'None'
+    if ($DialogCalls) {
+      $Warnings.Add('An embedded InstallScript action reaches dialog functions; validate the containing MSI or suite sequence and silent mode in a VM.')
+    }
+    # A valid setup.iss beside setup.inx is the documented default source used by
+    # Setup.exe /s. This proves the package is self-contained even though the
+    # script still uses response-backed dialogs internally.
+  } elseif ($ResponseInfo -and (-not $ResponseValidation -or $ResponseValidation.IsValid)) {
     $SilentSupport = 'Supported'
     $ResponseRequirement = 'Embedded'
+  } elseif ($DialogCalls -and @($DialogTraces | Where-Object Source -EQ 'FrameworkCallback').Count) {
+    # Official InstallShield framework source routes program-style projects
+    # through _ShowWizardPages and the exported IfxOnShowWizardPages callback.
+    # Reachable Sd* dialogs on that path use InstallShield Silent response
+    # sections even when the literal setup.iss filename is absent from the INX.
+    $SilentSupport = 'ResponseFileRequired'
+    $ResponseRequirement = 'External'
+    $Warnings.Add('The InstallShield framework callback reaches response-backed dialogs but the media does not ship a valid default setup.iss.')
   } elseif ($DialogCalls -and $ResponseReferences) {
     # Revenera's InstallShield Silent contract reads built-in/Sd dialog answers
     # from setup.iss. Imported dialog and response-runtime evidence without a
@@ -705,47 +742,51 @@ function Invoke-InstallShieldInstallScriptAnalysis {
   }
 
   [pscustomobject][ordered]@{
-    Path                    = $Decoded.Path
-    SilentSupport           = $SilentSupport
-    ResponseFileRequirement = $ResponseRequirement
-    SilentSwitches          = if ($SilentSupport -eq 'Supported') { [string[]]@('/s') } else { [string[]]@() }
-    InstallEntryPoints      = if ($Program) { [string[]]@($Program.Functions.Name | Where-Object { $_ -match '^(?:program|Preprogram|Postprogram|OnFirstUIBefore|OnMaintUIBefore)$' }) } else { [string[]]@($Symbols | Where-Object { $_ -match '^(?:program|Preprogram|Postprogram|OnFirstUIBefore|OnMaintUIBefore)$' }) }
-    DialogCalls             = [string[]]$DialogCalls
-    DialogTraces            = [object[]]$DialogTraces
-    ResponseFileAccesses    = [string[]]$ResponseReferences
-    RegistryWrites          = [object[]]@($StaticAnalysis.RegistryWrites)
-    RegistryItems           = [object[]]@($StaticAnalysis.RegistryItems)
-    Protocols               = [string[]]@($AssociationInfo.Protocols)
-    FileExtensions          = [string[]]@($AssociationInfo.FileExtensions)
-    ProtocolAssociations    = [object[]]@($AssociationInfo.ProtocolAssociations)
-    FileExtensionAssociations = [object[]]@($AssociationInfo.FileExtensionAssociations)
-    RegistryAssociationInfo = $AssociationInfo
-    ExecutedPayloads        = [object[]]@($StaticAnalysis.ExecutedPayloads)
-    FileOperations          = [object[]]@($StaticAnalysis.FileOperations)
-    Shortcuts               = [object[]]@($StaticAnalysis.Shortcuts)
-    StaticCalls             = [object[]]@($StaticAnalysis.Calls)
-    OpcodeCoverage          = [object[]]@($StaticAnalysis.OpcodeCoverage)
-    UnsupportedOpcodes      = [string[]]@($StaticAnalysis.UnsupportedOpcodes)
-    UnresolvedCalls         = [string[]]$IrWarnings.ToArray()
-    InstallOperations       = [string[]]$InstallOperations
-    ArpRuntimeEvidence      = [string[]]$ArpRuntimeEvidence
-    EmbeddedResponseFile    = $ResponseInfo
+    Path                       = $Decoded.Path
+    SilentSupport              = $SilentSupport
+    ResponseFileRequirement    = $ResponseRequirement
+    SilentSwitches             = if ($SilentSupport -eq 'Supported') { [string[]]@('/s') } else { [string[]]@() }
+    InstallEntryPoints         = if ($SelectedEntryPoints) { $SelectedEntryPoints } elseif ($Program) { [string[]]@($Program.Functions.Name | Where-Object { $_ -match '^(?:program|Preprogram|Postprogram|OnFirstUIBefore|OnMaintUIBefore)$' }) } else { [string[]]@($Symbols | Where-Object { $_ -match '^(?:program|Preprogram|Postprogram|OnFirstUIBefore|OnMaintUIBefore)$' }) }
+    DialogCalls                = [string[]]$DialogCalls
+    DialogTraces               = [object[]]$DialogTraces
+    ResponseFileAccesses       = [string[]]$ResponseReferences
+    RegistryWrites             = [object[]]@($StaticAnalysis.RegistryWrites)
+    RegistryItems              = [object[]]@($StaticAnalysis.RegistryItems)
+    Protocols                  = [string[]]@($AssociationInfo.Protocols)
+    FileExtensions             = [string[]]@($AssociationInfo.FileExtensions)
+    ProtocolAssociations       = [object[]]@($AssociationInfo.ProtocolAssociations)
+    FileExtensionAssociations  = [object[]]@($AssociationInfo.FileExtensionAssociations)
+    RegistryAssociationInfo    = $AssociationInfo
+    ExecutedPayloads           = [object[]]@($StaticAnalysis.ExecutedPayloads)
+    FileOperations             = [object[]]@($StaticAnalysis.FileOperations)
+    DllOperations              = [object[]]@($StaticAnalysis.DllOperations)
+    PropertyHandlers           = [object[]]@($StaticAnalysis.PropertyHandlers)
+    Shortcuts                  = [object[]]@($StaticAnalysis.Shortcuts)
+    StaticCalls                = [object[]]@($StaticAnalysis.Calls)
+    OpcodeCoverage             = [object[]]@($StaticAnalysis.OpcodeCoverage)
+    UnsupportedOpcodes         = [string[]]@($StaticAnalysis.UnsupportedOpcodes)
+    UnresolvedCalls            = [string[]]$IrWarnings.ToArray()
+    InstallOperations          = [string[]]$InstallOperations
+    ArpRuntimeEvidence         = [string[]]$ArpRuntimeEvidence
+    EmbeddedResponseFile       = $ResponseInfo
     EmbeddedResponseValidation = $ResponseValidation
-    Warnings                = [string[]]$Warnings.ToArray()
-    ParserVersionInfo       = [pscustomobject][ordered]@{
-      Parser        = 'Dumplings.PackageModule.InstallShieldInstallScript'
-      ParserMajor   = 4
-      Format        = $Decoded.Format
-      WasScrambled  = $Decoded.WasScrambled
-      HeaderValue   = $Decoded.HeaderValue
-      MarkerOffset  = $Decoded.MarkerOffset
-      CopyrightMarker = $Decoded.CopyrightMarker
-      AnalysisMode  = $Program ? 'BoundedStaticEmulation' : 'ConservativeStaticEvidenceFallback'
-      FunctionCount = $Program ? $Program.Functions.Count : 0
-      InstructionCount = $Program ? $Program.InstructionCount : 0
+    Warnings                   = [string[]]$Warnings.ToArray()
+    ParserVersionInfo          = [pscustomobject][ordered]@{
+      Parser                   = 'Dumplings.PackageModule.InstallShieldInstallScript'
+      ParserMajor              = 8
+      Format                   = $Decoded.Format
+      WasScrambled             = $Decoded.WasScrambled
+      HeaderValue              = $Decoded.HeaderValue
+      MarkerOffset             = $Decoded.MarkerOffset
+      CopyrightMarker          = $Decoded.CopyrightMarker
+      AnalysisMode             = $Program ? 'BoundedStaticEmulation' : 'ConservativeStaticEvidenceFallback'
+      AnalysisScope            = $AnalysisScope
+      FunctionCount            = $Program ? $Program.Functions.Count : 0
+      InstructionCount         = $Program ? $Program.InstructionCount : 0
       ExploredInstructionCount = $StaticAnalysis ? $StaticAnalysis.ExploredInstructionCount : 0
-      EmulationTruncated = $StaticAnalysis ? $StaticAnalysis.Truncated : $false
-      ResourceTableCount = @($StringTablePath).Count
+      EmulationTruncated       = $StaticAnalysis ? $StaticAnalysis.Truncated : $false
+      ResourceTableCount       = @($StringTablePath).Count
+      PropertyHandlerCount     = $StaticAnalysis ? $StaticAnalysis.PropertyHandlers.Count : 0
     }
   }
 }
@@ -991,11 +1032,11 @@ function Get-InstallShieldInstallScriptArpInfo {
         Publisher              = $PublisherWrite ? [string]$PublisherWrite.Data : $null
         Scope                  = $Writes[0].Root -eq 'HKCU' ? 'user' : ($Writes[0].Root -eq 'HKLM' ? 'machine' : $null)
         DefaultInstallLocation = $LocationWrite ? [string]$LocationWrite.Data : $null
-        UninstallString         = $UninstallWrite ? [string]$UninstallWrite.Data : $null
-        QuietUninstallString    = $QuietUninstallWrite ? [string]$QuietUninstallWrite.Data : $null
-        DisplayIcon             = $DisplayIconWrite ? [string]$DisplayIconWrite.Data : $null
-        URLInfoAbout            = $UrlInfoAboutWrite ? [string]$UrlInfoAboutWrite.Data : $null
-        HelpLink                = $HelpLinkWrite ? [string]$HelpLinkWrite.Data : $null
+        UninstallString        = $UninstallWrite ? [string]$UninstallWrite.Data : $null
+        QuietUninstallString   = $QuietUninstallWrite ? [string]$QuietUninstallWrite.Data : $null
+        DisplayIcon            = $DisplayIconWrite ? [string]$DisplayIconWrite.Data : $null
+        URLInfoAbout           = $UrlInfoAboutWrite ? [string]$UrlInfoAboutWrite.Data : $null
+        HelpLink               = $HelpLinkWrite ? [string]$HelpLinkWrite.Data : $null
         InstallerType          = ($WindowsInstaller -and [string]$WindowsInstaller.Data -match '^(?:1|true)$') ? 'msi' : 'exe'
         RegistryRoot           = [string]$Writes[0].Root
         RegistryKey            = [string]$Writes[0].Key
@@ -1169,10 +1210,10 @@ function Get-InstallShieldInstallScriptArpInfo {
     RuntimeEvidence              = [string[]]$RuntimeEvidence
     ValueSources                 = [pscustomobject][ordered]@{
       ProjectProductCode = 'Setup.ini:[Startup].ProductGUID -> PRODUCT_GUID/UNINSTALLKEY'
-      ProductCode = $HasBuiltInRegistration ? 'ProjectProductCode plus compiled MaintenanceStart/uninstall-path evidence' : 'Explicit static uninstall registry path'
-      DisplayName = $HasBuiltInRegistration ? "$ProjectNameSource -> IFX_PRODUCT_NAME/AppName project default" : 'Explicit static uninstall DisplayName write'
-      Publisher   = $HasBuiltInRegistration ? 'Setup.ini:[Startup].CompanyName -> IFX_COMPANY_NAME default' : 'Explicit static uninstall Publisher write'
-      RegistryItems = 'Compiled RegDBSetItem calls applied before MaintenanceStart'
+      ProductCode        = $HasBuiltInRegistration ? 'ProjectProductCode plus compiled MaintenanceStart/uninstall-path evidence' : 'Explicit static uninstall registry path'
+      DisplayName        = $HasBuiltInRegistration ? "$ProjectNameSource -> IFX_PRODUCT_NAME/AppName project default" : 'Explicit static uninstall DisplayName write'
+      Publisher          = $HasBuiltInRegistration ? 'Setup.ini:[Startup].CompanyName -> IFX_COMPANY_NAME default' : 'Explicit static uninstall Publisher write'
+      RegistryItems      = 'Compiled RegDBSetItem calls applied before MaintenanceStart'
     }
     Warnings                     = [string[]]$Warnings.ToArray()
     UnresolvedFields             = [string[]]$UnresolvedFields.ToArray()
@@ -1187,6 +1228,11 @@ function Get-InstallShieldInstallScriptInfo {
     Path to an InstallShield installer. It is extracted once through Get-InstallShieldInfo.
   .PARAMETER Installer
     Existing Get-InstallShieldInfo result whose extracted files are reused.
+  .PARAMETER EntryPoint
+    Optional compiled function names selected by an MSI custom-action table or
+    Advanced UI CallInstallScript action.
+  .PARAMETER AnalysisScope
+    Selects standalone installer semantics or scoped embedded-action analysis.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -1194,7 +1240,12 @@ function Get-InstallShieldInstallScriptInfo {
     [string]$Path,
 
     [Parameter(Mandatory, ParameterSetName = 'Installer', Position = 0, ValueFromPipeline)]
-    [psobject]$Installer
+    [psobject]$Installer,
+
+    [string[]]$EntryPoint,
+
+    [ValidateSet('StandaloneInstaller', 'EmbeddedAction')]
+    [string]$AnalysisScope = 'StandaloneInstaller'
   )
 
   process {
@@ -1217,14 +1268,47 @@ function Get-InstallShieldInstallScriptInfo {
       }
     }
     if (-not $Installer.HasInstallScript -or -not $Installer.InxFiles) { throw 'The InstallShield payload does not contain a compiled InstallScript file.' }
-    if (@($Installer.InxFiles).Count -ne 1) { throw 'Multiple compiled InstallScript files prevent deterministic entry-script selection.' }
-    $ScriptPath = [string]$Installer.InxFiles[0]
+    $InxFiles = [IO.FileInfo[]]@($Installer.InxFiles | ForEach-Object { Get-Item -LiteralPath $_ -Force })
+    $ScriptFile = if ($InxFiles.Count -eq 1) {
+      $InxFiles[0]
+    } else {
+      # Advanced UI extraction can recover historical or parcel-local scripts
+      # as Setup (n).inx while retaining the suite dispatcher as exact
+      # Setup.inx. Select only that canonical file; multiple exact matches stay
+      # ambiguous and fail rather than relying on traversal order.
+      Resolve-UniqueInstallerFile -Item $InxFiles -Pattern 'Setup.inx' `
+        -BasePath $Installer.ExtractedPath -Description 'InstallShield compiled-script payload'
+    }
+    $ScriptPath = $ScriptFile.FullName
     $ScriptDirectory = [IO.Path]::GetDirectoryName($ScriptPath)
     $ResponseCandidate = Get-ChildItem -LiteralPath $ScriptDirectory -Filter 'setup.iss' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-    $StringTablePaths = [string[]]@($Installer.ExtractedFiles | Where-Object { [IO.Path]::GetFileName($_) -like 'StringTable_*.ips' })
-    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $ScriptPath -EmbeddedResponseFile $ResponseCandidate.FullName -StringTablePath $StringTablePaths
+    $StringTablePaths = [string[]]@($Installer.ExtractedFiles | Where-Object {
+        $FileName = [IO.Path]::GetFileName($_)
+        $FileName -like 'StringTable_*.ips' -or $FileName -like 'String*.txt'
+      })
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $ScriptPath `
+      -EmbeddedResponseFile $ResponseCandidate.FullName -StringTablePath $StringTablePaths `
+      -EntryPoint $EntryPoint -AnalysisScope $AnalysisScope
     $Analysis = Merge-InstallShieldInstallScriptMediaEvidence -Installer $Installer -Analysis $Analysis
-    $ArpInfo = Get-InstallShieldInstallScriptArpInfo -Installer $Installer -Analysis $Analysis
+    $ArpInfo = if ($AnalysisScope -eq 'EmbeddedAction') {
+      # The containing MSI or Advanced UI suite owns its uninstall identity.
+      # Keep explicit registry writes from the selected function in Analysis,
+      # but do not project standalone MaintenanceStart defaults or emit missing
+      # Setup.ini identity warnings for a custom-action-only call graph.
+      [pscustomobject][ordered]@{
+        ProductCode = $null; DisplayName = $null; DisplayVersion = $null; Publisher = $null
+        Scope = $null; DefaultInstallLocation = $null; UninstallString = $null
+        QuietUninstallString = $null; DisplayIcon = $null; URLInfoAbout = $null; HelpLink = $null
+        WritesAppsAndFeaturesEntry = $null; AppsAndFeaturesProductCode = $null
+        AppsAndFeaturesInstallerType = $null; AppsAndFeaturesEntries = [object[]]@()
+        RegistryWrites = [object[]]@(); ProjectProductCode = $null; ProjectName = $null
+        ProjectPublisher = $null; RegistrationMode = 'EmbeddedAction'
+        RuntimeEvidence = [string[]]$Analysis.ArpRuntimeEvidence; ValueSources = [ordered]@{}
+        Warnings = [string[]]@(); UnresolvedFields = [string[]]@()
+      }
+    } else {
+      Get-InstallShieldInstallScriptArpInfo -Installer $Installer -Analysis $Analysis
+    }
     $Warnings = [string[]]@((@($Analysis.Warnings) + @($ArpInfo.Warnings)) | Select-Object -Unique)
     # Select-Object -Unique compares custom objects as their type name and can
     # collapse unrelated values. Deduplicate registry evidence by its stable
@@ -1246,87 +1330,91 @@ function Get-InstallShieldInstallScriptInfo {
     # silent, registry, and compiled-script evidence. This lets the analyzer and
     # manifest updater consume one result without reparsing setup.inx.
     return [pscustomobject][ordered]@{
-      Path                         = $Installer.PSObject.Properties['Path'] ? [string]$Installer.Path : $Analysis.Path
-      InstallerType                = 'InstallShield InstallScript'
-      ProductCode                  = $ArpInfo.ProductCode
-      UpgradeCode                  = $null
-      DisplayName                  = $ArpInfo.DisplayName
-      DisplayVersion               = $ArpInfo.DisplayVersion
-      Publisher                    = $ArpInfo.Publisher
-      Scope                        = $ArpInfo.Scope
-      DefaultInstallLocation       = $ArpInfo.DefaultInstallLocation
-      UninstallString              = $ArpInfo.UninstallString
-      QuietUninstallString         = $ArpInfo.QuietUninstallString
-      DisplayIcon                  = $ArpInfo.DisplayIcon
-      URLInfoAbout                 = $ArpInfo.URLInfoAbout
-      HelpLink                     = $ArpInfo.HelpLink
-      WritesAppsAndFeaturesEntry   = $ArpInfo.WritesAppsAndFeaturesEntry
-      AppsAndFeaturesProductCode   = $ArpInfo.AppsAndFeaturesProductCode
-      AppsAndFeaturesInstallerType = $ArpInfo.AppsAndFeaturesInstallerType
-      Warnings                     = $Warnings
-      UnresolvedFields             = [string[]]$ArpInfo.UnresolvedFields
-      AppsAndFeaturesEntries       = [object[]]$ArpInfo.AppsAndFeaturesEntries
-      RegistryWrites               = [object[]]$RegistryWrites.ToArray()
-      RegistryItems                = [object[]]$Analysis.RegistryItems
-      MediaRegistrySets            = [object[]]$Analysis.MediaRegistrySets
-      MediaRegistryWrites          = [object[]]$Analysis.MediaRegistryWrites
-      ConditionalMediaRegistryWrites = [object[]]$Analysis.ConditionalMediaRegistryWrites
-      CabinetFileGroups            = [object[]]$Analysis.CabinetFileGroups
-      CabinetComponents            = [object[]]$Analysis.CabinetComponents
-      MediaSetupTypes              = [object[]]$Analysis.MediaSetupTypes
-      MediaShellFolders            = [object[]]$Analysis.MediaShellFolders
-      MediaShortcuts               = [object[]]$Analysis.MediaShortcuts
-      ConditionalMediaShortcuts    = [object[]]$Analysis.ConditionalMediaShortcuts
+      Path                               = $Installer.PSObject.Properties['Path'] ? [string]$Installer.Path : $Analysis.Path
+      InstallerType                      = 'InstallShield InstallScript'
+      ProductCode                        = $ArpInfo.ProductCode
+      UpgradeCode                        = $null
+      DisplayName                        = $ArpInfo.DisplayName
+      DisplayVersion                     = $ArpInfo.DisplayVersion
+      Publisher                          = $ArpInfo.Publisher
+      Scope                              = $ArpInfo.Scope
+      DefaultInstallLocation             = $ArpInfo.DefaultInstallLocation
+      UninstallString                    = $ArpInfo.UninstallString
+      QuietUninstallString               = $ArpInfo.QuietUninstallString
+      DisplayIcon                        = $ArpInfo.DisplayIcon
+      URLInfoAbout                       = $ArpInfo.URLInfoAbout
+      HelpLink                           = $ArpInfo.HelpLink
+      WritesAppsAndFeaturesEntry         = $ArpInfo.WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode         = $ArpInfo.AppsAndFeaturesProductCode
+      AppsAndFeaturesInstallerType       = $ArpInfo.AppsAndFeaturesInstallerType
+      Warnings                           = $Warnings
+      UnresolvedFields                   = [string[]]$ArpInfo.UnresolvedFields
+      AppsAndFeaturesEntries             = [object[]]$ArpInfo.AppsAndFeaturesEntries
+      RegistryWrites                     = [object[]]$RegistryWrites.ToArray()
+      RegistryItems                      = [object[]]$Analysis.RegistryItems
+      MediaRegistrySets                  = [object[]]$Analysis.MediaRegistrySets
+      MediaRegistryWrites                = [object[]]$Analysis.MediaRegistryWrites
+      ConditionalMediaRegistryWrites     = [object[]]$Analysis.ConditionalMediaRegistryWrites
+      CabinetFileGroups                  = [object[]]$Analysis.CabinetFileGroups
+      CabinetComponents                  = [object[]]$Analysis.CabinetComponents
+      MediaSetupTypes                    = [object[]]$Analysis.MediaSetupTypes
+      MediaShellFolders                  = [object[]]$Analysis.MediaShellFolders
+      MediaShortcuts                     = [object[]]$Analysis.MediaShortcuts
+      ConditionalMediaShortcuts          = [object[]]$Analysis.ConditionalMediaShortcuts
       ConditionalRegistryAssociationInfo = $Analysis.ConditionalRegistryAssociationInfo
-      ConditionalProtocols         = [string[]]$Analysis.ConditionalProtocols
-      ConditionalFileExtensions    = [string[]]$Analysis.ConditionalFileExtensions
-      Protocols                    = [string[]]$Analysis.Protocols
-      FileExtensions               = [string[]]$Analysis.FileExtensions
-      ProtocolAssociations         = [object[]]$Analysis.ProtocolAssociations
-      FileExtensionAssociations    = [object[]]$Analysis.FileExtensionAssociations
-      RegistryAssociationInfo      = $Analysis.RegistryAssociationInfo
-      ProjectProductCode           = $ArpInfo.ProjectProductCode
-      ProjectName                  = $ArpInfo.ProjectName
-      ProjectPublisher             = $ArpInfo.ProjectPublisher
-      CompiledScriptPath           = $Analysis.Path
-      CompiledScriptName           = [IO.Path]::GetFileName($Analysis.Path)
-      ArpRegistrationMode          = $ArpInfo.RegistrationMode
-      ArpRuntimeEvidence           = [string[]]$ArpInfo.RuntimeEvidence
-      ArpValueSources              = $ArpInfo.ValueSources
-      SilentSupport                = $Analysis.SilentSupport
-      ResponseFileRequirement      = $Analysis.ResponseFileRequirement
-      SilentSwitches               = [string[]]$Analysis.SilentSwitches
-      InstallEntryPoints           = [string[]]$Analysis.InstallEntryPoints
-      DialogCalls                  = [string[]]$Analysis.DialogCalls
-      DialogTraces                 = [object[]]$Analysis.DialogTraces
-      ResponseFileAccesses         = [string[]]$Analysis.ResponseFileAccesses
-      ExecutedPayloads             = [object[]]$Analysis.ExecutedPayloads
-      FileOperations               = [object[]]$Analysis.FileOperations
-      Shortcuts                    = [object[]]$Analysis.Shortcuts
-      StaticCalls                  = [object[]]$Analysis.StaticCalls
-      OpcodeCoverage               = [object[]]$Analysis.OpcodeCoverage
-      UnsupportedOpcodes           = [string[]]$Analysis.UnsupportedOpcodes
-      UnresolvedCalls              = [string[]]$Analysis.UnresolvedCalls
-      InstallOperations            = [string[]]$Analysis.InstallOperations
-      EmbeddedResponseFile         = $Analysis.EmbeddedResponseFile
-      EmbeddedResponseValidation   = $Analysis.EmbeddedResponseValidation
-      ParserVersionInfo            = [pscustomobject][ordered]@{
-        Parser       = 'Dumplings.PackageModule.InstallShieldInstallScript'
-        ParserMajor  = 6
-        Format       = $Analysis.ParserVersionInfo.Format
-        WasScrambled = $Analysis.ParserVersionInfo.WasScrambled
-        HeaderValue  = $Analysis.ParserVersionInfo.HeaderValue
-        MarkerOffset = $Analysis.ParserVersionInfo.MarkerOffset
-        CopyrightMarker = $Analysis.ParserVersionInfo.CopyrightMarker
-        AnalysisMode = 'BoundedStaticEmulationAndMaintenanceDefaults'
-        FunctionCount = $Analysis.ParserVersionInfo.FunctionCount
-        InstructionCount = $Analysis.ParserVersionInfo.InstructionCount
+      ConditionalProtocols               = [string[]]$Analysis.ConditionalProtocols
+      ConditionalFileExtensions          = [string[]]$Analysis.ConditionalFileExtensions
+      Protocols                          = [string[]]$Analysis.Protocols
+      FileExtensions                     = [string[]]$Analysis.FileExtensions
+      ProtocolAssociations               = [object[]]$Analysis.ProtocolAssociations
+      FileExtensionAssociations          = [object[]]$Analysis.FileExtensionAssociations
+      RegistryAssociationInfo            = $Analysis.RegistryAssociationInfo
+      ProjectProductCode                 = $ArpInfo.ProjectProductCode
+      ProjectName                        = $ArpInfo.ProjectName
+      ProjectPublisher                   = $ArpInfo.ProjectPublisher
+      CompiledScriptPath                 = $Analysis.Path
+      CompiledScriptName                 = [IO.Path]::GetFileName($Analysis.Path)
+      ArpRegistrationMode                = $ArpInfo.RegistrationMode
+      ArpRuntimeEvidence                 = [string[]]$ArpInfo.RuntimeEvidence
+      ArpValueSources                    = $ArpInfo.ValueSources
+      SilentSupport                      = $Analysis.SilentSupport
+      ResponseFileRequirement            = $Analysis.ResponseFileRequirement
+      SilentSwitches                     = [string[]]$Analysis.SilentSwitches
+      InstallEntryPoints                 = [string[]]$Analysis.InstallEntryPoints
+      DialogCalls                        = [string[]]$Analysis.DialogCalls
+      DialogTraces                       = [object[]]$Analysis.DialogTraces
+      ResponseFileAccesses               = [string[]]$Analysis.ResponseFileAccesses
+      ExecutedPayloads                   = [object[]]$Analysis.ExecutedPayloads
+      FileOperations                     = [object[]]$Analysis.FileOperations
+      DllOperations                      = [object[]]$Analysis.DllOperations
+      PropertyHandlers                   = [object[]]$Analysis.PropertyHandlers
+      Shortcuts                          = [object[]]$Analysis.Shortcuts
+      StaticCalls                        = [object[]]$Analysis.StaticCalls
+      OpcodeCoverage                     = [object[]]$Analysis.OpcodeCoverage
+      UnsupportedOpcodes                 = [string[]]$Analysis.UnsupportedOpcodes
+      UnresolvedCalls                    = [string[]]$Analysis.UnresolvedCalls
+      InstallOperations                  = [string[]]$Analysis.InstallOperations
+      EmbeddedResponseFile               = $Analysis.EmbeddedResponseFile
+      EmbeddedResponseValidation         = $Analysis.EmbeddedResponseValidation
+      ParserVersionInfo                  = [pscustomobject][ordered]@{
+        Parser                   = 'Dumplings.PackageModule.InstallShieldInstallScript'
+        ParserMajor              = 9
+        Format                   = $Analysis.ParserVersionInfo.Format
+        WasScrambled             = $Analysis.ParserVersionInfo.WasScrambled
+        HeaderValue              = $Analysis.ParserVersionInfo.HeaderValue
+        MarkerOffset             = $Analysis.ParserVersionInfo.MarkerOffset
+        CopyrightMarker          = $Analysis.ParserVersionInfo.CopyrightMarker
+        AnalysisMode             = $AnalysisScope -eq 'EmbeddedAction' ? 'ScopedBoundedStaticEmulation' : 'BoundedStaticEmulationAndMaintenanceDefaults'
+        AnalysisScope            = $AnalysisScope
+        FunctionCount            = $Analysis.ParserVersionInfo.FunctionCount
+        InstructionCount         = $Analysis.ParserVersionInfo.InstructionCount
         ExploredInstructionCount = $Analysis.ParserVersionInfo.ExploredInstructionCount
-        EmulationTruncated = $Analysis.ParserVersionInfo.EmulationTruncated
-        ResourceTableCount = $Analysis.ParserVersionInfo.ResourceTableCount
-        CabinetFileGroupCount = @($Analysis.CabinetFileGroups).Count
-        CabinetComponentCount = @($Analysis.CabinetComponents).Count
-        MediaSetupTypeCount = @($Analysis.MediaSetupTypes).Count
+        EmulationTruncated       = $Analysis.ParserVersionInfo.EmulationTruncated
+        ResourceTableCount       = $Analysis.ParserVersionInfo.ResourceTableCount
+        PropertyHandlerCount     = @($Analysis.PropertyHandlers).Count
+        CabinetFileGroupCount    = @($Analysis.CabinetFileGroups).Count
+        CabinetComponentCount    = @($Analysis.CabinetComponents).Count
+        MediaSetupTypeCount      = @($Analysis.MediaSetupTypes).Count
       }
     }
   }

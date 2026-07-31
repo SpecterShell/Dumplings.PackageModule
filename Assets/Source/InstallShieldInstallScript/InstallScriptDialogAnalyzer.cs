@@ -12,6 +12,9 @@ namespace Dumplings.InstallShield.InstallScript
 
     public static class InstallScriptDialogAnalyzer
     {
+        private const int MaximumFrameworkDepth = 8;
+        private const int MaximumFrameworkSteps = 128;
+
         private sealed class DialogSummary
         {
             internal DialogSummary()
@@ -32,6 +35,22 @@ namespace Dumplings.InstallShield.InstallScript
             var functionsByName = program.Functions
                 .GroupBy(function => function.Name, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+
+            // Program-style InstallScript projects enter the UI through an
+            // imported runtime function. Official InstallShield framework
+            // source shows that _ShowWizardPages calls the exported
+            // IfxOnShowWizardPages callback, so follow that callback before
+            // falling back to the ordinary named-entry-point tracer.
+            if ((entryPoints == null || entryPoints.Length == 0) &&
+                !functionsByName.ContainsKey("OnFirstUIBefore") &&
+                functionsByName.ContainsKey("program") &&
+                functionsByName.ContainsKey("IfxOnShowWizardPages") &&
+                ContainsCallTarget(program, functionsByName["program"].Index, "ISRT._ShowWizardPages", 0, new HashSet<int>()))
+            {
+                var frameworkTraces = GetFrameworkWizardTraces(program, functionsByName["program"], functionsByName["IfxOnShowWizardPages"]);
+                if (frameworkTraces.Count != 0) return frameworkTraces;
+            }
+
             var scenarios = new List<KeyValuePair<string, string[]>>();
             if (entryPoints != null && entryPoints.Length != 0)
             {
@@ -62,7 +81,7 @@ namespace Dumplings.InstallShield.InstallScript
 
             foreach (var scenario in scenarios)
             {
-                var trace = new InstallScriptDialogTrace { Scenario = scenario.Key, IsComplete = true };
+                var trace = new InstallScriptDialogTrace { Scenario = scenario.Key, Source = "DirectBytecode", IsComplete = true };
                 foreach (var entryPointName in scenario.Value)
                 {
                     InstallScriptFunction entryPoint;
@@ -120,6 +139,243 @@ namespace Dumplings.InstallShield.InstallScript
                 results.Add(trace);
             }
             return results;
+        }
+
+        /// <summary>
+        /// Reconstructs program-style wizard branches through the callback
+        /// contract documented by InstallShield's EventsObjectPriv.rul and
+        /// EventsSetupPriv.rul framework sources. The runtime condition values
+        /// are intentionally not guessed; branch classification relies only on
+        /// the response-dialog families reached by each callback child.
+        /// </summary>
+        private static List<InstallScriptDialogTrace> GetFrameworkWizardTraces(
+            InstallScriptProgram program,
+            InstallScriptFunction programEntry,
+            InstallScriptFunction callback)
+        {
+            var result = new List<InstallScriptDialogTrace>();
+            var reachability = new Dictionary<int, bool>();
+            var branchTraces = new List<InstallScriptDialogTrace>();
+
+            foreach (var instruction in callback.Instructions)
+            {
+                if (instruction.Opcode != 0x20 && instruction.Opcode != 0x21) continue;
+                if (instruction.CallTargetIndex < 0 || instruction.CallTargetIndex >= program.Functions.Count) continue;
+                if (!CanReachResponseDialog(program, instruction.CallTargetIndex, 0, new HashSet<int>(), reachability)) continue;
+
+                var trace = new InstallScriptDialogTrace
+                {
+                    Scenario = "FrameworkBranch",
+                    Source = "FrameworkCallback",
+                    IsComplete = callback.BodyDecoded
+                };
+                trace.EntryPoints.Add(programEntry.Name);
+                trace.EntryPoints.Add(callback.Name);
+                var remainingSteps = MaximumFrameworkSteps;
+                CollectOrderedDialogs(
+                    program,
+                    instruction.CallTargetIndex,
+                    programEntry.Name,
+                    instruction.Offset,
+                    0,
+                    new HashSet<int>(),
+                    reachability,
+                    trace,
+                    ref remainingSteps);
+                if (trace.Steps.Count == 0) continue;
+
+                CollapseCompletionDialogs(trace);
+                foreach (var step in trace.Steps)
+                {
+                    if (!string.IsNullOrEmpty(step.Dialog)) trace.Dialogs.Add(step.Dialog);
+                    if (!step.Complete || step.Alternatives.Count != 0) trace.IsComplete = false;
+                }
+                branchTraces.Add(trace);
+            }
+
+            foreach (var trace in branchTraces)
+            {
+                var candidates = new List<string>();
+                foreach (var step in trace.Steps)
+                {
+                    if (!string.IsNullOrEmpty(step.Dialog)) candidates.Add(step.Dialog);
+                    else candidates.AddRange(step.Alternatives);
+                }
+                if (candidates.Any(dialog => dialog.StartsWith("SdWelcomeMaint", StringComparison.Ordinal)))
+                    trace.Scenario = "Maintenance";
+                else if (candidates.Any(dialog => dialog.StartsWith("SdWelcomeUpdate", StringComparison.Ordinal)))
+                    trace.Scenario = "Update";
+                else if (candidates.Any(dialog => dialog.StartsWith("SdWelcome", StringComparison.Ordinal)))
+                    trace.Scenario = "FreshInstall";
+                else
+                    trace.Scenario = "FrameworkBranch";
+
+                // The call order is static evidence, but MODE, MAINTENANCE,
+                // feature selection, and BACK/NEXT branches can still suppress
+                // or repeat pages. Keep generated response templates reviewable
+                // rather than falsely marking them complete.
+                trace.IsComplete = false;
+                trace.Warnings.Add(
+                    "Dialog order was reconstructed through InstallShield's _ShowWizardPages/IfxOnShowWizardPages callback contract; conditional or optional pages still require a recorded VM response file.");
+            }
+
+            // Keep at most one branch per recognized scenario. If a customized
+            // callback exposes several candidates, retain all unknown branches
+            // rather than merging unrelated dialog orders.
+            foreach (var scenario in new[] { "FreshInstall", "Maintenance", "Update" })
+            {
+                var matching = branchTraces.Where(trace => trace.Scenario == scenario).ToArray();
+                if (matching.Length == 1) result.Add(matching[0]);
+                else if (matching.Length > 1)
+                {
+                    foreach (var trace in matching)
+                    {
+                        trace.Warnings.Add("Multiple callback branches matched scenario '" + scenario + "'; runtime selection remains unresolved.");
+                        result.Add(trace);
+                    }
+                }
+            }
+            result.AddRange(branchTraces.Where(trace => trace.Scenario == "FrameworkBranch"));
+            return result;
+        }
+
+        /// <summary>
+        /// Memoizes whether a function can reach a recognized response dialog.
+        /// This prevents ordered collection from descending into every helper
+        /// and UI implementation function in large framework scripts.
+        /// </summary>
+        private static bool CanReachResponseDialog(
+            InstallScriptProgram program,
+            int functionIndex,
+            int depth,
+            ISet<int> visited,
+            IDictionary<int, bool> cache)
+        {
+            if (functionIndex < 0 || functionIndex >= program.Functions.Count || depth > MaximumFrameworkDepth) return false;
+            bool cached;
+            if (cache.TryGetValue(functionIndex, out cached)) return cached;
+            if (!visited.Add(functionIndex)) return false;
+            try
+            {
+                var function = program.Functions[functionIndex];
+                if (ReadDirectDialogs(function).Count != 0)
+                {
+                    cache[functionIndex] = true;
+                    return true;
+                }
+                foreach (var instruction in function.Instructions)
+                {
+                    if (instruction.Opcode != 0x20 && instruction.Opcode != 0x21) continue;
+                    if (instruction.Operands.Any(operand => operand.Kind == InstallScriptOperandKind.String && IsResponseDialog(operand.StringValue)))
+                    {
+                        cache[functionIndex] = true;
+                        return true;
+                    }
+                    if (CanReachResponseDialog(program, instruction.CallTargetIndex, depth + 1, visited, cache))
+                    {
+                        cache[functionIndex] = true;
+                        return true;
+                    }
+                }
+                cache[functionIndex] = false;
+                return false;
+            }
+            finally
+            {
+                visited.Remove(functionIndex);
+            }
+        }
+
+        /// <summary>
+        /// Flattens only call edges that lead to response dialogs. Calls remain
+        /// in bytecode order; mutually exclusive completion calls are collapsed
+        /// later into alternatives by CollapseCompletionDialogs.
+        /// </summary>
+        private static void CollectOrderedDialogs(
+            InstallScriptProgram program,
+            int functionIndex,
+            string entryPoint,
+            long callsiteOffset,
+            int depth,
+            ISet<int> visited,
+            IDictionary<int, bool> reachability,
+            InstallScriptDialogTrace trace,
+            ref int remainingSteps)
+        {
+            if (remainingSteps <= 0)
+            {
+                trace.IsComplete = false;
+                if (!trace.Warnings.Contains("The framework dialog trace exceeded the parser step limit."))
+                    trace.Warnings.Add("The framework dialog trace exceeded the parser step limit.");
+                return;
+            }
+            if (functionIndex < 0 || functionIndex >= program.Functions.Count || depth > MaximumFrameworkDepth || !visited.Add(functionIndex))
+            {
+                trace.IsComplete = false;
+                return;
+            }
+            try
+            {
+                var function = program.Functions[functionIndex];
+                var directDialogs = ReadDirectDialogs(function);
+                if (directDialogs.Count != 0)
+                {
+                    var step = new InstallScriptDialogStep
+                    {
+                        EntryPoint = entryPoint,
+                        Offset = callsiteOffset,
+                        Function = function.Name,
+                        Dialog = directDialogs.Count == 1 ? directDialogs[0] : null,
+                        Complete = function.BodyDecoded && directDialogs.Count == 1
+                    };
+                    if (directDialogs.Count > 1) step.Alternatives.AddRange(directDialogs);
+                    trace.Steps.Add(step);
+                    remainingSteps--;
+                    return;
+                }
+
+                if (!function.BodyDecoded) trace.IsComplete = false;
+                foreach (var instruction in function.Instructions)
+                {
+                    if (remainingSteps <= 0) break;
+                    if (instruction.Opcode != 0x20 && instruction.Opcode != 0x21) continue;
+                    var callsiteDialogs = instruction.Operands
+                        .Where(operand => operand.Kind == InstallScriptOperandKind.String && IsResponseDialog(operand.StringValue))
+                        .Select(operand => operand.StringValue)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToArray();
+                    if (callsiteDialogs.Length != 0)
+                    {
+                        var step = new InstallScriptDialogStep
+                        {
+                            EntryPoint = entryPoint,
+                            Offset = instruction.Offset,
+                            Function = "CallsiteLiteral",
+                            Dialog = callsiteDialogs.Length == 1 ? callsiteDialogs[0] : null,
+                            Complete = callsiteDialogs.Length == 1
+                        };
+                        if (callsiteDialogs.Length > 1) step.Alternatives.AddRange(callsiteDialogs);
+                        trace.Steps.Add(step);
+                        remainingSteps--;
+                        continue;
+                    }
+                    if (!CanReachResponseDialog(program, instruction.CallTargetIndex, depth + 1, new HashSet<int>(visited), reachability)) continue;
+                    CollectOrderedDialogs(
+                        program,
+                        instruction.CallTargetIndex,
+                        entryPoint,
+                        instruction.Offset,
+                        depth + 1,
+                        visited,
+                        reachability,
+                        trace,
+                        ref remainingSteps);
+                }
+            }
+            finally
+            {
+                visited.Remove(functionIndex);
+            }
         }
 
         private static bool ContainsCallTarget(InstallScriptProgram program, int functionIndex, string targetName, int depth, ISet<int> visited)
@@ -231,6 +487,7 @@ namespace Dumplings.InstallShield.InstallScript
             return suffix.StartsWith("Welcome", StringComparison.Ordinal) ||
                 suffix.StartsWith("License", StringComparison.Ordinal) ||
                 suffix.StartsWith("AskDestPath", StringComparison.Ordinal) ||
+                suffix.StartsWith("SelectFolder", StringComparison.Ordinal) ||
                 suffix.StartsWith("StartCopy", StringComparison.Ordinal) ||
                 suffix.StartsWith("Finish", StringComparison.Ordinal) ||
                 suffix == "FeatureTree" || suffix == "ComponentTree";

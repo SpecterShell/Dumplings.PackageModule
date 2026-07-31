@@ -220,6 +220,21 @@ Result=1
     $Info.EmbeddedResponseFile.DialogCount | Should -Be 1
   }
 
+  It 'scopes embedded custom-action analysis without applying standalone response-file rules' {
+    $Path = Join-Path $TestDrive 'setup.inx'
+    New-TestInstallScriptFile -Path $Path -String @('ConfigureProduct', 'SdWelcome', 'setup.iss')
+
+    $Info = Invoke-InstallShieldInstallScriptAnalysis -Path $Path `
+      -EntryPoint ConfigureProduct -AnalysisScope EmbeddedAction
+
+    $Info.InstallEntryPoints | Should -Be 'ConfigureProduct'
+    $Info.SilentSupport | Should -Be 'NotApplicable'
+    $Info.ResponseFileRequirement | Should -Be 'None'
+    $Info.SilentSwitches | Should -BeNullOrEmpty
+    $Info.ParserVersionInfo.AnalysisScope | Should -Be 'EmbeddedAction'
+    $Info.Warnings | Should -Not -Contain 'The compiled script uses InstallShield response-backed dialog support but the media does not ship a valid default setup.iss.'
+  }
+
   It 'reconstructs documented MaintenanceStart ARP defaults without using response metadata as version evidence' {
     $Path = Join-Path $TestDrive 'setup.inx'
     $ResponsePath = Join-Path $TestDrive 'setup.iss'
@@ -237,11 +252,11 @@ Version=0.0.1
 Company=Stale response publisher
 '@ | Set-Content -LiteralPath $ResponsePath
     $Installer = [pscustomobject]@{
-      HasInstallScript = $true
-      InxFiles = @($Path)
+      HasInstallScript   = $true
+      InxFiles           = @($Path)
       SetupConfiguration = [ordered]@{
         Startup = [ordered]@{
-          Product = 'Contoso Editor'
+          Product     = 'Contoso Editor'
           ProductGUID = '11111111-2222-3333-4444-555555555555'
           CompanyName = 'Contoso, Ltd.'
         }
@@ -272,7 +287,7 @@ Company=Stale response publisher
     $Installer = [pscustomobject]@{
       SetupConfiguration = [ordered]@{
         Startup = [ordered]@{
-          Product = 'Project default'
+          Product     = 'Project default'
           ProductGUID = '11111111-2222-3333-4444-555555555555'
           CompanyName = 'Project publisher'
         }
@@ -280,8 +295,8 @@ Company=Stale response publisher
     }
     $BaseAnalysis = [ordered]@{
       ArpRuntimeEvidence = @('MaintenanceStart', 'Software\Microsoft\Windows\CurrentVersion\Uninstall\')
-      RegistryWrites = @()
-      RegistryItems = @(
+      RegistryWrites     = @()
+      RegistryItems      = @(
         [pscustomobject]@{ Complete = $true; Name = 'DisplayName'; Data = 'Configured product' }
         [pscustomobject]@{ Complete = $true; Name = 'DisplayVersion'; Data = '2.5.1' }
         [pscustomobject]@{ Complete = $true; Name = 'Publisher'; Data = 'Configured publisher' }
@@ -320,30 +335,30 @@ Company=Stale response publisher
     $Installer = [pscustomobject]@{ SetupConfiguration = [ordered]@{} }
     $Key = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Contoso.Editor'
     $RegistryValues = [ordered]@{
-        DisplayName = 'Contoso Editor'
-        DisplayVersion = '3.2.1'
-        Publisher = 'Contoso'
-        InstallLocation = 'C:\Program Files\Contoso Editor'
-        UninstallString = 'C:\Program Files\Contoso Editor\uninstall.exe'
-        QuietUninstallString = 'C:\Program Files\Contoso Editor\uninstall.exe /s'
-        DisplayIcon = 'C:\Program Files\Contoso Editor\editor.exe,0'
-        URLInfoAbout = 'https://example.test/editor'
-        HelpLink = 'https://example.test/editor/help'
-      }
+      DisplayName          = 'Contoso Editor'
+      DisplayVersion       = '3.2.1'
+      Publisher            = 'Contoso'
+      InstallLocation      = 'C:\Program Files\Contoso Editor'
+      UninstallString      = 'C:\Program Files\Contoso Editor\uninstall.exe'
+      QuietUninstallString = 'C:\Program Files\Contoso Editor\uninstall.exe /s'
+      DisplayIcon          = 'C:\Program Files\Contoso Editor\editor.exe,0'
+      URLInfoAbout         = 'https://example.test/editor'
+      HelpLink             = 'https://example.test/editor/help'
+    }
     $Writes = foreach ($Value in $RegistryValues.GetEnumerator()) {
       [pscustomobject]@{
         Complete = $true
-        Root = 'HKLM'
-        Key = $Key
-        Name = $Value.Key
-        Type = 'REG_SZ'
-        Data = $Value.Value
+        Root     = 'HKLM'
+        Key      = $Key
+        Name     = $Value.Key
+        Type     = 'REG_SZ'
+        Data     = $Value.Value
       }
     }
     $Analysis = [pscustomobject]@{
       ArpRuntimeEvidence = @()
-      RegistryWrites = @($Writes)
-      RegistryItems = @()
+      RegistryWrites     = @($Writes)
+      RegistryItems      = @()
     }
 
     $Info = Get-InstallShieldInstallScriptArpInfo -Installer $Installer -Analysis $Analysis
@@ -361,8 +376,8 @@ Company=Stale response publisher
   It 'keeps HKEY_USER_SELECTABLE uninstall entries while leaving scope unresolved' {
     $Analysis = [pscustomobject]@{
       ArpRuntimeEvidence = @()
-      RegistryItems = @()
-      RegistryWrites = @(
+      RegistryItems      = @()
+      RegistryWrites     = @(
         [pscustomobject]@{ Complete = $true; Root = 'SHCTX'; Key = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Dumplings.App'; Name = 'DisplayName'; Type = 'REG_SZ'; Data = 'Dumplings App' }
       )
     }
@@ -398,7 +413,7 @@ Company=Stale response publisher
     $Installer = [pscustomobject]@{
       SetupConfiguration = [ordered]@{
         Startup = [ordered]@{
-          Product = 'Contoso Portable Tool'
+          Product     = 'Contoso Portable Tool'
           ProductGUID = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
           CompanyName = 'Contoso'
         }
@@ -425,9 +440,9 @@ Company=Stale response publisher
     Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerCondition.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Cabinet.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerCondition.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Cabinet.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
@@ -551,22 +566,22 @@ Company=Stale response publisher
     $Shortcut = [pscustomobject]@{ Name = 'Dumplings'; Target = '<TARGETDIR>\Dumplings.exe'; Component = ''; Confidence = 'ConditionalMediaRecord' }
     $Installer = [pscustomobject]@{
       InstallShieldCabinetSupport = [pscustomobject]@{
-        RegistrySets = @()
+        RegistrySets   = @()
         RegistryWrites = @($DefaultWrite, $NamedWrite, $ComponentWrite)
-        ShellFolders = @()
-        Shortcuts = @($Shortcut)
+        ShellFolders   = @()
+        Shortcuts      = @($Shortcut)
       }
     }
     $Analysis = [pscustomobject]@{
-      StaticCalls = @()
-      RegistryWrites = @()
-      Shortcuts = @()
-      Warnings = @()
-      Protocols = @()
-      FileExtensions = @()
-      ProtocolAssociations = @()
+      StaticCalls               = @()
+      RegistryWrites            = @()
+      Shortcuts                 = @()
+      Warnings                  = @()
+      Protocols                 = @()
+      FileExtensions            = @()
+      ProtocolAssociations      = @()
       FileExtensionAssociations = @()
-      RegistryAssociationInfo = $null
+      RegistryAssociationInfo   = $null
     }
     $Module = Get-Module InstallShieldInstallScript
 
@@ -622,6 +637,117 @@ Company=Stale response publisher
     $Shell.Shortcuts[0].Features | Should -Contain '<Data>\Main App'
     $Shell.Shortcuts[0].SetupTypes | Should -Contain 'Complete'
     $Registry.Warnings + $Shell.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'preserves InstallScript 11.5 structure references across function frames' {
+    $Path = 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\BuilderDifferential\Legacy115\PointerSemantics\PointerRegistry.inx'
+    if (-not (Test-Path -LiteralPath $Path)) {
+      Set-ItResult -Skipped -Because 'the controlled InstallShield 11.5 pointer fixture is not cached'
+      return
+    }
+
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $Path -EntryPoint 'PointerEvidence'
+    $Write = $Analysis.RegistryWrites | Where-Object Name -EQ 'PointerValue'
+    $Call = $Analysis.StaticCalls | Where-Object { $_.Function -eq 'PointerEvidence' -and $_.Target -match '^function\d+$' } | Select-Object -First 1
+
+    $Call.Arguments | Should -Contain '&record'
+    $Write | Should -HaveCount 1
+    $Write.Root | Should -Be 'HKLM'
+    $Write.Key | Should -Be 'SoftwareDumplings'
+    $Write.Data | Should -Be 'DumplingsPointerEvidence'
+    $Write.Complete | Should -BeTrue
+    $Analysis.OpcodeCoverage | Where-Object Opcode -EQ 0x001A | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
+    $Analysis.OpcodeCoverage | Where-Object Opcode -EQ 0x001C | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
+  }
+
+  It 'writes InstallScript 11.5 BYREF primitive parameters back to their caller' {
+    $Path = 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\BuilderDifferential\Legacy115\IndirectionSemantics\ByRef.inx'
+    if (-not (Test-Path -LiteralPath $Path)) {
+      Set-ItResult -Skipped -Because 'the controlled InstallShield 11.5 BYREF fixture is not cached'
+      return
+    }
+
+    $Program = Read-InstallShieldInstallScriptProgram -Path $Path
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $Path -EntryPoint 'ByRefEvidence'
+    $Write = $Analysis.RegistryWrites | Where-Object Name -EQ 'ByRefValue'
+
+    $Program.Functions[1].ParameterFlags[0] -band 0x02 | Should -Be 0x02
+    $Program.Functions[2].ParameterFlags[0] -band 0x02 | Should -Be 0x02
+    $Write | Should -HaveCount 1
+    $Write.Data | Should -Be 'After'
+    $Write.Complete | Should -BeTrue
+  }
+
+  It 'dereferences primitive pointers emitted by InstallShield 11.5' {
+    $Path = 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\BuilderDifferential\Legacy115\IndirectionSemantics\Indirect.inx'
+    if (-not (Test-Path -LiteralPath $Path)) {
+      Set-ItResult -Skipped -Because 'the controlled InstallShield 11.5 indirection fixture is not cached'
+      return
+    }
+
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $Path -EntryPoint 'IndirectEvidence'
+    $Write = $Analysis.RegistryWrites | Where-Object Name -EQ 'IndirectValue'
+
+    $Write | Should -HaveCount 1
+    $Write.Data | Should -Be '42'
+    $Write.Complete | Should -BeTrue
+    $Analysis.OpcodeCoverage | Where-Object Opcode -EQ 0x001B | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
+  }
+
+  It 'keeps InstallShield 11.5 catch-only effects out of normal-path metadata' {
+    $Path = 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\BuilderDifferential\Legacy115\ExceptionSemantics\Catch.inx'
+    if (-not (Test-Path -LiteralPath $Path)) {
+      Set-ItResult -Skipped -Because 'the controlled InstallShield 11.5 exception fixture is not cached'
+      return
+    }
+
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $Path -EntryPoint 'CatchEvidence'
+
+    $Analysis.RegistryWrites.Name | Should -Contain 'NormalPath'
+    $Analysis.RegistryWrites.Name | Should -Not -Contain 'CatchPath'
+    foreach ($Opcode in 0x0036, 0x0037, 0x0038) {
+      $Analysis.OpcodeCoverage | Where-Object Opcode -EQ $Opcode | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
+    }
+  }
+
+  It 'records InstallShield 11.5 DLL load and unload instructions without loading the module' {
+    $Path = 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\BuilderDifferential\Legacy115\ScriptSamples\ScriptSamples-Setup.inx'
+    if (-not (Test-Path -LiteralPath $Path)) {
+      Set-ItResult -Skipped -Because 'the official InstallShield 11.5 ScriptSamples fixture is not cached'
+      return
+    }
+
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $Path -EntryPoint 'DllWrapper'
+
+    $Analysis.DllOperations | Should -HaveCount 2
+    $Analysis.DllOperations.Operation | Should -Be @('Load', 'Unload')
+    $Analysis.DllOperations.Path | ForEach-Object { $_ | Should -Match 'MyDLL\.Dll$' }
+    $Analysis.OpcodeCoverage | Where-Object Opcode -EQ 0x0039 | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
+    $Analysis.OpcodeCoverage | Where-Object Opcode -EQ 0x003A | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
+    $Analysis.OpcodeCoverage | Where-Object Opcode -EQ 0x002F | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
+    $Analysis.OpcodeCoverage | Where-Object Opcode -EQ 0x0030 | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
+  }
+
+  It 'exposes InstallShield 11.5 property-handler registrations without invoking them' {
+    $Path = 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\BuilderDifferential\Legacy115\ScenarioSemantics\ScenarioVariables.inx'
+    if (-not (Test-Path -LiteralPath $Path)) {
+      Set-ItResult -Skipped -Because 'the controlled InstallShield 11.5 scenario-variable fixture is not cached'
+      return
+    }
+
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $Path
+    $Handler = $Analysis.PropertyHandlers | Where-Object {
+      $_.Function -eq 'function831' -and $_.VariableKind -eq 'LocalNumberVariable' -and $_.VariableIndex -eq 6
+    } | Select-Object -First 1
+
+    $Analysis.PropertyHandlers.Count | Should -BeGreaterOrEqual 40
+    $Handler.GetterFunction | Should -Be 'function829'
+    $Handler.SetterFunction | Should -Be 'function830'
+    $Handler.HandleSlotKind | Should -Be 'LocalNumberVariable'
+    $Handler.HandleSlotIndex | Should -Be 119
+    $Handler.Complete | Should -BeTrue
+    $Analysis.ParserVersionInfo.PropertyHandlerCount | Should -Be $Analysis.PropertyHandlers.Count
+    $Analysis.OpcodeCoverage | Where-Object Opcode -EQ 0x003B | Select-Object -ExpandProperty Emulation | Should -Be 'Structural'
   }
 
   It 'validates the cached Celsys self-contained response layout when available' -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\CSP_504w_setup.exe')) {
@@ -716,15 +842,20 @@ Company=Stale response publisher
     $Info.InstallScriptInfo.ProjectName | Should -Be 'U90Ladder'
     $Info.InstallScriptInfo.ProductCode | Should -BeNullOrEmpty
     $Info.InstallScriptInfo.WritesAppsAndFeaturesEntry | Should -BeNullOrEmpty
-    $Info.InstallScriptInfo.SilentSupport | Should -Be 'Indeterminate'
-    $Info.InstallScriptInfo.ResponseFileRequirement | Should -Be 'Unknown'
+    $Info.InstallScriptInfo.SilentSupport | Should -Be 'ResponseFileRequired'
+    $Info.InstallScriptInfo.ResponseFileRequirement | Should -Be 'External'
     $Info.InstallScriptInfo.ParserVersionInfo.CopyrightMarker | Should -Be 'Copyright (c) 1990-1999 Stirling Technologies, Ltd. All Rights Reserved.'
     $Info.InstallScriptInfo.ParserVersionInfo.FunctionCount | Should -Be 551
     $Info.InstallScriptInfo.ParserVersionInfo.InstructionCount | Should -BeGreaterThan 10000
     $Trace = $Info.InstallScriptInfo.DialogTraces | Where-Object Scenario -EQ 'FreshInstall'
     $Trace.EntryPoint | Should -Be 'program'
+    $Trace.Source | Should -Be 'FrameworkCallback'
     $Trace.IsComplete | Should -BeFalse
-    $Trace.Warnings -join ' ' | Should -Match '_ShowWizardPages'
+    $Trace.Dialogs | Should -Be @('SdWelcome', 'SdLicense', 'SdAskDestPath', 'SdSelectFolder', 'SdStartCopy')
+    @($Trace.Steps | Where-Object { $_.Alternatives -contains 'SdFinish' -and $_.Alternatives -contains 'SdFinishReboot' }) | Should -HaveCount 1
+    $Trace.Warnings -join ' ' | Should -Match 'recorded VM response file'
+    $MaintenanceTrace = $Info.InstallScriptInfo.DialogTraces | Where-Object Scenario -EQ 'Maintenance'
+    $MaintenanceTrace.Dialogs | Should -Be @('SdWelcomeMaint', 'SdComponentTree')
   }
 
   It 'extracts only a requested PackageForTheWeb catalog entry' -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\U90Ladder_6_6_45.exe')) {
@@ -751,21 +882,21 @@ Company=Stale response publisher
 
   It 'recovers the <Architecture> PRONOTE script from proprietary InstallShield cabinet media' -ForEach @(
     @{
-      Architecture = 'x64'
-      File = 'Install_PRNclient_FR_2023.0.1.2_win64.exe'
-      ProductCode = '{02871376-45F6-4642-9D84-C7681ABE361F}'
-      DisplayName = 'Client PRONOTE 2023 - 64bit'
-      ScriptSize = 304235
-      FunctionCount = 883
+      Architecture     = 'x64'
+      File             = 'Install_PRNclient_FR_2023.0.1.2_win64.exe'
+      ProductCode      = '{02871376-45F6-4642-9D84-C7681ABE361F}'
+      DisplayName      = 'Client PRONOTE 2023 - 64bit'
+      ScriptSize       = 304235
+      FunctionCount    = 883
       InstructionCount = 19437
     }
     @{
-      Architecture = 'x86'
-      File = 'Install_PRNclient_FR_2023.0.1.2_win32.exe'
-      ProductCode = '{6675F0E8-C34B-4FB8-9E61-35EE4C20136F}'
-      DisplayName = 'Client PRONOTE 2023 - 32bit'
-      ScriptSize = 304094
-      FunctionCount = 883
+      Architecture     = 'x86'
+      File             = 'Install_PRNclient_FR_2023.0.1.2_win32.exe'
+      ProductCode      = '{6675F0E8-C34B-4FB8-9E61-35EE4C20136F}'
+      DisplayName      = 'Client PRONOTE 2023 - 32bit'
+      ScriptSize       = 304094
+      FunctionCount    = 883
       InstructionCount = 19427
     }
   ) -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\Install_PRNclient_FR_2023.0.1.2_win64.exe')) {
@@ -827,7 +958,7 @@ Company=Stale response publisher
   It 'creates reviewable response templates without inventing project-specific feature state' {
     $Trace = [pscustomobject]@{
       IsComplete = $false
-      Steps = @(
+      Steps      = @(
         [pscustomobject]@{ Offset = 16; Dialog = 'SdWelcome'; Alternatives = @() }
         [pscustomobject]@{ Offset = 32; Dialog = 'SdComponentTree'; Alternatives = @() }
         [pscustomobject]@{ Offset = 48; Dialog = $null; Alternatives = @('SdFinish', 'SdFinishReboot') }
@@ -855,8 +986,8 @@ Count=1
 '@ | Set-Content -LiteralPath $ResponsePath
     $Trace = [pscustomobject]@{
       IsComplete = $true
-      Dialogs = @('SdWelcome')
-      Steps = @([pscustomobject]@{ Dialog = 'SdWelcome'; Alternatives = @() })
+      Dialogs    = @('SdWelcome')
+      Steps      = @([pscustomobject]@{ Dialog = 'SdWelcome'; Alternatives = @() })
     }
 
     $Result = Test-InstallShieldResponseFile -Path $ResponsePath -Trace $Trace

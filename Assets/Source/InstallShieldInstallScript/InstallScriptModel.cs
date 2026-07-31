@@ -153,11 +153,14 @@ namespace Dumplings.InstallShield.InstallScript
             Dialogs = new List<string>();
             Warnings = new List<string>();
             Scenario = string.Empty;
+            Source = string.Empty;
         }
 
         public string EntryPoint { get { return EntryPoints.Count == 0 ? null : EntryPoints[0]; } }
         public List<string> EntryPoints { get; private set; }
         public string Scenario { get; internal set; }
+        /// <summary>Identifies direct bytecode tracing or framework-callback reconstruction.</summary>
+        public string Source { get; internal set; }
         public List<InstallScriptDialogStep> Steps { get; private set; }
         public List<string> Dialogs { get; private set; }
         public bool IsComplete { get; internal set; }
@@ -285,6 +288,28 @@ namespace Dumplings.InstallShield.InstallScript
         public bool Complete { get; internal set; }
     }
 
+    /// <summary>
+    /// One explicit InstallScript UseDLL or UnUseDLL instruction. The analyzer
+    /// records the requested module path but never loads or invokes the module.
+    /// </summary>
+    public sealed class InstallScriptDllOperation
+    {
+        internal InstallScriptDllOperation()
+        {
+            EntryPoint = string.Empty;
+            Function = string.Empty;
+            Operation = string.Empty;
+            Path = string.Empty;
+        }
+
+        public string EntryPoint { get; internal set; }
+        public string Function { get; internal set; }
+        public long Offset { get; internal set; }
+        public string Operation { get; internal set; }
+        public string Path { get; internal set; }
+        public bool Complete { get; internal set; }
+    }
+
     /// <summary>One shortcut request reconstructed from a documented InstallScript API.</summary>
     public sealed class InstallScriptShortcutEvidence
     {
@@ -331,6 +356,36 @@ namespace Dumplings.InstallShield.InstallScript
         public string Emulation { get; internal set; }
     }
 
+    /// <summary>
+    /// One compiler-generated property proxy registered by opcode 0x003B.
+    /// InstallShield assigns the returned opaque handle to a numeric slot and
+    /// later routes reads and writes through the paired getter/setter functions.
+    /// The analyzer exposes this structure but does not invoke either handler.
+    /// </summary>
+    public sealed class InstallScriptPropertyHandlerEvidence
+    {
+        internal InstallScriptPropertyHandlerEvidence()
+        {
+            Function = string.Empty;
+            VariableKind = string.Empty;
+            GetterFunction = string.Empty;
+            SetterFunction = string.Empty;
+            HandleSlotKind = string.Empty;
+        }
+
+        public string Function { get; internal set; }
+        public long Offset { get; internal set; }
+        public string VariableKind { get; internal set; }
+        public int VariableIndex { get; internal set; }
+        public int GetterFunctionIndex { get; internal set; }
+        public string GetterFunction { get; internal set; }
+        public int SetterFunctionIndex { get; internal set; }
+        public string SetterFunction { get; internal set; }
+        public string HandleSlotKind { get; internal set; }
+        public int? HandleSlotIndex { get; internal set; }
+        public bool Complete { get; internal set; }
+    }
+
     /// <summary>Bounded static-emulation evidence for a decoded InstallScript program.</summary>
     public sealed class InstallScriptStaticAnalysis
     {
@@ -342,7 +397,9 @@ namespace Dumplings.InstallShield.InstallScript
             RegistryItems = new List<InstallScriptRegistryItemEvidence>();
             ExecutedPayloads = new List<InstallScriptExecutedPayload>();
             FileOperations = new List<InstallScriptFileOperation>();
+            DllOperations = new List<InstallScriptDllOperation>();
             Shortcuts = new List<InstallScriptShortcutEvidence>();
+            PropertyHandlers = new List<InstallScriptPropertyHandlerEvidence>();
             OpcodeCoverage = new List<InstallScriptOpcodeEvidence>();
             UnsupportedOpcodes = new List<string>();
             Warnings = new List<string>();
@@ -354,7 +411,9 @@ namespace Dumplings.InstallShield.InstallScript
         public List<InstallScriptRegistryItemEvidence> RegistryItems { get; private set; }
         public List<InstallScriptExecutedPayload> ExecutedPayloads { get; private set; }
         public List<InstallScriptFileOperation> FileOperations { get; private set; }
+        public List<InstallScriptDllOperation> DllOperations { get; private set; }
         public List<InstallScriptShortcutEvidence> Shortcuts { get; private set; }
+        public List<InstallScriptPropertyHandlerEvidence> PropertyHandlers { get; private set; }
         public List<InstallScriptOpcodeEvidence> OpcodeCoverage { get; private set; }
         public List<string> UnsupportedOpcodes { get; private set; }
         public List<string> Warnings { get; private set; }

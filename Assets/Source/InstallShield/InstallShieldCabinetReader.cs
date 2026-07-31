@@ -31,6 +31,7 @@ namespace Dumplings.InstallShield
         private const int MaximumMediaDirectoryCount = 64;
         private const int MaximumShellFolderCount = 4096;
         private const int MaximumShortcutCount = 10000;
+        private const int MaximumSpannedVolumeCount = 1024;
         private const int DeflateChunkOutputLimit = 65536;
 
         /// <summary>Enumerate catalog entries without opening payload volumes.</summary>
@@ -51,9 +52,10 @@ namespace Dumplings.InstallShield
 
         /// <summary>
         /// Extract selected catalog ordinals to validated absolute paths.
-        /// Split, linked, or external records are rejected conservatively.
-        /// Output is streamed and hashed incrementally so a large selected
-        /// payload does not require a same-sized managed byte array.
+        /// Linked records resolve to their source descriptor. Split records are
+        /// exposed as one forward-only stream over validated numbered-volume
+        /// ranges. Output is streamed and hashed incrementally so a large
+        /// selected payload does not require a same-sized managed byte array.
         /// </summary>
         public static List<string> Extract(string headerPath, IDictionary<int, string> targets, long maximumExpandedBytes)
         {
@@ -67,10 +69,14 @@ namespace Dumplings.InstallShield
             {
                 if (pair.Key < 0 || pair.Key >= catalog.Entries.Count)
                     throw new InvalidDataException("An InstallShield cabinet target index is outside the catalog.");
-                var entry = catalog.Entries[pair.Key];
-                if (!entry.IsValid) throw new InvalidDataException("The selected InstallShield cabinet entry is invalid.");
-                if (entry.IsSplit) throw new NotSupportedException("Split InstallShield cabinet entries are not supported by the focused support-file reader.");
-                if (entry.LinkFlags != 0) throw new NotSupportedException("Linked InstallShield cabinet entries are not supported by the focused support-file reader.");
+                var requestedEntry = catalog.Entries[pair.Key];
+                if (!requestedEntry.IsValid) throw new InvalidDataException("The selected InstallShield cabinet entry is invalid.");
+
+                // InstallShield link records are aliases. Unshield follows
+                // LinkPrevious until it reaches the descriptor that owns the
+                // stored bytes; LinkNext only records the forward relationship.
+                var entry = ResolveLinkedEntry(catalog, requestedEntry);
+                if (!entry.IsValid) throw new InvalidDataException("A linked InstallShield cabinet source entry is invalid.");
                 if (entry.ExpandedSize > maximumExpandedBytes - expandedTotal)
                     throw new InvalidDataException("Selected InstallShield cabinet output exceeds the configured expansion limit.");
                 expandedTotal += entry.ExpandedSize;
@@ -85,6 +91,23 @@ namespace Dumplings.InstallShield
                 results.Add(destination);
             }
             return results;
+        }
+
+        private static InstallShieldCabinetEntry ResolveLinkedEntry(Catalog catalog, InstallShieldCabinetEntry entry)
+        {
+            var visited = new HashSet<int>();
+            var current = entry;
+            while (true)
+            {
+                if ((current.LinkFlags & ~3) != 0)
+                    throw new InvalidDataException("An InstallShield cabinet entry uses unknown link flags.");
+                if (!visited.Add(current.Index))
+                    throw new InvalidDataException("An InstallShield cabinet link chain contains a cycle.");
+                if ((current.LinkFlags & 1) == 0) return current;
+                if (current.LinkPrevious >= catalog.Entries.Count)
+                    throw new InvalidDataException("An InstallShield cabinet link references an invalid previous entry.");
+                current = catalog.Entries[checked((int)current.LinkPrevious)];
+            }
         }
 
         private static Catalog ReadCatalog(string headerPath)
@@ -714,21 +737,12 @@ namespace Dumplings.InstallShield
 
         private static void WriteEntry(Catalog catalog, InstallShieldCabinetEntry entry, string destination, long maximumExpandedBytes)
         {
-            var volumePath = GetVolumePath(catalog.HeaderPath, entry.Volume);
-            using (var stream = new FileStream(volumePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            var storedSize = entry.IsCompressed ? entry.CompressedSize : entry.ExpandedSize;
+            using (var stream = OpenEntryStream(catalog, entry, storedSize))
             {
-                var commonBytes = ReadExactly(stream, CommonHeaderSize);
-                var common = ReadCommonHeader(commonBytes, 0);
-                if (common.Signature != Signature) throw new InvalidDataException("An InstallShield cabinet volume has an invalid signature.");
-                if (entry.DataOffset < CommonHeaderSize + 64 || entry.DataOffset > stream.Length)
-                    throw new InvalidDataException("An InstallShield cabinet file offset is outside its volume.");
-                var storedSize = entry.IsCompressed ? entry.CompressedSize : entry.ExpandedSize;
-                if (storedSize < 0 || storedSize > stream.Length - entry.DataOffset)
-                    throw new InvalidDataException("An InstallShield cabinet file range is truncated.");
                 if (entry.ExpandedSize > maximumExpandedBytes)
                     throw new InvalidDataException("An InstallShield cabinet output exceeds the configured limit.");
 
-                stream.Position = entry.DataOffset;
                 try
                 {
                     using (var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -752,6 +766,101 @@ namespace Dumplings.InstallShield
                     throw;
                 }
             }
+        }
+
+        private static Stream OpenEntryStream(Catalog catalog, InstallShieldCabinetEntry entry, long storedSize)
+        {
+            if (storedSize < 0) throw new InvalidDataException("An InstallShield cabinet stored size is negative.");
+            if (entry.IsSplit)
+                return new InstallShieldSpannedStream(GetSpannedSegments(catalog, entry, storedSize));
+
+            var volumePath = GetVolumePath(catalog.HeaderPath, entry.Volume);
+            var stream = new FileStream(volumePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            try
+            {
+                ValidateVolume(stream, catalog.MajorVersion);
+                if (entry.DataOffset < CommonHeaderSize + 64 || entry.DataOffset > stream.Length)
+                    throw new InvalidDataException("An InstallShield cabinet file offset is outside its volume.");
+                if (storedSize > stream.Length - entry.DataOffset)
+                    throw new InvalidDataException("An InstallShield cabinet file range is truncated.");
+                stream.Position = entry.DataOffset;
+                return stream;
+            }
+            catch
+            {
+                stream.Dispose();
+                throw;
+            }
+        }
+
+        private static List<VolumeSegment> GetSpannedSegments(Catalog catalog, InstallShieldCabinetEntry entry, long storedSize)
+        {
+            var segments = new List<VolumeSegment>();
+            var remaining = storedSize;
+            var volume = (int)entry.Volume;
+            while (remaining > 0)
+            {
+                if (segments.Count >= MaximumSpannedVolumeCount)
+                    throw new InvalidDataException("An InstallShield cabinet entry spans too many volumes.");
+                if (volume < 0 || volume > ushort.MaxValue)
+                    throw new InvalidDataException("An InstallShield cabinet volume number is outside the supported range.");
+
+                var volumePath = GetVolumePath(catalog.HeaderPath, checked((ushort)volume));
+                using (var stream = new FileStream(volumePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    var header = ValidateVolume(stream, catalog.MajorVersion);
+                    var firstFileIndex = ReadUInt32(header, CommonHeaderSize + 8);
+                    var lastFileIndex = ReadUInt32(header, CommonHeaderSize + 12);
+                    long dataOffset;
+                    long segmentStoredSize;
+
+                    // Match InstallShield/Unshield ordering: when a descriptor
+                    // is both the first and last file in a volume, the trailing
+                    // segment fields are authoritative.
+                    if ((uint)entry.Index == lastFileIndex)
+                    {
+                        dataOffset = ToInt64(ReadUInt64(header, CommonHeaderSize + 40), "split last-file offset");
+                        segmentStoredSize = ToInt64(ReadUInt64(
+                            header,
+                            CommonHeaderSize + (entry.IsCompressed ? 56 : 48)),
+                            "split last-file size");
+                    }
+                    else if ((uint)entry.Index == firstFileIndex)
+                    {
+                        dataOffset = ToInt64(ReadUInt64(header, CommonHeaderSize + 16), "split first-file offset");
+                        segmentStoredSize = ToInt64(ReadUInt64(
+                            header,
+                            CommonHeaderSize + (entry.IsCompressed ? 32 : 24)),
+                            "split first-file size");
+                    }
+                    else
+                    {
+                        throw new InvalidDataException("A split InstallShield cabinet volume does not reference the selected entry.");
+                    }
+
+                    if (dataOffset < CommonHeaderSize + 64 || segmentStoredSize <= 0)
+                        throw new InvalidDataException("A split InstallShield cabinet segment has an invalid range.");
+                    if (segmentStoredSize > remaining)
+                        throw new InvalidDataException("Split InstallShield cabinet segment sizes exceed the file descriptor.");
+                    if (dataOffset > stream.Length || segmentStoredSize > stream.Length - dataOffset)
+                        throw new InvalidDataException("A split InstallShield cabinet segment is truncated.");
+
+                    segments.Add(new VolumeSegment(volumePath, dataOffset, segmentStoredSize));
+                    remaining -= segmentStoredSize;
+                }
+                volume++;
+            }
+            return segments;
+        }
+
+        private static byte[] ValidateVolume(Stream stream, int expectedMajorVersion)
+        {
+            stream.Position = 0;
+            var header = ReadExactly(stream, CommonHeaderSize + 64);
+            var common = ReadCommonHeader(header, 0);
+            if (GetMajorVersion(common.Version) != expectedMajorVersion)
+                throw new InvalidDataException("An InstallShield cabinet volume version does not match its catalog.");
+            return header;
         }
 
         private static long CopyStoredRange(
@@ -972,6 +1081,108 @@ namespace Dumplings.InstallShield
         {
             if (value > long.MaxValue) throw new InvalidDataException("The InstallShield " + name + " exceeds supported stream limits.");
             return (long)value;
+        }
+
+        private sealed class VolumeSegment
+        {
+            internal VolumeSegment(string path, long offset, long length)
+            {
+                Path = path;
+                Offset = offset;
+                Length = length;
+            }
+
+            internal string Path { get; private set; }
+            internal long Offset { get; private set; }
+            internal long Length { get; private set; }
+        }
+
+        /// <summary>
+        /// Present validated ranges from consecutive dataN.cab files as one
+        /// logical stored stream. InstallShield compression framing is applied
+        /// after this layer, so even a two-byte chunk length may cross volumes.
+        /// </summary>
+        private sealed class InstallShieldSpannedStream : Stream
+        {
+            private readonly List<VolumeSegment> segments;
+            private readonly long length;
+            private FileStream currentStream;
+            private int segmentIndex;
+            private long segmentRemaining;
+            private long position;
+
+            internal InstallShieldSpannedStream(List<VolumeSegment> segments)
+            {
+                if (segments == null) throw new ArgumentNullException("segments");
+                if (segments.Count == 0) throw new InvalidDataException("A split InstallShield cabinet entry has no volume segments.");
+                this.segments = segments;
+                foreach (var segment in segments) length = checked(length + segment.Length);
+                segmentIndex = -1;
+            }
+
+            public override bool CanRead { get { return true; } }
+            public override bool CanSeek { get { return false; } }
+            public override bool CanWrite { get { return false; } }
+            public override long Length { get { return length; } }
+            public override long Position
+            {
+                get { return position; }
+                set { throw new NotSupportedException(); }
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                if (buffer == null) throw new ArgumentNullException("buffer");
+                if (offset < 0 || count < 0 || offset > buffer.Length - count)
+                    throw new ArgumentOutOfRangeException("offset");
+                if (count == 0 || position >= length) return 0;
+
+                var totalRead = 0;
+                while (count > 0 && position < length)
+                {
+                    if (currentStream == null || segmentRemaining == 0) OpenNextSegment();
+                    var requested = (int)Math.Min(count, segmentRemaining);
+                    var read = currentStream.Read(buffer, offset, requested);
+                    if (read <= 0) throw new EndOfStreamException("A split InstallShield cabinet segment is truncated.");
+                    offset += read;
+                    count -= read;
+                    totalRead += read;
+                    position += read;
+                    segmentRemaining -= read;
+                }
+                return totalRead;
+            }
+
+            private void OpenNextSegment()
+            {
+                if (currentStream != null)
+                {
+                    currentStream.Dispose();
+                    currentStream = null;
+                }
+                segmentIndex++;
+                if (segmentIndex >= segments.Count)
+                    throw new EndOfStreamException("A split InstallShield cabinet stream ended before its descriptor size.");
+                var segment = segments[segmentIndex];
+                currentStream = new FileStream(segment.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                currentStream.Position = segment.Offset;
+                segmentRemaining = segment.Length;
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing && currentStream != null)
+                {
+                    currentStream.Dispose();
+                    currentStream = null;
+                }
+                base.Dispose(disposing);
+            }
+
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+            public override void SetLength(long value) { throw new NotSupportedException(); }
+            public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
         }
 
         private sealed class Catalog

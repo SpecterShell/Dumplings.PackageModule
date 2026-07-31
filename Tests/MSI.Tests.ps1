@@ -157,6 +157,50 @@ Describe 'MSI builder and install-location parser' {
       ($Actions | Where-Object Action -EQ 'ISInstallScriptStartup').Scheduled | Should -BeTrue
     }
 
+    It 'Should expose Basic MSI compiled InstallScript actions without changing project type' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties       = @{}
+        Tables           = @('Property', 'Binary', 'CustomAction', 'InstallExecuteSequence')
+        SummaryInfo      = [pscustomobject]@{ CreatingApp = 'InstallShield'; Comments = $null }
+        CustomActionRows = @([pscustomobject]@{
+            Action = 'ConfigureProduct'; Type = 1; Source = 'ISSetup.dll'; Target = 'f1'
+          })
+        SequenceRows     = @([pscustomobject]@{
+            Table = 'InstallExecuteSequence'; Action = 'ConfigureProduct'; Condition = 'NOT Installed'; Sequence = 1200
+          })
+      }
+
+      $ProjectType = Get-MsiInstallShieldProjectTypeFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $Actions = Get-MsiInstallShieldScriptActionInfo -StaticTableInfo $StaticTableInfo -ProjectTypeInfo $ProjectType
+
+      $ProjectType.ProjectType | Should -Be 'Basic MSI'
+      $Actions.Action | Should -Be 'ConfigureProduct'
+      $Actions.Kind | Should -Be 'CompiledFunction'
+      $Actions.Target | Should -Be 'f1'
+      $Actions.Sequences.Condition | Should -Be 'NOT Installed'
+    }
+
+    It 'Should distinguish the InstallScript MSI Setup.exe contract from compiled-script evidence' {
+      $ProjectType = [pscustomobject]@{ ProjectType = 'InstallScript MSI' }
+      $Actions = @([pscustomobject]@{
+          Action = 'ISVerifyScriptingRuntime'
+          Sequences = @([pscustomobject]@{
+              Table = 'InstallUISequence'
+              Sequence = 100
+              Condition = 'NOT AFTERREBOOT AND NOT ISSETUPDRIVEN'
+            })
+        })
+
+      $Requirement = Get-MsiInstallShieldLauncherRequirement -ProjectTypeInfo $ProjectType -ScriptActions $Actions
+
+      $Requirement.IsApplicable | Should -BeTrue
+      $Requirement.RequiresSetupExe | Should -BeTrue
+      $Requirement.VerifierAction.Action | Should -Be 'ISVerifyScriptingRuntime'
+      $Requirement.SequenceConditions | Should -Be 'NOT AFTERREBOOT AND NOT ISSETUPDRIVEN'
+      $Requirement.Evidence | Should -Contain 'ISVerifyScriptingRuntime custom action'
+      $Requirement.Warnings | Should -BeNullOrEmpty
+    }
+
     It 'Should classify Chromium enterprise MSIs compiled from WiX source' {
       $StaticTableInfo = [pscustomobject]@{
         Properties       = @{}

@@ -30,9 +30,122 @@ BeforeAll {
     if ($Sha256) { $Arguments.Sha256 = $Sha256 }
     Get-DumplingsTestFixture @Arguments
   }
+
+  function New-TestInstallShieldSpannedCabinet {
+    param ([Parameter(Mandatory)][string]$Path)
+
+    $Payload = [Text.Encoding]::UTF8.GetBytes(('Dumplings split InstallShield cabinet payload. ' * 256))
+    $CompressedStream = [IO.MemoryStream]::new()
+    try {
+      $Deflater = [IO.Compression.DeflateStream]::new($CompressedStream, [IO.Compression.CompressionLevel]::Optimal, $true)
+      try { $Deflater.Write($Payload, 0, $Payload.Length) } finally { $Deflater.Dispose() }
+      $Compressed = $CompressedStream.ToArray()
+    } finally {
+      $CompressedStream.Dispose()
+    }
+    if ($Compressed.Length -gt [uint16]::MaxValue) { throw 'The synthetic InstallShield compressed block is too large.' }
+    $Stored = [byte[]]::new($Compressed.Length + 2)
+    [BitConverter]::GetBytes([uint16]$Compressed.Length).CopyTo($Stored, 0)
+    $Compressed.CopyTo($Stored, 2)
+
+    $Directory = Split-Path -Path $Path -Parent
+    $DescriptorBase = 0x20
+    $TableOffset = 0x100
+    $TableBase = $DescriptorBase + $TableOffset
+    $DescriptorTableOffset = 0x100
+    $RecordSize = 0x57
+    $Header = [byte[]]::new(0x500)
+    $WriteUInt16 = { param([byte[]]$Bytes, [int]$Offset, [uint16]$Value) [BitConverter]::GetBytes($Value).CopyTo($Bytes, $Offset) }
+    $WriteUInt32 = { param([byte[]]$Bytes, [int]$Offset, [uint32]$Value) [BitConverter]::GetBytes($Value).CopyTo($Bytes, $Offset) }
+    $WriteUInt64 = { param([byte[]]$Bytes, [int]$Offset, [uint64]$Value) [BitConverter]::GetBytes($Value).CopyTo($Bytes, $Offset) }
+    $WriteString = {
+      param([byte[]]$Bytes, [int]$Offset, [string]$Value)
+      [Text.Encoding]::Unicode.GetBytes($Value + [char]0).CopyTo($Bytes, $Offset)
+    }
+
+    # data1.hdr contains one compressed split descriptor and one linked alias.
+    & $WriteUInt32 $Header 0 ([uint32]0x28635349)
+    & $WriteUInt32 $Header 4 ([uint32]0x04000C80)
+    & $WriteUInt32 $Header 12 ([uint32]$DescriptorBase)
+    & $WriteUInt32 $Header 16 ([uint32]($Header.Length - $DescriptorBase))
+    & $WriteUInt32 $Header ($DescriptorBase + 0x0C) ([uint32]$TableOffset)
+    & $WriteUInt32 $Header ($DescriptorBase + 0x14) ([uint32]0x1C0)
+    & $WriteUInt32 $Header ($DescriptorBase + 0x18) ([uint32]0x1C0)
+    & $WriteUInt32 $Header ($DescriptorBase + 0x1C) ([uint32]1)
+    & $WriteUInt32 $Header ($DescriptorBase + 0x28) ([uint32]2)
+    & $WriteUInt32 $Header ($DescriptorBase + 0x2C) ([uint32]$DescriptorTableOffset)
+    & $WriteUInt32 $Header $TableBase ([uint32]0x10)
+    & $WriteString $Header ($TableBase + 0x10) 'payload'
+    & $WriteString $Header ($TableBase + 0x30) 'split.bin'
+    & $WriteString $Header ($TableBase + 0x60) 'alias.bin'
+
+    $Digest = [Security.Cryptography.MD5]::HashData($Payload)
+    foreach ($Record in @(
+        @{ Index = 0; NameOffset = 0x30; Flags = 5; LinkPrevious = 0; LinkFlags = 0 }
+        @{ Index = 1; NameOffset = 0x60; Flags = 4; LinkPrevious = 0; LinkFlags = 1 }
+      )) {
+      $Offset = $TableBase + $DescriptorTableOffset + $Record.Index * $RecordSize
+      & $WriteUInt16 $Header $Offset ([uint16]$Record.Flags)
+      & $WriteUInt64 $Header ($Offset + 2) ([uint64]$Payload.Length)
+      & $WriteUInt64 $Header ($Offset + 10) ([uint64]$Stored.Length)
+      & $WriteUInt64 $Header ($Offset + 18) ([uint64]84)
+      $Digest.CopyTo($Header, $Offset + 26)
+      & $WriteUInt32 $Header ($Offset + 58) ([uint32]$Record.NameOffset)
+      & $WriteUInt16 $Header ($Offset + 62) ([uint16]0)
+      & $WriteUInt32 $Header ($Offset + 76) ([uint32]$Record.LinkPrevious)
+      $Header[$Offset + 84] = [byte]$Record.LinkFlags
+      & $WriteUInt16 $Header ($Offset + 85) ([uint16]1)
+    }
+    [IO.File]::WriteAllBytes($Path, $Header)
+
+    # Split the stored Deflate frame after its first length byte. This proves
+    # the logical stream, rather than the decompressor, owns volume traversal.
+    $SplitAt = 1
+    foreach ($Volume in 1, 2) {
+      $Start = $Volume -eq 1 ? 0 : $SplitAt
+      $Count = $Volume -eq 1 ? $SplitAt : $Stored.Length - $SplitAt
+      $Cabinet = [byte[]]::new(84 + $Count)
+      & $WriteUInt32 $Cabinet 0 ([uint32]0x28635349)
+      & $WriteUInt32 $Cabinet 4 ([uint32]0x04000C80)
+      & $WriteUInt32 $Cabinet 28 ([uint32]0)
+      & $WriteUInt32 $Cabinet 32 ([uint32]0)
+      foreach ($Offset in 36, 60) { & $WriteUInt64 $Cabinet $Offset ([uint64]84) }
+      foreach ($Offset in 44, 68) { & $WriteUInt64 $Cabinet $Offset ([uint64]$Payload.Length) }
+      foreach ($Offset in 52, 76) { & $WriteUInt64 $Cabinet $Offset ([uint64]$Count) }
+      [Array]::Copy($Stored, $Start, $Cabinet, 84, $Count)
+      [IO.File]::WriteAllBytes((Join-Path $Directory "data$Volume.cab"), $Cabinet)
+    }
+
+    return [pscustomobject]@{ Payload = $Payload; StoredLength = $Stored.Length }
+  }
 }
 
 Describe 'InstallShield parser' {
+  It 'streams compressed split entries across volumes and resolves linked aliases' {
+    $HeaderPath = Join-Path $TestDrive 'data1.hdr'
+    $Fixture = New-TestInstallShieldSpannedCabinet -Path $HeaderPath
+    $Destination = Join-Path $TestDrive 'spanned-expanded'
+
+    $Result = Expand-InstallShieldCabinet -Path $HeaderPath -DestinationPath $Destination -CollisionAction Error
+
+    $Result | Should -Be (Get-Item -LiteralPath $Destination).FullName
+    [IO.File]::ReadAllBytes((Join-Path $Destination 'payload\split.bin')) | Should -Be $Fixture.Payload
+    [IO.File]::ReadAllBytes((Join-Path $Destination 'payload\alias.bin')) | Should -Be $Fixture.Payload
+  }
+
+  It 'rejects cyclic InstallShield cabinet link chains before opening payload volumes' {
+    $HeaderPath = Join-Path $TestDrive 'data1.hdr'
+    $null = New-TestInstallShieldSpannedCabinet -Path $HeaderPath
+    $Header = [IO.File]::ReadAllBytes($HeaderPath)
+    $FirstDescriptor = 0x20 + 0x100 + 0x100
+    [BitConverter]::GetBytes([uint32]1).CopyTo($Header, $FirstDescriptor + 76)
+    $Header[$FirstDescriptor + 84] = 1
+    [IO.File]::WriteAllBytes($HeaderPath, $Header)
+
+    { Expand-InstallShieldCabinet -Path $HeaderPath -DestinationPath (Join-Path $TestDrive 'cycle') -Name 'split.bin' -CollisionAction Error } |
+      Should -Throw '*link chain contains a cycle*'
+  }
+
   It 'builds one analysis context with one extraction, tree walk, and nested MSI parse' {
     $Fixture = Join-Path $TestDrive 'context-setup.exe'
     $Destination = Join-Path $TestDrive 'context-expanded'
@@ -86,6 +199,10 @@ Describe 'InstallShield parser' {
       $Info.AdvancedUiInfo.Selections.Name | Should -Contain 'SketchUpBase'
       $Info.AdvancedUiInfo.Modes.Name | Should -Be @('Install', 'Maintenance')
       $Info.AdvancedUiInfo.Actions.Type | Should -Contain 'CallInstallScript'
+      $Info.AdvancedUiInfo.InstallScriptEntryPoints | Should -Be @('CheckLanguage', 'SetLanguages')
+      $Info.InstallScriptInfo.InstallEntryPoints | Should -Be @('CheckLanguage', 'SetLanguages')
+      $Info.InstallScriptInfo.SilentSupport | Should -Be 'NotApplicable'
+      $Info.InstallScriptInfo.ParserVersionInfo.AnalysisScope | Should -Be 'EmbeddedAction'
       $Info.AdvancedUiInfo.Events.Event | Should -Contain 'OnEnd'
       $Info.AdvancedUiInfo.AbortConditions.Condition.Children.Type | Should -Contain 'Any'
       $Info.AdvancedUiInfo.PackageArchitectures | Should -Be @('x64')
@@ -360,11 +477,67 @@ PreReq0=First.prq
 
       $Info.Variant | Should -Be 'InstallScript MSI'
       $Info.InstallShieldProjectTypeEvidence.CustomActions | Should -Contain 'ISVerifyScriptingRuntime'
+      $Info.InstallShieldLauncherRequirement.RequiresSetupExe | Should -BeTrue
+      $Info.HasInstallScript | Should -BeFalse
       $MsiInfo.InstallShieldProjectType | Should -Be 'InstallScript MSI'
       $MsiInfo.DisplayName | Should -Be 'Dumplings InstallScript MSI'
       $MsiInfo.DisplayVersion | Should -Be '1.2.3'
       $MsiInfo.InstallShieldScriptActions.Action | Should -Contain 'ISVerifyScriptingRuntime'
+      $MsiInfo.InstallShieldLauncherRequirement.RequiresSetupExe | Should -BeTrue
+      $MsiInfo.InstallShieldLauncherRequirement.SequenceConditions | Should -Contain 'NOT AFTERREBOOT AND NOT ISSETUPDRIVEN'
       ($MsiInfo.InstallShieldScriptActions | Where-Object Action -EQ 'ISVerifyScriptingRuntime').Sequences.Count | Should -BeGreaterThan 0
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should retain InstallScript MSI classification while analyzing its compiled action' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'BuilderDifferential\InstallScriptMSIWithAction\setup.exe'
+    if (-not (Test-Path -LiteralPath $Fixture)) {
+      Set-ItResult -Skipped -Because 'The persistent official scripted InstallScript MSI fixture is unavailable.'
+      return
+    }
+
+    $ExpandedPath = New-TempFolder
+    try {
+      $Info = Get-InstallShieldInfo -Path $Fixture -DestinationPath $ExpandedPath
+      $MsiInfo = $Info.SelectedMsiInfo
+
+      $Info.Variant | Should -Be 'InstallScript MSI'
+      $Info.HasInstallScript | Should -BeTrue
+      $MsiInfo.InstallShieldLauncherRequirement.RequiresSetupExe | Should -BeTrue
+      $MsiInfo.InstallShieldScriptInfo.EntryPoints | Should -Be 'CreateCboContents'
+      $MsiInfo.InstallShieldScriptInfo.Analysis.ParserVersionInfo.AnalysisScope | Should -Be 'EmbeddedAction'
+      ($MsiInfo.InstallShieldScriptActions | Where-Object Action -EQ 'CreateCboContents').Function | Should -Be 'CreateCboContents'
+      ($MsiInfo.InstallShieldScriptActions | Where-Object Action -EQ 'ISVerifyScriptingRuntime').Kind | Should -Be 'RuntimeVerifier'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should recover official Basic MSI InstallScript custom actions from Binary.ISSetup.dll' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'BuilderDifferential\InstallScriptMSIScripted\setup.exe'
+    if (-not (Test-Path -LiteralPath $Fixture)) {
+      Set-ItResult -Skipped -Because 'The persistent official scripted Basic MSI fixture is unavailable.'
+      return
+    }
+
+    $ExpandedPath = New-TempFolder
+    try {
+      $Info = Get-InstallShieldInfo -Path $Fixture -DestinationPath $ExpandedPath
+      $MsiInfo = $Info.SelectedMsiInfo
+
+      $Info.Variant | Should -Be 'Basic MSI'
+      $Info.HasInstallScript | Should -BeTrue
+      $MsiInfo.InstallShieldProjectType | Should -Be 'Basic MSI'
+      $MsiInfo.HasInstallScript | Should -BeTrue
+      $MsiInfo.InstallShieldScriptInfo.BinaryName | Should -Be 'ISSetup.dll'
+      $MsiInfo.InstallShieldScriptInfo.EntryPoints | Should -Be @(
+        'CreateCboContents', 'DllWrapper', 'QueryRegistry', 'ShowRegTestProperty'
+      )
+      $MsiInfo.InstallShieldScriptInfo.Analysis.ParserVersionInfo.AnalysisScope | Should -Be 'EmbeddedAction'
+      ($MsiInfo.InstallShieldScriptActions | Where-Object Action -EQ 'CreateCboContents').Target | Should -Be 'f1'
+      ($MsiInfo.InstallShieldScriptActions | Where-Object Action -EQ 'CreateCboContents').Function | Should -Be 'CreateCboContents'
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -620,6 +793,65 @@ Location=payload\Selected.msi
       }
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should follow an InstallShield 11.5 external-media Setup.ini without scanning sibling files' {
+    $FixtureRoot = Join-Path $Script:FixtureDirectory 'BuilderDifferential\Legacy115\BuilderInstaller'
+    $Fixture = Join-Path $FixtureRoot 'setup.exe'
+    $MsiFixture = Join-Path $FixtureRoot 'InstallShield1150.msi'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $MsiFixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The persistent InstallShield 11.5 external-media fixture is unavailable.'
+      return
+    }
+
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'installshield-115-external-expanded'
+    Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    try {
+      $Info = Get-InstallShieldInfo -Path $Fixture -DestinationPath $ExpandedPath
+      $MsiInfo = Get-InstallShieldMsiInfo -Installer $Info
+
+      $Info.Variant | Should -Be 'Basic MSI'
+      $Info.HasMsi | Should -BeTrue
+      $Info.MsiPayloadSelection.SourceKind | Should -Be 'ExternalSibling'
+      $Info.SetupIniPath | Should -Be 'Setup.ini'
+      $Info.SelectedMsiPath | Should -Be 'InstallShield1150.msi'
+      $Info.MsiFiles | Should -Contain (Get-Item -LiteralPath $MsiFixture).FullName
+      $MsiInfo.Path | Should -Be (Get-Item -LiteralPath $MsiFixture).FullName
+      $MsiInfo.DisplayName | Should -Be 'InstallShield 11.5'
+      $MsiInfo.DisplayVersion | Should -Be '11.50.0000'
+      $MsiInfo.ProductCode | Should -Be '{97033B64-7CE1-428F-BD7F-101D26C9AF9E}'
+      $MsiInfo.UpgradeCode | Should -Be '{474F074C-7A6F-45A7-9550-8D5ECE5938DE}'
+      $MsiInfo.InstallShieldProjectType | Should -Be 'Basic MSI'
+    } finally {
+      Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'Should not substitute an unrelated sibling MSI for a missing Setup.ini package' {
+    $MediaRoot = Join-Path $TestDrive 'external-media-missing-package'
+    $ExpandedPath = Join-Path $TestDrive 'external-media-missing-package-expanded'
+    $null = New-Item -Path $MediaRoot -ItemType Directory -Force
+    $null = New-Item -Path $ExpandedPath -ItemType Directory -Force
+    [IO.File]::WriteAllBytes((Join-Path $MediaRoot 'setup.exe'), [byte[]]@(0x4D, 0x5A))
+    [IO.File]::WriteAllBytes((Join-Path $MediaRoot 'Unrelated.msi'), [byte[]]@(0))
+    [IO.File]::WriteAllText((Join-Path $MediaRoot 'Setup.ini'), @'
+[Startup]
+PackageName=Missing.msi
+
+[Missing.msi]
+Location=payload\Missing.msi
+'@)
+
+    InModuleScope InstallShield -Parameters @{ MediaRoot = $MediaRoot; ExpandedPath = $ExpandedPath } {
+      $Selection = Get-InstallShieldExternalMediaSelection `
+        -InstallerPath (Join-Path $MediaRoot 'setup.exe') -ExtractedPath $ExpandedPath
+
+      $Selection.SelectionMethod | Should -Be 'SetupIniUnresolved'
+      $Selection.SourceKind | Should -Be 'ExternalOrMissing'
+      $Selection.SelectedMsiPath | Should -BeNullOrEmpty
+      $Selection.Warnings | Should -Contain "Setup.ini selects 'Missing.msi', but that MSI path was not extracted."
     }
   }
 

@@ -18,6 +18,13 @@
 #         |   -> old 0x138-byte or stream attributes -> transformed/zlib ranges
 #         `-- plain ANSI/UTF-16 records -> adjacent bounded payloads
 #
+#   Legacy external Basic MSI media (physical sibling files)
+#     +-- setup.exe: InstallShield bootstrapper
+#     +-- Setup.ini
+#     |   +-- [Startup] PackageName -> package section name
+#     |   `-- [PackageName] Location -> exact media-relative MSI path
+#     `-- selected sibling MSI: parsed only after safe exact-path resolution
+#
 # File names and lengths come from decoded records. A nested MSI path is selected
 # from catalog/setup metadata, never a recursive wildcard. Unsupported generation
 # fields remain observed, and malformed next offsets or output paths are rejected.
@@ -1095,8 +1102,9 @@ function Expand-InstallShieldCabinet {
   .DESCRIPTION
     The managed extractor validates the ISc( catalog, every selected volume
     range, Deflate framing, expanded sizes, and MD5 digests. Files are streamed
-    to disk; the complete cabinet entry is not materialized in memory. Split or
-    linked records remain unsupported and fail explicitly.
+    to disk; the complete cabinet entry is not materialized in memory. Split
+    payloads stream across validated numbered-volume ranges, and linked catalog
+    records resolve to the descriptor that owns their stored bytes.
   .PARAMETER Path
     Path to the data*.hdr catalog. The path is resolved before C# is called.
   .PARAMETER DestinationPath
@@ -1148,9 +1156,6 @@ function Expand-InstallShieldCabinet {
     $Targets = [Collections.Generic.Dictionary[int, string]]::new()
     $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($Entry in $Selected) {
-      if ($Entry.IsSplit -or $Entry.LinkFlags -ne 0) {
-        throw "InstallShield cabinet entry '$($Entry.Name)' is split or linked across records and is not supported."
-      }
       if ([long]$Entry.ExpandedSize -gt $MaximumExpandedBytes - $ExpandedBytes) {
         throw 'Selected InstallShield cabinet output exceeds the configured expansion limit.'
       }
@@ -1282,25 +1287,42 @@ function Get-InstallShieldMsiPayloadSelection {
     The extraction root
   .PARAMETER MsiFile
     The extracted MSI candidates
+  .PARAMETER SetupIniFile
+    Optional authoritative Setup.ini file. This supports external-media
+    launchers whose configuration and MSI remain beside setup.exe.
+  .PARAMETER SelectionRoot
+    Root used to resolve Setup.ini package paths. Defaults to ExtractedPath.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)]
     [string]$ExtractedPath,
 
-    [Parameter(Mandatory)]
+    [AllowNull()]
     [AllowEmptyCollection()]
-    [System.IO.FileInfo[]]$MsiFile
+    [System.IO.FileInfo[]]$MsiFile,
+
+    [System.IO.FileInfo]$SetupIniFile,
+
+    [string]$SelectionRoot = $ExtractedPath
   )
 
   $Warnings = [System.Collections.Generic.List[string]]::new()
+  $MsiFile = [IO.FileInfo[]]@($MsiFile | Where-Object { $null -ne $_ })
   # The root Setup.ini is the bootstrapper's primary configuration. A sole
   # nested copy is accepted, but multiple copies are deliberately ambiguous.
-  $SetupIniFiles = @(Get-ChildItem -LiteralPath $ExtractedPath -Filter 'Setup.ini' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName)
+  $SelectionRoot = Resolve-InstallerFileSystemPath -Path $SelectionRoot -PathType Container
+  $SetupIniFiles = if ($SetupIniFile) {
+    @($SetupIniFile)
+  } else {
+    @(Get-ChildItem -LiteralPath $ExtractedPath -Filter 'Setup.ini' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName)
+  }
   $RootSetupIni = @($SetupIniFiles | Where-Object {
-      [System.IO.Path]::GetRelativePath($ExtractedPath, $_.FullName) -ieq 'Setup.ini'
+      [System.IO.Path]::GetRelativePath($SelectionRoot, $_.FullName) -ieq 'Setup.ini'
     })
-  $SetupIni = if ($RootSetupIni.Count -eq 1) {
+  $SetupIni = if ($SetupIniFile) {
+    $SetupIniFile
+  } elseif ($RootSetupIni.Count -eq 1) {
     $RootSetupIni[0]
   } elseif ($SetupIniFiles.Count -eq 1) {
     $SetupIniFiles[0]
@@ -1325,7 +1347,7 @@ function Get-InstallShieldMsiPayloadSelection {
   $RelativeMsiFiles = @($MsiFile | ForEach-Object {
       [pscustomobject]@{
         File         = $_
-        RelativePath = ConvertTo-InstallShieldPayloadPath -Path ([System.IO.Path]::GetRelativePath($ExtractedPath, $_.FullName))
+        RelativePath = ConvertTo-InstallShieldPayloadPath -Path ([System.IO.Path]::GetRelativePath($SelectionRoot, $_.FullName))
       }
     })
   $ConfiguredPaths = @(@($PackageLocation, $PackageName) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
@@ -1355,7 +1377,7 @@ function Get-InstallShieldMsiPayloadSelection {
   $SourceKind = 'None'
   if ($Selected) {
     $SelectionMethod = 'SetupIni'
-    $SourceKind = 'Embedded'
+    $SourceKind = $SelectionRoot -ieq (Resolve-InstallerFileSystemPath -Path $ExtractedPath -PathType Container) ? 'Embedded' : 'ExternalSibling'
   } elseif (-not [string]::IsNullOrWhiteSpace($PackageName)) {
     $SelectionMethod = 'SetupIniUnresolved'
     $SourceKind = 'ExternalOrMissing'
@@ -1372,16 +1394,79 @@ function Get-InstallShieldMsiPayloadSelection {
   }
 
   return [pscustomobject]@{
-    SelectionMethod = $SelectionMethod
-    SourceKind      = $SourceKind
-    SetupIniPath    = $null -eq $SetupIni ? $null : [System.IO.Path]::GetRelativePath($ExtractedPath, $SetupIni.FullName)
-    PackageName     = [string]::IsNullOrWhiteSpace($PackageName) ? $null : $PackageName
-    PackageLocation = [string]::IsNullOrWhiteSpace($PackageLocation) ? $null : $PackageLocation
-    ConfiguredPaths = @($ConfiguredPaths)
-    SelectedMsiPath = $null -eq $Selected ? $null : $Selected.RelativePath
-    Configuration   = $Configuration
-    Warnings        = @($Warnings)
+    SelectionMethod         = $SelectionMethod
+    SourceKind              = $SourceKind
+    SetupIniPath            = $null -eq $SetupIni ? $null : [System.IO.Path]::GetRelativePath($SelectionRoot, $SetupIni.FullName)
+    SetupIniResolvedPath    = $null -eq $SetupIni ? $null : $SetupIni.FullName
+    SelectionRoot           = $SelectionRoot
+    PackageName             = [string]::IsNullOrWhiteSpace($PackageName) ? $null : $PackageName
+    PackageLocation         = [string]::IsNullOrWhiteSpace($PackageLocation) ? $null : $PackageLocation
+    ConfiguredPaths         = @($ConfiguredPaths)
+    SelectedMsiPath         = $null -eq $Selected ? $null : $Selected.RelativePath
+    SelectedMsiResolvedPath = $null -eq $Selected ? $null : $Selected.File.FullName
+    Configuration           = $Configuration
+    Warnings                = @($Warnings)
   }
+}
+
+function Get-InstallShieldExternalMediaSelection {
+  <#
+  .SYNOPSIS
+    Resolve an external-media MSI selected by Setup.ini beside setup.exe.
+  .DESCRIPTION
+    Older InstallShield bootstrap media commonly stores Setup.ini and the MSI as
+    sibling files. Only Startup.PackageName and that section's Location are
+    considered; the directory is never recursively searched for MSI candidates.
+  .PARAMETER InstallerPath
+    Resolved path to the InstallShield setup launcher.
+  .PARAMETER ExtractedPath
+    Existing extraction root used to preserve the normal result contract.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$InstallerPath,
+    [Parameter(Mandatory)][string]$ExtractedPath
+  )
+
+  $MediaRoot = [IO.Path]::GetDirectoryName($InstallerPath)
+  $SetupIniPath = Join-Path $MediaRoot 'Setup.ini'
+  if (-not (Test-Path -LiteralPath $SetupIniPath -PathType Leaf)) { return $null }
+
+  $SetupIniFile = Get-Item -LiteralPath $SetupIniPath -Force
+  $Configuration = Read-InstallShieldIniConfiguration -Path $SetupIniFile.FullName
+  $PackageName = [string](Get-InstallShieldIniValue -Configuration $Configuration -Section 'Startup' -Name 'PackageName')
+  $PackageLocation = if ([string]::IsNullOrWhiteSpace($PackageName)) {
+    $null
+  } else {
+    [string](Get-InstallShieldIniValue -Configuration $Configuration -Section $PackageName -Name 'Location')
+  }
+
+  # Location is authoritative when present; PackageName remains the documented
+  # fallback. Resolve-SafeExtractionPath rejects rooted and traversing paths.
+  $ConfiguredPath = ConvertTo-InstallShieldPayloadPath -Path ($PackageLocation ?? $PackageName)
+  if ([string]::IsNullOrWhiteSpace($ConfiguredPath) -or
+    [Uri]::IsWellFormedUriString($ConfiguredPath, [UriKind]::Absolute)) {
+    return Get-InstallShieldMsiPayloadSelection -ExtractedPath $ExtractedPath -MsiFile ([IO.FileInfo[]]@()) `
+      -SetupIniFile $SetupIniFile -SelectionRoot $MediaRoot
+  }
+
+  try {
+    $CandidatePath = Resolve-SafeExtractionPath -DestinationPath $MediaRoot -RelativePath $ConfiguredPath
+  } catch {
+    $Selection = Get-InstallShieldMsiPayloadSelection -ExtractedPath $ExtractedPath -MsiFile ([IO.FileInfo[]]@()) `
+      -SetupIniFile $SetupIniFile -SelectionRoot $MediaRoot
+    $Selection.Warnings = [string[]]@($Selection.Warnings + "Setup.ini selected an unsafe external package path '$ConfiguredPath': $($_.Exception.Message)")
+    return $Selection
+  }
+
+  [IO.FileInfo[]]$Candidate = if ([IO.Path]::GetExtension($CandidatePath) -ieq '.msi' -and
+    (Test-Path -LiteralPath $CandidatePath -PathType Leaf)) {
+    @(Get-Item -LiteralPath $CandidatePath -Force)
+  } else {
+    @()
+  }
+  return Get-InstallShieldMsiPayloadSelection -ExtractedPath $ExtractedPath -MsiFile $Candidate `
+    -SetupIniFile $SetupIniFile -SelectionRoot $MediaRoot
 }
 
 function Resolve-InstallShieldMsiFile {
@@ -1419,8 +1504,13 @@ function Resolve-InstallShieldMsiFile {
   # A parser-derived Setup.ini selection remains authoritative even when the
   # caller supplied a wildcard; the wildcard is only a review constraint.
   if (-not [string]::IsNullOrWhiteSpace($SelectedRelativePath)) {
+    $SelectedResolvedPath = [string]$Selection.SelectedMsiResolvedPath
     $Selected = @($Item | Where-Object {
-        [System.IO.Path]::GetRelativePath($Installer.ExtractedPath, $_.FullName).Equals($SelectedRelativePath, [System.StringComparison]::OrdinalIgnoreCase)
+        if (-not [string]::IsNullOrWhiteSpace($SelectedResolvedPath)) {
+          $_.FullName -ieq $SelectedResolvedPath
+        } else {
+          [System.IO.Path]::GetRelativePath($Installer.ExtractedPath, $_.FullName) -ieq $SelectedRelativePath
+        }
       })
     if ($Selected.Count -ne 1) { throw "The Setup.ini-selected MSI path was not extracted uniquely: $SelectedRelativePath" }
     if ($NameWasSpecified -and -not ($Selected[0].Name -like $Pattern -or $Selected[0].FullName -like $Pattern -or $SelectedRelativePath -like $Pattern)) {
@@ -1578,13 +1668,14 @@ function Get-InstallShieldMsiInfo {
         Warnings                            = [string[]]@($MsiInfo.Warnings)
         UnresolvedFields                    = [string[]]@($MsiInfo.UnresolvedFields)
         Name                                = $MsiFile.Name
-        SelectedMsiPath                     = [System.IO.Path]::GetRelativePath($Installer.ExtractedPath, $MsiFile.FullName)
+        SelectedMsiPath                     = $Installer.MsiPayloadSelection.SelectedMsiPath ?? [System.IO.Path]::GetRelativePath($Installer.ExtractedPath, $MsiFile.FullName)
         SelectionMethod                     = $SelectionMethod
         PackageArchitecture                 = $MsiInfo.PackageArchitecture
         Template                            = $MsiInfo.Template
         InstallerBuilder                    = $MsiInfo.InstallerBuilder
         InstallShieldProjectType            = $MsiInfo.InstallShieldProjectType
         InstallShieldProjectTypeEvidence    = $MsiInfo.InstallShieldProjectTypeEvidence
+        InstallShieldLauncherRequirement    = $MsiInfo.InstallShieldLauncherRequirement
         SummaryWordCount                    = $MsiInfo.SummaryWordCount
         AllowsInstallWithoutElevation       = $MsiInfo.AllowsInstallWithoutElevation
         InstallShieldScriptActions          = [object[]]@($MsiInfo.InstallShieldScriptActions)
@@ -1755,6 +1846,18 @@ function New-InstallShieldAnalysisContext {
   }
 
   $MsiSelection = Get-InstallShieldMsiPayloadSelection -ExtractedPath $ExtractedPath -MsiFile $MsiFiles
+  if (-not $MsiSelection.Configuration) {
+    # InstallShield 11.x and other external-media launchers keep Setup.ini and
+    # the MSI beside setup.exe. Resolve only the exact configured sibling path;
+    # never widen this into a directory scan or wildcard selection.
+    $ExternalMsiSelection = Get-InstallShieldExternalMediaSelection -InstallerPath $Path -ExtractedPath $ExtractedPath
+    if ($ExternalMsiSelection) {
+      $MsiSelection = $ExternalMsiSelection
+      if ($MsiSelection.SelectedMsiResolvedPath) {
+        $MsiFiles = @($MsiFiles) + @(Get-Item -LiteralPath $MsiSelection.SelectedMsiResolvedPath -Force)
+      }
+    }
+  }
   $SelectedMsiInfo = $null
   if ($MsiSelection.SelectedMsiPath) {
     try {
@@ -1833,11 +1936,18 @@ function Merge-InstallShieldInstallScriptResult {
     Mutable outer InstallShield result.
   .PARAMETER InstallScriptInfo
     Focused compiled-script analysis produced from the same extraction context.
+  .PARAMETER Supplemental
+    Retain the script as nested action evidence without applying its identity or
+    standalone silent-install conclusions to the outer MSI or suite.
   #>
-  param ([Parameter(Mandatory)][psobject]$Result, [Parameter(Mandatory)][psobject]$InstallScriptInfo)
+  param (
+    [Parameter(Mandatory)][psobject]$Result,
+    [Parameter(Mandatory)][psobject]$InstallScriptInfo,
+    [switch]$Supplemental
+  )
 
   $Result.InstallScriptInfo = $InstallScriptInfo
-  if (-not $Result.HasMsi) {
+  if (-not $Supplemental -and -not $Result.HasMsi) {
     $Result.SilentSupport = $InstallScriptInfo.SilentSupport
     $Result.ResponseFileRequirement = $InstallScriptInfo.ResponseFileRequirement
     $Result.SilentSwitches = [string[]]@($InstallScriptInfo.SilentSwitches)
@@ -1852,8 +1962,8 @@ function Merge-InstallShieldInstallScriptResult {
         'MediaShellFolders', 'MediaShortcuts', 'ConditionalMediaShortcuts',
         'ConditionalRegistryAssociationInfo', 'ConditionalProtocols', 'ConditionalFileExtensions',
         'FileExtensions', 'ProtocolAssociations', 'FileExtensionAssociations',
-        'RegistryAssociationInfo', 'ExecutedPayloads', 'FileOperations', 'Shortcuts',
-        'StaticCalls', 'OpcodeCoverage', 'UnsupportedOpcodes'
+        'RegistryAssociationInfo', 'ExecutedPayloads', 'FileOperations', 'DllOperations', 'Shortcuts',
+        'PropertyHandlers', 'StaticCalls', 'OpcodeCoverage', 'UnsupportedOpcodes'
       )) {
       $Result.$PropertyName = $InstallScriptInfo.$PropertyName
     }
@@ -2000,7 +2110,7 @@ function Get-InstallShieldInfo {
       WritesAppsAndFeaturesEntry         = $null
       AppsAndFeaturesProductCode         = $null
       AppsAndFeaturesInstallerType       = $null
-      Warnings                           = [string[]]@($PayloadSelectionWarnings + $InstallShieldCabinetSupport.Warnings + $ClassificationWarnings)
+      Warnings                           = [string[]]@($PayloadSelectionWarnings + $InstallShieldCabinetSupport.Warnings + $ClassificationWarnings + @($SelectedMsiInfo.InstallShieldScriptInfo.Warnings) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
       UnresolvedFields                   = [string[]]@()
       AppsAndFeaturesEntries             = [object[]]@()
       RegistryWrites                     = [object[]]@()
@@ -2024,6 +2134,8 @@ function Get-InstallShieldInfo {
       RegistryAssociationInfo            = $null
       ExecutedPayloads                   = [object[]]@()
       FileOperations                     = [object[]]@()
+      DllOperations                      = [object[]]@()
+      PropertyHandlers                   = [object[]]@()
       Shortcuts                          = [object[]]@()
       StaticCalls                        = [object[]]@()
       OpcodeCoverage                     = [object[]]@()
@@ -2036,7 +2148,7 @@ function Get-InstallShieldInfo {
       InstallShieldCabinetSupport        = $InstallShieldCabinetSupport
       Variant                            = $Variant
       HasMsi                             = [bool]$MsiFiles
-      HasInstallScript                   = [bool]$InxFiles
+      HasInstallScript                   = [bool]($InxFiles -or $SelectedMsiInfo.HasInstallScript)
       MsiFiles                           = @($MsiFiles | Select-Object -ExpandProperty FullName)
       SetupIniPath                       = $MsiPayloadSelection.SetupIniPath
       SetupConfiguration                 = $MsiPayloadSelection.Configuration
@@ -2045,13 +2157,14 @@ function Get-InstallShieldInfo {
       SelectedMsiInfo                    = $SelectedMsiInfo
       InstallShieldProjectType           = $SelectedMsiInfo.InstallShieldProjectType
       InstallShieldProjectTypeEvidence   = $SelectedMsiInfo.InstallShieldProjectTypeEvidence
+      InstallShieldLauncherRequirement   = $SelectedMsiInfo.InstallShieldLauncherRequirement
       PrerequisiteDefinitions            = [object[]]$PrerequisiteDefinitions
       PrerequisiteReferences             = $PrerequisiteReferences
       PrerequisiteEvidence               = $PrerequisiteEvidence
       InxFiles                           = @($InxFiles | Select-Object -ExpandProperty FullName)
       CabFiles                           = @($CabFiles | Select-Object -ExpandProperty FullName)
       SfxFiles                           = @($SfxFiles | Select-Object -ExpandProperty FullName)
-      InstallScriptInfo                  = $null
+      InstallScriptInfo                  = $SelectedMsiInfo.InstallShieldScriptInfo
       SilentSupport                      = $null
       ResponseFileRequirement            = $null
       SilentSwitches                     = [string[]]@()
@@ -2065,11 +2178,20 @@ function Get-InstallShieldInfo {
       $Result = Merge-InstallShieldAdvancedUiResult -Result $Result -AdvancedUiInfo $AdvancedUiInfo
     }
 
-    # Reuse this extraction and analyze setup.inx/setup.iss once. For
-    # InstallScript-only media the script owns ARP and silent behavior. For
-    # InstallScript MSI, retain the script result as supplemental evidence but
-    # keep MSI database identity authoritative.
-    if (-not $AdvancedUiInfo -and $InxFiles -and (Get-Command Get-InstallShieldInstallScriptInfo -ErrorAction SilentlyContinue)) {
+    # Advanced UI CallInstallScript actions name the exact compiled functions
+    # dispatched by suite events. Analyze only those roots and keep suite ARP
+    # identity and command-line behavior authoritative.
+    if ($AdvancedUiInfo -and $AdvancedUiInfo.InstallScriptEntryPoints -and $InxFiles -and (Get-Command Get-InstallShieldInstallScriptInfo -ErrorAction SilentlyContinue)) {
+      try {
+        $InstallScriptInfo = Get-InstallShieldInstallScriptInfo -Installer $Result `
+          -EntryPoint $AdvancedUiInfo.InstallScriptEntryPoints -AnalysisScope EmbeddedAction
+        $Result = Merge-InstallShieldInstallScriptResult -Result $Result -InstallScriptInfo $InstallScriptInfo -Supplemental
+      } catch {
+        $Result.Warnings = [string[]]@($Result.Warnings + "Advanced UI InstallScript action analysis failed: $($_.Exception.Message)")
+      }
+      # Reuse this extraction and analyze setup.inx/setup.iss once for a
+      # standalone InstallScript package, where the script owns ARP and silent behavior.
+    } elseif (-not $AdvancedUiInfo -and $InxFiles -and (Get-Command Get-InstallShieldInstallScriptInfo -ErrorAction SilentlyContinue)) {
       try {
         $InstallScriptInfo = Get-InstallShieldInstallScriptInfo -Installer $Result
         $Result = Merge-InstallShieldInstallScriptResult -Result $Result -InstallScriptInfo $InstallScriptInfo
@@ -3089,6 +3211,21 @@ function Get-InstallShieldAdvancedUiInfo {
     if (-not $WritesArp) { $Warnings.Add('The Advanced UI catalog does not contain both SuiteId and ARPInfo; visible outer ARP ownership is unresolved.') }
     if ($Packages.Count -eq 0) { $Warnings.Add('The Advanced UI catalog contains no package parcels.') }
 
+    # CallInstallScript.Arguments begins with the authored InstallScript
+    # function name. Preserve only literal identifiers; dynamic expressions
+    # remain unresolved rather than being guessed from nearby strings.
+    $InstallScriptEntryPoints = [Collections.Generic.List[string]]::new()
+    foreach ($Action in @($Actions | Where-Object Type -EQ 'CallInstallScript')) {
+      $Arguments = [string]$Action.Attributes['Arguments']
+      $Match = [regex]::Match($Arguments, '^\s*([A-Za-z_][A-Za-z0-9_]*)')
+      if ($Match.Success) {
+        $Function = $Match.Groups[1].Value
+        if ($Function -notin $InstallScriptEntryPoints) { $InstallScriptEntryPoints.Add($Function) }
+      } else {
+        $Warnings.Add("Advanced UI CallInstallScript action '$($Action.Id)' does not contain a literal function name.")
+      }
+    }
+
     $ExecutedPayloads = [Collections.Generic.List[object]]::new()
     foreach ($Package in $Packages) {
       foreach ($Operation in $Package.Operations) {
@@ -3131,6 +3268,7 @@ function Get-InstallShieldAdvancedUiInfo {
       Selections                   = [object[]]$Selections
       Modes                        = [object[]]@($Modes)
       Actions                      = [object[]]@($Actions)
+      InstallScriptEntryPoints     = [string[]]$InstallScriptEntryPoints.ToArray()
       Events                       = [object[]]@($Events)
       AbortConditions              = [object[]]@($AbortConditions)
       Transactions                 = [object[]]@($Transactions)

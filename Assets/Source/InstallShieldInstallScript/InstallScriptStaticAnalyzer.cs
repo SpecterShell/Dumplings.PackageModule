@@ -26,6 +26,11 @@ namespace Dumplings.InstallShield.InstallScript
 
             internal List<string> Strings;
             internal long? Number;
+            // A reference identifies either a bounded structure snapshot or a
+            // primitive value slot stored in MachineState. It is symbolic only;
+            // no host pointer is created.
+            internal string ReferenceIdentity;
+            internal bool IsValueReference;
             internal bool Complete;
 
             internal static Value Unknown(string description)
@@ -47,6 +52,16 @@ namespace Dumplings.InstallShield.InstallScript
                 return value;
             }
 
+            internal static Value FromReference(string identity)
+            {
+                return new Value { ReferenceIdentity = identity, Complete = true };
+            }
+
+            internal static Value FromValueReference(string identity)
+            {
+                return new Value { ReferenceIdentity = identity, IsValueReference = true, Complete = true };
+            }
+
             internal static Value FromStrings(IEnumerable<string> values)
             {
                 var result = new Value { Complete = true };
@@ -62,13 +77,14 @@ namespace Dumplings.InstallShield.InstallScript
 
             internal Value Clone()
             {
-                var result = new Value { Number = Number, Complete = Complete };
+                var result = new Value { Number = Number, ReferenceIdentity = ReferenceIdentity, IsValueReference = IsValueReference, Complete = Complete };
                 result.Strings.AddRange(Strings);
                 return result;
             }
 
             internal string Render()
             {
+                if (!string.IsNullOrEmpty(ReferenceIdentity)) return IsValueReference ? "&value" : "&record";
                 if (Number.HasValue) return Number.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 return string.Join(" | ", Strings.ToArray());
             }
@@ -88,6 +104,8 @@ namespace Dumplings.InstallShield.InstallScript
                 StringVariables = new Dictionary<string, Value>(StringComparer.Ordinal);
                 NumberVariables = new Dictionary<string, Value>(StringComparer.Ordinal);
                 Objects = new Dictionary<string, Dictionary<string, Value>>(StringComparer.Ordinal);
+                ReferencedObjects = new Dictionary<string, Dictionary<string, Value>>(StringComparer.Ordinal);
+                ReferencedValues = new Dictionary<string, Value>(StringComparer.Ordinal);
                 RootCandidates = new List<string> { "HKCR" };
                 LastResult = Value.Unknown("RESULT");
             }
@@ -95,6 +113,9 @@ namespace Dumplings.InstallShield.InstallScript
             internal Dictionary<string, Value> StringVariables;
             internal Dictionary<string, Value> NumberVariables;
             internal Dictionary<string, Dictionary<string, Value>> Objects;
+            internal Dictionary<string, Dictionary<string, Value>> ReferencedObjects;
+            internal Dictionary<string, Value> ReferencedValues;
+            internal int NextReferenceIdentity;
             internal List<string> RootCandidates;
             internal Value LastResult;
 
@@ -106,6 +127,9 @@ namespace Dumplings.InstallShield.InstallScript
                 foreach (var pair in StringVariables) result.StringVariables.Add(pair.Key, pair.Value.Clone());
                 foreach (var pair in NumberVariables) result.NumberVariables.Add(pair.Key, pair.Value.Clone());
                 foreach (var pair in Objects) result.Objects.Add(pair.Key, CloneMembers(pair.Value));
+                foreach (var pair in ReferencedObjects) result.ReferencedObjects.Add(pair.Key, CloneMembers(pair.Value));
+                foreach (var pair in ReferencedValues) result.ReferencedValues.Add(pair.Key, pair.Value.Clone());
+                result.NextReferenceIdentity = NextReferenceIdentity;
                 result.RootCandidates.Clear();
                 result.RootCandidates.AddRange(RootCandidates);
                 result.LastResult = LastResult.Clone();
@@ -168,6 +192,13 @@ namespace Dumplings.InstallShield.InstallScript
             internal Value ReturnValue;
         }
 
+        private sealed class CallBinding
+        {
+            internal Value Value;
+            internal InstallScriptOperand Source;
+            internal string ReferenceIdentity;
+        }
+
         private sealed class Context
         {
             internal InstallScriptProgram Program;
@@ -183,6 +214,7 @@ namespace Dumplings.InstallShield.InstallScript
             internal HashSet<string> WarningSet;
             internal HashSet<string> EffectSet;
             internal Dictionary<int, int> FunctionInvocations;
+            internal Dictionary<int, List<int>> HandlerFunctions;
         }
 
         /// <summary>
@@ -214,14 +246,16 @@ namespace Dumplings.InstallShield.InstallScript
                 MaximumEffects = maximumEffects,
                 WarningSet = new HashSet<string>(StringComparer.Ordinal),
                 EffectSet = new HashSet<string>(StringComparer.Ordinal),
-                FunctionInvocations = new Dictionary<int, int>()
+                FunctionInvocations = new Dictionary<int, int>(),
+                HandlerFunctions = FindHandlerFunctions(program)
             };
-            context.EffectDistances = FindEffectDistances(program, context.RootSetterFunctions, context.LocalizationFunctions);
+            context.EffectDistances = FindEffectDistances(program, context.RootSetterFunctions, context.LocalizationFunctions, context.HandlerFunctions);
             context.RelevantFunctions = new HashSet<int>(context.EffectDistances.Keys);
             if (resources != null)
                 foreach (var pair in resources) context.Resources[pair.Key] = pair.Value ?? new string[0];
 
             AddOpcodeCoverage(context);
+            AddPropertyHandlerEvidence(context);
             var roots = SelectEntryPoints(program, entryPoints);
             foreach (var function in roots)
             {
@@ -299,12 +333,44 @@ namespace Dumplings.InstallShield.InstallScript
             return new HashSet<int>(reachable.Where(index => program.Functions[index].Parameters.Count == 1 && program.Functions[index].Parameters[0] == 0));
         }
 
-        private static Dictionary<int, int> FindEffectDistances(InstallScriptProgram program, HashSet<int> rootSetters, HashSet<int> localizationFunctions)
+        private static Dictionary<int, List<int>> FindHandlerFunctions(InstallScriptProgram program)
+        {
+            var result = new Dictionary<int, List<int>>();
+            foreach (var instruction in program.Functions.SelectMany(function => function.Instructions).Where(item => item.Opcode == 0x002F))
+            {
+                if (instruction.Destination == null || instruction.Destination.Kind != InstallScriptOperandKind.Integer ||
+                    instruction.Operands.Count == 0 || instruction.Operands[0].Kind != InstallScriptOperandKind.Integer)
+                    continue;
+                var handlerId = instruction.Destination.IntegerValue;
+                var functionIndex = instruction.Operands[0].IntegerValue;
+                if (handlerId < 0 || functionIndex < 0 || functionIndex >= program.Functions.Count || !program.Functions[functionIndex].BodyDecoded)
+                    continue;
+                List<int> functions;
+                if (!result.TryGetValue(handlerId, out functions))
+                {
+                    functions = new List<int>();
+                    result.Add(handlerId, functions);
+                }
+                if (!functions.Contains(functionIndex)) functions.Add(functionIndex);
+            }
+            return result;
+        }
+
+        private static Dictionary<int, int> FindEffectDistances(
+            InstallScriptProgram program,
+            HashSet<int> rootSetters,
+            HashSet<int> localizationFunctions,
+            Dictionary<int, List<int>> handlerFunctions)
         {
             var distances = new Dictionary<int, int>();
             foreach (var index in rootSetters.Concat(localizationFunctions)) distances[index] = 0;
             foreach (var function in program.Functions.Where(item => item.BodyDecoded))
             {
+                // A BYREF helper can alter a caller value that later becomes a
+                // registry key, path, or launch argument even when the helper
+                // contains no imported side effect of its own.
+                if (function.ParameterFlags.Any(flags => (flags & 0x02) != 0))
+                    distances[function.Index] = 0;
                 if (function.Instructions.Any(instruction =>
                     instruction.Opcode == 0x0020 && instruction.CallTargetIndex >= 0 && instruction.CallTargetIndex < program.Functions.Count &&
                     IsRelevantImportedOperation(program.Functions[instruction.CallTargetIndex].Name)))
@@ -320,6 +386,7 @@ namespace Dumplings.InstallShield.InstallScript
             {
                 changed = false;
                 foreach (var function in program.Functions.Where(item => item.BodyDecoded))
+                {
                     foreach (var instruction in function.Instructions.Where(item => item.Opcode == 0x0021))
                     {
                         int targetDistance;
@@ -332,6 +399,24 @@ namespace Dumplings.InstallShield.InstallScript
                             changed = true;
                         }
                     }
+                    foreach (var instruction in function.Instructions.Where(item => item.Opcode == 0x0030 && item.Destination != null))
+                    {
+                        List<int> targets;
+                        if (!handlerFunctions.TryGetValue(instruction.Destination.IntegerValue, out targets)) continue;
+                        foreach (var target in targets)
+                        {
+                            int targetDistance;
+                            if (!distances.TryGetValue(target, out targetDistance)) continue;
+                            int current;
+                            var candidate = targetDistance + 1;
+                            if (!distances.TryGetValue(function.Index, out current) || candidate < current)
+                            {
+                                distances[function.Index] = candidate;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
             }
             return distances;
         }
@@ -360,9 +445,10 @@ namespace Dumplings.InstallShield.InstallScript
                 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008,
                 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x000F, 0x0010,
                 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017, 0x0018,
-                0x0019, 0x001D, 0x001E, 0x0020, 0x0021, 0x0023, 0x0024,
-                0x0025, 0x0028, 0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x0031,
-                0x0032, 0x0033, 0x0034, 0x0035, 0x003C
+                0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x0020, 0x0021, 0x0023, 0x0024,
+                0x0025, 0x0028, 0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x002F,
+                0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039,
+                0x003A, 0x003C
             });
             foreach (var group in context.Program.Functions.SelectMany(function => function.Instructions).GroupBy(instruction => instruction.Opcode).OrderBy(group => group.Key))
             {
@@ -372,15 +458,94 @@ namespace Dumplings.InstallShield.InstallScript
                     Count = group.Count(),
                     OpaqueCount = group.Count(instruction => instruction.IsOpaque),
                 Emulation = semantic.Contains(group.Key) ? "Evaluated" :
-                        (group.Key == 0x001A || group.Key == 0x001B || group.Key == 0x001C ||
-                         group.Key == 0x0022 || group.Key == 0x0026 || group.Key == 0x0027 ||
-                         group.Key == 0x002F || group.Key == 0x0030 || (group.Key >= 0x0036 && group.Key <= 0x003A) ||
+                        (group.Key == 0x0022 || group.Key == 0x0026 || group.Key == 0x0027 ||
                          group.Key == 0x003B || group.Key == 0x0129 ? "Structural" : "EvidenceOnly")
                 };
                 context.Result.OpcodeCoverage.Add(evidence);
                 if (evidence.OpaqueCount != 0 || evidence.Emulation == "EvidenceOnly")
                     context.Result.UnsupportedOpcodes.Add("0x" + group.Key.ToString("X4") + " " + first.Operation);
             }
+        }
+
+        private static void AddPropertyHandlerEvidence(Context context)
+        {
+            // InstallShield 11.5 compiler output establishes the 0x003B shape:
+            // the destination identifies a runtime-backed variable, the two
+            // integer operands identify getter/setter functions, and the next
+            // `slot = RESULT` instruction stores the opaque registration handle.
+            // Expose that structure without guessing initial values or invoking
+            // the handlers, which depend on the InstallShield runtime process.
+            foreach (var function in context.Program.Functions.Where(item => item.BodyDecoded))
+            {
+                for (var index = 0; index < function.Instructions.Count; index++)
+                {
+                    var instruction = function.Instructions[index];
+                    if (instruction.Opcode != 0x003B || instruction.Destination == null || instruction.Operands.Count < 2)
+                        continue;
+
+                    var getterIndex = instruction.Operands[0].IntegerValue;
+                    var setterIndex = instruction.Operands[1].IntegerValue;
+                    var getterValid = instruction.Operands[0].Kind == InstallScriptOperandKind.Integer &&
+                        getterIndex >= 0 && getterIndex < context.Program.Functions.Count;
+                    var setterValid = instruction.Operands[1].Kind == InstallScriptOperandKind.Integer &&
+                        setterIndex >= 0 && setterIndex < context.Program.Functions.Count;
+                    var evidence = new InstallScriptPropertyHandlerEvidence
+                    {
+                        Function = function.Name,
+                        Offset = instruction.Offset,
+                        VariableKind = instruction.Destination.Kind.ToString(),
+                        VariableIndex = instruction.Destination.IntegerValue,
+                        GetterFunctionIndex = getterIndex,
+                        GetterFunction = getterValid ? context.Program.Functions[getterIndex].Name : string.Empty,
+                        SetterFunctionIndex = setterIndex,
+                        SetterFunction = setterValid ? context.Program.Functions[setterIndex].Name : string.Empty,
+                        Complete = false
+                    };
+
+                    if (index + 1 < function.Instructions.Count)
+                    {
+                        var assignment = function.Instructions[index + 1];
+                        if (assignment.Opcode == 0x0006 && assignment.Destination != null &&
+                            assignment.Operands.Count == 1 &&
+                            assignment.Operands[0].Kind == InstallScriptOperandKind.UserNumberVariable &&
+                            assignment.Operands[0].EncodedTag == 0x08 && assignment.Operands[0].IntegerValue == 0)
+                        {
+                            evidence.HandleSlotKind = assignment.Destination.Kind.ToString();
+                            evidence.HandleSlotIndex = assignment.Destination.IntegerValue;
+                            evidence.Complete = getterValid && setterValid;
+                        }
+                    }
+
+                    context.Result.PropertyHandlers.Add(evidence);
+                }
+            }
+        }
+
+        private static Dictionary<int, int> FindCatchEndIndexes(InstallScriptFunction function)
+        {
+            var result = new Dictionary<int, int>();
+            var regions = new Stack<Tuple<int, int>>();
+            for (var index = 0; index < function.Instructions.Count; index++)
+            {
+                var opcode = function.Instructions[index].Opcode;
+                if (opcode == 0x0036)
+                {
+                    regions.Push(Tuple.Create(index, -1));
+                    continue;
+                }
+                if (opcode == 0x0037 && regions.Count != 0)
+                {
+                    var region = regions.Pop();
+                    regions.Push(Tuple.Create(region.Item1, index));
+                    continue;
+                }
+                if (opcode == 0x0038 && regions.Count != 0)
+                {
+                    var region = regions.Pop();
+                    if (region.Item2 >= 0) result[region.Item2] = index;
+                }
+            }
+            return result;
         }
 
         private static List<Outcome> ExecuteFunction(
@@ -414,6 +579,7 @@ namespace Dumplings.InstallShield.InstallScript
 
             var frame = BindParameters(function, arguments);
             var labels = new Dictionary<int, int>();
+            var catchEndIndexes = FindCatchEndIndexes(function);
             var branchBaseLabels = new int[function.Instructions.Count];
             var currentLabel = function.LabelIndex;
             for (var index = 0; index < function.Instructions.Count; index++)
@@ -491,6 +657,31 @@ namespace Dumplings.InstallShield.InstallScript
                         outcomes.Add(new Outcome { State = work.State, ReturnValue = Value.Unknown(instruction.Operation) });
                         break;
                     }
+                    if (instruction.Opcode == 0x0036 || instruction.Opcode == 0x0038)
+                    {
+                        // Try and endcatch delimit protected regions. They do
+                        // not alter the successful execution path by themselves.
+                        work.InstructionIndex++;
+                        continue;
+                    }
+                    if (instruction.Opcode == 0x0037)
+                    {
+                        int endIndex;
+                        if (catchEndIndexes.TryGetValue(work.InstructionIndex, out endIndex))
+                        {
+                            // Catch bodies execute only after a runtime exception.
+                            // Imported code is never invoked by this emulator, so
+                            // keep exception-only effects out of normal ARP evidence.
+                            AddWarning(context, "InstallScript catch-only effects were excluded from normal-path metadata.");
+                            work.InstructionIndex = endIndex + 1;
+                        }
+                        else
+                        {
+                            AddWarning(context, "An InstallScript catch region could not be matched to endcatch in " + function.Name + ".");
+                            work.InstructionIndex++;
+                        }
+                        continue;
+                    }
                     if (instruction.Opcode == 0x0023 || instruction.Opcode == 0x0024 || instruction.Opcode == 0x0025)
                     {
                         var returned = instruction.Operands.Count == 0 ? Value.Unknown("void-return") : ReadOperand(work.Frame, work.State, instruction.Operands[0]);
@@ -499,7 +690,6 @@ namespace Dumplings.InstallShield.InstallScript
                     }
                     if (instruction.Opcode == 0x0020 || instruction.Opcode == 0x0021)
                     {
-                        var values = instruction.Operands.Select(operand => ReadOperand(work.Frame, work.State, operand)).ToArray();
                         if (instruction.CallTargetIndex < 0 || instruction.CallTargetIndex >= context.Program.Functions.Count)
                         {
                             work.State.LastResult = Value.Unknown("invalid-call-target");
@@ -507,6 +697,7 @@ namespace Dumplings.InstallShield.InstallScript
                             continue;
                         }
                         var target = context.Program.Functions[instruction.CallTargetIndex];
+                        var values = instruction.Operands.Select(operand => ReadOperand(work.Frame, work.State, operand)).ToArray();
                         RecordCall(context, entryPoint, function, instruction, target, values);
                         if (instruction.Opcode == 0x0020)
                         {
@@ -535,8 +726,9 @@ namespace Dumplings.InstallShield.InstallScript
                             continue;
                         }
 
+                        var bindings = CreateCallBindings(target, instruction.Operands, work.Frame, work.State);
                         var nestedStack = new HashSet<int>(callStack);
-                        var nested = ExecuteFunction(context, target, values, work.State.Clone(), entryPoint, depth + 1, nestedStack);
+                        var nested = ExecuteFunction(context, target, bindings.Select(binding => binding.Value).ToArray(), work.State.Clone(), entryPoint, depth + 1, nestedStack);
                         if (nested.Count == 0)
                         {
                             work.State.LastResult = Value.Unknown("call:" + target.Name);
@@ -556,8 +748,58 @@ namespace Dumplings.InstallShield.InstallScript
                             var resumed = work.Clone();
                             resumed.State = outcome.State;
                             resumed.State.LastResult = outcome.ReturnValue;
+                            ApplyCallBindings(bindings, resumed.Frame, resumed.State);
                             resumed.InstructionIndex++;
                             pending.Enqueue(resumed);
+                        }
+                        break;
+                    }
+
+                    if (instruction.Opcode == 0x002F)
+                    {
+                        // Handler records bind an event identifier to a decoded
+                        // function. The global binding catalog is built once
+                        // before execution, so the instruction itself is a no-op.
+                        work.InstructionIndex++;
+                        continue;
+                    }
+                    if (instruction.Opcode == 0x0030)
+                    {
+                        List<int> handlerIndexes;
+                        if (instruction.Destination == null ||
+                            !context.HandlerFunctions.TryGetValue(instruction.Destination.IntegerValue, out handlerIndexes))
+                        {
+                            work.State.LastResult = Value.Unknown("unresolved-handler");
+                            work.InstructionIndex++;
+                            continue;
+                        }
+
+                        var relevantHandlers = handlerIndexes
+                            .Where(index => context.EffectDistances.ContainsKey(index))
+                            .Take(MaximumNestedOutcomes)
+                            .ToArray();
+                        if (relevantHandlers.Length == 0)
+                        {
+                            work.State.LastResult = Value.Unknown("handler-without-static-effects");
+                            work.InstructionIndex++;
+                            continue;
+                        }
+                        if (handlerIndexes.Count > relevantHandlers.Length)
+                            AddWarning(context, "InstallScript handler alternatives were bounded for event " + instruction.Destination.IntegerValue + ".");
+
+                        foreach (var handlerIndex in relevantHandlers)
+                        {
+                            var target = context.Program.Functions[handlerIndex];
+                            var nestedStack = new HashSet<int>(callStack);
+                            var nested = ExecuteFunction(context, target, new Value[0], work.State.Clone(), entryPoint, depth + 1, nestedStack);
+                            foreach (var outcome in nested.Take(MaximumNestedOutcomes))
+                            {
+                                var resumed = work.Clone();
+                                resumed.State = outcome.State;
+                                resumed.State.LastResult = outcome.ReturnValue;
+                                resumed.InstructionIndex++;
+                                pending.Enqueue(resumed);
+                            }
                         }
                         break;
                     }
@@ -573,6 +815,29 @@ namespace Dumplings.InstallShield.InstallScript
                         instruction.Opcode == 0x0034 || instruction.Opcode == 0x0035)
                     {
                         EvaluateResultOrMemberOperation(instruction, work.Frame, work.State);
+                        work.InstructionIndex++;
+                        continue;
+                    }
+
+                    // InstallScript encodes address creation and pointer
+                    // parameter materialization as different operations. Keep
+                    // the referenced member snapshot in machine state so a
+                    // callee can read it after the caller frame is no longer
+                    // directly addressable.
+                    if (instruction.Opcode == 0x001A || instruction.Opcode == 0x001B || instruction.Opcode == 0x001C)
+                    {
+                        EvaluateReferenceOperation(instruction, work.Frame, work.State);
+                        work.InstructionIndex++;
+                        continue;
+                    }
+
+                    // UseDLL and UnUseDLL consume the encoded destination as a
+                    // path and publish status through RESULT. Record the opaque
+                    // module boundary without loading code into this process.
+                    if (instruction.Opcode == 0x0039 || instruction.Opcode == 0x003A)
+                    {
+                        AddDllOperation(context, entryPoint, function, instruction, work.Frame, work.State);
+                        work.State.LastResult = Value.Unknown(instruction.Opcode == 0x0039 ? "UseDLL-result" : "UnUseDLL-result");
                         work.InstructionIndex++;
                         continue;
                     }
@@ -607,6 +872,73 @@ namespace Dumplings.InstallShield.InstallScript
             return frame;
         }
 
+        private static List<CallBinding> CreateCallBindings(
+            InstallScriptFunction target,
+            IList<InstallScriptOperand> operands,
+            Frame frame,
+            MachineState state)
+        {
+            var result = new List<CallBinding>(operands.Count);
+            for (var index = 0; index < operands.Count; index++)
+            {
+                var source = operands[index];
+                var value = ReadOperand(frame, state, source);
+                var byReference = index < target.ParameterFlags.Count && (target.ParameterFlags[index] & 0x02) != 0;
+                if (!byReference || !IsWritableOperand(source))
+                {
+                    result.Add(new CallBinding { Value = value });
+                    continue;
+                }
+
+                var stored = ReadStoredOperand(frame, state, source);
+                if (stored != null && stored.IsValueReference && !string.IsNullOrEmpty(stored.ReferenceIdentity))
+                {
+                    // Forwarding a BYREF parameter must retain the original
+                    // caller's slot rather than creating a reference to a copy.
+                    result.Add(new CallBinding
+                    {
+                        Value = stored.Clone(),
+                        Source = source,
+                        ReferenceIdentity = stored.ReferenceIdentity
+                    });
+                    continue;
+                }
+
+                var identity = "value-reference:" + state.NextReferenceIdentity++.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                state.ReferencedValues[identity] = value.Clone();
+                result.Add(new CallBinding
+                {
+                    Value = Value.FromValueReference(identity),
+                    Source = source,
+                    ReferenceIdentity = identity
+                });
+            }
+            return result;
+        }
+
+        private static void ApplyCallBindings(IEnumerable<CallBinding> bindings, Frame frame, MachineState state)
+        {
+            foreach (var binding in bindings)
+            {
+                Value value;
+                if (binding.Source == null || string.IsNullOrEmpty(binding.ReferenceIdentity) ||
+                    !state.ReferencedValues.TryGetValue(binding.ReferenceIdentity, out value))
+                    continue;
+                WriteOperand(frame, state, binding.Source, value);
+            }
+        }
+
+        private static bool IsWritableOperand(InstallScriptOperand operand)
+        {
+            if (operand == null) return false;
+            return operand.Kind == InstallScriptOperandKind.LocalStringVariable ||
+                operand.Kind == InstallScriptOperandKind.LocalNumberVariable ||
+                operand.Kind == InstallScriptOperandKind.SystemStringVariable ||
+                operand.Kind == InstallScriptOperandKind.UserStringVariable ||
+                operand.Kind == InstallScriptOperandKind.SystemNumberVariable ||
+                operand.Kind == InstallScriptOperandKind.UserNumberVariable;
+        }
+
         private static bool TryJump(Dictionary<int, int> labels, int baseLabel, int relativeTarget, WorkItem work)
         {
             int instructionIndex;
@@ -621,25 +953,62 @@ namespace Dumplings.InstallShield.InstallScript
         private static Value ReadOperand(Frame frame, MachineState state, InstallScriptOperand operand)
         {
             if (operand == null) return Value.Unknown("missing-operand");
+            Value stored;
             switch (operand.Kind)
             {
                 case InstallScriptOperandKind.Integer: return Value.FromNumber(operand.IntegerValue);
                 case InstallScriptOperandKind.String: return Value.FromString(operand.StringValue);
                 case InstallScriptOperandKind.LocalStringVariable:
-                    return ReadVariable(frame.Strings, operand.IntegerValue, "local-string");
+                    stored = ReadVariable(frame.Strings, operand.IntegerValue, "local-string");
+                    break;
                 case InstallScriptOperandKind.LocalNumberVariable:
-                    return ReadVariable(frame.Numbers, operand.IntegerValue, "local-number");
+                    stored = ReadVariable(frame.Numbers, operand.IntegerValue, "local-number");
+                    break;
                 case InstallScriptOperandKind.SystemStringVariable:
                 case InstallScriptOperandKind.UserStringVariable:
-                    return ReadVariable(state.StringVariables, operand.Kind + ":" + operand.IntegerValue, "global-string");
+                    stored = ReadVariable(state.StringVariables, operand.Kind + ":" + operand.IntegerValue, "global-string");
+                    break;
                 case InstallScriptOperandKind.SystemNumberVariable:
                 case InstallScriptOperandKind.UserNumberVariable:
                     // Generated wrappers place imported/user-call return values
                     // in the runtime RESULT slot, encoded as tag 0x08/index 0.
                     if (operand.EncodedTag == 0x08 && operand.IntegerValue == 0) return state.LastResult.Clone();
-                    return ReadVariable(state.NumberVariables, operand.Kind + ":" + operand.IntegerValue, "global-number");
+                    stored = ReadVariable(state.NumberVariables, operand.Kind + ":" + operand.IntegerValue, "global-number");
+                    break;
                 default: return Value.Unknown(operand.Kind + ":" + operand.IntegerValue);
             }
+            return ResolveValueReference(state, stored);
+        }
+
+        private static Value ReadStoredOperand(Frame frame, MachineState state, InstallScriptOperand operand)
+        {
+            if (operand == null) return null;
+            Value value;
+            switch (operand.Kind)
+            {
+                case InstallScriptOperandKind.LocalStringVariable:
+                    return frame.Strings.TryGetValue(operand.IntegerValue, out value) ? value.Clone() : null;
+                case InstallScriptOperandKind.LocalNumberVariable:
+                    return frame.Numbers.TryGetValue(operand.IntegerValue, out value) ? value.Clone() : null;
+                case InstallScriptOperandKind.SystemStringVariable:
+                case InstallScriptOperandKind.UserStringVariable:
+                    return state.StringVariables.TryGetValue(operand.Kind + ":" + operand.IntegerValue, out value) ? value.Clone() : null;
+                case InstallScriptOperandKind.SystemNumberVariable:
+                case InstallScriptOperandKind.UserNumberVariable:
+                    return state.NumberVariables.TryGetValue(operand.Kind + ":" + operand.IntegerValue, out value) ? value.Clone() : null;
+                default:
+                    return null;
+            }
+        }
+
+        private static Value ResolveValueReference(MachineState state, Value value)
+        {
+            if (value == null || !value.IsValueReference || string.IsNullOrEmpty(value.ReferenceIdentity))
+                return value == null ? Value.Unknown("missing-value") : value;
+            Value referenced;
+            return state.ReferencedValues.TryGetValue(value.ReferenceIdentity, out referenced)
+                ? referenced.Clone()
+                : Value.Unknown("unresolved-value-reference");
         }
 
         private static Value ReadVariable<TKey>(Dictionary<TKey, Value> variables, TKey key, string description)
@@ -651,6 +1020,12 @@ namespace Dumplings.InstallShield.InstallScript
         private static void WriteOperand(Frame frame, MachineState state, InstallScriptOperand operand, Value value)
         {
             if (operand == null) return;
+            var stored = ReadStoredOperand(frame, state, operand);
+            if (stored != null && stored.IsValueReference && !string.IsNullOrEmpty(stored.ReferenceIdentity))
+            {
+                state.ReferencedValues[stored.ReferenceIdentity] = value.Clone();
+                return;
+            }
             switch (operand.Kind)
             {
                 case InstallScriptOperandKind.LocalStringVariable: frame.Strings[operand.IntegerValue] = value.Clone(); break;
@@ -721,6 +1096,69 @@ namespace Dumplings.InstallShield.InstallScript
                 default: result = Value.Unknown("operation-0x" + instruction.Opcode.ToString("X4")); break;
             }
             WriteOperand(frame, state, instruction.Destination, result);
+        }
+
+        private static void EvaluateReferenceOperation(InstallScriptInstruction instruction, Frame frame, MachineState state)
+        {
+            if (instruction.Opcode == 0x001C)
+            {
+                // A pointer-typed parameter is already bound to the local
+                // destination. The prologue materializes it in RESULT for the
+                // generated member-access sequence that follows.
+                state.LastResult = ReadOperand(frame, state, instruction.Destination);
+                return;
+            }
+
+            if (instruction.Opcode == 0x001B)
+            {
+                // The compiler emits `destination = *pointer` as Indirect.
+                // Resolve only symbolic primitive slots created by AddressOf;
+                // structure fields continue through MemberRead/MemberWrite.
+                if (instruction.Destination == null || instruction.Operands.Count == 0)
+                    return;
+                var reference = ReadStoredOperand(frame, state, instruction.Operands[0]);
+                Value value;
+                if (reference != null && reference.IsValueReference &&
+                    !string.IsNullOrEmpty(reference.ReferenceIdentity) &&
+                    state.ReferencedValues.TryGetValue(reference.ReferenceIdentity, out value))
+                    WriteOperand(frame, state, instruction.Destination, value);
+                else
+                    WriteOperand(frame, state, instruction.Destination, Value.Unknown("indirect-unresolved-value"));
+                return;
+            }
+
+            if (instruction.Destination == null || instruction.Operands.Count == 0)
+                return;
+            var source = instruction.Operands[0];
+            var existing = ReadOperand(frame, state, source);
+            if (!string.IsNullOrEmpty(existing.ReferenceIdentity))
+            {
+                WriteOperand(frame, state, instruction.Destination, existing);
+                return;
+            }
+
+            Dictionary<string, Value> members;
+            var sourceStore = GetObjectStore(frame, state, source);
+            if (!sourceStore.TryGetValue(GetOperandIdentity(source), out members))
+            {
+                if (!IsWritableOperand(source))
+                {
+                    WriteOperand(frame, state, instruction.Destination, Value.Unknown("address-of-unresolved-value"));
+                    return;
+                }
+
+                // Primitive AddressOf records a symbolic slot. The slot keeps
+                // the current value and can be read by opcode 0x001B without
+                // creating or dereferencing a native pointer.
+                var valueIdentity = "value-reference:" + state.NextReferenceIdentity++.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                state.ReferencedValues[valueIdentity] = ReadOperand(frame, state, source);
+                WriteOperand(frame, state, instruction.Destination, Value.FromValueReference(valueIdentity));
+                return;
+            }
+
+            var identity = "object-reference:" + state.NextReferenceIdentity++.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            state.ReferencedObjects[identity] = CloneMembers(members);
+            WriteOperand(frame, state, instruction.Destination, Value.FromReference(identity));
         }
 
         private static Value WriteStringCharacter(Value current, Value[] values)
@@ -831,13 +1269,25 @@ namespace Dumplings.InstallShield.InstallScript
         private static void WriteMember(Frame frame, MachineState state, InstallScriptOperand target, Value[] values)
         {
             if (target == null || values.Length < 2 || !values[0].Complete || values[0].Strings.Count != 1) return;
-            var store = GetObjectStore(frame, state, target);
-            var identity = GetOperandIdentity(target);
             Dictionary<string, Value> members;
-            if (!store.TryGetValue(identity, out members))
+            var reference = ReadOperand(frame, state, target);
+            if (!string.IsNullOrEmpty(reference.ReferenceIdentity))
             {
-                members = new Dictionary<string, Value>(StringComparer.Ordinal);
-                store.Add(identity, members);
+                if (!state.ReferencedObjects.TryGetValue(reference.ReferenceIdentity, out members))
+                {
+                    members = new Dictionary<string, Value>(StringComparer.Ordinal);
+                    state.ReferencedObjects.Add(reference.ReferenceIdentity, members);
+                }
+            }
+            else
+            {
+                var store = GetObjectStore(frame, state, target);
+                var identity = GetOperandIdentity(target);
+                if (!store.TryGetValue(identity, out members))
+                {
+                    members = new Dictionary<string, Value>(StringComparer.Ordinal);
+                    store.Add(identity, members);
+                }
             }
             members[values[0].Strings[0]] = values[1].Clone();
         }
@@ -846,10 +1296,13 @@ namespace Dumplings.InstallShield.InstallScript
         {
             if (target == null || values.Length == 0 || !values[0].Complete || values[0].Strings.Count != 1)
                 return Value.Unknown("member-read");
-            var store = GetObjectStore(frame, state, target);
             Dictionary<string, Value> members;
             Value value;
-            return store.TryGetValue(GetOperandIdentity(target), out members) && members.TryGetValue(values[0].Strings[0], out value)
+            var reference = ReadOperand(frame, state, target);
+            var found = !string.IsNullOrEmpty(reference.ReferenceIdentity)
+                ? state.ReferencedObjects.TryGetValue(reference.ReferenceIdentity, out members)
+                : GetObjectStore(frame, state, target).TryGetValue(GetOperandIdentity(target), out members);
+            return found && members.TryGetValue(values[0].Strings[0], out value)
                 ? value.Clone() : Value.Unknown("member:" + values[0].Strings[0]);
         }
 
@@ -860,6 +1313,30 @@ namespace Dumplings.InstallShield.InstallScript
             Dictionary<string, Value> sourceMembers;
             if (!sourceStore.TryGetValue(GetOperandIdentity(source), out sourceMembers)) return;
             GetObjectStore(frame, state, destination)[GetOperandIdentity(destination)] = CloneMembers(sourceMembers);
+        }
+
+        private static void AddDllOperation(
+            Context context,
+            string entryPoint,
+            InstallScriptFunction function,
+            InstallScriptInstruction instruction,
+            Frame frame,
+            MachineState state)
+        {
+            if (!CanAddEffect(context)) return;
+            var path = ReadOperand(frame, state, instruction.Destination);
+            var operation = instruction.Opcode == 0x0039 ? "Load" : "Unload";
+            var identity = "dll\0" + entryPoint + "\0" + function.Index + "\0" + instruction.Offset + "\0" + operation + "\0" + path.Render();
+            if (!context.EffectSet.Add(identity)) return;
+            context.Result.DllOperations.Add(new InstallScriptDllOperation
+            {
+                EntryPoint = entryPoint,
+                Function = function.Name,
+                Offset = instruction.Offset,
+                Operation = operation,
+                Path = path.Render(),
+                Complete = path.Complete && path.Strings.Count == 1
+            });
         }
 
         private static Value Add(Value[] values, bool xorWhenNumeric)
