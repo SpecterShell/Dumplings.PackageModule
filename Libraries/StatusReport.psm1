@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Collect per-task outcome details from lifecycle hooks and render a static
-# status dashboard (status.json and index.html) for the whole runner invocation.
+# Collect per-task outcome details from lifecycle hooks and write a static
+# status dashboard (status.json plus a JavaScript-rendered index.html) for the
+# whole runner invocation.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -161,96 +162,24 @@ function Register-DumplingsTaskStatus {
   (Get-DumplingsTaskStatusStore -Storage $Storage)[$TaskName] = $Record
 }
 
-function ConvertTo-StatusReportEscapedHtml {
+function Get-DumplingsTaskStatusPage {
   <#
   .SYNOPSIS
-    Escape text for embedding into the status dashboard HTML.
+    Return the static task status dashboard page.
+  .DESCRIPTION
+    The page is a static shell that fetches status.json from the same
+    directory at view time and renders it in the browser. Task data is never
+    embedded into the HTML, so the page stays small no matter how many tasks a
+    run covers. All rendering goes through textContent, so report content
+    cannot inject markup into the page.
+  .OUTPUTS
+    The dashboard HTML document.
   #>
   [CmdletBinding()]
   [OutputType([string])]
-  param (
-    [AllowNull()]
-    [AllowEmptyString()]
-    [string]$Text
-  )
+  param ()
 
-  if ([string]::IsNullOrEmpty($Text)) { return '' }
-  return $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;').Replace("'", '&#39;')
-}
-
-function Format-DumplingsTaskStatusHtml {
-  <#
-  .SYNOPSIS
-    Render the status report payload as a self-contained HTML dashboard.
-  .PARAMETER Payload
-    The report payload built by Export-DumplingsTaskStatusReport.
-  #>
-  [CmdletBinding()]
-  [OutputType([string])]
-  param (
-    [Parameter(Mandatory)]
-    [System.Collections.IDictionary]$Payload
-  )
-
-  $Run = $Payload['run']
-  $RepositoryUrl = $null -ne $Run ? [string]$Run['repositoryUrl'] : $null
-  $Commit = $null -ne $Run ? [string]$Run['commit'] : $null
-
-  # Run metadata line
-  $RunLine = [System.Text.StringBuilder]::new()
-  $null = $RunLine.Append("Generated $(ConvertTo-StatusReportEscapedHtml $Payload['generatedAt']) · Stop reason: $(ConvertTo-StatusReportEscapedHtml $Payload['stopReason'])")
-  if ($null -ne $Run) {
-    $null = $RunLine.Append(' · ')
-    if (-not [string]::IsNullOrWhiteSpace([string]$Run['url'])) {
-      $null = $RunLine.Append("<a href=""$(ConvertTo-StatusReportEscapedHtml $Run['url'])"">$(ConvertTo-StatusReportEscapedHtml $Run['workflow']) run #$($Run['runNumber'])</a>")
-    } else {
-      $null = $RunLine.Append("$(ConvertTo-StatusReportEscapedHtml $Run['workflow']) run #$($Run['runNumber'])")
-    }
-    if (-not [string]::IsNullOrWhiteSpace($Commit)) {
-      $null = $RunLine.Append(" ($(ConvertTo-StatusReportEscapedHtml $Commit.Substring(0, [Math]::Min(7, $Commit.Length))))")
-    }
-  }
-
-  # Summary chips and state filter options, in severity order
-  $StateOrder = [ordered]@{ Failed = 0; Blocked = 1; Running = 2; Pending = 3; Skipped = 4; Succeeded = 5 }
-  $SummaryItems = [System.Text.StringBuilder]::new()
-  $StateOptions = [System.Text.StringBuilder]::new('<option value="">All states</option>')
-  $null = $SummaryItems.Append("<li class=""badge"">$($Payload['summary']['total']) tasks</li>")
-  foreach ($StateName in $StateOrder.Keys) {
-    $Count = [int]$Payload['summary'][$StateName.ToLower()]
-    if ($Count -le 0) { continue }
-    $null = $SummaryItems.Append("<li class=""badge state-${StateName}"">${Count} $($StateName.ToLower())</li>")
-    $null = $StateOptions.Append("<option value=""${StateName}"">${StateName} (${Count})</option>")
-  }
-
-  # Task rows
-  $Rows = [System.Text.StringBuilder]::new()
-  foreach ($Task in $Payload['tasks']) {
-    $Name = [string]$Task['name']
-    $State = [string]$Task['state']
-    $NameHtml = ConvertTo-StatusReportEscapedHtml $Name
-    if (-not [string]::IsNullOrWhiteSpace($RepositoryUrl) -and -not [string]::IsNullOrWhiteSpace($Commit)) {
-      $TaskUrl = "${RepositoryUrl}/tree/${Commit}/Tasks/$([uri]::EscapeDataString($Name))"
-      $NameHtml = "<a href=""$(ConvertTo-StatusReportEscapedHtml $TaskUrl)"">${NameHtml}</a>"
-    }
-    $IdentifierHtml = ''
-    if (-not [string]::IsNullOrWhiteSpace([string]$Task['identifier']) -and $Task['identifier'] -cne $Name) {
-      $IdentifierHtml = "<span class=""identifier"">$(ConvertTo-StatusReportEscapedHtml $Task['identifier'])</span>"
-    }
-    $FlagsHtml = ([string[]]$Task['statuses'] | ForEach-Object -Process { "<span class=""flag"">$(ConvertTo-StatusReportEscapedHtml $_)</span>" }) -join ' '
-    $DetailsHtml = [System.Text.StringBuilder]::new()
-    if ($Task['logs'].Count -gt 0) {
-      $LogsHtml = (($Task['logs'] | ForEach-Object -Process { ConvertTo-StatusReportEscapedHtml $_ }) -join "`n")
-      $null = $DetailsHtml.Append("<details><summary>Logs ($($Task['logs'].Count))</summary><pre>${LogsHtml}</pre></details>")
-    }
-    if (-not [string]::IsNullOrWhiteSpace([string]$Task['error'])) {
-      $null = $DetailsHtml.Append("<details class=""error""><summary>Error</summary><pre>$(ConvertTo-StatusReportEscapedHtml $Task['error'])</pre></details>")
-    }
-    $SearchText = (ConvertTo-StatusReportEscapedHtml "$Name $($Task['identifier']) $($Task['version'])").ToLowerInvariant()
-    $null = $Rows.AppendLine("<tr data-state=""${State}"" data-search=""${SearchText}""><td class=""name"">${NameHtml}${IdentifierHtml}</td><td><span class=""badge state-${State}"">${State}</span></td><td class=""version"">$(ConvertTo-StatusReportEscapedHtml $Task['version'])</td><td class=""flags"">${FlagsHtml}</td><td class=""details"">$($DetailsHtml.ToString())</td></tr>")
-  }
-
-  $Template = @'
+  return @'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -266,7 +195,8 @@ a { color: inherit; }
 .meta { opacity: .75; font-size: .9rem; margin: 0 0 1rem; }
 .summary { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; padding: 0; list-style: none; }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .8rem; }
-.controls input, .controls select { padding: .35rem .6rem; font-size: .95rem; border: 1px solid light-dark(#c8c8c8, #555); border-radius: .4rem; background: light-dark(#fff, #1e1e1e); color: inherit; }
+.controls input, .controls select, .controls button { padding: .35rem .6rem; font-size: .95rem; border: 1px solid light-dark(#c8c8c8, #555); border-radius: .4rem; background: light-dark(#fff, #1e1e1e); color: inherit; }
+.controls button { cursor: pointer; }
 .controls input { flex: 1 1 16rem; }
 .controls .count { opacity: .7; font-size: .85rem; }
 table { border-collapse: collapse; width: 100%; font-size: .92rem; }
@@ -293,51 +223,178 @@ details.error summary { color: #cf222e; opacity: 1; }
 </head>
 <body>
 <h1>Dumplings task status</h1>
-<p class="meta">__RUN_LINE__</p>
-<ul class="summary">__SUMMARY_ITEMS__</ul>
+<p class="meta" id="meta">Loading status...</p>
+<ul class="summary" id="summary"></ul>
 <div class="controls">
 <input id="filter" type="search" placeholder="Filter by task, identifier, or version" aria-label="Filter tasks">
-<select id="state" aria-label="Filter by state">__STATE_OPTIONS__</select>
-<span class="count">Showing <span id="shown">__TASK_COUNT__</span> / __TASK_COUNT__</span>
+<select id="state" aria-label="Filter by state"><option value="">All states</option></select>
+<button id="expand-all" type="button" title="Expand the logs of every shown task">Expand all logs</button>
+<button id="collapse-all" type="button">Collapse all logs</button>
+<span class="count">Showing <span id="shown">0</span> / <span id="total">0</span></span>
 </div>
 <table id="tasks">
 <thead><tr><th>Task</th><th>State</th><th>Version</th><th>Flags</th><th>Details</th></tr></thead>
-<tbody>
-__TASK_ROWS__
-</tbody>
+<tbody></tbody>
 </table>
 <p class="footer">Machine-readable data: <a href="status.json">status.json</a></p>
 <script>
 (function () {
-  var q = document.getElementById('filter');
-  var s = document.getElementById('state');
-  var rows = Array.prototype.slice.call(document.querySelectorAll('#tasks tbody tr'));
-  var shown = document.getElementById('shown');
-  function apply() {
-    var text = q.value.toLowerCase();
-    var state = s.value;
-    var visible = 0;
-    for (var i = 0; i < rows.length; i++) {
-      var match = (!state || rows[i].getAttribute('data-state') === state) && (!text || rows[i].getAttribute('data-search').indexOf(text) !== -1);
-      rows[i].style.display = match ? '' : 'none';
-      if (match) { visible++; }
-    }
-    shown.textContent = visible;
+  var STATE_ORDER = ['Failed', 'Blocked', 'Running', 'Pending', 'Skipped', 'Succeeded'];
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) { node.className = className; }
+    if (text !== undefined && text !== null) { node.textContent = text; }
+    return node;
   }
-  q.addEventListener('input', apply);
-  s.addEventListener('change', apply);
+
+  function renderMeta(data) {
+    var meta = document.getElementById('meta');
+    meta.textContent = 'Generated ' + data.generatedAt + ' | Stop reason: ' + data.stopReason;
+    if (!data.run) { return; }
+    meta.appendChild(document.createTextNode(' | '));
+    var runLabel = (data.run.workflow || 'Workflow') + ' run #' + data.run.runNumber;
+    if (data.run.url) {
+      var runLink = el('a', null, runLabel);
+      runLink.href = data.run.url;
+      meta.appendChild(runLink);
+    } else {
+      meta.appendChild(document.createTextNode(runLabel));
+    }
+    if (data.run.commit) {
+      meta.appendChild(document.createTextNode(' (' + data.run.commit.substring(0, 7) + ')'));
+    }
+  }
+
+  function renderSummary(data) {
+    var summary = document.getElementById('summary');
+    summary.appendChild(el('li', 'badge', data.summary.total + ' tasks'));
+    var stateSelect = document.getElementById('state');
+    STATE_ORDER.forEach(function (state) {
+      var count = data.summary[state.toLowerCase()] || 0;
+      if (count <= 0) { return; }
+      summary.appendChild(el('li', 'badge state-' + state, count + ' ' + state.toLowerCase()));
+      var option = el('option', null, state + ' (' + count + ')');
+      option.value = state;
+      stateSelect.appendChild(option);
+    });
+  }
+
+  function renderRows(data) {
+    var tbody = document.querySelector('#tasks tbody');
+    var linkBase = data.run && data.run.repositoryUrl && data.run.commit ? data.run.repositoryUrl + '/tree/' + data.run.commit + '/Tasks/' : null;
+    data.tasks.forEach(function (task) {
+      var row = document.createElement('tr');
+      row.setAttribute('data-state', task.state);
+      row.setAttribute('data-search', ((task.name || '') + ' ' + (task.identifier || '') + ' ' + (task.version || '')).toLowerCase());
+
+      var nameCell = el('td', 'name');
+      if (linkBase) {
+        var nameLink = el('a', null, task.name);
+        nameLink.href = linkBase + encodeURIComponent(task.name);
+        nameCell.appendChild(nameLink);
+      } else {
+        nameCell.appendChild(document.createTextNode(task.name));
+      }
+      if (task.identifier && task.identifier !== task.name) {
+        nameCell.appendChild(el('span', 'identifier', task.identifier));
+      }
+      row.appendChild(nameCell);
+
+      var stateCell = document.createElement('td');
+      stateCell.appendChild(el('span', 'badge state-' + task.state, task.state));
+      row.appendChild(stateCell);
+
+      row.appendChild(el('td', 'version', task.version || ''));
+
+      var flagsCell = el('td', 'flags');
+      (task.statuses || []).forEach(function (flag) {
+        flagsCell.appendChild(el('span', 'flag', flag));
+        flagsCell.appendChild(document.createTextNode(' '));
+      });
+      row.appendChild(flagsCell);
+
+      var detailsCell = el('td', 'details');
+      var logs = task.logs || [];
+      if (logs.length > 0) {
+        var logDetails = document.createElement('details');
+        logDetails.appendChild(el('summary', null, 'Logs (' + logs.length + ')'));
+        logDetails.appendChild(el('pre', null, logs.join('\n')));
+        detailsCell.appendChild(logDetails);
+      }
+      if (task.error) {
+        var errorDetails = document.createElement('details');
+        errorDetails.className = 'error';
+        errorDetails.appendChild(el('summary', null, 'Error'));
+        errorDetails.appendChild(el('pre', null, task.error));
+        detailsCell.appendChild(errorDetails);
+      }
+      row.appendChild(detailsCell);
+
+      tbody.appendChild(row);
+    });
+    document.getElementById('total').textContent = data.summary.total;
+  }
+
+  function bindControls() {
+    var q = document.getElementById('filter');
+    var s = document.getElementById('state');
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#tasks tbody tr'));
+    var shown = document.getElementById('shown');
+    shown.textContent = rows.length;
+    function apply() {
+      var text = q.value.toLowerCase();
+      var state = s.value;
+      var visible = 0;
+      for (var i = 0; i < rows.length; i++) {
+        var match = (!state || rows[i].getAttribute('data-state') === state) && (!text || rows[i].getAttribute('data-search').indexOf(text) !== -1);
+        rows[i].style.display = match ? '' : 'none';
+        if (match) { visible++; }
+      }
+      shown.textContent = visible;
+    }
+    q.addEventListener('input', apply);
+    s.addEventListener('change', apply);
+    function setOpen(details, open) {
+      for (var i = 0; i < details.length; i++) { details[i].open = open; }
+    }
+    document.getElementById('expand-all').addEventListener('click', function () {
+      // Only shown rows are expanded; opening many log sections at once can slow
+      // down the page, so ask first
+      var details = [];
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].style.display === 'none') { continue; }
+        var rowDetails = rows[i].querySelectorAll('details');
+        for (var j = 0; j < rowDetails.length; j++) { details.push(rowDetails[j]); }
+      }
+      if (details.length >= 100 && !window.confirm('This will expand ' + details.length + ' log sections and may slow down the page. Continue?')) { return; }
+      setOpen(details, true);
+    });
+    document.getElementById('collapse-all').addEventListener('click', function () {
+      setOpen(document.querySelectorAll('#tasks details'), false);
+    });
+  }
+
+  fetch('status.json')
+    .then(function (response) {
+      if (!response.ok) { throw new Error('HTTP ' + response.status); }
+      return response.json();
+    })
+    .then(function (data) {
+      renderMeta(data);
+      renderSummary(data);
+      renderRows(data);
+      bindControls();
+    })
+    .catch(function (error) {
+      document.getElementById('meta').textContent = 'Failed to load status.json: ' + error.message +
+        '. If you opened this file from disk, view the published GitHub Pages site instead.';
+    });
 })();
 </script>
 </body>
 </html>
 '@
-
-  return $Template.
-  Replace('__RUN_LINE__', $RunLine.ToString()).
-  Replace('__SUMMARY_ITEMS__', $SummaryItems.ToString()).
-  Replace('__STATE_OPTIONS__', $StateOptions.ToString()).
-  Replace('__TASK_ROWS__', $Rows.ToString().TrimEnd()).
-  Replace('__TASK_COUNT__', [string]$Payload['summary']['total'])
 }
 
 function Export-DumplingsTaskStatusReport {
@@ -347,9 +404,10 @@ function Export-DumplingsTaskStatusReport {
   .DESCRIPTION
     Called from the RunnerStopping lifecycle hook. Every planned task appears in
     the report, including blocked or never-started tasks that have no recorded
-    details. The report consists of a machine-readable status.json and a
-    self-contained index.html written to a Status folder beneath the output
-    directory, ready to be published as a GitHub Pages site.
+    details. The report consists of a machine-readable status.json and a static
+    index.html that fetches status.json at view time, written to a Status
+    folder beneath the output directory, ready to be published as a GitHub
+    Pages site.
   .PARAMETER TaskStates
     The authoritative task-state map owned by Core, keyed by task name with
     values such as Succeeded, Failed, Skipped, Blocked, Running, or Pending.
@@ -442,7 +500,7 @@ function Export-DumplingsTaskStatusReport {
 
   $ReportPath = (New-Item -Path (Join-Path $OutputPath 'Status') -ItemType Directory -Force).FullName
   ConvertTo-Json -InputObject $Payload -Depth 8 -Compress | Set-Content -LiteralPath (Join-Path $ReportPath 'status.json') -Encoding utf8NoBOM
-  Format-DumplingsTaskStatusHtml -Payload $Payload | Set-Content -LiteralPath (Join-Path $ReportPath 'index.html') -Encoding utf8NoBOM
+  Get-DumplingsTaskStatusPage | Set-Content -LiteralPath (Join-Path $ReportPath 'index.html') -Encoding utf8NoBOM
 
   return $ReportPath
 }

@@ -129,12 +129,16 @@ Describe 'Task status report export' {
     $Dependent.version | Should -BeNullOrEmpty
 
     $Html = Get-Content -LiteralPath (Join-Path $ReportPath 'index.html') -Raw
-    $Html | Should -BeLike '*Acme.Widget*'
-    $Html | Should -BeLike '*data-state="Failed"*'
-    $Html | Should -BeLike '*status.json*'
+    $Html | Should -BeLike "*fetch('status.json')*"
+    $Html | Should -BeLike '*id="expand-all"*'
+    $Html | Should -BeLike '*id="collapse-all"*'
+    # Expanding 100 or more log sections asks for confirmation first
+    $Html | Should -BeLike '*details.length >= 100*'
+    # Task data lives only in status.json and is rendered in the browser
+    $Html | Should -Not -BeLike '*Acme.Widget*'
   }
 
-  It 'keeps a single task as a JSON array and escapes HTML content' {
+  It 'keeps a single task as a JSON array and does not embed task data in the page' {
     $Script:TaskStates['Acme.Broken'] = 'Failed'
     $Task = [pscustomobject]@{
       Config = [ordered]@{}
@@ -147,10 +151,11 @@ Describe 'Task status report export' {
     $Json = Get-Content -LiteralPath (Join-Path $ReportPath 'status.json') -Raw | ConvertFrom-Json
     @($Json.tasks).Count | Should -Be 1
     $Json.stopReason | Should -Be 'Completed'
+    # Report content is preserved verbatim in the JSON; the page renders it via textContent
+    $Json.tasks[0].logs[0] | Should -Be '<script>alert(1)</script>'
 
     $Html = Get-Content -LiteralPath (Join-Path $ReportPath 'index.html') -Raw
-    $Html | Should -BeLike '*&lt;script&gt;alert(1)&lt;/script&gt;*'
-    $Html | Should -Not -BeLike '*<script>alert(1)</script>*'
+    $Html | Should -Not -BeLike '*alert(1)*'
   }
 
   It 'writes an empty report when no task was planned' {
