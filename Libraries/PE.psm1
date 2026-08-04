@@ -417,13 +417,32 @@ function Read-PEVersionResourceBlock {
 function Get-PEVersionStringTable {
   <#
   .SYNOPSIS
-    Read named strings from PE version resources
+    Read named strings from PE version resources.
+  .PARAMETER Path
+    Path to the PE image. The function opens and closes the file itself.
+  .PARAMETER Stream
+    Caller-owned, readable, seekable PE stream. Its position is restored by the
+    shared PE resource reader.
+  .PARAMETER Layout
+    Optional PE layout already parsed from Stream. Supplying it avoids parsing
+    the PE headers again.
   #>
   [OutputType([pscustomobject])]
-  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream,
+    [Parameter(ParameterSetName = 'Stream')][psobject]$Layout
+  )
   process {
     $Strings = [ordered]@{}
-    foreach ($Resource in @(Get-PEResourceInfo -Path $Path | Where-Object TypeId -EQ 16)) {
+    # Reuse the caller's layout when a parser already has the PE open. Path
+    # callers retain the original behavior and own no stream after this call.
+    $Resources = if ($PSCmdlet.ParameterSetName -eq 'Stream') {
+      Get-PEResourceInfo -Stream $Stream -Layout $Layout
+    } else {
+      Get-PEResourceInfo -Path $Path
+    }
+    foreach ($Resource in @($Resources | Where-Object TypeId -EQ 16)) {
       $Bytes = Read-PEResourceData -Resource $Resource -MaximumBytes 16777216; $Root = Read-PEVersionResourceBlock -Bytes $Bytes -Offset 0 -Limit $Bytes.Length
       $Pending = [Collections.Generic.Queue[object]]::new(); $Pending.Enqueue($Root)
       while ($Pending.Count) {

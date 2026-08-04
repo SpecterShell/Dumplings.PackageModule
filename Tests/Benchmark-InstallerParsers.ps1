@@ -16,6 +16,7 @@ param (
   [string]$SquirrelPath,
   [string]$BurnPath,
   [string]$MsiPath,
+  [string]$TauriPath,
   [string]$OutputPath
 )
 
@@ -130,6 +131,9 @@ $Results = @(
   }
   if ($MsiPath) {
     Invoke-InstallerParserBenchmark -Name MSI -Path $MsiPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-MsiInstallerInfo -Path `$InstallerPath"
+  }
+  if ($TauriPath) {
+    Invoke-InstallerParserBenchmark -Name TauriExecutable -Path $TauriPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-TauriExecutableInfo -Path `$InstallerPath"
   }
 ) | Where-Object { $null -ne $_ }
 

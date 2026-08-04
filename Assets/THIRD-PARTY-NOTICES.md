@@ -38,6 +38,27 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+## Tauri
+
+Source: <https://github.com/tauri-apps/tauri>
+
+`Libraries/Tauri.psm1` and `Assets/Source/Tauri/TauriExecutableScanner.cs`
+independently implement the generated embedded-asset layout documented by
+Tauri's Apache-2.0/MIT source. No Tauri binary or Rust crate is distributed as
+a PackageModule runtime dependency.
+
+Copyright 2019-2024 Tauri Programme within The Commons Conservancy
+
+## tauri-dumper
+
+Source: <https://github.com/Mas0nShi/tauri-dumper>
+
+tauri-dumper is an MIT-licensed behavioral reference for locating Rust
+pointer-sized asset records. PackageModule does not copy or distribute its code
+and does not invoke its executable.
+
+Copyright (c) 2025 Mas0nShi
+
 ## WiX Toolset DTF 3.14.1
 
 Corresponding source: <https://github.com/wixtoolset/wix3/tree/wix3141rtm/src/DTF>

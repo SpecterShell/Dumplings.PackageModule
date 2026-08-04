@@ -280,14 +280,31 @@ function Get-WinGetInstallerPortableEvidence {
     })
   $ArchitectureInfo = Get-PEArchitectureInfo -Path $Path -RelatedFile $RelatedPEFiles
   $DependencyInfo = Get-PEDependencyInfo -Path $Path -RelatedFile $RelatedFile
+
+  # Tauri applications retain at least one inexpensive framework literal in
+  # normal generated builds. Gate the complete asset-map scan on those markers
+  # so ordinary portable PEs do not pay the decompression-validation cost.
+  $TauriExecutableInfo = $null
+  $TauriMarkerPatterns = @('tauri://localhost', '__TAURI_INTERNALS__', '__TAURI_BUNDLE_TYPE_VAR_')
+  foreach ($MarkerPattern in $TauriMarkerPatterns) {
+    if (@(Find-BinaryPattern -Path $Path -Pattern ([Text.Encoding]::ASCII.GetBytes($MarkerPattern)) -Maximum 1).Count -gt 0) {
+      try { $TauriExecutableInfo = Get-TauriExecutableInfo -Path $Path -ErrorAction Stop } catch { }
+      break
+    }
+  }
+  $Warnings = [Collections.Generic.List[string]]::new()
+  foreach ($Warning in @($ArchitectureInfo.Warnings) + @($DependencyInfo.Warnings) + @($TauriExecutableInfo.Warnings)) {
+    if (-not [string]::IsNullOrWhiteSpace($Warning)) { $Warnings.Add($Warning) }
+  }
   [pscustomobject]@{
     ArchitectureInfo                = $ArchitectureInfo
     DependencyInfo                  = $DependencyInfo
+    TauriExecutableInfo             = $TauriExecutableInfo
     RecommendedWinGetArchitecture   = $ArchitectureInfo.RecommendedWinGetArchitecture
     RecommendedWinGetArchitectures  = $ArchitectureInfo.RecommendedWinGetArchitectures
     RecommendedPackageDependencies  = $DependencyInfo.RecommendedPackageDependencies
     RecommendedPackageDependencyIds = $DependencyInfo.RecommendedPackageDependencyIds
-    Warnings                        = @($ArchitectureInfo.Warnings + $DependencyInfo.Warnings)
+    Warnings                        = $Warnings.ToArray()
   }
 }
 
