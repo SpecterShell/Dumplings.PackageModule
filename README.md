@@ -109,6 +109,7 @@ The logical model stores authored values, not WinGet-generated default switches 
 - `WebDriver.psm1` provides leased Edge/Firefox sessions shared across concurrent tasks.
 - `Playwright.psm1` provides a separately leased Patchright/Playwright page and browser context. It uses installed Edge for ordinary sessions and installed Chrome for stealth sessions, restores the pinned Patchright driver runtime, and synchronously unwraps tasks without registering PowerShell as an asynchronous callback.
 - `MessageQueue.psm1`, `Telegram.psm1`, and `Matrix.psm1` provide per-target queues, coalescing, splitting, rate limiting, and session updates.
+- `StatusReport.psm1` records per-task outcomes from the `AfterTask` hook and merges them with Core's authoritative task states in the `RunnerStopping` hook, writing a static status dashboard (`Outputs/Status/index.html` and `status.json`) that the Automation workflow publishes to GitHub Pages.
 - `WinGetARP.psm1` collects and matches Apps & Features evidence, including MSI ownership scope evidence.
 - `TextContent.psm1` and `Format.psm1` normalize release-note HTML, Markdown, tables, Unicode whitespace, and validator-blocked control characters.
 - `WinGetGitHubRepo.psm1` and `WinGetLocalRepo.psm1` implement remote and local manifest repository workflows.
