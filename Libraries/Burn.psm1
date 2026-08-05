@@ -1,16 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
-# Format sources: https://github.com/wixtoolset/wix
-# Burn binary structure consumed here (section-relative, LE integers):
+# Format sources:
+# - https://github.com/wixtoolset/wix/blob/main/src/wix/WixToolset.Core.Burn/Bundles/BurnCommon.cs
+# - https://github.com/wixtoolset/wix/blob/main/src/wix/WixToolset.Core.Burn/Bundles/BurnReader.cs
+# - https://github.com/wixtoolset/wix/blob/main/src/wix/WixToolset.Core.Burn/CommandLine/ExtractSubcommand.cs
+# Burn binary structure consumed here (section-relative, little-endian integers):
 #
 #   PE bundle
-#   +-- .wixburn: magic 00 43 F1 00 (uint32 LE 0x00F14300), version,
-#   |   bundle GUID, StubSize,
-#   |   signature fields, container format/count, container-size[u32]*
-#   `-- [StubSize] UX CAB -> entry "0" BurnManifest XML -> attached containers
+#   +-- .wixburn
+#   |   Offset  Size  Field
+#   |   0x00       4  Magic: 00 43 F1 00 (uint32 0x00F14300)
+#   |   0x04       4  Format version (2)
+#   |   0x08      16  Bundle GUID
+#   |   0x18       4  StubSize -> absolute UX CAB offset
+#   |   0x1C      12  original checksum/signature metadata
+#   |   0x28       4  container format (1 = CAB)
+#   |   0x2C       4  container count, including UX
+#   |   0x30     4*N  UX size followed by attached-container sizes
+#   +-- [StubSize, StubSize + UXSize) UX CAB
+#   |   +-- entry "0" -> UX\manifest.xml
+#   |   `-- u* entries -> UX\<Payload.FilePath>
+#   +-- optional padding and original engine signature -> EngineSize
+#   +-- [EngineSize, ...] attached CAB slots in header order
+#   |   `-- a* entries -> <Container.Id>\<Payload.FilePath>
+#   `-- optional current Authenticode signature after attached containers
 #
-# Container sizes frame exact sequential ranges. The XML chain, package
-# conditions, and registration records determine scope and visible ARP ownership;
-# physical package order alone does not.
+# Every CAB is exposed through an exact declared range. BurnManifest XML maps
+# opaque CAB source IDs to logical output paths and identifies detached/external
+# payloads whose bytes are not present in the bundle.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -47,25 +63,7 @@ function Import-Assembly {
 
 Import-Assembly
 
-# Constants
-$IMAGE_DOS_HEADER_SIZE = 64
-$IMAGE_DOS_HEADER_OFFSET_MAGIC = 0
-$IMAGE_DOS_HEADER_OFFSET_NTHEADER = 60
-$IMAGE_DOS_SIGNATURE = 0x5A4D
-
-$IMAGE_NT_HEADER_SIZE = 24
-$IMAGE_NT_HEADER_OFFSET_SIGNATURE = 0
-$IMAGE_NT_HEADER_OFFSET_MACHINE = 4
-$IMAGE_NT_HEADER_OFFSET_NUMBEROFSECTIONS = 6
-$IMAGE_NT_HEADER_OFFSET_SIZEOFOPTIONALHEADER = 20
-$IMAGE_NT_SIGNATURE = 0x00004550
-
-$IMAGE_SECTION_HEADER_SIZE = 40
-$IMAGE_SECTION_HEADER_OFFSET_NAME = 0
-$IMAGE_SECTION_HEADER_OFFSET_SIZEOFRAWDATA = 16
-$IMAGE_SECTION_HEADER_OFFSET_POINTERTORAWDATA = 20
-$IMAGE_SECTION_WIXBURN_NAME = 0x6E7275627869772E # ".wixburn" as qword
-
+# .wixburn field offsets are relative to the section's raw file range.
 $BURN_SECTION_OFFSET_MAGIC = 0
 $BURN_SECTION_OFFSET_VERSION = 4
 $BURN_SECTION_OFFSET_BUNDLEGUID = 8
@@ -76,8 +74,11 @@ $BURN_SECTION_OFFSET_ORIGINALSIGNATURESIZE = 36
 $BURN_SECTION_OFFSET_FORMAT = 40
 $BURN_SECTION_OFFSET_COUNT = 44
 $BURN_SECTION_OFFSET_UXSIZE = 48
+$BURN_SECTION_MIN_SIZE = 52
 $BURN_SECTION_MAGIC = 0x00f14300
 $BURN_SECTION_VERSION = 0x00000002
+$BURN_MAXIMUM_CONTAINER_COUNT = 65536
+$BURN_MAXIMUM_CABINET_ENTRIES = 65536
 
 function Get-BurnEngineInfo {
   <#
@@ -103,117 +104,121 @@ function Get-BurnEngineInfo {
   )
 
   process {
-    # Open file stream
-    $Stream = switch ($PSCmdlet.ParameterSetName) {
-      'Path' { [System.IO.File]::OpenRead((Get-Item -Path $Path -Force).FullName) }
-      'Stream' { $Stream }
-      default { throw 'Invalid parameter set.' }
+    $OwnsStream = $PSCmdlet.ParameterSetName -eq 'Path'
+    if ($OwnsStream) {
+      $Path = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+      $Stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     }
-    $Reader = [System.IO.BinaryReader]::new($Stream)
+    if (-not $Stream.CanRead -or -not $Stream.CanSeek) { throw 'Burn parsing requires a readable, seekable stream.' }
+    $OriginalPosition = $Stream.Position
 
     try {
-      # Validate the PE structure in file order before locating the format-specific section.
-      # Every following offset is absolute in the original bundle stream.
-      # DOS header
-      $Stream.Seek(0, 'Begin') | Out-Null
-      $DosHeader = $Reader.ReadBytes($Script:IMAGE_DOS_HEADER_SIZE)
-      if ([System.BitConverter]::ToUInt16($DosHeader, $Script:IMAGE_DOS_HEADER_OFFSET_MAGIC) -ne $Script:IMAGE_DOS_SIGNATURE) { throw "Not a valid DOS executable (missing 'MZ' signature)." }
-      $PEOffset = [System.BitConverter]::ToUInt32($DosHeader, $Script:IMAGE_DOS_HEADER_OFFSET_NTHEADER)
+      # Shared PE parsing validates DOS/NT headers, section ranges, and the
+      # current Authenticode certificate directory without duplicating PE code.
+      $PELayout = Get-PELayout -Stream $Stream
+      if (-not $PELayout) { throw 'The file is not a valid PE image.' }
+      $WixBurnSections = @($PELayout.Sections | Where-Object Name -CEQ '.wixburn')
+      if ($WixBurnSections.Count -ne 1) { throw 'Missing or ambiguous .wixburn section. Not a valid WiX Burn installer.' }
+      $WixBurnSection = $WixBurnSections[0]
+      [long]$WixBurnDataOffset = $WixBurnSection.RawOffset
+      [long]$WixBurnRawDataSize = $WixBurnSection.RawSize
+      if ($WixBurnRawDataSize -lt $Script:BURN_SECTION_MIN_SIZE) { throw '.wixburn section too small. Invalid installer.' }
+      if ($WixBurnDataOffset -lt 0 -or $WixBurnRawDataSize -gt $Stream.Length - $WixBurnDataOffset) { throw '.wixburn section range is outside the installer.' }
 
-      # NT header
-      $Stream.Seek($PEOffset, 'Begin') | Out-Null
-      $NTHeader = $Reader.ReadBytes($Script:IMAGE_NT_HEADER_SIZE)
-      if ([System.BitConverter]::ToUInt32($NTHeader, $Script:IMAGE_NT_HEADER_OFFSET_SIGNATURE) -ne $Script:IMAGE_NT_SIGNATURE) { throw 'Not a valid PE executable (missing NT signature).' }
-      $MachineType = [System.BitConverter]::ToUInt16($NTHeader, $Script:IMAGE_NT_HEADER_OFFSET_MACHINE)
-      $Sections = [System.BitConverter]::ToUInt16($NTHeader, $Script:IMAGE_NT_HEADER_OFFSET_NUMBEROFSECTIONS)
-      $OptionalHeaderSize = [System.BitConverter]::ToUInt16($NTHeader, $Script:IMAGE_NT_HEADER_OFFSET_SIZEOFOPTIONALHEADER)
-      $FirstSectionOffset = $PEOffset + $Script:IMAGE_NT_HEADER_SIZE + $OptionalHeaderSize
-
-      # Find exactly the section whose eight-byte name is .wixburn; payload strings elsewhere are
-      # not sufficient Burn evidence.
-      $WixBurnSectionIndex = -1
-      $WixBurnSectionBytes = $null
-      $Stream.Seek($FirstSectionOffset, 'Begin') | Out-Null
-      for ($i = 0; $i -lt $Sections; $i++) {
-        $SectionBytes = $Reader.ReadBytes($Script:IMAGE_SECTION_HEADER_SIZE)
-        if ([System.BitConverter]::ToUInt64($SectionBytes, $Script:IMAGE_SECTION_HEADER_OFFSET_NAME) -eq $Script:IMAGE_SECTION_WIXBURN_NAME) {
-          $WixBurnSectionIndex = $i
-          $WixBurnSectionBytes = $SectionBytes
-          break
-        }
-      }
-      if ($WixBurnSectionIndex -eq -1) { throw 'Missing .wixburn section. Not a WiX Burn installer.' }
-
-      $WixBurnRawDataSize = [System.BitConverter]::ToUInt32($WixBurnSectionBytes, $Script:IMAGE_SECTION_HEADER_OFFSET_SIZEOFRAWDATA)
-      $WixBurnDataOffset = [System.BitConverter]::ToUInt32($WixBurnSectionBytes, $Script:IMAGE_SECTION_HEADER_OFFSET_POINTERTORAWDATA)
-      $BURN_SECTION_MIN_SIZE = $Script:BURN_SECTION_OFFSET_UXSIZE
-      if ($WixBurnRawDataSize -lt $BURN_SECTION_MIN_SIZE) { throw '.wixburn section too small. Invalid installer.' }
-      $WixBurnMaxContainers = ($WixBurnRawDataSize - $Script:BURN_SECTION_OFFSET_UXSIZE) / 4
-
-      # Read .wixburn section raw data
-      $Stream.Seek($WixBurnDataOffset, 'Begin') | Out-Null
-      $WixBurnBytes = $Reader.ReadBytes($WixBurnRawDataSize)
-
-      # Validate the Burn section generation and container format before reading its variable-size
-      # container-size array.
-      $magic = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_MAGIC)
-      if ($magic -ne $Script:BURN_SECTION_MAGIC) { throw 'Invalid WiX Burn magic number.' }
-      $Version = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_VERSION)
+      # Read only the fixed prefix first. The declared count then determines the
+      # exact number of uint32 size records needed from the section.
+      $WixBurnPrefix = Read-BinaryBytes -Stream $Stream -Offset $WixBurnDataOffset -Count $Script:BURN_SECTION_MIN_SIZE
+      $Magic = [BitConverter]::ToUInt32($WixBurnPrefix, $Script:BURN_SECTION_OFFSET_MAGIC)
+      if ($Magic -ne $Script:BURN_SECTION_MAGIC) { throw 'Invalid WiX Burn magic number.' }
+      $Version = [BitConverter]::ToUInt32($WixBurnPrefix, $Script:BURN_SECTION_OFFSET_VERSION)
       if ($Version -ne $Script:BURN_SECTION_VERSION) { throw "Unsupported WiX Burn section version: $Version" }
-      $Format = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_FORMAT)
-      if ($Format -ne 1) { throw "Unknown container format: $Format" }
+      $Format = [BitConverter]::ToUInt32($WixBurnPrefix, $Script:BURN_SECTION_OFFSET_FORMAT)
+      if ($Format -ne 1) { throw "Unknown Burn container format: $Format" }
+      [uint32]$ContainerCount = [BitConverter]::ToUInt32($WixBurnPrefix, $Script:BURN_SECTION_OFFSET_COUNT)
+      [long]$MaximumSectionContainers = [Math]::Floor(($WixBurnRawDataSize - $Script:BURN_SECTION_OFFSET_UXSIZE) / 4)
+      if ($ContainerCount -gt $MaximumSectionContainers -or $ContainerCount -gt $Script:BURN_MAXIMUM_CONTAINER_COUNT) { throw 'The Burn container count exceeds the section or parser limit.' }
+      [int]$BurnHeaderSize = $Script:BURN_SECTION_OFFSET_UXSIZE + ([int]$ContainerCount * 4)
+      $WixBurnBytes = Read-BinaryBytes -Stream $Stream -Offset $WixBurnDataOffset -Count $BurnHeaderSize
 
-      $BundleCode = [Guid]::new([byte[]]$WixBurnBytes[$Script:BURN_SECTION_OFFSET_BUNDLEGUID..($Script:BURN_SECTION_OFFSET_BUNDLEGUID + 15)])
-      $StubSize = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_STUBSIZE)
-      $OriginalChecksum = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_ORIGINALCHECKSUM)
-      $OriginalSignatureOffset = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_ORIGINALSIGNATUREOFFSET)
-      $OriginalSignatureSize = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_ORIGINALSIGNATURESIZE)
-      $ContainerCount = [System.BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_COUNT)
-      if ($ContainerCount -gt $WixBurnMaxContainers) { throw 'Container count exceeds maximum. Corrupt installer.' }
+      $BundleGuidBytes = [byte[]]::new(16)
+      [Array]::Copy($WixBurnBytes, $Script:BURN_SECTION_OFFSET_BUNDLEGUID, $BundleGuidBytes, 0, $BundleGuidBytes.Length)
+      $BundleCode = [Guid]::new($BundleGuidBytes)
+      [long]$StubSize = [BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_STUBSIZE)
+      $OriginalChecksum = [BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_ORIGINALCHECKSUM)
+      [long]$OriginalSignatureOffset = [BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_ORIGINALSIGNATUREOFFSET)
+      [long]$OriginalSignatureSize = [BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_ORIGINALSIGNATURESIZE)
+      if ($StubSize -le 0 -or $StubSize -gt $Stream.Length) { throw 'The Burn stub size is outside the installer.' }
 
-      $AttachedContainers = @()
-      $UXSize = 0
-      if ($ContainerCount -gt 0) {
-        for ($j = 0; $j -lt $ContainerCount; $j++) {
-          $SizeOffset = $Script:BURN_SECTION_OFFSET_UXSIZE + ($j * 4)
-          $Size = [System.BitConverter]::ToUInt32($WixBurnBytes, $SizeOffset)
-          $AttachedContainers += [pscustomobject]@{ Index = $j; Size = $Size }
-        }
-        $UXSize = $AttachedContainers[0].Size
+      $CertificateDirectory = $PELayout.DataDirectories['Certificate']
+      [long]$CurrentSignatureOffset = if ($CertificateDirectory -and $CertificateDirectory.Size -gt 0 -and $CertificateDirectory.Offset -ge 0) { $CertificateDirectory.Offset } else { 0 }
+      [long]$CurrentSignatureSize = if ($CurrentSignatureOffset -gt 0) { $CertificateDirectory.Size } else { 0 }
+      if ($CurrentSignatureOffset -gt 0 -and $CurrentSignatureSize -gt $Stream.Length - $CurrentSignatureOffset) { throw 'The current Authenticode signature range is outside the installer.' }
+
+      $ContainerSizes = [Collections.Generic.List[long]]::new([int]$ContainerCount)
+      for ($Index = 0; $Index -lt $ContainerCount; $Index++) {
+        [long]$Size = [BitConverter]::ToUInt32($WixBurnBytes, $Script:BURN_SECTION_OFFSET_UXSIZE + ($Index * 4))
+        if ($Size -le 0) { throw "Burn container $Index has an invalid size." }
+        $ContainerSizes.Add($Size)
       }
+      [long]$UXSize = $ContainerCount -gt 0 ? $ContainerSizes[0] : 0
+      if ($UXSize -gt $Stream.Length - $StubSize) { throw 'The Burn UX container range is outside the installer.' }
+      [long]$UXEnd = $StubSize + $UXSize
+      if ($CurrentSignatureOffset -gt 0 -and $CurrentSignatureOffset -lt $UXEnd) { throw 'The current Authenticode signature overlaps the Burn UX container.' }
 
-      # Prefer the original Authenticode boundary. Unsigned/single-container bundles fall back to
-      # the source-defined stub plus UX extent.
-      # Calculate Engine Size
-      $EngineSize = 0
-      if ($OriginalSignatureOffset -gt 0) {
-        $EngineSize = $OriginalSignatureOffset + $OriginalSignatureSize
-      } elseif ($ContainerCount -lt 2) {
-        # Fallback: use stub + UX container
-        $EngineSize = $StubSize + $UXSize
+      # Match WiX BurnCommon: attached containers begin after the preserved
+      # original engine signature, or after the current signature for a
+      # UX-only bundle, otherwise immediately after the UX cabinet.
+      [long]$EngineSize = if ($OriginalSignatureOffset -gt 0) {
+        if ($OriginalSignatureOffset -lt $UXEnd) { throw 'The original Burn signature overlaps the UX container.' }
+        if ($OriginalSignatureSize -gt $Stream.Length - $OriginalSignatureOffset) { throw 'The original Burn signature range is outside the installer.' }
+        $OriginalSignatureOffset + $OriginalSignatureSize
+      } elseif ($CurrentSignatureOffset -gt 0 -and $ContainerCount -lt 2) {
+        $CurrentSignatureOffset + $CurrentSignatureSize
+      } else {
+        $UXEnd
       }
+      if ($EngineSize -lt $UXEnd -or $EngineSize -gt $Stream.Length) { throw 'The Burn engine boundary is inconsistent with the UX container.' }
 
-      # Return metadata
-      [PSCustomObject]@{
+      $Containers = [Collections.Generic.List[object]]::new([int]$ContainerCount)
+      [long]$AttachedOffset = $EngineSize
+      for ($Index = 0; $Index -lt $ContainerCount; $Index++) {
+        [long]$Offset = $Index -eq 0 ? $StubSize : $AttachedOffset
+        [long]$Size = $ContainerSizes[$Index]
+        if ($Size -gt $Stream.Length - $Offset) { throw "Burn container $Index extends beyond the installer." }
+        $Containers.Add([pscustomobject][ordered]@{
+            Index  = $Index
+            Kind   = $Index -eq 0 ? 'UX' : 'Attached'
+            Offset = $Offset
+            Size   = $Size
+          })
+        if ($Index -gt 0) { $AttachedOffset += $Size }
+      }
+      if ($CurrentSignatureOffset -gt 0 -and $ContainerCount -gt 1 -and $AttachedOffset -gt $CurrentSignatureOffset) { throw 'The attached Burn containers overlap the current Authenticode signature.' }
+
+      [pscustomobject][ordered]@{
         Path                    = $Path
-        MachineType             = $MachineType
+        MachineType             = $PELayout.Machine
         BundleCode              = $BundleCode
         Version                 = $Version
         StubSize                = $StubSize
+        UXAddress               = $StubSize
+        UXSize                  = $UXSize
         OriginalChecksum        = $OriginalChecksum
         OriginalSignatureOffset = $OriginalSignatureOffset
         OriginalSignatureSize   = $OriginalSignatureSize
+        CurrentSignatureOffset  = $CurrentSignatureOffset
+        CurrentSignatureSize    = $CurrentSignatureSize
         ContainerCount          = $ContainerCount
-        AttachedContainers      = $AttachedContainers
+        AttachedContainers      = $Containers.ToArray()
         EngineSize              = $EngineSize
         WixburnRawDataSize      = $WixBurnRawDataSize
         WixburnDataOffset       = $WixBurnDataOffset
       }
     } finally {
-      switch ($PSCmdlet.ParameterSetName) {
-        'Path' { $Reader.Close(); $Stream.Close() }
-        'Stream' { } # Do not close user-provided stream
-        default { throw 'Invalid parameter set.' }
+      if ($OwnsStream) {
+        $Stream.Dispose()
+      } else {
+        $null = $Stream.Seek($OriginalPosition, [IO.SeekOrigin]::Begin)
       }
     }
   }
@@ -238,28 +243,36 @@ function Get-BurnStub {
   )
 
   process {
-    # Open file stream
-    $BurnStream = switch ($PSCmdlet.ParameterSetName) {
-      'Path' { [System.IO.File]::OpenRead((Get-Item -Path $Path -Force).FullName) }
-      'Stream' { $Stream }
-      default { throw 'Invalid parameter set.' }
+    $OwnsStream = $PSCmdlet.ParameterSetName -eq 'Path'
+    if ($OwnsStream) {
+      $Path = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+      $Stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     }
-    $CabPath = [System.IO.Path]::GetTempFileName()
-    $CabStream = [System.IO.File]::OpenWrite($CabPath)
+    if (-not $Stream.CanRead -or -not $Stream.CanSeek) { throw 'Burn extraction requires a readable, seekable stream.' }
+    $OriginalPosition = $Stream.Position
+    $CabPath = [IO.Path]::GetTempFileName()
+    $Succeeded = $false
 
     try {
-      # Container zero is the UX cabinet and begins exactly at StubSize. Copy only its declared
-      # range rather than the remainder of the bundle.
-      $BurnInfo = Get-BurnEngineInfo -Stream $BurnStream
-      $null = $BurnStream.Seek($BurnInfo.StubSize, 'Begin')
-      $BurnStream.CopyTo($CabStream, $BurnInfo.AttachedContainers[0].Size)
-      $CabPath
+      $BurnInfo = Get-BurnEngineInfo -Stream $Stream
+      if ($BurnInfo.ContainerCount -eq 0) { throw 'The Burn bundle has no UX container.' }
+      $UXContainer = $BurnInfo.AttachedContainers[0]
+      $CabStream = [IO.File]::Open($CabPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+      try {
+        # Stream.CopyTo's second argument is a buffer size, not a byte limit.
+        # Copy the exact source-declared CAB range through the bounded helper.
+        Copy-BinaryStreamRange -Source $Stream -Destination $CabStream -Offset $UXContainer.Offset -Length $UXContainer.Size
+      } finally {
+        $CabStream.Dispose()
+      }
+      $Succeeded = $true
+      return $CabPath
     } finally {
-      $CabStream.Close()
-      switch ($PSCmdlet.ParameterSetName) {
-        'Path' { $BurnStream.Close() }
-        'Stream' { } # Do not close user-provided stream
-        default { throw 'Invalid parameter set.' }
+      if (-not $Succeeded) { Remove-Item -LiteralPath $CabPath -Force -ErrorAction SilentlyContinue }
+      if ($OwnsStream) {
+        $Stream.Dispose()
+      } else {
+        $null = $Stream.Seek($OriginalPosition, [IO.SeekOrigin]::Begin)
       }
     }
   }
@@ -284,23 +297,461 @@ function Get-BurnManifest {
   )
 
   process {
+    $OwnsStub = $PSCmdlet.ParameterSetName -eq 'Path'
     $StubPath = switch ($PSCmdlet.ParameterSetName) {
       'Path' { Get-BurnStub -Path $Path }
-      'StubPath' { (Test-Path -Path $StubPath) ? $StubPath : (throw "The specified Burn stub path '$StubPath' is invalid.") }
+      'StubPath' { Resolve-InstallerFileSystemPath -Path $StubPath -PathType Leaf }
       default { throw 'Invalid parameter set.' }
     }
-    $Stub = [Microsoft.Deployment.Compression.Cab.CabInfo]::new($StubPath)
-    $ManifestReader = $Stub.OpenText('0')
-
+    $ManifestReader = $null
     try {
+      # Open entry 0 only after the temporary UX cabinet exists. The finally
+      # block removes a path-owned cabinet even when CAB or XML parsing fails.
+      $Stub = [Microsoft.Deployment.Compression.Cab.CabInfo]::new($StubPath)
+      $ManifestReader = $Stub.OpenText('0')
       [xml]$ManifestReader.ReadToEnd()
     } finally {
-      $ManifestReader.Close()
-      switch ($PSCmdlet.ParameterSetName) {
-        'Path' { Remove-Item -Path $StubPath -Force -ErrorAction 'Continue' }
-        'StubPath' { } # Do not delete user-provided stub path
-        default { throw 'Invalid parameter set.' }
+      if ($ManifestReader) { $ManifestReader.Dispose() }
+      if ($OwnsStub) { Remove-Item -LiteralPath $StubPath -Force -ErrorAction SilentlyContinue }
+    }
+  }
+}
+
+function Export-BurnContainerRange {
+  <#
+  .SYNOPSIS
+    Materialize one exact Burn container range as a temporary cabinet
+  .PARAMETER Stream
+    Caller-owned, readable, seekable bundle stream. Its position is restored by
+    the shared range-copy helper.
+  .PARAMETER Container
+    Validated Get-BurnEngineInfo container evidence containing Offset and Size.
+  .PARAMETER DestinationPath
+    Resolved temporary cabinet path to create or replace.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][IO.Stream]$Stream,
+    [Parameter(Mandatory)]$Container,
+    [Parameter(Mandatory)][string]$DestinationPath
+  )
+
+  $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  $Output = [IO.File]::Open($DestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  try {
+    Copy-BinaryStreamRange -Source $Stream -Destination $Output -Offset $Container.Offset -Length $Container.Size
+  } finally {
+    $Output.Dispose()
+  }
+  return $DestinationPath
+}
+
+function ConvertTo-BurnExtractionPath {
+  <#
+  .SYNOPSIS
+    Validate and normalize one untrusted Burn manifest or cabinet-relative path
+  .PARAMETER Path
+    Relative path from Burn XML or a cabinet catalog. Drive, UNC, parent, invalid,
+    and Windows reserved-name components are rejected before output reservation.
+  .PARAMETER Description
+    Human-readable record identity included in malformed-input errors.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$Description
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path) -or $Path.IndexOf([char]0) -ge 0) { throw "$Description has an empty or invalid path." }
+  $Normalized = $Path.Replace('/', '\')
+  if ([IO.Path]::IsPathRooted($Normalized) -or $Normalized -match '^[A-Za-z]:') { throw "$Description has a rooted path: $Path" }
+  $InvalidCharacters = [IO.Path]::GetInvalidFileNameChars()
+  $Components = $Normalized.Split('\')
+  foreach ($Component in $Components) {
+    if ([string]::IsNullOrEmpty($Component) -or $Component -in '.', '..') { throw "$Description contains a path traversal or empty segment: $Path" }
+    if ($Component.IndexOfAny($InvalidCharacters) -ge 0 -or $Component.EndsWith('.') -or $Component.EndsWith(' ')) {
+      throw "$Description contains an invalid Windows path component: $Path"
+    }
+    if ($Component -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') {
+      throw "$Description contains a reserved Windows path component: $Path"
+    }
+  }
+  return $Components -join '\'
+}
+
+function Add-BurnPayloadMapping {
+  <#
+  .SYNOPSIS
+    Add one source-backed Burn payload mapping to a container lookup
+  .PARAMETER Map
+    Case-insensitive dictionary keyed by normalized CAB source path.
+  .PARAMETER SourcePath
+    Burn manifest SourcePath naming the physical CAB entry.
+  .PARAMETER FilePath
+    Burn manifest FilePath projected beneath UX or the authored container ID.
+  .PARAMETER FileSize
+    Optional Burn manifest uncompressed payload size. Empty values remain unknown.
+  #>
+  param (
+    [Parameter(Mandatory)][Collections.IDictionary]$Map,
+    [Parameter(Mandatory)][string]$SourcePath,
+    [Parameter(Mandatory)][string]$FilePath,
+    [string]$FileSize
+  )
+
+  $SourceKey = $SourcePath.Replace('/', '\').TrimStart('\')
+  if ([string]::IsNullOrWhiteSpace($SourceKey)) { throw 'A Burn payload has no cabinet SourcePath.' }
+  if ([string]::IsNullOrWhiteSpace($FilePath)) { throw "Burn payload '$SourcePath' has no FilePath." }
+  $SourceKey = ConvertTo-BurnExtractionPath -Path $SourceKey -Description "Burn payload '$SourcePath' SourcePath"
+  $FilePath = ConvertTo-BurnExtractionPath -Path $FilePath -Description "Burn payload '$SourcePath' FilePath"
+  [long]$ExpectedSize = -1
+  if (-not [string]::IsNullOrWhiteSpace($FileSize) -and (-not [long]::TryParse($FileSize, [ref]$ExpectedSize) -or $ExpectedSize -lt 0)) {
+    throw "Burn payload '$SourcePath' has an invalid FileSize."
+  }
+  if (-not $Map.ContainsKey($SourceKey)) { $Map[$SourceKey] = [Collections.Generic.List[object]]::new() }
+  $Map[$SourceKey].Add([pscustomobject][ordered]@{
+      FilePath     = $FilePath
+      ExpectedSize = $ExpectedSize
+    })
+}
+
+function Get-BurnExtractionManifestInfo {
+  <#
+  .SYNOPSIS
+    Resolve Burn manifest container slots and logical payload mappings
+  .PARAMETER Manifest
+    Parsed BurnManifest XML from UX cabinet entry 0.
+  .PARAMETER EngineInfo
+    Validated physical container ranges from Get-BurnEngineInfo.
+  .OUTPUTS
+    Container IDs by physical index, UX and attached source maps, and unavailable
+    external or detached payload paths.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][xml]$Manifest,
+    [Parameter(Mandatory)]$EngineInfo
+  )
+
+  $Root = $Manifest.DocumentElement
+  if (-not $Root -or $Root.LocalName -ne 'BurnManifest') { throw 'UX cabinet entry 0 is not a BurnManifest document.' }
+  [int]$AttachedSlotCount = [Math]::Max(0, [int]$EngineInfo.ContainerCount - 1)
+  $ContainerByIndex = [Collections.Generic.Dictionary[int, string]]::new()
+  $IndexByContainer = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
+  $DetachedContainerIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $UnindexedAttachedIds = [Collections.Generic.List[string]]::new()
+
+  # AttachedIndex is the source-backed relation between a physical .wixburn
+  # size slot and an authored Burn container ID. Detached containers have no
+  # physical range in the bundle and are retained only as unavailable evidence.
+  foreach ($ContainerNode in @($Root.ChildNodes | Where-Object LocalName -EQ 'Container')) {
+    $ContainerId = $ContainerNode.GetAttribute('Id')
+    if ([string]::IsNullOrWhiteSpace($ContainerId)) { throw 'A Burn Container element has no Id.' }
+    $ContainerId = ConvertTo-BurnExtractionPath -Path $ContainerId -Description "Burn container ID '$ContainerId'"
+    if ($ContainerId.Contains('\')) { throw "Burn container ID '$ContainerId' is not a single output directory name." }
+    $AttachedValue = $ContainerNode.GetAttribute('Attached')
+    $AttachedIndexText = $ContainerNode.GetAttribute('AttachedIndex')
+    $IsAttached = $AttachedValue -in 'yes', 'true', '1'
+    $IsDetached = -not [string]::IsNullOrWhiteSpace($AttachedValue) -and -not $IsAttached
+
+    if (-not [string]::IsNullOrWhiteSpace($AttachedIndexText)) {
+      [int]$AttachedIndex = 0
+      if (-not [int]::TryParse($AttachedIndexText, [ref]$AttachedIndex) -or $AttachedIndex -lt 1 -or $AttachedIndex -gt $AttachedSlotCount) {
+        throw "Burn container '$ContainerId' has an invalid AttachedIndex."
       }
+      if ($IsDetached) { throw "Burn container '$ContainerId' is both detached and assigned an AttachedIndex." }
+      if ($ContainerByIndex.ContainsKey($AttachedIndex)) { throw "More than one Burn container uses AttachedIndex $AttachedIndex." }
+      if ($IndexByContainer.ContainsKey($ContainerId)) { throw "Burn container ID '$ContainerId' is duplicated." }
+      $ContainerByIndex.Add($AttachedIndex, $ContainerId)
+      $IndexByContainer.Add($ContainerId, $AttachedIndex)
+
+      $FileSizeText = $ContainerNode.GetAttribute('FileSize')
+      if (-not [string]::IsNullOrWhiteSpace($FileSizeText)) {
+        [long]$DeclaredSize = 0
+        if (-not [long]::TryParse($FileSizeText, [ref]$DeclaredSize) -or $DeclaredSize -ne $EngineInfo.AttachedContainers[$AttachedIndex].Size) {
+          throw "Burn container '$ContainerId' does not match the size declared by .wixburn."
+        }
+      }
+    } elseif ($IsAttached) {
+      $UnindexedAttachedIds.Add($ContainerId)
+    } else {
+      $null = $DetachedContainerIds.Add($ContainerId)
+    }
+  }
+
+  if ($AttachedSlotCount -eq 1) {
+    if ($ContainerByIndex.ContainsKey(1)) {
+      if ($UnindexedAttachedIds.Count -gt 0) { throw 'The single attached Burn slot has additional unindexed container candidates.' }
+    } else {
+      if ($UnindexedAttachedIds.Count -gt 1) { throw 'The single attached Burn slot has more than one possible container ID.' }
+      $ContainerId = $UnindexedAttachedIds.Count -eq 1 ? $UnindexedAttachedIds[0] : 'WixAttachedContainer'
+      $ContainerByIndex.Add(1, $ContainerId)
+      $IndexByContainer.Add($ContainerId, 1)
+    }
+  } elseif ($AttachedSlotCount -gt 1) {
+    if ($UnindexedAttachedIds.Count -gt 0 -or $ContainerByIndex.Count -ne $AttachedSlotCount) {
+      throw 'The Burn manifest does not unambiguously map every attached container slot.'
+    }
+  } elseif ($UnindexedAttachedIds.Count -gt 0 -or $ContainerByIndex.Count -gt 0) {
+    throw 'The Burn manifest describes attached containers that are absent from the bundle.'
+  }
+
+  $UXMappings = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+  $UXNodes = @($Root.ChildNodes | Where-Object LocalName -EQ 'UX')
+  if ($UXNodes.Count -ne 1) { throw 'The Burn manifest does not contain exactly one UX element.' }
+  foreach ($PayloadNode in @($UXNodes[0].ChildNodes | Where-Object LocalName -EQ 'Payload')) {
+    Add-BurnPayloadMapping -Map $UXMappings -SourcePath $PayloadNode.GetAttribute('SourcePath') `
+      -FilePath $PayloadNode.GetAttribute('FilePath') -FileSize $PayloadNode.GetAttribute('FileSize')
+  }
+
+  $AttachedMappings = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+  $UnavailablePaths = [Collections.Generic.List[string]]::new()
+  [int]$ExternalPayloadCount = 0
+  [int]$DetachedPayloadCount = 0
+  foreach ($PayloadNode in @($Root.ChildNodes | Where-Object LocalName -EQ 'Payload')) {
+    $Packaging = $PayloadNode.GetAttribute('Packaging')
+    $FilePath = $PayloadNode.GetAttribute('FilePath')
+    $ContainerId = $PayloadNode.GetAttribute('Container')
+    if ($Packaging -ine 'embedded') {
+      $ExternalPayloadCount++
+      if (-not [string]::IsNullOrWhiteSpace($FilePath)) { $UnavailablePaths.Add($FilePath) }
+      continue
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ContainerId)) {
+      if ($AttachedSlotCount -ne 1) { throw "Embedded Burn payload '$FilePath' has no unambiguous container." }
+      $ContainerId = $ContainerByIndex[1]
+    }
+    if ($DetachedContainerIds.Contains($ContainerId)) {
+      $DetachedPayloadCount++
+      if (-not [string]::IsNullOrWhiteSpace($FilePath)) { $UnavailablePaths.Add([IO.Path]::Combine($ContainerId, $FilePath)) }
+      continue
+    }
+    if (-not $IndexByContainer.ContainsKey($ContainerId)) { throw "Embedded Burn payload '$FilePath' references unknown container '$ContainerId'." }
+    if (-not $AttachedMappings.ContainsKey($ContainerId)) {
+      $AttachedMappings[$ContainerId] = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    }
+    Add-BurnPayloadMapping -Map $AttachedMappings[$ContainerId] -SourcePath $PayloadNode.GetAttribute('SourcePath') `
+      -FilePath $FilePath -FileSize $PayloadNode.GetAttribute('FileSize')
+  }
+
+  return [pscustomobject][ordered]@{
+    ContainerByIndex       = $ContainerByIndex
+    UXMappings             = $UXMappings
+    AttachedMappings       = $AttachedMappings
+    DetachedContainerIds   = $DetachedContainerIds
+    UnavailablePaths       = $UnavailablePaths.ToArray()
+    ExternalPayloadCount   = $ExternalPayloadCount
+    DetachedPayloadCount   = $DetachedPayloadCount
+    DetachedContainerCount = $DetachedContainerIds.Count
+  }
+}
+
+function Get-BurnCabinetCatalog {
+  <#
+  .SYNOPSIS
+    Project one physical Burn cabinet catalog into logical WiX extraction paths
+  .PARAMETER Path
+    Exact temporary cabinet path for one validated Burn container.
+  .PARAMETER RootPath
+    Logical `UX` or authored container-ID directory beneath the destination.
+  .PARAMETER Mapping
+    Case-insensitive SourcePath-to-FilePath mapping from BurnManifest XML.
+  .PARAMETER ContainerIndex
+    Physical .wixburn container slot index used for deterministic ordering.
+  .PARAMETER UX
+    Treat source entry 0 as UX manifest.xml.
+  .PARAMETER MaximumEntries
+    Maximum physical records accepted from this cabinet.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$RootPath,
+    [Parameter(Mandatory)][Collections.IDictionary]$Mapping,
+    [Parameter(Mandatory)][int]$ContainerIndex,
+    [switch]$UX,
+    [ValidateRange(1, [int]::MaxValue)][int]$MaximumEntries = 65536
+  )
+
+  $Entries = @(Get-CabinetEntry -Path $Path -MaximumEntries $MaximumEntries)
+  $SeenSources = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $MatchedMappings = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $Catalog = [Collections.Generic.List[object]]::new()
+  foreach ($Entry in $Entries) {
+    $SourceKey = ConvertTo-BurnExtractionPath -Path $Entry.FullName.Replace('/', '\').TrimStart('\') -Description "Burn cabinet entry '$($Entry.FullName)'"
+    if (-not $SeenSources.Add($SourceKey)) { throw "The Burn cabinet contains duplicate source entry '$SourceKey'." }
+    if ($UX -and $SourceKey -eq '0') {
+      $Catalog.Add([pscustomobject][ordered]@{
+          CabinetPath    = $Path
+          ContainerIndex = $ContainerIndex
+          SourceName     = $Entry.SourceName
+          SourcePath     = $SourceKey
+          LogicalPath    = [IO.Path]::Combine($RootPath, 'manifest.xml')
+          Length         = $Entry.Length
+        })
+      continue
+    }
+
+    if ($Mapping.ContainsKey($SourceKey)) {
+      $null = $MatchedMappings.Add($SourceKey)
+      foreach ($Target in $Mapping[$SourceKey]) {
+        if ($Target.ExpectedSize -ge 0 -and $Target.ExpectedSize -ne $Entry.Length) {
+          throw "Burn payload '$SourceKey' does not match its manifest FileSize."
+        }
+        $Catalog.Add([pscustomobject][ordered]@{
+            CabinetPath    = $Path
+            ContainerIndex = $ContainerIndex
+            SourceName     = $Entry.SourceName
+            SourcePath     = $SourceKey
+            LogicalPath    = [IO.Path]::Combine($RootPath, $Target.FilePath)
+            Length         = $Entry.Length
+          })
+      }
+    } else {
+      # WiX extracts every CAB record before applying manifest renames. Retain
+      # records absent from the XML under their physical cabinet path.
+      $Catalog.Add([pscustomobject][ordered]@{
+          CabinetPath    = $Path
+          ContainerIndex = $ContainerIndex
+          SourceName     = $Entry.SourceName
+          SourcePath     = $SourceKey
+          LogicalPath    = [IO.Path]::Combine($RootPath, $Entry.FullName)
+          Length         = $Entry.Length
+        })
+    }
+  }
+  foreach ($SourceKey in $Mapping.Keys) {
+    if (-not $MatchedMappings.Contains([string]$SourceKey)) { throw "Burn manifest payload '$SourceKey' is absent from its attached cabinet." }
+  }
+  return $Catalog.ToArray()
+}
+
+function Expand-BurnInstaller {
+  <#
+  .SYNOPSIS
+    Extract embedded WiX Burn payloads using a WiX 7-style directory projection
+  .DESCRIPTION
+    Writes UX payloads beneath UX and attached payloads beneath their authored
+    container IDs. External payloads and detached containers are reported but
+    never downloaded. The installer is parsed and copied only as data.
+  .PARAMETER Path
+    Path to the Burn bundle executable. The path is resolved with PowerShell
+    provider semantics before .NET opens it.
+  .PARAMETER DestinationPath
+    Output directory. A temporary directory is created when omitted.
+  .PARAMETER Name
+    Optional wildcard matching projected paths, source CAB paths, or leaf names.
+    All embedded files are selected when omitted.
+  .PARAMETER CollisionAction
+    Behavior when a projected path already exists or another payload projects to
+    the same path. Prompt asks only after a collision is detected.
+  .PARAMETER MaximumExpandedBytes
+    Maximum aggregate bytes written across all selected logical outputs.
+  #>
+  [CmdletBinding()]
+  [OutputType([IO.FileInfo[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
+    [string]$DestinationPath,
+    [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
+  )
+
+  process {
+    $Path = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = New-TempFolder }
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    $TemporaryPath = New-TempFolder
+    $BundleStream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+      $EngineInfo = Get-BurnEngineInfo -Stream $BundleStream
+      if ($EngineInfo.ContainerCount -eq 0) { throw 'The Burn bundle has no embedded UX container.' }
+
+      # The UX container must be decoded first because entry 0 owns the logical
+      # mappings and physical AttachedIndex assignments for every later CAB.
+      $CabinetPaths = [Collections.Generic.Dictionary[int, string]]::new()
+      $UXCabinetPath = Join-Path $TemporaryPath 'container-00000000.cab'
+      $null = Export-BurnContainerRange -Stream $BundleStream -Container $EngineInfo.AttachedContainers[0] -DestinationPath $UXCabinetPath
+      $CabinetPaths.Add(0, $UXCabinetPath)
+      $Manifest = Get-BurnManifest -StubPath $UXCabinetPath
+      $ManifestInfo = Get-BurnExtractionManifestInfo -Manifest $Manifest -EngineInfo $EngineInfo
+
+      $Catalog = [Collections.Generic.List[object]]::new()
+      foreach ($Entry in (Get-BurnCabinetCatalog -Path $UXCabinetPath -RootPath 'UX' -Mapping $ManifestInfo.UXMappings `
+            -ContainerIndex 0 -UX -MaximumEntries $Script:BURN_MAXIMUM_CABINET_ENTRIES)) {
+        $Catalog.Add($Entry)
+      }
+      if ($Catalog.Count -gt $Script:BURN_MAXIMUM_CABINET_ENTRIES) { throw 'The Burn cabinet catalogs exceed the configured entry limit.' }
+      for ($Index = 1; $Index -lt $EngineInfo.ContainerCount; $Index++) {
+        $ContainerId = $ManifestInfo.ContainerByIndex[$Index]
+        $CabinetPath = Join-Path $TemporaryPath ('container-{0:D8}.cab' -f $Index)
+        $null = Export-BurnContainerRange -Stream $BundleStream -Container $EngineInfo.AttachedContainers[$Index] -DestinationPath $CabinetPath
+        $CabinetPaths.Add($Index, $CabinetPath)
+        $Mapping = $ManifestInfo.AttachedMappings.ContainsKey($ContainerId) ? $ManifestInfo.AttachedMappings[$ContainerId] : [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($Entry in (Get-BurnCabinetCatalog -Path $CabinetPath -RootPath $ContainerId -Mapping $Mapping `
+              -ContainerIndex $Index -MaximumEntries $Script:BURN_MAXIMUM_CABINET_ENTRIES)) {
+          $Catalog.Add($Entry)
+        }
+        if ($Catalog.Count -gt $Script:BURN_MAXIMUM_CABINET_ENTRIES) { throw 'The Burn cabinet catalogs exceed the configured entry limit.' }
+      }
+
+      # Match both the WiX-projected path and the opaque CAB source path. Leaf
+      # matching remains available through Test-ExtractionPattern.
+      $MatchingCatalog = [Collections.Generic.List[object]]::new()
+      foreach ($Entry in $Catalog) {
+        if ((Test-ExtractionPattern -Path $Entry.LogicalPath -Pattern $Name) -or
+          (Test-ExtractionPattern -Path $Entry.SourcePath -Pattern $Name)) {
+          $MatchingCatalog.Add($Entry)
+        }
+      }
+      if ($MatchingCatalog.Count -eq 0) {
+        $UnavailableMatch = @($ManifestInfo.UnavailablePaths | Where-Object { Test-ExtractionPattern -Path $_ -Pattern $Name })
+        if ($UnavailableMatch.Count -gt 0) { throw "Burn selector '$Name' matches only external or detached payloads whose bytes are not embedded." }
+        throw "No embedded Burn payload matches selector '$Name'."
+      }
+
+      # Resolve and reserve every destination before any CAB is decompressed so
+      # duplicate manifest FilePath values use the same collision semantics as
+      # pre-existing files.
+      $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      $Selected = [Collections.Generic.List[object]]::new()
+      [long]$TotalExpandedBytes = 0
+      foreach ($Entry in $MatchingCatalog) {
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.LogicalPath `
+          -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        if (-not $Target.ShouldWrite) { continue }
+        if ($Entry.Length -gt $MaximumExpandedBytes - $TotalExpandedBytes) { throw 'The selected Burn payloads exceed the configured output limit.' }
+        $TotalExpandedBytes += $Entry.Length
+        $Selected.Add([pscustomobject][ordered]@{
+            CabinetPath     = $Entry.CabinetPath
+            ContainerIndex  = $Entry.ContainerIndex
+            SourceName      = $Entry.SourceName
+            DestinationPath = $Target.Path
+            Length          = $Entry.Length
+          })
+      }
+
+      # Decode each physical cabinet once. The shared helper deduplicates source
+      # entries that intentionally project to several logical aliases.
+      foreach ($ContainerIndex in @($Selected.ContainerIndex | Sort-Object -Unique)) {
+        $ContainerSelection = @($Selected | Where-Object ContainerIndex -EQ $ContainerIndex)
+        if ($ContainerSelection.Count -eq 0) { continue }
+        $null = Export-CabinetSelection -Path $CabinetPaths[$ContainerIndex] -Selection $ContainerSelection `
+          -MaximumEntries $Script:BURN_MAXIMUM_CABINET_ENTRIES -MaximumExpandedBytes $MaximumExpandedBytes
+      }
+
+      if ($ManifestInfo.ExternalPayloadCount -gt 0 -or $ManifestInfo.DetachedContainerCount -gt 0) {
+        Write-Warning ('Burn extraction omitted {0} external payload(s) and {1} detached container(s) because their bytes are not embedded.' -f `
+            $ManifestInfo.ExternalPayloadCount, $ManifestInfo.DetachedContainerCount)
+      }
+      $Results = [Collections.Generic.List[IO.FileInfo]]::new($Selected.Count)
+      foreach ($Item in $Selected) { $Results.Add((Get-Item -LiteralPath $Item.DestinationPath -Force)) }
+      return $Results.ToArray()
+    } finally {
+      $BundleStream.Dispose()
+      Remove-Item -LiteralPath $TemporaryPath -Recurse -Force -ErrorAction SilentlyContinue
     }
   }
 }
@@ -886,4 +1337,4 @@ function Get-BurnInfo {
   }
 }
 
-Export-ModuleMember -Function Get-BurnEngineInfo, Get-BurnStub, Get-BurnManifest, Get-BurnUXPayload, Get-BurnBootstrapperApplicationData, Get-BurnPackageArchitectureInfo, Get-BurnScopeInfo, Get-BurnInfo, Read-ScopeFromBurn, Read-SupportedScopesFromBurn, Test-BurnDualScope, Read-UnsupportedArchitecturesFromBurn, Test-BurnUnsupportedArchitecture, Read-ProductCodeFromBurn, Read-UpgradeCodeFromBurn, Read-ProductNameFromBurn
+Export-ModuleMember -Function Get-BurnEngineInfo, Get-BurnStub, Get-BurnManifest, Expand-BurnInstaller, Get-BurnUXPayload, Get-BurnBootstrapperApplicationData, Get-BurnPackageArchitectureInfo, Get-BurnScopeInfo, Get-BurnInfo, Read-ScopeFromBurn, Read-SupportedScopesFromBurn, Test-BurnDualScope, Read-UnsupportedArchitecturesFromBurn, Test-BurnUnsupportedArchitecture, Read-ProductCodeFromBurn, Read-UpgradeCodeFromBurn, Read-ProductNameFromBurn

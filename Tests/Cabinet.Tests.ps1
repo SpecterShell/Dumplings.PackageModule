@@ -30,4 +30,30 @@ Describe 'Generic cabinet extraction' {
     $Result | Should -HaveCount 1
     [IO.File]::ReadAllText($Result[0]) | Should -Be 'value 2'
   }
+
+  It 'exports a validated source entry to more than one logical destination' {
+    $Destination = Join-Path $TestDrive 'Mapped'
+    $FirstPath = Join-Path $Destination 'first\file.txt'
+    $SecondPath = Join-Path $Destination 'second\file.txt'
+    $Selection = @(
+      [pscustomobject]@{ SourceName = 'file1.txt'; DestinationPath = $FirstPath; Length = 7 }
+      [pscustomobject]@{ SourceName = 'file1.txt'; DestinationPath = $SecondPath; Length = 7 }
+    )
+
+    $Result = @(Export-CabinetSelection -Path $Script:CabinetPath -Selection $Selection -MaximumExpandedBytes 14)
+
+    $Result | Should -Be @($FirstPath, $SecondPath)
+    [IO.File]::ReadAllText($FirstPath) | Should -Be 'value 1'
+    [IO.File]::ReadAllText($SecondPath) | Should -Be 'value 1'
+  }
+
+  It 'rejects mapped selections whose aggregate output exceeds the limit' {
+    $Selection = @(
+      [pscustomobject]@{ SourceName = 'file1.txt'; DestinationPath = (Join-Path $TestDrive 'one.txt'); Length = 7 }
+      [pscustomobject]@{ SourceName = 'file1.txt'; DestinationPath = (Join-Path $TestDrive 'two.txt'); Length = 7 }
+    )
+
+    { Export-CabinetSelection -Path $Script:CabinetPath -Selection $Selection -MaximumExpandedBytes 13 } |
+      Should -Throw '*output limit*'
+  }
 }
