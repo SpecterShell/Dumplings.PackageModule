@@ -38,6 +38,10 @@ Functions that perform task execution, messaging, or submission expect the globa
 
 `SimpleTask` provides the same Core construction and skip behavior for scripts that do not need package state or WinGet submission.
 
+Use the [`author-dumplings-task` skill](../../.agents/skills/author-dumplings-task/SKILL.md)
+for the supported task layout, state contract, source patterns, provider tasks,
+and dry-run workflow.
+
 Package submissions are claimed by effective WinGet identifier in process-wide shared storage. The first task owns the claim for the run; duplicate tasks skip submission rather than racing the same package.
 
 ### Installer Analysis
