@@ -49,7 +49,7 @@ try {
   # Record the task outcome even when browser lease completion above fails the
   # task. Reporting is best-effort and must never fail the task itself.
   try {
-    $StatusReportModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'StatusReport.psm1') -Force -PassThru
+    $StatusReportModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Messaging' 'StatusReport.psm1') -Force -PassThru
     & $StatusReportModule {
       param ($Storage, $TaskName, $Task, $InvocationError)
       Register-DumplingsTaskStatus -Storage $Storage -TaskName $TaskName -Task $Task -InvocationError $InvocationError

@@ -154,14 +154,14 @@ Describe 'Chromium resource classification' {
   It 'Should identify the bare mini-installer from chrome and setup resources' {
     InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
       param($SyntheticPath)
-      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
-      Mock Get-PEResourceInfo {
+      Mock Get-PELayout -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
+      Mock Get-PEResourceInfo -ModuleName ChromiumMiniInstaller {
         @(
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'chrome.packed.7z'; Id = $null; Offset = 100; Size = 200 }
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BL'; TypeId = $null; Name = 'setup.ex_'; Id = $null; Offset = 300; Size = 400 }
         )
       }
-      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+      Mock Read-ChromiumInstallerTagFromStream -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
       $Info.Variant | Should -Be 'ChromiumMiniInstaller'
@@ -169,22 +169,22 @@ Describe 'Chromium resource classification' {
       $Info.SupportedScopes | Should -Be @('user', 'machine')
       $Info.MachineScopeSwitch | Should -Be '--system-level'
       $Info.ExecutedPayloads | Should -Be @('setup.exe')
-      Should -Invoke Get-PELayout -Times 1 -Exactly
-      Should -Invoke Get-PEResourceInfo -Times 1 -Exactly
+      Should -Invoke Get-PELayout -ModuleName ChromiumMiniInstaller -Times 1 -Exactly
+      Should -Invoke Get-PEResourceInfo -ModuleName ChromiumMiniInstaller -Times 1 -Exactly
     }
   }
 
   It 'Should identify a branded mini-installer archive from the resource pairing' {
     InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
       param($SyntheticPath)
-      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
-      Mock Get-PEResourceInfo {
+      Mock Get-PELayout -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
+      Mock Get-PEResourceInfo -ModuleName ChromiumMiniInstaller {
         @(
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'VIVALDI.PACKED.7Z'; Id = $null; Offset = 100; Size = 200 }
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BL'; TypeId = $null; Name = 'SETUP.EX_'; Id = $null; Offset = 300; Size = 400 }
         )
       }
-      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+      Mock Read-ChromiumInstallerTagFromStream -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
       $Info.Variant | Should -Be 'ChromiumMiniInstaller'
@@ -197,9 +197,9 @@ Describe 'Chromium resource classification' {
   It 'Should identify Chromium Updater from its B7 updater resource' {
     InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
       param($SyntheticPath)
-      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
-      Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'updater.packed.7z'; Id = $null; Offset = 100; Size = 200 } }
-      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $true; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+      Mock Get-PELayout -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
+      Mock Get-PEResourceInfo -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'updater.packed.7z'; Id = $null; Offset = 100; Size = 200 } }
+      Mock Read-ChromiumInstallerTagFromStream -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ MarkerFound = $true; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
       $Info.Variant | Should -Be 'ChromiumUpdater'
@@ -211,9 +211,9 @@ Describe 'Chromium resource classification' {
   It 'Should inspect a tagged Chromium Updater for an offline target before classifying it as online' {
     InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
       param($SyntheticPath)
-      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
-      Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'updater.packed.7z'; Id = $null; Offset = 100; Size = 200 } }
-      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
+      Mock Get-PELayout -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
+      Mock Get-PEResourceInfo -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; TypeId = $null; Name = 'updater.packed.7z'; Id = $null; Offset = 100; Size = 200 } }
+      Mock Read-ChromiumInstallerTagFromStream -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
       Mock Get-ChromiumUpdaterPayloadInfo {
         [pscustomobject]@{
           OfflineManifest   = [pscustomobject]@{
@@ -242,9 +242,9 @@ Describe 'Chromium resource classification' {
   It 'Should identify Omaha and treat appguid as non-ARP identity' {
     InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
       param($SyntheticPath)
-      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
-      Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B'; TypeId = $null; Name = $null; Id = 102; Offset = 100; Size = 200 } }
-      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
+      Mock Get-PELayout -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
+      Mock Get-PEResourceInfo -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B'; TypeId = $null; Name = $null; Id = 102; Offset = 100; Size = 200 } }
+      Mock Read-ChromiumInstallerTagFromStream -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
       Mock Get-ChromiumOmahaPayloadInfo { $null }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
@@ -260,9 +260,9 @@ Describe 'Chromium resource classification' {
   It 'Should leave online status unknown when an Omaha offline-manifest check fails' {
     InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
       param($SyntheticPath)
-      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
-      Mock Get-PEResourceInfo { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B'; Id = 102; Offset = 100; Size = 200 } }
-      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
+      Mock Get-PELayout -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 1; Size = 1 } } } }
+      Mock Get-PEResourceInfo -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B'; Id = 102; Offset = 100; Size = 200 } }
+      Mock Read-ChromiumInstallerTagFromStream -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ MarkerFound = $true; IsTagged = $true; ApplicationId = '{APP-ID}'; ApplicationName = 'Example Browser'; NeedsAdmin = 'true' } }
       Mock Get-ChromiumOmahaPayloadInfo { throw 'malformed payload' }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
@@ -276,8 +276,8 @@ Describe 'Chromium resource classification' {
   It 'Should prefer B7 setup resources over BL and BN like Chromium mini_installer' {
     InModuleScope ChromiumSetup -Parameters @{ SyntheticPath = $Script:SyntheticPath } {
       param($SyntheticPath)
-      Mock Get-PELayout { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
-      Mock Get-PEResourceInfo {
+      Mock Get-PELayout -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ DataDirectories = @{ Certificate = [pscustomobject]@{ Rva = 0; Size = 0 } } } }
+      Mock Get-PEResourceInfo -ModuleName ChromiumMiniInstaller {
         @(
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BN'; Name = 'CHROME.7Z'; Offset = 100; Size = 200 }
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'BN'; Name = 'SETUP.EXE'; Offset = 300; Size = 400 }
@@ -285,7 +285,7 @@ Describe 'Chromium resource classification' {
           [pscustomobject]@{ Path = $SyntheticPath; TypeName = 'B7'; Name = 'SETUP.PACKED.7Z'; Offset = 700; Size = 800 }
         )
       }
-      Mock Read-ChromiumInstallerTagFromStream { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
+      Mock Read-ChromiumInstallerTagFromStream -ModuleName ChromiumMiniInstaller { [pscustomobject]@{ MarkerFound = $false; IsTagged = $false; ApplicationId = $null; ApplicationName = $null; NeedsAdmin = $null } }
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
 

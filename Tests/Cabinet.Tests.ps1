@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
-  foreach ($ModuleName in @('Runtime', 'Binary', 'General', 'Cabinet')) {
-    Import-Module (Join-Path $PSScriptRoot "..\Libraries\$ModuleName.psm1") -Force
-  }
+  Import-Module (Join-Path $PSScriptRoot '..\PackageModule.psd1') -Force -Global
   Import-CabinetDependency
 }
 

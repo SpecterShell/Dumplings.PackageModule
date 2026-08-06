@@ -6,21 +6,20 @@ The module is designed for PowerShell 7.4 or later on Windows.
 
 ## Loading
 
-Core loads PackageModule automatically by dot-sourcing `Index.ps1` in every task worker. For standalone analysis from the Dumplings root:
+Core loads PackageModule through `Index.ps1` in every task worker. Standalone callers should import the module manifest:
 
 ```powershell
-. .\Modules\PackageModule\Index.ps1
+Import-Module .\Modules\PackageModule\PackageModule.psd1 -Force
 ```
 
-`Index.ps1` loads components in deterministic dependency order:
+`PackageModule.psd1` is the supported command surface. `PackageModule.psm1` imports child modules in explicit dependency order and re-exports their established functions, aliases, and variables. `Index.ps1` imports that manifest globally, then loads the task model classes for Core.
 
-1. Version comparison types.
-2. Runtime, binary, compression, archive, PE, and registry infrastructure.
-3. General text and messaging helpers.
-4. YAML schema and WinGet manifest model/serialization foundations.
-5. Installer-family and service libraries.
-6. Manifest validation, update, and submission consumers.
-7. Task model classes.
+Libraries are grouped by responsibility:
+
+- `Infrastructure` contains bounded binary, archive, PE, cabinet, filesystem, parser-bridge, installed-state, and provider-neutral installer-analysis mechanics.
+- `Installers` contains installer-family parsing and extraction. Thin executable wrappers use separate `DotNetInstaller`, `IExpress`, `SevenZipSfx`, and `WinRarSfx` modules backed by the shared `Bootstrapper` command resolver.
+- `WinGet` contains manifest policy, matching, repositories, downloads, and submission.
+- `Data`, `Networking`, `Browser`, and `Messaging` contain their corresponding integrations.
 
 Functions that perform task execution, messaging, or submission expect the globals initialized by Core. Static parser and manifest functions can be used independently when their documented parameters are supplied.
 
@@ -46,9 +45,9 @@ Package submissions are claimed by effective WinGet identifier in process-wide s
 
 ### Installer Analysis
 
-`Get-WinGetInstallerAnalysis` detects file and installer families from structured content and magic bytes, then routes to supported static parsers. Its `DetectedFamilies` output contains only structurally confirmed or successfully parsed families; `RoutingHints` and `RejectedCandidates` retain heuristic diagnostics without promoting them to detections. `FamilyCandidates` remains a confirmed-only compatibility projection. PackageModule includes in-process implementations for PE, MSI/WiX, MSIX/AppX, Burn, InstallShield, Chromium Setup, Zero Install, Squirrel/Velopack, install4j, InstallAnywhere, InstallBuilder, CreateInstall, wrapper formats, portable applications, and other installer families. Their default and file-level licenses are described below.
+`Get-InstallerAnalysis` detects file and installer families from structured content and magic bytes without applying package-provider policy. `Get-WinGetInstallerAnalysis` projects the same evidence into WinGet installer types, architecture recommendations, defaults, and snippets. `DetectedFamilies` contains only structurally confirmed or successfully parsed families; `RoutingHints` and `RejectedCandidates` retain heuristic diagnostics without promoting them to detections. `FamilyCandidates` remains a confirmed-only compatibility projection.
 
-Some implementations are maintained in the separately licensed InstallerParsers submodule. [`InstallerBridge.psm1`](Libraries/InstallerBridge.psm1) invokes its JSON CLI in a child PowerShell process and returns deserialized evidence. It does not import GPL parser code into PackageModule's process module scope.
+Some implementations are maintained in the separately licensed InstallerParsers submodule. [`InstallerBridge.psm1`](Libraries/Infrastructure/InstallerBridge.psm1) invokes its JSON CLI in a child PowerShell process and returns deserialized evidence. It does not import GPL parser code into PackageModule's process module scope.
 
 Each aggregate parser constructs the canonical identity/ARP envelope directly and returns diagnostics through `Warnings` and `UnresolvedFields`; parsers do not write log messages directly. This keeps family-specific ARP decisions in the parser that understands the format instead of deriving them from a shared normalizer. Family-specific layout, payload, association, scope, and architecture evidence remains additive.
 
@@ -114,8 +113,8 @@ The logical model stores authored values, not WinGet-generated default switches 
 - `Playwright.psm1` provides a separately leased Patchright/Playwright page and browser context. It uses installed Edge for ordinary sessions and installed Chrome for stealth sessions, restores the pinned Patchright driver runtime, and synchronously unwraps tasks without registering PowerShell as an asynchronous callback.
 - `MessageQueue.psm1`, `Telegram.psm1`, and `Matrix.psm1` provide per-target queues, coalescing, splitting, rate limiting, and session updates.
 - `StatusReport.psm1` records per-task outcomes from the `AfterTask` hook and merges them with Core's authoritative task states in the `RunnerStopping` hook, writing a static status dashboard (`Outputs/Status/index.html` and `status.json`) that the Automation workflow publishes to GitHub Pages.
-- `WinGetARP.psm1` collects and matches Apps & Features evidence, including MSI ownership scope evidence.
-- `TextContent.psm1` and `Format.psm1` normalize release-note HTML, Markdown, tables, Unicode whitespace, and validator-blocked control characters.
+- `ARP.psm1` collects raw Apps & Features and MSI ownership evidence. `WinGetMatching.psm1` applies WinGet normalization and manifest matching.
+- `Text.psm1` handles encoding, line endings, Base64, and list text. `Format.psm1` normalizes manifest text, while `HTML.psm1` renders HTML, Markdown, and tables. `Conversion.psm1` owns general value conversion, `Object.psm1` parses XML and INI data, and `ProtocolBuffers.psm1` decodes schema-less Protocol Buffers wire data.
 - `WinGetGitHubRepo.psm1` and `WinGetLocalRepo.psm1` implement remote and local manifest repository workflows.
 
 ### Playwright
@@ -181,13 +180,15 @@ synchronous PowerShell boundary to avoid callback hangs.
 ```text
 PackageModule/
 +-- Index.ps1
++-- PackageModule.psd1
++-- PackageModule.psm1
 +-- Assets/
 |   +-- Assemblies/    # pinned managed dependencies
 |   +-- Providers/     # source-available companion providers and licenses
 |   +-- Schemas/       # offline WinGet schemas
 |   `-- Source/        # auditable C# loaded with Add-Type
 +-- Hooks/             # Core lifecycle integration
-+-- Libraries/         # PowerShell modules
++-- Libraries/         # categorized PowerShell modules
 +-- Models/            # task classes
 +-- Tests/              # Pester suites
 `-- Utilities/          # standalone maintenance and validation scripts
@@ -222,7 +223,7 @@ Invoke-Pester .\Modules\PackageModule\Tests\ChromiumSetup.Tests.ps1
 Run ScriptAnalyzer on modified PowerShell modules and use the repository's accepted exclusion rules where documented:
 
 ```powershell
-Invoke-ScriptAnalyzer .\Modules\PackageModule\Libraries\WinGetManifestValidation.psm1
+Invoke-ScriptAnalyzer .\Modules\PackageModule\Libraries\WinGet\WinGetManifestValidation.psm1
 ```
 
 Tests use generated fixtures or the shared persistent installer fixture cache. They must not execute installers or depend on user `Downloads` and temporary folders.
@@ -239,8 +240,8 @@ The following components retain file-level licenses instead of Apache-2.0:
 
 | Components | License and reason |
 | --- | --- |
-| `Libraries/{Runtime,Binary,Compression,Archive,PE,RegistryAssociations}.psm1`, `Assets/Source/InstallerInfrastructure/{BinaryIO,PatternSearch,PEImageReader}.cs`, and `Tests/TestFixture.ps1` | MIT; mirrored byte-for-byte into InstallerParsers and usable by its GPL-2.0 parser. |
-| `Libraries/MSI.psm1` | MIT; imported by the GPL-2.0 Advanced Installer parser to inspect nested MSI databases. |
+| `Libraries/Infrastructure/{Runtime,Binary,Archive,PE,InstallerEvidence}.psm1`, `Assets/Source/InstallerInfrastructure/{BinaryIO,PatternSearch,PEImageReader}.cs`, and `Tests/TestFixture.ps1` | MIT; mirrored byte-for-byte into InstallerParsers and usable by its GPL-2.0 parser. |
+| `Libraries/Installers/MSI.psm1` | MIT; imported by the GPL-2.0 Advanced Installer parser to inspect nested MSI databases. |
 | `Assets/Source/CreateInstall/GenteeLzgeDecoder.cs` | MIT; adaptation of the Gentee decoder. |
 | `Assets/Source/WinGet/WinGetDownloadProbe.cs` | MIT; independent implementation grounded in winget-cli's MIT source. |
 | Pinned assemblies and `Assets/Providers/SharpCompress.Gentee` | Their own Apache-2.0, MS-RL, MIT, or LGPL licenses as documented. |

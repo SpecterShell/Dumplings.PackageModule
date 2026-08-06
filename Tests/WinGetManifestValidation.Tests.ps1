@@ -2,12 +2,12 @@ BeforeDiscovery {
   if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.WinGetVersion').Type) {
     Add-Type -Path (Join-Path $PSScriptRoot '..\Assets\Source\Versioning\Versioning.cs')
   }
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\YamlSchema.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSchema.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestModel.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSerialization.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestValidation.psm1') -Force
+  . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\YamlSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestModel.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestSerialization.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestValidation.psm1') -Force
 }
 
 BeforeAll {
@@ -247,7 +247,7 @@ PackageIdentifier: Test.Other
     foreach ($Schema in $Schemas) {
       { Get-Content -LiteralPath $Schema.FullName -Raw | ConvertFrom-Json -AsHashtable | Out-Null } | Should -Not -Throw
     }
-    Get-Content (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestValidation.psm1') -Raw | Should -Not -Match 'winget\.exe\s+validate'
+    Get-Content (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestValidation.psm1') -Raw | Should -Not -Match 'winget\.exe\s+validate'
   }
 }
 
@@ -418,12 +418,7 @@ Describe 'Process-safe validation' {
           if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.WinGetVersion').Type) {
             Add-Type -Path (Join-Path $Root 'Assets\Source\Versioning\Versioning.cs')
           }
-          Import-Module (Join-Path $Root 'Libraries\General.psm1') -Force
-          Import-Module (Join-Path $Root 'Libraries\YamlSchema.psm1') -Force
-          Import-Module (Join-Path $Root 'Libraries\WinGetManifestSchema.psm1') -Force
-          Import-Module (Join-Path $Root 'Libraries\WinGetManifestModel.psm1') -Force
-          Import-Module (Join-Path $Root 'Libraries\WinGetManifestSerialization.psm1') -Force
-          Import-Module (Join-Path $Root 'Libraries\WinGetManifestValidation.psm1') -Force
+          Import-Module (Join-Path $Root 'PackageModule.psd1') -Force -Global
           (Get-WinGetManifestValidationResult -Path $ManifestPath).IsValid
         }
       })

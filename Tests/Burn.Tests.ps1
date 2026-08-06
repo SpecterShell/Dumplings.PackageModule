@@ -1,8 +1,6 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  foreach ($ModuleName in @('Runtime', 'Binary', 'PE', 'General', 'Cabinet', 'Burn')) {
-    Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' "$ModuleName.psm1") -Force
-  }
+  Import-Module (Join-Path $PSScriptRoot '..\PackageModule.psd1') -Force -Global
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Burn'
 

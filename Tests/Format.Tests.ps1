@@ -1,5 +1,5 @@
 BeforeDiscovery {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Format.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\Format.psm1') -Force
 }
 
 Describe 'Format-Text WinGet-safe character handling' {

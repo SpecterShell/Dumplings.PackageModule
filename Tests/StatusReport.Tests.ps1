@@ -1,4 +1,4 @@
-$Script:StatusReportModulePath = Join-Path $PSScriptRoot '..\Libraries\StatusReport.psm1'
+$Script:StatusReportModulePath = Join-Path $PSScriptRoot '..\Libraries\Messaging\StatusReport.psm1'
 Import-Module $Script:StatusReportModulePath -Force
 
 Describe 'Task status registration' {

@@ -1,9 +1,6 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  $LibraryPath = Join-Path $PSScriptRoot '..\Libraries'
-  foreach ($ModuleName in @('Runtime', 'Binary', 'Compression', 'Archive', 'PE', 'RegistryAssociations', 'InstallMate')) {
-    Import-Module (Join-Path $LibraryPath "$ModuleName.psm1") -Force
-  }
+  Import-Module (Join-Path $PSScriptRoot '..\PackageModule.psd1') -Force -Global
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\AdditionalGenericExeParsers'
   $Script:InstallMateFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallMate\Generated'

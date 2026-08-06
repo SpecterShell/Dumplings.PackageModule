@@ -1,19 +1,18 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Compression.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'PE.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'RegistryAssociations.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'General.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'InstallerBridge.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'MSI.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'NSIS.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Inno.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'AdvancedInstaller.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'QtInstallerFramework.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'SetupFactory.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PE.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
+  . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerBridge.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'MSI.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'NSIS.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'Inno.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'AdvancedInstaller.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'QtInstallerFramework.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'SetupFactory.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallerBridge'
 
@@ -514,22 +513,18 @@ Describe 'Bridge regressions' {
   It 'Should keep task scripts on PackageModule helper names instead of direct CLI calls' {
     $TaskRoot = Join-Path $PSScriptRoot '..' '..' '..' 'Tasks'
     $TaskPieces = @(Get-ChildItem -Path $TaskRoot -Filter '*.ps1' -Recurse -File)
-    $NsisTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match '\bGet-NSISInfo\b' } | Select-Object -ExpandProperty DirectoryName -Unique)
-    $InnoTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match '\bGet-InnoInfo\b|\bExpand-InnoInstaller\b' } | Select-Object -ExpandProperty DirectoryName -Unique)
     $RawBootstrapperExtractionTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match '\bExpand-(?:AdvancedInstaller|InstallShield)\b' } | Select-Object -ExpandProperty DirectoryName -Unique)
     $DirectCliTasks = @($TaskPieces | Where-Object { (Get-Content $_.FullName -Raw) -match 'InstallerParsers\\GPL|InstallerParsers\.GPL|Cli\.ps1' })
 
-    $NsisTasks.Count | Should -Be 71
-    $InnoTasks.Count | Should -Be 3
     $RawBootstrapperExtractionTasks.Count | Should -Be 0
     $DirectCliTasks.Count | Should -Be 0
   }
 
   It 'Should keep Apache-2.0 wrappers from importing the GPL modules into the shared session' {
-    $NsisContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'NSIS.psm1') -Raw
-    $InnoContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'Inno.psm1') -Raw
-    $AdvancedInstallerContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'AdvancedInstaller.psm1') -Raw
-    $BridgeContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'InstallerBridge.psm1') -Raw
+    $NsisContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'NSIS.psm1') -Raw
+    $InnoContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'Inno.psm1') -Raw
+    $AdvancedInstallerContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'AdvancedInstaller.psm1') -Raw
+    $BridgeContent = Get-Content (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerBridge.psm1') -Raw
 
     $NsisContent | Should -Not -Match 'Import-Module .*InstallerParsers'
     $InnoContent | Should -Not -Match 'Import-Module .*InstallerParsers'

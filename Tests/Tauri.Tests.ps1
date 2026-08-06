@@ -41,7 +41,8 @@ BeforeAll {
       $AssetMap = @([pscustomobject]@{ Assets = @(
             (New-TestTauriAsset -Name '/index.html' -Content ([Text.Encoding]::UTF8.GetBytes('<!doctype html><html>Tauri fixture</html>')))
             (New-TestTauriAsset -Name '/assets/app.js' -Content ([Text.Encoding]::UTF8.GetBytes('globalThis.__TAURI_FIXTURE__ = true;')))
-          ) })
+          )
+        })
     }
 
     $Path = Join-Path $Script:TauriSyntheticDirectory $Name
@@ -126,7 +127,8 @@ Describe 'Tauri executable structure and metadata' {
           (New-TestTauriAsset -Name '/index.html' -Content ([Text.Encoding]::UTF8.GetBytes('<html>raw</html>')) -Compression None)
           (New-TestTauriAsset -Name '/assets/你好.txt' -Content ([Text.Encoding]::UTF8.GetBytes('Unicode asset')) -Compression None)
           (New-TestTauriAsset -Name '/empty.txt' -Content ([byte[]]::new(0)) -Compression None)
-        ) })
+        )
+      })
     $Path = New-TestTauriExecutable -Name 'tauri-x86-raw.bin' -Machine 0x014C -PE32 -AssetMap $Maps
     $Info = Get-TauriExecutableInfo -Path $Path
 
@@ -158,11 +160,13 @@ Describe 'Tauri executable structure and metadata' {
     $Maps = @(
       [pscustomobject]@{ Assets = @(
           (New-TestTauriAsset -Name '/index.html' -Content ([Text.Encoding]::UTF8.GetBytes('<html>one</html>')))
-        ) }
+        )
+      }
       [pscustomobject]@{ Assets = @(
           (New-TestTauriAsset -Name '/index.html' -Content ([Text.Encoding]::UTF8.GetBytes('<html>two</html>')))
           (New-TestTauriAsset -Name '/isolation.js' -Content ([Text.Encoding]::UTF8.GetBytes('isolation')))
-        ) }
+        )
+      }
     )
     $Info = Get-TauriExecutableInfo -Path (New-TestTauriExecutable -Name 'tauri-multiple.exe' -AssetMap $Maps)
 
@@ -245,11 +249,13 @@ Describe 'Tauri executable extraction safety' {
       [pscustomobject]@{ Assets = @(
           (New-TestTauriAsset -Name '/same.txt' -Content ([Text.Encoding]::UTF8.GetBytes('one')) -Compression None)
           (New-TestTauriAsset -Name '/first.js' -Content ([Text.Encoding]::UTF8.GetBytes('first')) -Compression None)
-        ) }
+        )
+      }
       [pscustomobject]@{ Assets = @(
           (New-TestTauriAsset -Name '/same.txt' -Content ([Text.Encoding]::UTF8.GetBytes('two')) -Compression None)
           (New-TestTauriAsset -Name '/second.js' -Content ([Text.Encoding]::UTF8.GetBytes('second')) -Compression None)
-        ) }
+        )
+      }
     )
     $Path = New-TestTauriExecutable -Name 'tauri-collisions.exe' -AssetMap $Maps
 
@@ -276,13 +282,15 @@ Describe 'Tauri executable extraction safety' {
     $UnsafeMaps = @([pscustomobject]@{ Assets = @(
           (New-TestTauriAsset -Name '/index.html' -Content ([Text.Encoding]::UTF8.GetBytes('<html>safe</html>')))
           (New-TestTauriAsset -Name '/../escape.txt' -Content ([Text.Encoding]::UTF8.GetBytes('unsafe')))
-        ) })
+        )
+      })
     { Get-TauriExecutableInfo -Path (New-TestTauriExecutable -Name 'tauri-traversal.exe' -AssetMap $UnsafeMaps) } | Should -Throw '*unsafe path*'
 
     $MixedMaps = @([pscustomobject]@{ Assets = @(
           (New-TestTauriAsset -Name '/index.html' -Content ([Text.Encoding]::UTF8.GetBytes('<html>mixed</html>')))
           (New-TestTauriAsset -Name '/app.js' -Content ([Text.Encoding]::UTF8.GetBytes('raw')) -Compression None)
-        ) })
+        )
+      })
     $MixedPath = New-TestTauriExecutable -Name 'tauri-mixed.exe' -AssetMap $MixedMaps
     (Get-TauriExecutableInfo $MixedPath).CanExpand | Should -BeFalse
     { Expand-TauriExecutable $MixedPath -DestinationPath (Join-Path $TestDrive 'mixed') } | Should -Throw '*does not contain one uniformly encoded*'
@@ -326,8 +334,8 @@ Describe 'Tauri analyzer integration' {
   }
 
   It 'loads the scanner repeatedly without duplicate type failures' {
-    { Import-Module (Join-Path $PSScriptRoot '..\Libraries\Tauri.psm1') -Force } | Should -Not -Throw
-    { Import-Module (Join-Path $PSScriptRoot '..\Libraries\Tauri.psm1') -Force } | Should -Not -Throw
+    { Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\Tauri.psm1') -Force } | Should -Not -Throw
+    { Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\Tauri.psm1') -Force } | Should -Not -Throw
   }
 }
 

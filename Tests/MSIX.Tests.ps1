@@ -1,5 +1,5 @@
 BeforeAll {
-  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'MSIX.psm1') -Force
+  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'Installers', 'MSIX.psm1') -Force
 }
 
 Describe 'MSIX/AppX dependency filtering' {

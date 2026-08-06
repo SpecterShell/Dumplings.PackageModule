@@ -14,8 +14,8 @@ BeforeAll {
     }
   }
 
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetLocalRepo.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetGitHubRepo.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetLocalRepo.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetGitHubRepo.psm1') -Force
   $Script:WinGetGitHubRepoModule = Get-Module -Name WinGetGitHubRepo
   & $Script:WinGetGitHubRepoModule {
     function script:Invoke-GitHubApi {

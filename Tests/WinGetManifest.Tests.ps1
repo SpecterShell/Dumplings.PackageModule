@@ -1,26 +1,27 @@
 BeforeDiscovery {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\YamlSchema.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSchema.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestModel.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetARP.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSerialization.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerBridge.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\MSI.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\MSIX.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Burn.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\NSIS.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Inno.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\AdvancedInstaller.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\ChromiumSetup.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetInstallerAnalyzer.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetDownload.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestUpdate.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Cabinet.psm1') -Force
+  . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\YamlSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestModel.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetMatching.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestSerialization.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerBridge.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\MSI.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\MSIX.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\Burn.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\NSIS.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\Inno.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\AdvancedInstaller.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\ChromiumSetup.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetAnalysis.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetDownload.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestUpdate.psm1') -Force
 }
 
 Describe 'Get-WinGetInstallerReleaseDate' {

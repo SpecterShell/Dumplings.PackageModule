@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\GitHub.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetGitHubRepo.psm1') -Force
+  . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Networking\GitHub.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetGitHubRepo.psm1') -Force
 }
 
 Describe 'Add-WinGetGitHubManifests' {

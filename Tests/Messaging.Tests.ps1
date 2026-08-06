@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 BeforeDiscovery {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\TextContent.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Messaging.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Telegram.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Matrix.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\Text.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\HTML.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Messaging\Messaging.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Messaging\Telegram.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Messaging\Matrix.psm1') -Force
 }
 
 Describe 'Shared message splitting' {

@@ -1,12 +1,12 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'General.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'PE.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Install4j.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+  . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PE.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'Install4j.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Install4j'
   $ProgressPreference = 'SilentlyContinue'

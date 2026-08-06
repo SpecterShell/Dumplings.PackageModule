@@ -1,5 +1,5 @@
 BeforeDiscovery {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\YamlSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\YamlSchema.psm1') -Force
 }
 
 Describe 'Get-YamlSchemaValidationResult' {

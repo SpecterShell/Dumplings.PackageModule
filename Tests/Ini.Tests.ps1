@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\Text.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\Object.psm1') -Force
 }
 
 Describe 'ConvertFrom-Ini' {

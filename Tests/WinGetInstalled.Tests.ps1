@@ -1,8 +1,9 @@
 BeforeAll {
-  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'YamlSchema.psm1') -Force
-  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'WinGetManifestSchema.psm1') -Force
-  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'WinGetManifestModel.psm1') -Force
-  Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Libraries', 'WinGetARP.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Data' 'YamlSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'WinGet' 'WinGetManifestSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'WinGet' 'WinGetManifestModel.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'ARP.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'WinGet' 'WinGetMatching.psm1') -Force
 
   $Script:Manifest = [ordered]@{
     Version   = [ordered]@{
@@ -161,14 +162,14 @@ Describe 'WinGet installed-entry matching helpers' {
 Describe 'MSI UserData install-context helpers' {
   It 'Should convert MSI ProductCode values to and from packed registry GUIDs' {
     $ProductCode = '{FECAFEB5-8D0E-4AE4-8FA0-745BAA835C35}'
-    $Packed = ConvertTo-WinGetMsiPackedGuid -Guid $ProductCode
+    $Packed = ConvertTo-MsiPackedGuid -Guid $ProductCode
 
     $Packed | Should -Be '5BEFACEFE0D84EA4F80A47B5AA38C553'
-    ConvertFrom-WinGetMsiPackedGuid -PackedGuid $Packed | Should -Be $ProductCode
+    ConvertFrom-MsiPackedGuid -PackedGuid $Packed | Should -Be $ProductCode
   }
 
   It 'Should classify S-1-5-18 MSI UserData evidence as machine context' {
-    $Context = Resolve-WinGetMsiARPInstallContext -ProductCode '{11111111-1111-1111-1111-111111111111}' -CurrentUserSid 'S-1-5-21-1000' -UserDataEntry @(
+    $Context = Resolve-MsiARPInstallContext -ProductCode '{11111111-1111-1111-1111-111111111111}' -CurrentUserSid 'S-1-5-21-1000' -UserDataEntry @(
       [pscustomobject]@{ Sid = 'S-1-5-18'; Context = 'machine' }
     )
 
@@ -179,7 +180,7 @@ Describe 'MSI UserData install-context helpers' {
   }
 
   It 'Should classify current-user MSI UserData evidence as user context' {
-    $Context = Resolve-WinGetMsiARPInstallContext -ProductCode '{11111111-1111-1111-1111-111111111111}' -CurrentUserSid 'S-1-5-21-1000' -UserDataEntry @(
+    $Context = Resolve-MsiARPInstallContext -ProductCode '{11111111-1111-1111-1111-111111111111}' -CurrentUserSid 'S-1-5-21-1000' -UserDataEntry @(
       [pscustomobject]@{ Sid = 'S-1-5-21-1000'; Context = 'user' }
     )
 
@@ -190,7 +191,7 @@ Describe 'MSI UserData install-context helpers' {
   }
 
   It 'Should classify another user SID as otherUser context' {
-    $Context = Resolve-WinGetMsiARPInstallContext -ProductCode '{11111111-1111-1111-1111-111111111111}' -CurrentUserSid 'S-1-5-21-1000' -UserDataEntry @(
+    $Context = Resolve-MsiARPInstallContext -ProductCode '{11111111-1111-1111-1111-111111111111}' -CurrentUserSid 'S-1-5-21-1000' -UserDataEntry @(
       [pscustomobject]@{ Sid = 'S-1-5-21-2000'; Context = 'otherUser' }
     )
 
@@ -202,7 +203,7 @@ Describe 'MSI UserData install-context helpers' {
   }
 
   It 'Should classify multiple MSI UserData contexts as mixed' {
-    $Context = Resolve-WinGetMsiARPInstallContext -ProductCode '{11111111-1111-1111-1111-111111111111}' -CurrentUserSid 'S-1-5-21-1000' -UserDataEntry @(
+    $Context = Resolve-MsiARPInstallContext -ProductCode '{11111111-1111-1111-1111-111111111111}' -CurrentUserSid 'S-1-5-21-1000' -UserDataEntry @(
       [pscustomobject]@{ Sid = 'S-1-5-18'; Context = 'machine' },
       [pscustomobject]@{ Sid = 'S-1-5-21-1000'; Context = 'user' }
     )
@@ -210,5 +211,12 @@ Describe 'MSI UserData install-context helpers' {
     $Context.InstallContext | Should -Be 'mixed'
     $Context.IsMachine | Should -BeTrue
     $Context.IsCurrentUser | Should -BeTrue
+  }
+
+  It 'Should not export superseded WinGet-prefixed MSI wrappers' {
+    Get-Command ConvertFrom-WinGetMsiPackedGuid -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    Get-Command ConvertTo-WinGetMsiPackedGuid -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    Get-Command Get-WinGetMsiUserDataProductEntry -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    Get-Command Resolve-WinGetMsiARPInstallContext -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
   }
 }

@@ -1,7 +1,7 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'InstallerBridge.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Inno.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerBridge.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'Inno.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Inno'
 

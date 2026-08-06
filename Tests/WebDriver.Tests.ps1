@@ -252,7 +252,7 @@ Describe 'WebDriver task integration contracts' {
 
 Describe 'WebDriver lifecycle hooks' {
   BeforeAll {
-    $Script:HookWebDriverModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'WebDriver.psm1') -Force -DisableNameChecking -PassThru
+    $Script:HookWebDriverModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Browser' 'WebDriver.psm1') -Force -DisableNameChecking -PassThru
     $Script:HookRoot = Join-Path $PSScriptRoot '..' 'Hooks'
   }
 
@@ -333,7 +333,7 @@ Describe 'WebDriver lifecycle hooks' {
 
 Describe 'Scoped WebDriver PowerShell API' {
   BeforeAll {
-    $Script:WebDriverModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'WebDriver.psm1') -Force -DisableNameChecking -PassThru
+    $Script:WebDriverModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Browser' 'WebDriver.psm1') -Force -DisableNameChecking -PassThru
   }
 
   AfterAll {
@@ -428,7 +428,7 @@ Describe 'Scoped WebDriver PowerShell API' {
 
 Describe 'Shared WebDriver real runspace smoke' -Tag Integration {
   It 'uses one real Selenium session and service across thread-job runspaces' -Skip:($env:DUMPLINGS_WEBDRIVER_INTEGRATION -ne '1') {
-    $ModulePath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'Libraries' 'WebDriver.psm1')).Path
+    $ModulePath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'Libraries' 'Browser' 'WebDriver.psm1')).Path
     $Storage = [hashtable]::Synchronized(@{})
     $CachePath = Join-Path $TestDrive 'WebDriverCache'
     $null = New-Item -Path $CachePath -ItemType Directory -Force
@@ -484,7 +484,7 @@ Describe 'Shared WebDriver real runspace smoke' -Tag Integration {
   }
 
   It 'preempts and recycles a real session when the quantum expires under contention' -Skip:($env:DUMPLINGS_WEBDRIVER_INTEGRATION -ne '1') {
-    $ModulePath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'Libraries' 'WebDriver.psm1')).Path
+    $ModulePath = (Resolve-Path (Join-Path $PSScriptRoot '..' 'Libraries' 'Browser' 'WebDriver.psm1')).Path
     $Storage = [hashtable]::Synchronized(@{})
     $CachePath = Join-Path $TestDrive 'PreemptionCache'
     $null = New-Item -Path $CachePath -ItemType Directory -Force

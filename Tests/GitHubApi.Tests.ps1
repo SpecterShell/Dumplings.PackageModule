@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
-  $Script:GitHubModulePath = Join-Path $PSScriptRoot '..\Libraries\GitHub.psm1'
+  $Script:GitHubModulePath = Join-Path $PSScriptRoot '..\Libraries\Networking\GitHub.psm1'
   Import-Module $Script:GitHubModulePath -Force
 }
 

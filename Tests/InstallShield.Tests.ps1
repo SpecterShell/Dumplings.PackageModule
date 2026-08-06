@@ -1,17 +1,17 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerCondition.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Cabinet.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'General.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'PE.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'RegistryAssociations.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'MSI.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'InstallShield.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'InstallShieldInstallScript.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerEvidence.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Cabinet.psm1') -Force
+  . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PE.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'MSI.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'InstallShield.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'InstallShieldInstallScript.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallShield'
   $Script:MsiFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\MSI'
@@ -227,10 +227,15 @@ Describe 'InstallShield parser' {
       $NestedMsi.Parser | Should -Be 'Windows Installer'
       $NestedMsi.Info.ProductCode | Should -Be '{9FDE1EAA-1ACA-28CD-8077-1E3C45E96033}'
       $NestedExe = $NestedPackages | Where-Object PackageType -EQ 'Exe'
-      $NestedExe.Success | Should -BeFalse
       $NestedExe.SourcePath | Should -Exist
       $NestedExe.SourceUrl | Should -Match '^http://download\.visualstudio\.microsoft\.com/'
-      $NestedExe.Warnings | Should -Match 'Get-WinGetInstallerAnalysis is not loaded'
+      if (Get-Command Get-WinGetInstallerAnalysis -ErrorAction SilentlyContinue) {
+        $NestedExe.Success | Should -BeTrue
+        $NestedExe.Parser | Should -Be 'WinGet installer analyzer'
+      } else {
+        $NestedExe.Success | Should -BeFalse
+        $NestedExe.Warnings | Should -Match 'Get-WinGetInstallerAnalysis is not loaded'
+      }
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }

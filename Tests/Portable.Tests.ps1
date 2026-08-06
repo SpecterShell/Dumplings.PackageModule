@@ -1,7 +1,8 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
   . (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Index.ps1')
 
   $Script:PortableFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Portable'
@@ -318,12 +319,10 @@ Describe 'PE architecture helpers' {
     $Info.Warnings | Should -Contain 'Related PE files contain multiple concrete architectures: x64, x86. Inspect package layout manually before authoring WinGet installers.'
   }
 
-  It 'Should keep compatibility wrapper names available' {
-    $Path = Get-PortableTestPEFixture -Name 'wrapper-native-x64.exe' -Machine 0x8664 -PE32Plus
-
-    (Get-PortableExecutableArchitectureInfo -Path $Path).RecommendedWinGetArchitecture | Should -Be 'x64'
-    Read-ArchitectureFromPortableExecutable -Path $Path | Should -Be 'x64'
-    Test-PortableExecutableArchitecture -Path $Path -Architecture x64 | Should -BeTrue
+  It 'Should not export superseded portable architecture wrapper names' {
+    Get-Command Get-PortableExecutableArchitectureInfo -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    Get-Command Read-ArchitectureFromPortableExecutable -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    Get-Command Test-PortableExecutableArchitecture -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
   }
 }
 
@@ -558,11 +557,9 @@ Describe 'PE dependency helpers' {
     $Info.Warnings[0] | Should -BeLike '*has no runtimeconfig sidecar*'
   }
 
-  It 'Should keep compatibility VCRedist wrapper names available' {
-    $Path = Get-PortableTestPEFixture -Name 'wrapper-vcredist.exe' -Machine 0x014C -Imports @('msvcp100.dll')
-
-    (Get-PortableExecutableVCRedistInfo -Path $Path).RecommendedPackageDependencyIds | Should -Contain 'Microsoft.VCRedist.2010.x86'
-    Test-PortableExecutableVCRedistDependency -Path $Path | Should -BeTrue
+  It 'Should not export superseded VCRedist wrapper names' {
+    Get-Command Get-PortableExecutableVCRedistInfo -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    Get-Command Test-PortableExecutableVCRedistDependency -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
   }
 }
 

@@ -1,7 +1,7 @@
 #Requires -Version 7.4
 
 BeforeAll {
-  $Script:ModulePath = Join-Path $PSScriptRoot '..' 'Libraries' 'Playwright.psm1'
+  $Script:ModulePath = Join-Path $PSScriptRoot '..' 'Libraries' 'Browser' 'Playwright.psm1'
   $Script:PlaywrightModule = Import-Module $Script:ModulePath -Force -PassThru -DisableNameChecking
 }
 

@@ -1,11 +1,12 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestFixture.ps1')
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
   . (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath 'Index.ps1')
 
-  $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\WinGetInstallerAnalyzer'
+  $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallerAnalyzer'
   $Script:DeclaredTypeFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'ManifestUpdateDeclaredTypes'
   $ProgressPreference = 'SilentlyContinue'
 
@@ -102,7 +103,7 @@ install4j i4jruntime.jar.pack;i4jparams.conf;user.jar.pack allinstdirs1234-5678-
 
 Describe 'Installer manifest behavior defaults' {
   It 'Should mirror documented Advanced Installer modes and return codes' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope WinGetAnalysis {
       $Defaults = Get-WinGetInstallerExeFamilyDefault -Family 'Advanced Installer'
 
       $Defaults.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
@@ -112,13 +113,13 @@ Describe 'Installer manifest behavior defaults' {
   }
 
   It 'Should limit generic EXE families without progress mode support' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope WinGetAnalysis {
       (Get-WinGetInstallerExeFamilyDefault -Family 'Squirrel').InstallModes | Should -Be @('interactive', 'silent')
     }
   }
 
   It 'Should mirror the documented InstallShield Advanced UI snippet' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope WinGetAnalysis {
       $Defaults = Get-WinGetInstallerExeFamilyDefault -Family 'InstallShield Advanced UI'
 
       $Defaults.InstallerSwitches.Silent | Should -Be '/silent'
@@ -129,7 +130,7 @@ Describe 'Installer manifest behavior defaults' {
   }
 
   It 'Should not invent scope where the documented generic-family snippet omits it' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope WinGetAnalysis {
       foreach ($Family in @('Setup Factory', 'InstallAnywhere', 'InstallMate', 'QSetup', 'Paquet Builder')) {
         (Get-WinGetInstallerExeFamilyDefault -Family $Family).PSObject.Properties.Name | Should -Not -Contain 'Scope'
       }
@@ -137,7 +138,7 @@ Describe 'Installer manifest behavior defaults' {
   }
 
   It 'Should mirror documented Wise and Qt IFW installer-level fields' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope WinGetAnalysis {
       $Wise = Get-WinGetInstallerExeFamilyDefault -Family 'Wise'
       $Qt = Get-WinGetInstallerExeFamilyDefault -Family 'Qt Installer Framework'
 
@@ -243,7 +244,7 @@ Describe 'WinGet installer analyzer content detection' {
   }
 
   It 'Should expose localized NSIS ARP entries and parser notices' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope InstallerAnalyzer {
       $Notice = 'NSIS uninstall DisplayName or Publisher varies by installer language (en-US, zh-CN).'
       $Warning = 'The NSIS parser recovered incomplete optional metadata.'
       Mock Get-NSISInfo {
@@ -272,7 +273,7 @@ Describe 'WinGet installer analyzer content detection' {
       }
 
       $Candidate = [pscustomobject]@{ Family = 'NSIS/Nullsoft'; Confidence = 'high' }
-      $ParserResult = @(Invoke-WinGetInstallerExeParser -InstallerPath 'localized-nsis.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
+      $ParserResult = @(Invoke-InstallerExeParser -InstallerPath 'localized-nsis.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
           Where-Object { $_.Name -eq 'NSIS' -and $_.Success })[0].Result
 
       @($ParserResult.AppsAndFeaturesEntries).Count | Should -Be 2
@@ -298,7 +299,7 @@ Describe 'WinGet installer analyzer content detection' {
   }
 
   It 'Should detach selected InstallShield MSI metadata before extraction cleanup' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope InstallerAnalyzer {
       Mock New-TempFolder { 'C:\Temporary\InstallShieldAnalyzer' }
       Mock Remove-Item {}
       Mock Get-InstallShieldInfo {
@@ -324,7 +325,7 @@ Describe 'WinGet installer analyzer content detection' {
       }
 
       $Candidate = [pscustomobject]@{ Family = 'InstallShield'; Confidence = 'high' }
-      $Result = @(Invoke-WinGetInstallerExeParser -InstallerPath 'synthetic-installshield.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
+      $Result = @(Invoke-InstallerExeParser -InstallerPath 'synthetic-installshield.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
           Where-Object { $_.Name -eq 'InstallShield' -and $_.Success })[0].Result
 
       $Result.ProductCode | Should -Be '{INSTALLSHIELD-MSI}'
@@ -336,7 +337,7 @@ Describe 'WinGet installer analyzer content detection' {
   }
 
   It 'Should expose InstallScript ARP evidence without claiming progress-mode support' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope InstallerAnalyzer {
       Mock New-TempFolder { 'C:\Temporary\InstallScriptAnalyzer' }
       Mock Remove-Item {}
       Mock Get-InstallShieldInfo {
@@ -367,7 +368,7 @@ Describe 'WinGet installer analyzer content detection' {
       Mock Get-InstallShieldMsiInfo { throw 'MSI parsing must not run for InstallScript-only media' }
 
       $Candidate = [pscustomobject]@{ Family = 'InstallShield'; Confidence = 'high' }
-      $Result = @(Invoke-WinGetInstallerExeParser -InstallerPath 'synthetic-installscript.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
+      $Result = @(Invoke-InstallerExeParser -InstallerPath 'synthetic-installscript.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false |
           Where-Object { $_.Name -eq 'InstallShield' -and $_.Success })[0].Result
 
       $Result.ProductCode | Should -Be '{INSTALLSCRIPT-PRODUCT}'
@@ -390,7 +391,7 @@ Describe 'WinGet installer analyzer content detection' {
   }
 
   It 'Should use the documented Actual Installer dual-scope switch defaults' {
-    $Module = Get-Module WinGetInstallerAnalyzer
+    $Module = Get-Module WinGetAnalysis
     $Defaults = & $Module { Get-WinGetInstallerExeFamilyDefault -Family 'Actual Installer' }
 
     $Defaults.InstallerSwitches.Silent | Should -Be '/S /L'
@@ -403,33 +404,34 @@ Describe 'WinGet installer analyzer content detection' {
   It 'Should route Paquet Builder markers to its family defaults' {
     $FixturePath = Join-Path $Script:FixtureDirectory 'PaquetBuilder-marker.exe'
     [System.IO.File]::WriteAllText($FixturePath, 'MZ Paquet Builder Setup G.D.G. Software installpackbuilder.com')
-    $Module = Get-Module WinGetInstallerAnalyzer
+    $Module = Get-Module InstallerAnalyzer
     $Candidate = & $Module {
       param($FixturePath)
-      Get-WinGetInstallerGenericExeFamilyCandidate -File (Get-Item -LiteralPath $FixturePath) -Budget 1048576 |
+      Get-InstallerGenericExeFamilyCandidate -File (Get-Item -LiteralPath $FixturePath) -Budget 1048576 |
         Where-Object Family -EQ 'Paquet Builder' |
         Select-Object -First 1
     } $FixturePath
 
     $Candidate.Family | Should -Be 'Paquet Builder'
     $Candidate.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'Scope'
-    $Candidate.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/s'
+    (& (Get-Module WinGetAnalysis) { Get-WinGetInstallerExeFamilyDefault -Family 'Paquet Builder' }).InstallerSwitches.Silent | Should -Be '/s'
   }
 
   It 'Should route CreateInstall markers to its family defaults' {
     $FixturePath = Join-Path $Script:FixtureDirectory 'CreateInstall-marker.exe'
     [System.IO.File]::WriteAllText($FixturePath, 'MZ CreateInstall Novostrim .ciq')
-    $Module = Get-Module WinGetInstallerAnalyzer
+    $Module = Get-Module InstallerAnalyzer
     $Candidate = & $Module {
       param($FixturePath)
-      Get-WinGetInstallerGenericExeFamilyCandidate -File (Get-Item -LiteralPath $FixturePath) -Budget 1048576 |
+      Get-InstallerGenericExeFamilyCandidate -File (Get-Item -LiteralPath $FixturePath) -Budget 1048576 |
         Where-Object Family -EQ 'CreateInstall' |
         Select-Object -First 1
     } $FixturePath
 
     $Candidate.Family | Should -Be 'CreateInstall'
-    $Candidate.SuggestedManifestFields.Scope | Should -Be 'machine'
-    $Candidate.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '-silent'
+    $Defaults = & (Get-Module WinGetAnalysis) { Get-WinGetInstallerExeFamilyDefault -Family 'CreateInstall' }
+    $Defaults.Scope | Should -Be 'machine'
+    $Defaults.InstallerSwitches.Silent | Should -Be '-silent'
   }
 
   It 'Should keep CreateInstall text inside Codeg as a rejected route after NSIS succeeds' {
@@ -479,7 +481,7 @@ Describe 'WinGet installer analyzer content detection' {
   }
 
   It 'Should prefer a structured generic EXE parser over archive-wrapper heuristics' {
-    InModuleScope WinGetInstallerAnalyzer {
+    InModuleScope InstallerAnalyzer {
       Mock Get-SetupFactoryInfo { throw 'not Setup Factory' }
       Mock Get-InstallAnywhereInfo { throw 'not InstallAnywhere' }
       Mock Get-ActualInstallerInfo { throw 'not Actual Installer' }
@@ -500,13 +502,14 @@ Describe 'WinGet installer analyzer content detection' {
       Mock Get-InstallMateInfo { throw 'not InstallMate' }
       Mock Get-SevenZipSfxInfo { throw 'archive wrapper heuristic must not run' }
 
-      $Results = @(Invoke-WinGetInstallerExeParser -InstallerPath 'synthetic-qsetup.exe' -ExtractEmbeddedMsi:$false)
+      $Candidate = [pscustomobject]@{ Family = 'QSetup'; Confidence = 'high' }
+      $Results = @(Invoke-InstallerExeParser -InstallerPath 'synthetic-qsetup.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false)
       $QSetup = $Results | Where-Object { $_.Name -eq 'QSetup' -and $_.Success } | Select-Object -First 1
 
       $QSetup.Result.ProductName | Should -Be 'Analyzer QSetup Product'
       $QSetup.Result.ProductVersion | Should -Be '1.2.3'
       $QSetup.Result.SuggestedManifestFields.Scope | Should -Be 'machine'
-      $QSetup.Result.SuggestedManifestFields.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
+      (& (Get-Module WinGetAnalysis) { Get-WinGetInstallerExeFamilyDefault -Family 'QSetup' }).InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
       Should -Invoke -CommandName Get-SevenZipSfxInfo -Times 0 -Exactly
     }
   }

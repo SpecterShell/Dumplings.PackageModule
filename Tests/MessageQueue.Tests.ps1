@@ -1,8 +1,8 @@
-$Script:MessageQueueModulePath = Join-Path $PSScriptRoot '..\Libraries\MessageQueue.psm1'
+$Script:MessageQueueModulePath = Join-Path $PSScriptRoot '..\Libraries\Messaging\MessageQueue.psm1'
 Import-Module $Script:MessageQueueModulePath -Force
 
 BeforeAll {
-  Import-Module (Join-Path $PSScriptRoot '..\Index.ps1') -Force
+  . (Join-Path $PSScriptRoot '..\Index.ps1')
 }
 
 Describe 'Message queue broker' {
@@ -225,17 +225,6 @@ Describe 'Message queue PowerShell orchestration' {
 Describe 'PackageTask queued messaging' {
   BeforeAll {
     function global:Write-Log { param ($Object, $Level) $null = $Object, $Level }
-    function global:Send-QueuedTelegramMessage {
-      param ($Message, $QueueKey, $SessionKey, [switch]$AsMarkdown)
-      $Global:MessageQueueTestCalls.Add([pscustomobject]@{
-          Message       = $Message
-          QueueKey      = $QueueKey
-          SessionKey    = $SessionKey
-          HasQueueKey   = $PSBoundParameters.ContainsKey('QueueKey')
-          HasSessionKey = $PSBoundParameters.ContainsKey('SessionKey')
-          UsesMarkdown  = $AsMarkdown.IsPresent
-        })
-    }
     function New-MessageQueueTestTask {
       param ([string]$Name, [System.Collections.IDictionary]$Config)
       $TaskPath = Join-Path $TestDrive $Name
@@ -250,6 +239,17 @@ Describe 'PackageTask queued messaging' {
   BeforeEach {
     $Global:DumplingsPreference = [ordered]@{ EnableMessage = $true }
     $Global:MessageQueueTestCalls = [Collections.Generic.List[object]]::new()
+    Mock Send-QueuedTelegramMessage {
+      param ($Message, $QueueKey, $SessionKey, [switch]$AsMarkdown)
+      $Global:MessageQueueTestCalls.Add([pscustomobject]@{
+          Message       = $Message
+          QueueKey      = $PesterBoundParameters['QueueKey']
+          SessionKey    = $PesterBoundParameters['SessionKey']
+          HasQueueKey   = $PesterBoundParameters.ContainsKey('QueueKey')
+          HasSessionKey = $PesterBoundParameters.ContainsKey('SessionKey')
+          UsesMarkdown  = $PesterBoundParameters.ContainsKey('AsMarkdown')
+        })
+    }
   }
 
   It 'uses effective WinGet identifier precedence for state coalescing' {
@@ -287,7 +287,6 @@ Describe 'PackageTask queued messaging' {
 
   AfterAll {
     Remove-Item -Path 'Function:\Write-Log' -Force -ErrorAction Ignore
-    Remove-Item -Path 'Function:\Send-QueuedTelegramMessage' -Force -ErrorAction Ignore
     Remove-Item -Path 'Function:\New-MessageQueueTestTask' -Force -ErrorAction Ignore
     Remove-Variable -Name MessageQueueTestCalls -Scope Global -ErrorAction Ignore
   }

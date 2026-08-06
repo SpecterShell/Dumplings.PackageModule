@@ -1,8 +1,5 @@
 BeforeAll {
-  $LibraryPath = Join-Path $PSScriptRoot '..\Libraries'
-  foreach ($ModuleName in @('Runtime', 'General', 'Binary', 'Compression', 'Archive', 'PE', 'Bootstrapper', 'SevenZipSfx')) {
-    Import-Module (Join-Path $LibraryPath "$ModuleName.psm1") -Force
-  }
+  Import-Module (Join-Path $PSScriptRoot '..\PackageModule.psd1') -Force -Global
 }
 
 Describe '7-Zip SFX configuration parser' {

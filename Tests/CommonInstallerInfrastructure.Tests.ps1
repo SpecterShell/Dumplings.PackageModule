@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\RegistryAssociations.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerCondition.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerEvidence.psm1') -Force
   if (-not ([Management.Automation.PSTypeName]'Dumplings.Tests.VirtualLargeReadStream').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -93,12 +92,11 @@ Describe 'Shared installer infrastructure parity' {
     $PackageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $ParserRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\InstallerParsers'))
     $PathPairs = @(
-      @{ Package = 'Libraries\Runtime.psm1'; Parser = 'Libraries\Runtime.psm1' }
-      @{ Package = 'Libraries\Binary.psm1'; Parser = 'Libraries\Binary.psm1' }
-      @{ Package = 'Libraries\Compression.psm1'; Parser = 'Libraries\Compression.psm1' }
-      @{ Package = 'Libraries\Archive.psm1'; Parser = 'Libraries\Archive.psm1' }
-      @{ Package = 'Libraries\PE.psm1'; Parser = 'Libraries\PE.psm1' }
-      @{ Package = 'Libraries\RegistryAssociations.psm1'; Parser = 'Libraries\RegistryAssociations.psm1' }
+      @{ Package = 'Libraries\Infrastructure\Runtime.psm1'; Parser = 'Libraries\Infrastructure\Runtime.psm1' }
+      @{ Package = 'Libraries\Infrastructure\Binary.psm1'; Parser = 'Libraries\Infrastructure\Binary.psm1' }
+      @{ Package = 'Libraries\Infrastructure\Archive.psm1'; Parser = 'Libraries\Infrastructure\Archive.psm1' }
+      @{ Package = 'Libraries\Infrastructure\PE.psm1'; Parser = 'Libraries\Infrastructure\PE.psm1' }
+      @{ Package = 'Libraries\Infrastructure\InstallerEvidence.psm1'; Parser = 'Libraries\Infrastructure\InstallerEvidence.psm1' }
       @{ Package = 'Assets\Source\InstallerInfrastructure\BinaryIO.cs'; Parser = 'Assets\InstallerInfrastructure\BinaryIO.cs' }
       @{ Package = 'Assets\Source\InstallerInfrastructure\PatternSearch.cs'; Parser = 'Assets\InstallerInfrastructure\PatternSearch.cs' }
       @{ Package = 'Assets\Source\InstallerInfrastructure\PEImageReader.cs'; Parser = 'Assets\InstallerInfrastructure\PEImageReader.cs' }
@@ -113,7 +111,7 @@ Describe 'Shared installer infrastructure parity' {
   }
 
   It 'loads process-wide C# types safely from concurrent runspaces' {
-    $RuntimeModule = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1'))
+    $RuntimeModule = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1'))
     $ScriptPath = Join-Path $TestDrive 'ConcurrentRuntimeLoad.ps1'
     @'
 param([string]$RuntimeModule)
@@ -142,7 +140,7 @@ $Jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction Stop
     $SecondSource = Join-Path $SourceDirectory 'Reader.cs'
     [IO.File]::WriteAllText($FirstSource, 'namespace Dumplings.Tests.ManagedSourceSet { public sealed partial class Marker { public static string Model => "model"; } }')
     [IO.File]::WriteAllText($SecondSource, 'namespace Dumplings.Tests.ManagedSourceSet { public sealed partial class Marker { public static string Reader => "reader"; } }')
-    $RuntimeModule = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1'))
+    $RuntimeModule = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1'))
 
     $Jobs = 1..8 | ForEach-Object {
       Start-ThreadJob -ArgumentList $RuntimeModule, $FirstSource, $SecondSource -ScriptBlock {
@@ -166,7 +164,7 @@ $Jobs | Receive-Job -Wait -AutoRemoveJob -ErrorAction Stop
     $Violations = [Collections.Generic.List[string]]::new()
     foreach ($Root in $Roots) {
       foreach ($File in Get-ChildItem -LiteralPath $Root -Include '*.psm1', '*.ps1' -Recurse -File) {
-        if ($File.Name -eq 'Compression.psm1') { continue }
+        if ($File.Name -eq 'Archive.psm1') { continue }
         $Text = Get-Content -LiteralPath $File.FullName -Raw
         if ($Text -match '(?i)ReadAllBytes\s*\(') { $Violations.Add("$($File.FullName): unbounded ReadAllBytes") }
         if ($Text -match '\[(?:IO|System\.IO)\.Compression\.(?:ZLibStream|DeflateStream)|SharpCompress\.Compressors\.(?:LZMA\.LzmaStream|BZip2\.BZip2Stream)') {
@@ -187,7 +185,7 @@ Describe 'Aggregate parser result ownership' {
 
     foreach ($Root in $Roots) {
       Test-Path -LiteralPath (Join-Path $Root 'InstallerMetadata.psm1') | Should -BeFalse
-      Get-ChildItem -LiteralPath $Root -Filter '*.psm1' -File |
+      Get-ChildItem -LiteralPath $Root -Filter '*.psm1' -Recurse -File |
         Select-String -Pattern 'Complete-InstallerParserInfo' |
         Should -BeNullOrEmpty
     }
@@ -479,6 +477,13 @@ Describe 'Get-PEVersionStringTable' {
 }
 
 Describe 'Shared archive helpers' {
+  It 'loads filesystem path helpers from the filesystem module' {
+    (Get-Command Resolve-InstallerFileSystemPath).ModuleName | Should -Be 'FileSystem'
+    (Get-Command Resolve-SafeExtractionPath).ModuleName | Should -Be 'FileSystem'
+    (Get-Module Binary).ExportedFunctions.Keys | Should -Not -Contain 'Resolve-InstallerFileSystemPath'
+    (Get-Module Binary).ExportedFunctions.Keys | Should -Not -Contain 'Resolve-SafeExtractionPath'
+  }
+
   It 'resolves relative paths against the PowerShell filesystem location' {
     $PowerShellRoot = Join-Path $TestDrive 'PowerShellLocation'
     $null = New-Item -Path $PowerShellRoot -ItemType Directory

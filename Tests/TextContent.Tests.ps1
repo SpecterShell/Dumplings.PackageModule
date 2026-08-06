@@ -1,5 +1,5 @@
 BeforeDiscovery {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\TextContent.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\HTML.psm1') -Force
 }
 
 Describe 'Get-TextContent non-table regressions' {

@@ -1,10 +1,10 @@
 BeforeDiscovery {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\YamlSchema.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSchema.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestModel.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetARP.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGetManifestSerialization.psm1') -Force
+  . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Data\YamlSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestSchema.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestModel.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetMatching.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\WinGet\WinGetManifestSerialization.psm1') -Force
 }
 
 BeforeAll {

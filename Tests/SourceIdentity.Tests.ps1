@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 BeforeAll {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\SourceIdentity.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Networking\SourceIdentity.psm1') -Force
 }
 
 Describe 'Get-InstallerSourceIdentity' {

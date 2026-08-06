@@ -1,14 +1,14 @@
 BeforeAll {
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Cabinet.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerCondition.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\RegistryAssociations.psm1') -Force
-  Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShieldInstallScript.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+  . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Cabinet.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerEvidence.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerEvidence.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShieldInstallScript.psm1') -Force
 
   function New-TestInstallScriptFile {
     param (
@@ -437,15 +437,15 @@ Company=Stale response publisher
   }
 
   It 'rejects proprietary cabinet strings that escape the declared file table' {
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallerCondition.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Cabinet.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerEvidence.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Cabinet.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+    . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
     $Path = Join-Path $TestDrive 'malformed-data1.hdr'
     $Bytes = [byte[]]::new(72)
     foreach ($Field in @(
@@ -468,13 +468,13 @@ Company=Stale response publisher
   }
 
   It 'rejects a proprietary cabinet catalog whose object count exceeds parser limits' {
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+    . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
     $Path = Join-Path $TestDrive 'oversized-catalog-data1.hdr'
     $Bytes = [byte[]]::new(72)
     foreach ($Field in @(
@@ -497,13 +497,13 @@ Company=Stale response publisher
   }
 
   It 'parses source-backed InstallScript media registry sets and shell objects' {
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+    . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
     $Path = Join-Path $TestDrive 'media-data1.hdr'
     New-TestInstallShieldMediaHeader -Path $Path
 
@@ -751,13 +751,13 @@ Company=Stale response publisher
   }
 
   It 'validates the cached Celsys self-contained response layout when available' -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\CSP_504w_setup.exe')) {
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+    . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
     $Destination = Join-Path $TestDrive 'Celsys'
     $Info = Get-InstallShieldInfo -Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\CSP_504w_setup.exe' -DestinationPath $Destination
 
@@ -785,13 +785,13 @@ Company=Stale response publisher
     @{ Name = 'DinoCapture 2'; File = 'dnc2_1.5.55_U.exe' }
     @{ Name = 'DinoCapture 3'; File = 'dnc3_1.1.1.6.exe' }
   ) -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\dnc2_1.5.55_U.exe')) {
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+    . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
     $InstallerPath = Join-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield' $File
     if (-not (Test-Path $InstallerPath)) { Set-ItResult -Skipped -Because "$Name fixture is not cached"; return }
     $Info = Get-InstallShieldInfo -Path $InstallerPath -DestinationPath (Join-Path $TestDrive $Name.Replace(' ', '-'))
@@ -819,13 +819,13 @@ Company=Stale response publisher
   }
 
   It 'parses the cached Unitronics PackageForTheWeb and Stirling InstallScript generations' -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\U90Ladder_6_6_45.exe')) {
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+    . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
     $InstallerPath = 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\U90Ladder_6_6_45.exe'
     $Info = Get-InstallShieldInfo -Path $InstallerPath -DestinationPath (Join-Path $TestDrive 'Unitronics')
 
@@ -859,13 +859,13 @@ Company=Stale response publisher
   }
 
   It 'extracts only a requested PackageForTheWeb catalog entry' -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\U90Ladder_6_6_45.exe')) {
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+    . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
     $Destination = Join-Path $TestDrive 'Unitronics-Selected'
 
     $Result = Expand-InstallShieldInstaller `
@@ -900,13 +900,13 @@ Company=Stale response publisher
       InstructionCount = 19427
     }
   ) -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\Install_PRNclient_FR_2023.0.1.2_win64.exe')) {
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Runtime.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Binary.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Compression.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Archive.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\PE.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\General.psm1') -Force
-    Import-Module (Join-Path $PSScriptRoot '..\Libraries\InstallShield.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\PE.psm1') -Force
+    . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
     $InstallerPath = Join-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield' $File
     if (-not (Test-Path -LiteralPath $InstallerPath)) { Set-ItResult -Skipped -Because "$Architecture fixture is not cached"; return }
 

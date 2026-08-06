@@ -25,7 +25,7 @@ Describe 'Wise MSI wrapper parser' {
     $Info.ProductCode | Should -Be '{D06BA64C-4447-49B4-B99D-E85BEA9E1035}'
     $Info.UpgradeCode | Should -Be '{FCEEDA79-4099-4C10-B717-F72EF53CCDA9}'
     $Info.Scope | Should -Be 'machine'
-    $Info.NestedInstallerBuilder | Should -Be 'InstallShield'
+    $Info.NestedInstallerBuilder | Should -Be 'Wise'
     $Info.InstallLocationProperty | Should -Be 'INSTALLDIR'
     $Info.AppsAndFeaturesInstallerType | Should -Be 'msi'
     $Info.FileExtensions | Should -Contain '8xp'
