@@ -14,6 +14,7 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'InstallShieldInstallScript.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallShield'
+  $Script:MsiFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\MSI'
 
   function Get-InstallerFixture {
     param(
@@ -572,7 +573,52 @@ PreReq0=First.prq
 
       Expand-InstallShield -Path 'C:\Fixtures\Setup.exe' -CollisionAction Rename | Should -Be 'C:\Extracted\Setup_u'
       Should -Invoke Expand-InstallShieldInstaller -Exactly 1 -ParameterFilter {
-        $Path -eq 'C:\Fixtures\Setup.exe' -and [string]::IsNullOrEmpty($DestinationPath)
+        $Path -eq 'C:\Fixtures\Setup.exe' -and [string]::IsNullOrEmpty($DestinationPath) -and
+        $MaximumExpandedBytes -eq 8GB
+      }
+    }
+  }
+
+  It 'Should distinguish type 3 ISSetupStream attributes with and without timestamps' {
+    InModuleScope InstallShield {
+      $NameBytes = [Text.Encoding]::Unicode.GetBytes("Setup.inx$([char]0)")
+      $Payload = [byte[]](1, 2, 3, 4)
+      $Record = [byte[]]::new(24 + 24 + $NameBytes.Length + $Payload.Length)
+      [BitConverter]::GetBytes([uint32]$NameBytes.Length).CopyTo($Record, 0)
+      [BitConverter]::GetBytes([uint32]6).CopyTo($Record, 4)
+      [BitConverter]::GetBytes([uint32]$Payload.Length).CopyTo($Record, 10)
+      [BitConverter]::GetBytes([uint16]1).CopyTo($Record, 22)
+      for ($Index = 0; $Index -lt 3; $Index++) {
+        [BitConverter]::GetBytes(([datetime]'2026-01-02T03:04:05Z').ToFileTimeUtc()).CopyTo($Record, 24 + $Index * 8)
+      }
+      $NameBytes.CopyTo($Record, 48)
+      $Payload.CopyTo($Record, 48 + $NameBytes.Length)
+
+      $Stream = [IO.MemoryStream]::new($Record)
+      try {
+        $Attribute = Get-InstallShieldStreamAttribute -Stream $Stream -Offset 0 -Type 3
+
+        $Attribute.FileName | Should -Be 'Setup.inx'
+        $Attribute.FileLength | Should -Be $Payload.Length
+        $Attribute.DataOffset | Should -Be (48 + $NameBytes.Length)
+      } finally {
+        $Stream.Dispose()
+      }
+
+      $RecordWithoutTimestamps = [byte[]]::new(24 + $NameBytes.Length + $Payload.Length)
+      [BitConverter]::GetBytes([uint32]$NameBytes.Length).CopyTo($RecordWithoutTimestamps, 0)
+      [BitConverter]::GetBytes([uint32]6).CopyTo($RecordWithoutTimestamps, 4)
+      [BitConverter]::GetBytes([uint32]$Payload.Length).CopyTo($RecordWithoutTimestamps, 10)
+      [BitConverter]::GetBytes([uint16]1).CopyTo($RecordWithoutTimestamps, 22)
+      $NameBytes.CopyTo($RecordWithoutTimestamps, 24)
+      $Payload.CopyTo($RecordWithoutTimestamps, 24 + $NameBytes.Length)
+      $Stream = [IO.MemoryStream]::new($RecordWithoutTimestamps)
+      try {
+        $Attribute = Get-InstallShieldStreamAttribute -Stream $Stream -Offset 0 -Type 3
+        $Attribute.FileName | Should -Be 'Setup.inx'
+        $Attribute.DataOffset | Should -Be (24 + $NameBytes.Length)
+      } finally {
+        $Stream.Dispose()
       }
     }
   }
@@ -616,6 +662,12 @@ PreReq0=First.prq
             IsUnicodeLauncher = 1
             DataOffset        = 0
           }
+          # The record decoder must honor the operation's remaining budget and
+          # remove its partial output before a caller retries with a larger one.
+          { Export-InstallShieldDecodedFile -Stream $Stream -Attribute $Attribute -DestinationPath $ExpandedPath `
+              -MaximumBytes ($Expected.Length - 1) -StreamMode } | Should -Throw '*limit*'
+          Test-Path -LiteralPath (Join-Path $ExpandedPath $FileName) | Should -BeFalse
+          $Stream.Position = 0
           $OutputPath = Export-InstallShieldDecodedFile -Stream $Stream -Attribute $Attribute -DestinationPath $ExpandedPath -StreamMode
           Test-BinarySequence -Left ([IO.File]::ReadAllBytes($OutputPath)) -Right $Expected | Should -BeTrue
         } finally {
@@ -625,6 +677,25 @@ PreReq0=First.prq
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
+  }
+
+  It 'Should recover compiled InstallScript actions from the Tenable Nessus MSI' {
+    $Fixture = Join-Path $Script:MsiFixtureDirectory 'Nessus-10.12.3-x64.msi'
+    if (-not (Test-Path -LiteralPath $Fixture)) {
+      Set-ItResult -Skipped -Because 'The persistent Tenable Nessus MSI fixture is unavailable.'
+      return
+    }
+
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.InstallShieldProjectType | Should -Be 'Basic MSI'
+    $Info.InstallShieldScriptInfo.HasCompiledScript | Should -BeTrue
+    $Info.InstallShieldScriptInfo.EntryPoints | Should -Contain 'CheckDirPathPermissions'
+    $Info.InstallShieldScriptInfo.EntryPoints | Should -Contain 'SetupProperties'
+    $Info.InstallShieldScriptInfo.ExtractedFiles | Should -Contain 'Setup.inx'
+    $Info.InstallShieldScriptInfo.ExtractedFiles | Should -Contain 'IsConfig.ini'
+    $Info.InstallShieldScriptInfo.Analysis | Should -Not -BeNullOrEmpty
+    $Info.Warnings | Should -Not -Match 'Embedded InstallScript custom-action analysis failed'
   }
 
   It 'Should expose the PackageForTheWeb launch chain without executing it' {

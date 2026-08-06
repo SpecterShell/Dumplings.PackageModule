@@ -40,6 +40,7 @@ $Script:InstallShieldPackageForTheWebMaximumEntries = 4096
 $Script:InstallShieldPackageForTheWebMaximumExpandedBytes = 8GB
 $Script:InstallShieldCabinetSupportMaximumExpandedBytes = 64MB
 $Script:InstallShieldCabinetMaximumExpandedBytes = 8GB
+$Script:InstallShieldOverlayMaximumExpandedBytes = 8GB
 
 # PackageForTheWeb uses the generic cabinet module. Only the proprietary data1.hdr
 # reader needs format-specific managed source.
@@ -166,6 +167,30 @@ function Get-InstallShieldOldAttribute {
   }
 }
 
+function Test-InstallShieldFileTimeBlock {
+  <#
+  .SYNOPSIS
+    Test an observed ISSetupStream metadata block containing three Windows FILETIME values.
+  .PARAMETER Bytes
+    Exactly 24 bytes read immediately after the fixed stream-attribute prefix.
+  #>
+  [OutputType([bool])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes)
+
+  if ($Bytes.Length -ne 24) { return $false }
+  for ($Offset = 0; $Offset -lt 24; $Offset += 8) {
+    try {
+      $Timestamp = [DateTime]::FromFileTimeUtc([BitConverter]::ToInt64($Bytes, $Offset))
+    } catch {
+      return $false
+    }
+    # InstallShield postdates 1980. A distant upper bound rejects UTF-16 file
+    # names reinterpreted as integers without coupling parsing to the host date.
+    if ($Timestamp.Year -lt 1980 -or $Timestamp.Year -gt 3000) { return $false }
+  }
+  return $true
+}
+
 function Get-InstallShieldStreamAttribute {
   <#
   .SYNOPSIS
@@ -175,7 +200,8 @@ function Get-InstallShieldStreamAttribute {
   .PARAMETER Offset
     Absolute file offset of the 24-byte fixed attribute prefix.
   .PARAMETER Type
-    Stream header record type. Type 4 inserts an additional 24-byte field before the name.
+    Stream header record type. Type 4 and some type 3 variants insert a
+    24-byte timestamp field before the name.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -190,14 +216,21 @@ function Get-InstallShieldStreamAttribute {
   )
 
   # ISSetupStream records separate a fixed prefix from a bounded UTF-16 name.
-  # Type 4 inserts another fixed field before that name.
+  # Type 4 always carries an extra field. Type 3 exists both with and without
+  # three 64-bit FILETIME values, so validate that block instead of choosing a
+  # layout from the type alone.
   if ($Offset + 24 -gt $Stream.Length) { return $null }
   $Bytes = Read-PEFileBytes -Stream $Stream -Offset $Offset -Count 24
   $FileNameLength = [System.BitConverter]::ToUInt32($Bytes, 0)
   if ($FileNameLength -le 0 -or $FileNameLength -gt 520) { return $null }
 
   $NameOffset = $Offset + 24
-  if ($Type -eq 4) { $NameOffset += 24 }
+  if ($Type -eq 4) {
+    $NameOffset += 24
+  } elseif ($Type -eq 3 -and $NameOffset + 24 -le $Stream.Length) {
+    $Metadata = Read-PEFileBytes -Stream $Stream -Offset $NameOffset -Count 24
+    if (Test-InstallShieldFileTimeBlock -Bytes $Metadata) { $NameOffset += 24 }
+  }
   if ($NameOffset + $FileNameLength -gt $Stream.Length) { return $null }
 
   $NameBytes = Read-PEFileBytes -Stream $Stream -Offset $NameOffset -Count $FileNameLength
@@ -279,6 +312,9 @@ function Export-InstallShieldDecodedFile {
     Behavior when an output path already exists or is selected more than once.
   .PARAMETER ReservedPath
     Output paths already assigned during the current extraction operation.
+  .PARAMETER MaximumBytes
+    Maximum decoded bytes accepted for this record. The caller supplies the
+    remaining operation-wide extraction budget.
   #>
   [OutputType([string])]
   param (
@@ -295,6 +331,9 @@ function Export-InstallShieldDecodedFile {
     [string]$CollisionAction = 'Rename',
 
     [System.Collections.Generic.ISet[string]]$ReservedPath,
+
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumBytes = $Script:InstallShieldOverlayMaximumExpandedBytes,
 
     [Parameter()]
     [switch]$StreamMode
@@ -335,9 +374,9 @@ function Export-InstallShieldDecodedFile {
     # Probe the transformed stream for a valid zlib header before decoding;
     # launcher flags alone are not trusted to imply compressed data.
     if ($Attribute.IsUnicodeLauncher -ne 0 -and (Test-InstallShieldZlibStream -Stream $PayloadStream)) {
-      $null = Expand-InstallerCompressedStream -Algorithm Zlib -Stream $PayloadStream -Destination $Output -MaximumBytes 1073741824
+      $null = Expand-InstallerCompressedStream -Algorithm Zlib -Stream $PayloadStream -Destination $Output -MaximumBytes $MaximumBytes
     } else {
-      $null = Copy-BoundedStream -Source $PayloadStream -Destination $Output -MaximumBytes $Attribute.FileLength -ExpectedBytes $Attribute.FileLength
+      $null = Copy-BoundedStream -Source $PayloadStream -Destination $Output -MaximumBytes $MaximumBytes -ExpectedBytes $Attribute.FileLength
     }
     $Succeeded = $true
     return $OutputPath
@@ -365,6 +404,8 @@ function Expand-InstallShieldEncryptedPayload {
     Behavior when an output path already exists or is selected more than once.
   .PARAMETER ReservedPath
     Output paths already assigned during the current extraction operation.
+  .PARAMETER MaximumExpandedBytes
+    Maximum total decoded bytes written for selected records in this catalog.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -382,7 +423,10 @@ function Expand-InstallShieldEncryptedPayload {
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
     [string]$CollisionAction = 'Rename',
 
-    [System.Collections.Generic.ISet[string]]$ReservedPath
+    [System.Collections.Generic.ISet[string]]$ReservedPath,
+
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = $Script:InstallShieldOverlayMaximumExpandedBytes
   )
 
   # Authenticate the catalog header before selecting the generation-specific
@@ -393,6 +437,7 @@ function Expand-InstallShieldEncryptedPayload {
   $Cursor = $Header.NextOffset
   $Files = [System.Collections.Generic.List[string]]::new()
   $RecordCount = 0
+  $ExpandedBytes = 0L
   for ($Index = 0; $Index -lt $Header.NumFiles; $Index++) {
     $Attribute = if ($Header.IsSetupStream) {
       Get-InstallShieldStreamAttribute -Stream $Stream -Offset $Cursor -Type $Header.Type
@@ -404,9 +449,16 @@ function Expand-InstallShieldEncryptedPayload {
     if (-not $Attribute -or $Attribute.NextOffset -le $Cursor) { break }
     $RecordCount++
     if (Test-ExtractionPattern -Path $Attribute.FileName -Pattern $Name) {
+      if ($ExpandedBytes -ge $MaximumExpandedBytes) {
+        throw "Selected InstallShield overlay records exceed the $MaximumExpandedBytes-byte expansion limit."
+      }
       $ExtractedPath = Export-InstallShieldDecodedFile -Stream $Stream -Attribute $Attribute -DestinationPath $DestinationPath `
-        -CollisionAction $CollisionAction -ReservedPath $ReservedPath -StreamMode:$Header.IsSetupStream
-      if ($ExtractedPath) { $Files.Add($ExtractedPath) }
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPath -StreamMode:$Header.IsSetupStream `
+        -MaximumBytes ($MaximumExpandedBytes - $ExpandedBytes)
+      if ($ExtractedPath) {
+        $ExpandedBytes += (Get-Item -LiteralPath $ExtractedPath -Force).Length
+        $Files.Add($ExtractedPath)
+      }
     }
     $Cursor = $Attribute.NextOffset + $Attribute.FileLength
   }
@@ -563,6 +615,8 @@ function Expand-InstallShieldPlainPayload {
     Behavior when an output path already exists or is selected more than once.
   .PARAMETER ReservedPath
     Output paths already assigned during the current extraction operation.
+  .PARAMETER MaximumExpandedBytes
+    Maximum total bytes written for selected records in this payload.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -582,6 +636,9 @@ function Expand-InstallShieldPlainPayload {
 
     [System.Collections.Generic.ISet[string]]$ReservedPath,
 
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = $Script:InstallShieldOverlayMaximumExpandedBytes,
+
     [Parameter()]
     [switch]$Unicode
   )
@@ -591,6 +648,7 @@ function Expand-InstallShieldPlainPayload {
   $Cursor = if ($Unicode) { $Offset + 4 } else { $Offset }
   $Files = [System.Collections.Generic.List[string]]::new()
   $RecordCount = 0
+  $ExpandedBytes = 0L
   while ($Cursor -lt $Stream.Length) {
     $Record = Get-InstallShieldPlainRecord -Stream $Stream -Offset $Cursor -Unicode:$Unicode
     # A failed record terminates this layout attempt. The caller can then try
@@ -601,11 +659,15 @@ function Expand-InstallShieldPlainPayload {
       $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Record.DestinationName `
         -CollisionAction $CollisionAction -ReservedPath $ReservedPath
       if ($Target.ShouldWrite) {
+        if ([long]$Record.FileLength -gt $MaximumExpandedBytes - $ExpandedBytes) {
+          throw "Selected InstallShield plain records exceed the $MaximumExpandedBytes-byte expansion limit."
+        }
         $Parent = Split-Path -Path $Target.Path -Parent
         if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
         $Output = [IO.File]::Open($Target.Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try { Copy-BinaryStreamRange -Source $Stream -Destination $Output -Offset $Record.DataOffset -Length $Record.FileLength }
         finally { $Output.Dispose() }
+        $ExpandedBytes += [long]$Record.FileLength
         $Files.Add($Target.Path)
       }
     }
@@ -636,6 +698,8 @@ function Invoke-InstallShieldExtraction {
     Behavior when an output path already exists or another payload resolves to the same path.
   .PARAMETER SourceStream
     Optional caller-owned seekable installer stream. The helper restores its position and does not dispose it.
+  .PARAMETER MaximumExpandedBytes
+    Maximum total bytes decoded from an encoded or plain InstallShield overlay.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -650,7 +714,10 @@ function Invoke-InstallShieldExtraction {
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
     [string]$CollisionAction = 'Rename',
 
-    [IO.Stream]$SourceStream
+    [IO.Stream]$SourceStream,
+
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = $Script:InstallShieldOverlayMaximumExpandedBytes
   )
 
   $File = Get-Item -LiteralPath $Path -Force
@@ -697,15 +764,15 @@ function Invoke-InstallShieldExtraction {
     # generation-specific fallbacks attempted only from the same overlay start.
     if (-not $Result) {
       $Result = Expand-InstallShieldEncryptedPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath `
-        -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths -MaximumExpandedBytes $MaximumExpandedBytes
     }
     if (-not $Result) {
       $Result = Expand-InstallShieldPlainPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath `
-        -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths -Unicode
+        -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths -MaximumExpandedBytes $MaximumExpandedBytes -Unicode
     }
     if (-not $Result) {
       $Result = Expand-InstallShieldPlainPayload -Stream $Stream -Offset $CandidateOffset -DestinationPath $DestinationPath `
-        -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+        -Name $Name -CollisionAction $CollisionAction -ReservedPath $ReservedPaths -MaximumExpandedBytes $MaximumExpandedBytes
     }
 
     if (-not $Result) {
@@ -1537,6 +1604,8 @@ function Expand-InstallShieldInstaller {
     The path to the InstallShield installer
   .PARAMETER DestinationPath
     The destination directory for extracted files
+  .PARAMETER MaximumExpandedBytes
+    Maximum total bytes decoded from an encoded or plain InstallShield overlay.
   #>
   [OutputType([string])]
   param (
@@ -1549,7 +1618,10 @@ function Expand-InstallShieldInstaller {
     [string]$Name = '*',
 
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
-    [string]$CollisionAction = 'Prompt'
+    [string]$CollisionAction = 'Prompt',
+
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = $Script:InstallShieldOverlayMaximumExpandedBytes
   )
 
   process {
@@ -1559,7 +1631,8 @@ function Expand-InstallShieldInstaller {
     }
 
     $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
-    Invoke-InstallShieldExtraction -Path $InstallerPath -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction | Out-Null
+    Invoke-InstallShieldExtraction -Path $InstallerPath -DestinationPath $DestinationPath -Name $Name `
+      -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes | Out-Null
     return $DestinationPath
   }
 }
@@ -1581,6 +1654,8 @@ function Expand-InstallShield {
     Optional wildcard selecting payload paths or file names. All files are extracted when omitted.
   .PARAMETER CollisionAction
     Behavior when an output path already exists or another payload resolves to the same path.
+  .PARAMETER MaximumExpandedBytes
+    Maximum total bytes decoded from an encoded or plain InstallShield overlay.
   #>
   [OutputType([string])]
   param (
@@ -1593,13 +1668,17 @@ function Expand-InstallShield {
     [string]$Name = '*',
 
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
-    [string]$CollisionAction = 'Prompt'
+    [string]$CollisionAction = 'Prompt',
+
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$MaximumExpandedBytes = $Script:InstallShieldOverlayMaximumExpandedBytes
   )
 
   process {
     # Keep existing callers on the same output contract while routing all bytes
     # through the bounded in-process InstallShield parser.
-    Expand-InstallShieldInstaller -Path $Path -DestinationPath $DestinationPath -Name $Name -CollisionAction $CollisionAction
+    Expand-InstallShieldInstaller -Path $Path -DestinationPath $DestinationPath -Name $Name `
+      -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes
   }
 }
 
