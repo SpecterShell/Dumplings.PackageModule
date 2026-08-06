@@ -5,7 +5,11 @@ $ErrorActionPreference = 'Stop'
 # Force stop on undefined variables or properties
 Set-StrictMode -Version 3
 
-$ManifestVersion = '1.12.0'
+$Script:WinGetDefaultManifestVersion = '1.12.0'
+# Preserve the established exported variable without using its globally re-exported
+# slot as module-internal state. PowerShell can detach that slot when a parent module
+# re-exports it, which previously left schema parameter defaults null in Core workers.
+$ManifestVersion = $Script:WinGetDefaultManifestVersion
 $ManifestSchemaUrl = @{
   version       = "https://aka.ms/winget-manifest.version.${ManifestVersion}.schema.json"
   installer     = "https://aka.ms/winget-manifest.installer.${ManifestVersion}.schema.json"
@@ -85,7 +89,7 @@ function Get-WinGetManifestSchemaPath {
     [string]$ManifestType,
 
     [Parameter(Position = 1)]
-    [string]$ManifestVersion = $Script:ManifestVersion
+    [string]$ManifestVersion = $Script:WinGetDefaultManifestVersion
   )
 
   $SchemaVersion = Resolve-WinGetManifestSchemaVersion -ManifestVersion $ManifestVersion
@@ -120,7 +124,7 @@ function Get-WinGetManifestSchema {
     [string]$ManifestType,
 
     [Parameter(Position = 1)]
-    [string]$ManifestVersion = $Script:ManifestVersion,
+    [string]$ManifestVersion = $Script:WinGetDefaultManifestVersion,
 
     [switch]$Raw
   )
@@ -158,7 +162,7 @@ function Get-WinGetManifestSchemaUrl {
     [string]$ManifestType,
 
     [Parameter(Position = 1)]
-    [string]$ManifestVersion = $Script:ManifestVersion
+    [string]$ManifestVersion = $Script:WinGetDefaultManifestVersion
   )
 
   return "https://aka.ms/winget-manifest.${ManifestType}.${ManifestVersion}.schema.json"

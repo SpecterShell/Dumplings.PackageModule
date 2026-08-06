@@ -29,6 +29,21 @@ Describe 'PackageModule manifest-backed loading' {
     { Import-Module $Script:ManifestPath -Force -Global -ErrorAction Stop } | Should -Not -Throw
   }
 
+  It 'retains the default manifest schema version after global parent-module imports' {
+    $Schema = Get-WinGetManifestSchema -ManifestType version
+
+    $Schema['$id'] | Should -Be 'https://aka.ms/winget-manifest.version.1.12.0.schema.json'
+    $ManifestVersion | Should -Be '1.12.0'
+  }
+
+  It 'retains internal state for the globally re-exported installer cache' {
+    $UpdateModule = Get-Module WinGetManifestUpdate
+    $InternalCache = & $UpdateModule { $Script:WinGetSharedInstallerFiles }
+
+    $InternalCache | Should -BeOfType ([System.Collections.IDictionary])
+    [object]::ReferenceEquals($InternalCache, $WinGetInstallerFiles) | Should -BeTrue
+  }
+
   It 'loads executable wrapper families as separate modules' {
     Get-Module Bootstrapper | Should -Not -BeNullOrEmpty
     Get-Module DotNetInstaller | Should -Not -BeNullOrEmpty

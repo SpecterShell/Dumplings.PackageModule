@@ -11,7 +11,10 @@ $Culture = 'en-US'
 $WinGetUserAgent = 'Microsoft-Delivery-Optimization/10.0'
 $WinGetBackupUserAgent = 'winget-cli WindowsPackageManager/1.7.10661 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.22.10661.0'
 $WinGetTempInstallerFiles = [ordered]@{}
-$WinGetInstallerFiles = [ordered]@{}
+$Script:WinGetSharedInstallerFiles = [ordered]@{}
+# Expose the established cache variable as the same mutable dictionary while
+# retaining a private reference that parent-module re-export cannot detach.
+$WinGetInstallerFiles = $Script:WinGetSharedInstallerFiles
 $Script:WinGetAuthoringManifestVersion = '1.12.0'
 
 filter UniqueItems {
@@ -916,9 +919,9 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     } elseif ($InstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $InstallerFiles[$OriginalInstallerUrl])) {
       # Skip downloading if the installer file was previously downloaded
       $InstallerPath = $InstallerFiles[$OriginalInstallerUrl]
-    } elseif ($Script:WinGetInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetInstallerFiles[$OriginalInstallerUrl])) {
+    } elseif ($Script:WinGetSharedInstallerFiles.Contains($OriginalInstallerUrl) -and (Test-Path -Path $Script:WinGetSharedInstallerFiles[$OriginalInstallerUrl])) {
       # Skip downloading if the installer file was previously downloaded
-      $InstallerPath = $Script:WinGetInstallerFiles[$OriginalInstallerUrl]
+      $InstallerPath = $Script:WinGetSharedInstallerFiles[$OriginalInstallerUrl]
     } else {
       $Logger.Invoke("Downloading $($Installer.InstallerUrl)", 'Verbose')
       $InstallerPath = New-TempFile
