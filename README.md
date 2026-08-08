@@ -41,6 +41,8 @@ Use the [`author-dumplings-task` skill](../../.agents/skills/author-dumplings-ta
 for the supported task layout, state contract, source patterns, provider tasks,
 and dry-run workflow.
 
+Use the [`use-dumplings-functions` skill](../../.agents/skills/use-dumplings-functions/SKILL.md) for the curated networking, temporary-file, archive, content, feed, browser, HTML, and YAML helper contracts used by tasks and standalone analysis.
+
 Package submissions are claimed by effective WinGet identifier in process-wide shared storage. The first task owns the claim for the run; duplicate tasks skip submission rather than racing the same package.
 
 ### Installer Analysis
