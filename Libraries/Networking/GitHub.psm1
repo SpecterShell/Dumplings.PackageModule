@@ -81,7 +81,7 @@ function Initialize-GitHubApiRequest {
     $SecureGitHubToken.MakeReadOnly()
     $GitHubToken = $SecureGitHubToken
   } elseif ($GitHubToken -isnot [securestring]) {
-    throw 'A token required to invoke GitHub API is not provided through "-Token" or GH_DUMPLINGS_TOKEN.'
+    throw 'GitHub API authentication is unavailable. Run the request through Core\Index.ps1, pass -Token explicitly, or set GH_DUMPLINGS_TOKEN in this PowerShell process. Unauthenticated fallback is intentionally disabled because GitHub limits it to 60 requests per hour.'
   }
 
   $BoundParameters['Authentication'] = [Microsoft.PowerShell.Commands.WebAuthenticationType]::Bearer
@@ -180,8 +180,14 @@ function ConvertTo-GitHubApiException {
   }
 
   $RequestId = $null
+  $RateLimitRemaining = $null
+  $RateLimitReset = $null
+  $RetryAfter = $null
   if ($Response -and $Response.Headers) {
     try { $RequestId = ($Response.Headers.GetValues('x-github-request-id') | Select-Object -First 1) } catch {}
+    try { $RateLimitRemaining = ($Response.Headers.GetValues('x-ratelimit-remaining') | Select-Object -First 1) } catch {}
+    try { $RateLimitReset = ($Response.Headers.GetValues('x-ratelimit-reset') | Select-Object -First 1) } catch {}
+    try { $RetryAfter = ($Response.Headers.GetValues('retry-after') | Select-Object -First 1) } catch {}
   }
 
   $Segments = [System.Collections.Generic.List[string]]::new()
@@ -190,6 +196,16 @@ function ConvertTo-GitHubApiException {
   if ($Details.Count -gt 0) { $Segments.Add("errors: $($Details -join '; ')") }
   if (-not [string]::IsNullOrWhiteSpace($DocumentationUrl)) { $Segments.Add("documentation: ${DocumentationUrl}") }
   if (-not [string]::IsNullOrWhiteSpace($RequestId)) { $Segments.Add("request ID: ${RequestId}") }
+  if (-not [string]::IsNullOrWhiteSpace([string]$RateLimitRemaining)) { $Segments.Add("rate limit remaining: ${RateLimitRemaining}") }
+  if (-not [string]::IsNullOrWhiteSpace([string]$RateLimitReset)) {
+    $ResetSeconds = 0L
+    $ResetDescription = [string]$RateLimitReset
+    if ([long]::TryParse([string]$RateLimitReset, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$ResetSeconds)) {
+      try { $ResetDescription = [DateTimeOffset]::FromUnixTimeSeconds($ResetSeconds).UtcDateTime.ToString('yyyy-MM-dd HH:mm:ss ''UTC''', [Globalization.CultureInfo]::InvariantCulture) } catch {}
+    }
+    $Segments.Add("rate limit resets: ${ResetDescription}")
+  }
+  if (-not [string]::IsNullOrWhiteSpace([string]$RetryAfter)) { $Segments.Add("retry after: ${RetryAfter} seconds") }
 
   $Diagnostic = "GitHub API request $($Method.ToUpperInvariant()) $Uri failed"
   if ($Segments.Count -gt 0) { $Diagnostic += ": $($Segments -join ' | ')" }

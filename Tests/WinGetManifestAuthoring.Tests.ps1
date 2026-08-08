@@ -120,6 +120,27 @@ Describe 'WinGet manifest model authoring' {
     $Changed = Set-WinGetManifestValue -Manifest $Manifest -Target Package -Path '/Moniker' -Value 'authoring-test'
     $Changed.Moniker | Should -Be 'authoring-test'
   }
+
+  It 'traverses existing arrays through RFC 6901 numeric segments' {
+    $Manifest = New-AuthoringTestModel
+    $Manifest.Installers[0]['AppsAndFeaturesEntries'] = @([ordered]@{ DisplayVersion = '1.2.3' })
+
+    $Changed = Set-WinGetManifestValue -Manifest $Manifest -Target Installer -Index 0 -Path '/AppsAndFeaturesEntries/0/DisplayName' -Value 'Authoring Test'
+    $Changed.Installers[0]['AppsAndFeaturesEntries'][0]['DisplayName'] | Should -Be 'Authoring Test'
+    $Manifest.Installers[0]['AppsAndFeaturesEntries'][0].Contains('DisplayName') | Should -BeFalse
+
+    $Changed = Remove-WinGetManifestValue -Manifest $Changed -Target Installer -Index 0 -Path '/AppsAndFeaturesEntries/0/DisplayName'
+    $Changed.Installers[0]['AppsAndFeaturesEntries'][0].Contains('DisplayName') | Should -BeFalse
+  }
+
+  It 'rejects invalid array indexes and array-item removal' {
+    $Manifest = New-AuthoringTestModel
+    $Manifest.Installers[0]['Protocols'] = @('first', 'second')
+
+    { Set-WinGetManifestValue -Manifest $Manifest -Target Installer -Index 0 -Path '/Protocols/2' -Value 'third' } | Should -Throw '*outside the current 2-item array*'
+    { Set-WinGetManifestValue -Manifest $Manifest -Target Installer -Index 0 -Path '/Protocols/01' -Value 'changed' } | Should -Throw '*zero-based array index*'
+    { Remove-WinGetManifestValue -Manifest $Manifest -Target Installer -Index 0 -Path '/Protocols/0' } | Should -Throw '*Replace the parent array*'
+  }
 }
 
 Describe 'Get-WinGetInstallerManifestSuggestion' {

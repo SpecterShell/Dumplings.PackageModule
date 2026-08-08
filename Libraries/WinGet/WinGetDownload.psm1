@@ -1196,6 +1196,60 @@ function Add-WinGetDownloadProbeEvidence {
   return $Result
 }
 
+function ConvertTo-WinGetDownloadFailureEvidence {
+  <#
+  .SYNOPSIS
+    Project one native transport result into stable failure diagnostics.
+  .PARAMETER Result
+    Delivery Optimization or WinINet result rejected by the WinGet probe.
+  .OUTPUTS
+    A compact object containing transport, HTTP, native, timeout, retry, and final-URL evidence.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)]$Result)
+
+  $ResultProperties = $Result.PSObject.Properties
+  $ReadProperty = {
+    param ([string]$Name)
+    $Property = $ResultProperties[$Name]
+    if ($Property) { return $Property.Value }
+    return $null
+  }
+
+  $Method = [string](& $ReadProperty Method)
+  $HttpStatusCode = & $ReadProperty HttpStatusCode
+  $ErrorMessage = [string](& $ReadProperty ErrorMessage)
+  $FailureStage = [string](& $ReadProperty FailureStage)
+  $HResult = & $ReadProperty HResult
+  $NativeErrorCode = & $ReadProperty NativeErrorCode
+  $HashMatches = & $ReadProperty HashMatches
+  $MessageParts = [System.Collections.Generic.List[string]]::new()
+  if ($null -ne $HttpStatusCode) { $MessageParts.Add("HTTP ${HttpStatusCode}") }
+  if (-not [string]::IsNullOrWhiteSpace($ErrorMessage)) { $MessageParts.Add($ErrorMessage) }
+  if (-not [string]::IsNullOrWhiteSpace($FailureStage)) { $MessageParts.Add("stage ${FailureStage}") }
+  if ($null -ne $HashMatches -and -not [bool]$HashMatches) { $MessageParts.Add('SHA256 mismatch') }
+  if ($null -ne $HResult -and [int]$HResult -ne 0) {
+    $UnsignedHResult = [uint32]([int64]$HResult -band 0xFFFFFFFFL)
+    $MessageParts.Add("HRESULT 0x$($UnsignedHResult.ToString('X8'))")
+  }
+  if ($null -ne $NativeErrorCode -and [int]$NativeErrorCode -ne 0) { $MessageParts.Add("native error ${NativeErrorCode}") }
+  if ($MessageParts.Count -eq 0) { $MessageParts.Add('the transport did not complete successfully and returned no additional native error details') }
+
+  return [pscustomobject][ordered]@{
+    Method          = $Method
+    Message         = "${Method}: $($MessageParts -join '; ')"
+    HttpStatusCode  = $HttpStatusCode
+    HResult         = $HResult
+    NativeErrorCode = $NativeErrorCode
+    FailureStage    = $FailureStage
+    ErrorMessage    = $ErrorMessage
+    TimedOut        = [bool](& $ReadProperty TimedOut)
+    Cancelled       = [bool](& $ReadProperty Cancelled)
+    AttemptCount    = & $ReadProperty AttemptCount
+    FinalUri        = [string](& $ReadProperty FinalUri)
+  }
+}
+
 function Test-WinGetInstallerDownload {
   <#
   .SYNOPSIS
@@ -1216,6 +1270,8 @@ function Test-WinGetInstallerDownload {
     Maximum delay permitted before any single native transport retry
   .PARAMETER MaximumTotalRetryDelaySeconds
     Maximum cumulative delay permitted across each native transport's retries
+  .OUTPUTS
+    A summary with WouldWinGetDownload, per-transport Results, structured Failures, and FailureSummary. Failures preserve timeout, HTTP, HRESULT, retry, and final-URL evidence even when another transport succeeds.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -1311,6 +1367,8 @@ function Test-WinGetInstallerDownload {
 
       $AcceptedResult = $Results | Where-Object AcceptedByWinGet | Select-Object -First 1
       $AcceptedRequest = $Results | Where-Object ServerAcceptedRequest | Select-Object -First 1
+      $Failures = @($Results | Where-Object { -not $_.AcceptedByWinGet } | ForEach-Object { ConvertTo-WinGetDownloadFailureEvidence -Result $_ })
+      $FailureSummary = @($Failures.Message | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique) -join ' | '
       $ExactDeliveryOptimizationMetadata = -not [string]::IsNullOrWhiteSpace($ExpectedSha256)
       $Recommendation = if ($AcceptedResult) {
         "WinGet accepted the download through $($AcceptedResult.Method)."
@@ -1336,6 +1394,8 @@ function Test-WinGetInstallerDownload {
         ServerAcceptedRequest             = [bool]$AcceptedRequest
         WouldWinGetDownload               = [bool]$AcceptedResult
         Results                           = $Results.ToArray()
+        Failures                          = $Failures
+        FailureSummary                    = $FailureSummary
         Recommendation                    = $Recommendation
       }
     } finally {

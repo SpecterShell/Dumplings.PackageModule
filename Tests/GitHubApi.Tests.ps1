@@ -57,7 +57,7 @@ Describe 'Invoke-GitHubApi proxy command' {
     $PreviousToken = $Env:GH_DUMPLINGS_TOKEN
     try {
       Remove-Item -LiteralPath Env:\GH_DUMPLINGS_TOKEN -ErrorAction SilentlyContinue
-      { Initialize-GitHubApiRequest -BoundParameters ([ordered]@{ Uri = [uri]'https://api.github.com/user' }) } | Should -Throw '*token required*'
+      { Initialize-GitHubApiRequest -BoundParameters ([ordered]@{ Uri = [uri]'https://api.github.com/user' }) } | Should -Throw '*Core\Index.ps1*-Token*GH_DUMPLINGS_TOKEN*60 requests per hour*'
     } finally {
       if ($null -ne $PreviousToken) { $Env:GH_DUMPLINGS_TOKEN = $PreviousToken }
     }
@@ -164,6 +164,27 @@ Describe 'GitHub API diagnostics' {
 
       $Exception.Message | Should -BeLike '*HTTP 401 Unauthorized*Bad credentials*'
       $Exception.Message | Should -Not -BeLike '*errors:*'
+    } finally {
+      $Response.Dispose()
+    }
+  }
+
+  It 'includes GitHub rate-limit reset and retry evidence' {
+    $Response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::TooManyRequests)
+    try {
+      $Response.ReasonPhrase = 'Too Many Requests'
+      $Response.Headers.Add('x-ratelimit-remaining', '0')
+      $Response.Headers.Add('x-ratelimit-reset', '1786243200')
+      $Response.Headers.Add('retry-after', '30')
+      $HttpException = [Microsoft.PowerShell.Commands.HttpResponseException]::new('Response status code does not indicate success.', $Response)
+      $ErrorRecord = [System.Management.Automation.ErrorRecord]::new($HttpException, 'GitHubFailure', [System.Management.Automation.ErrorCategory]::LimitsExceeded, $null)
+      $ErrorRecord.ErrorDetails = '{"message":"API rate limit exceeded"}'
+
+      $Exception = ConvertTo-GitHubApiException -ErrorRecord $ErrorRecord -Uri 'https://api.github.com/user' -Method Get
+
+      $Exception.Message | Should -BeLike '*HTTP 429 Too Many Requests*rate limit remaining: 0*'
+      $Exception.Message | Should -BeLike '*rate limit resets:*UTC*'
+      $Exception.Message | Should -BeLike '*retry after: 30 seconds*'
     } finally {
       $Response.Dispose()
     }

@@ -128,7 +128,7 @@ Describe 'Hyper-V installed-state host controller' {
     Mock Get-VM { [pscustomobject]@{ Name = 'TestVM'; State = 'Running' } }
     Mock Get-VMIntegrationService { [pscustomobject]@{ Name = 'Guest Service Interface'; Enabled = $true } }
     Mock Copy-VMFile {}
-    Mock Invoke-Command { '{"SchemaVersion":1,"Phase":"BeforeInstall","ARPEntries":[],"ProtocolAssociations":[],"FileExtensionAssociations":[]}' }
+    Mock Invoke-Command { '{"SchemaVersion":1,"Phase":"BeforeInstall","ARPEntries":[{"Identity":"ARP|HKLM|Registry64|Existing"}],"ProtocolAssociations":[],"FileExtensionAssociations":[]}' }
     $Credential = [pscredential]::new('Tester', [securestring]::new())
     $OutputDirectory = Join-Path $TestDrive 'HostCapture'
 
@@ -137,5 +137,16 @@ Describe 'Hyper-V installed-state host controller' {
     Test-Path -LiteralPath $Result.HostOutputPath | Should -BeTrue
     (Get-Content -LiteralPath $Result.HostOutputPath -Raw | ConvertFrom-Json).Phase | Should -Be 'BeforeInstall'
     Should -Invoke Invoke-Command -Times 1 -Exactly -ParameterFilter { $VMName -eq 'TestVM' }
+  }
+
+  It 'rejects an empty capture returned by the guest collector' {
+    Mock Import-Module { [pscustomobject]@{ Name = 'Hyper-V' } }
+    Mock Get-VM { [pscustomobject]@{ Name = 'TestVM'; State = 'Running' } }
+    Mock Get-VMIntegrationService { [pscustomobject]@{ Name = 'Guest Service Interface'; Enabled = $true } }
+    Mock Copy-VMFile {}
+    Mock Invoke-Command { '{"SchemaVersion":1,"Phase":"BeforeInstall","ARPEntries":[],"ProtocolAssociations":[],"FileExtensionAssociations":[]}' }
+    $Credential = [pscredential]::new('Tester', [securestring]::new())
+
+    { & $Script:HostScript -Action Capture -VMName TestVM -Phase BeforeInstall -Credential $Credential -OutputDirectory (Join-Path $TestDrive 'EmptyCapture') } | Should -Throw '*empty installed-state snapshot*'
   }
 }

@@ -434,13 +434,13 @@ function Get-WinGetAuthoringAnalysisProjection {
   if ($SuggestedFields) { $Suggestions['FamilyDefaults'] = $SuggestedFields }
 
   return [pscustomobject]@{
-    InstallerType   = $InstallerType
-    ManifestFields  = $ManifestFields
-    Architecture    = $Architecture
-    Suggestions     = $Suggestions
-    Warnings        = @($Warnings | Select-Object -Unique)
-    BlockingIssues  = @($BlockingIssues | Select-Object -Unique)
-    ParserResult    = $ParserResult
+    InstallerType  = $InstallerType
+    ManifestFields = $ManifestFields
+    Architecture   = $Architecture
+    Suggestions    = $Suggestions
+    Warnings       = @($Warnings | Select-Object -Unique)
+    BlockingIssues = @($BlockingIssues | Select-Object -Unique)
+    ParserResult   = $ParserResult
   }
 }
 
@@ -466,6 +466,12 @@ function New-WinGetManifest {
     Optional package moniker.
   .PARAMETER ManifestVersion
     WinGet schema version; Dumplings authoring defaults to 1.12.0.
+  .EXAMPLE
+    $DefaultLocalization = [ordered]@{ PackageLocale = 'en-US'; Publisher = 'Contoso'; PackageName = 'Contoso App'; License = 'MIT'; ShortDescription = 'Contoso App.' }
+    $Installer = [ordered]@{ Architecture = 'x64'; InstallerType = 'portable'; InstallerUrl = 'https://example.test/app.exe'; InstallerSha256 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }
+    New-WinGetManifest -PackageIdentifier Contoso.App -PackageVersion 1.2.3 -DefaultLocalization $DefaultLocalization -Installer $Installer
+
+    Creates an in-memory logical manifest. DefaultLocalization is the complete default-locale dictionary; Installer accepts one or more effective installer dictionaries.
   #>
   [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Returns a detached in-memory model and changes no external state.')]
   [OutputType([pscustomobject])]
@@ -577,11 +583,11 @@ function Get-WinGetInstallerManifestSuggestion {
       # analyzer becomes a normal authoring issue rather than a StrictMode
       # missing-property exception.
       $ZipResult = $Analysis.ParserResults | Where-Object {
-          $SuccessProperty = $_.PSObject.Properties['Success']
-          $ResultProperty = $_.PSObject.Properties['Result']
-          $FamilyProperty = if ($ResultProperty -and $null -ne $ResultProperty.Value) { $ResultProperty.Value.PSObject.Properties['Family'] }
-          $SuccessProperty -and $SuccessProperty.Value -and $FamilyProperty -and $FamilyProperty.Value -ceq 'ZIP/archive'
-        } | Select-Object -First 1
+        $SuccessProperty = $_.PSObject.Properties['Success']
+        $ResultProperty = $_.PSObject.Properties['Result']
+        $FamilyProperty = if ($ResultProperty -and $null -ne $ResultProperty.Value) { $ResultProperty.Value.PSObject.Properties['Family'] }
+        $SuccessProperty -and $SuccessProperty.Value -and $FamilyProperty -and $FamilyProperty.Value -ceq 'ZIP/archive'
+      } | Select-Object -First 1
       if ($null -eq $ZipResult) {
         $Analysis.BlockingIssues += 'The ZIP archive catalog could not be parsed.'
         $NestedCandidates = @()
@@ -674,20 +680,20 @@ function Get-WinGetInstallerManifestSuggestion {
     }
 
     return [pscustomobject]@{
-      PSTypeName       = 'Dumplings.WinGet.InstallerManifestSuggestion'
-      InstallerUrl     = $InstallerUrl.AbsoluteUri
-      InstallerPath    = $InstallerPath
-      Installers       = @($Installers)
-      ProposedInstallers = @($Installers)
-      AppliedEvidence  = [pscustomobject]@{ Sha256 = $Hash; AnalyzerFields = $Projection.ManifestFields; ReleaseDate = $ReleaseDate }
-      Suggestions      = $Projection.Suggestions
+      PSTypeName            = 'Dumplings.WinGet.InstallerManifestSuggestion'
+      InstallerUrl          = $InstallerUrl.AbsoluteUri
+      InstallerPath         = $InstallerPath
+      Installers            = @($Installers)
+      ProposedInstallers    = @($Installers)
+      AppliedEvidence       = [pscustomobject]@{ Sha256 = $Hash; AnalyzerFields = $Projection.ManifestFields; ReleaseDate = $ReleaseDate }
+      Suggestions           = $Projection.Suggestions
       UnresolvedSuggestions = $Projection.Suggestions
-      Warnings         = @($Projection.Warnings | Select-Object -Unique)
-      BlockingIssues   = @($BlockingIssues | Select-Object -Unique)
-      Analysis         = $Analysis
-      RawAnalysis      = $Analysis
-      NestedAnalysis   = $NestedAnalysis
-      DownloadResult   = $DownloadResult
+      Warnings              = @($Projection.Warnings | Select-Object -Unique)
+      BlockingIssues        = @($BlockingIssues | Select-Object -Unique)
+      Analysis              = $Analysis
+      RawAnalysis           = $Analysis
+      NestedAnalysis        = $NestedAnalysis
+      DownloadResult        = $DownloadResult
     }
   } finally {
     if ($NestedTemporaryFolder) { Remove-Item -LiteralPath $NestedTemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue }
@@ -933,7 +939,7 @@ function ConvertFrom-WinGetAuthoringPointer {
 function Set-WinGetAuthoringPointerValue {
   <#
   .SYNOPSIS
-    Set or remove a dictionary field addressed by an RFC 6901 path.
+    Set or remove a value addressed by an RFC 6901 path.
   .PARAMETER Root
     Mutable root dictionary.
   .PARAMETER Path
@@ -955,23 +961,53 @@ function Set-WinGetAuthoringPointerValue {
   $Current = $Root
   for ($Index = 0; $Index -lt $Segments.Count - 1; $Index++) {
     $Segment = $Segments[$Index]
-    if ($Current -isnot [System.Collections.IDictionary]) { throw "Property path '$Path' does not address a dictionary at '$Segment'." }
-    # Set operations may create missing dictionary parents. Remove operations
-    # remain exact and fail when any addressed field is absent.
-    if (-not $Current.Contains($Segment)) {
-      if ($Remove) { throw "Property path '$Path' does not exist at '$Segment'." }
-      $Current[$Segment] = [ordered]@{}
+    if ($Current -is [System.Collections.IDictionary]) {
+      # Set operations may create missing dictionary parents. Array parents are
+      # never inferred because arrays are atomic under WinGet inheritance.
+      if (-not $Current.Contains($Segment)) {
+        if ($Remove) { throw "Property path '$Path' does not exist at '$Segment'." }
+        $Current[$Segment] = [ordered]@{}
+      }
+      $Current = $Current[$Segment]
+      continue
     }
-    $Current = $Current[$Segment]
+
+    if ($Current -is [System.Collections.IList]) {
+      $ArrayIndex = 0
+      if ($Segment -notmatch '^(?:0|[1-9]\d*)$' -or -not [int]::TryParse($Segment, [ref]$ArrayIndex)) {
+        throw "Property path '$Path' requires a zero-based array index at '$Segment'."
+      }
+      if ($ArrayIndex -ge $Current.Count) { throw "Property path '$Path' has array index $ArrayIndex outside the current $($Current.Count)-item array." }
+      $Current = $Current[$ArrayIndex]
+      continue
+    }
+
+    throw "Property path '$Path' cannot traverse scalar value at '$Segment'."
   }
-  if ($Current -isnot [System.Collections.IDictionary]) { throw "Property path '$Path' does not address a dictionary field." }
+
   $Leaf = $Segments[-1]
-  if ($Remove) {
-    if (-not $Current.Contains($Leaf)) { throw "Property path '$Path' does not exist." }
-    $Current.Remove($Leaf)
-  } else {
-    $Current[$Leaf] = Copy-WinGetManifestValue -Value $Value
+  if ($Current -is [System.Collections.IDictionary]) {
+    if ($Remove) {
+      if (-not $Current.Contains($Leaf)) { throw "Property path '$Path' does not exist." }
+      $Current.Remove($Leaf)
+    } else {
+      $Current[$Leaf] = Copy-WinGetManifestValue -Value $Value
+    }
+    return
   }
+
+  if ($Current -is [System.Collections.IList]) {
+    $ArrayIndex = 0
+    if ($Leaf -notmatch '^(?:0|[1-9]\d*)$' -or -not [int]::TryParse($Leaf, [ref]$ArrayIndex)) {
+      throw "Property path '$Path' requires a zero-based array index at '$Leaf'."
+    }
+    if ($ArrayIndex -ge $Current.Count) { throw "Property path '$Path' has array index $ArrayIndex outside the current $($Current.Count)-item array." }
+    if ($Remove) { throw "Property path '$Path' addresses an array element. Replace the parent array to add or remove array items." }
+    $Current[$ArrayIndex] = Copy-WinGetManifestValue -Value $Value
+    return
+  }
+
+  throw "Property path '$Path' does not address a dictionary field or existing array element."
 }
 
 function Get-WinGetAuthoringModelState {
@@ -1017,6 +1053,8 @@ function Set-WinGetManifestValue {
   <#
   .SYNOPSIS
     Set a package, installer, or locale field by RFC 6901 property path.
+  .DESCRIPTION
+    Numeric path segments traverse existing array elements. Arrays remain atomic: replace the parent array to insert or remove items.
   .PARAMETER Manifest
     Source logical manifest model.
   .PARAMETER Target
@@ -1031,6 +1069,10 @@ function Set-WinGetManifestValue {
     Exact installer selector.
   .PARAMETER PackageLocale
     Locale selector.
+  .EXAMPLE
+    Set-WinGetManifestValue -Manifest $Manifest -Target Installer -Index 0 -Path '/AppsAndFeaturesEntries/0/DisplayName' -Value 'Contoso App'
+
+    Sets DisplayName on the first AppsAndFeaturesEntries item of the first installer.
   #>
   [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Returns a detached in-memory model and changes no caller-owned state.')]
   [OutputType([pscustomobject])]
@@ -1078,6 +1120,8 @@ function Remove-WinGetManifestValue {
   <#
   .SYNOPSIS
     Remove a package, installer, or locale field by RFC 6901 property path.
+  .DESCRIPTION
+    Numeric path segments traverse existing array elements. Remove a field inside an array item through its numeric segment; replace the parent array to remove the item itself.
   .PARAMETER Manifest
     Source logical manifest model.
   .PARAMETER Target

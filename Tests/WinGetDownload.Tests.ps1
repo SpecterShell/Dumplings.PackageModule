@@ -682,6 +682,9 @@ Describe 'WinGet native download compatibility probe' {
       $Result.EffectiveMethod | Should -Be 'WinINet'
       $Result.WouldWinGetDownload | Should -BeTrue
       $Result.Results.Method | Should -Be @('DeliveryOptimization', 'WinINet')
+      $Result.Failures.Count | Should -Be 1
+      $Result.Failures[0].Method | Should -Be 'DeliveryOptimization'
+      $Result.FailureSummary | Should -Match 'did not complete successfully'
     }
   }
 
@@ -729,6 +732,29 @@ Describe 'WinGet native download compatibility probe' {
       $Result.ProxyForcedWinINet | Should -BeTrue
       $Result.EffectiveMethod | Should -Be 'WinINet'
       Should -Invoke Invoke-WinGetDeliveryOptimizationDownload -Times 0
+    }
+  }
+
+  It 'surfaces timeout and HTTP failure evidence at the probe summary level' {
+    InModuleScope WinGetDownload {
+      Mock Get-WinGetDownloadUserAgent { 'winget-cli WindowsPackageManager/1.2.3 DesktopAppInstaller/Microsoft.DesktopAppInstaller v1.2.3.0' }
+      Mock Invoke-WinGetWinINetDownload {
+        [pscustomobject]@{
+          Method = 'WinINet'; Success = $false; ResponseAccepted = $false; Sha256 = $null; DestinationPath = $DestinationPath
+          IsFatalDeliveryOptimizationError = $false; HttpStatusCode = 504; HResult = -2147012894; NativeErrorCode = 12002
+          FailureStage = 'ReceiveResponse'; ErrorMessage = 'The operation timed out.'; TimedOut = $true; AttemptCount = 4; FinalUri = 'https://example.com/installer.exe'
+        }
+      }
+
+      $Result = Test-WinGetInstallerDownload -Uri 'https://example.com/installer.exe' -Method WinINet
+
+      $Result.WouldWinGetDownload | Should -BeFalse
+      $Result.Failures.Count | Should -Be 1
+      $Result.Failures[0].HttpStatusCode | Should -Be 504
+      $Result.Failures[0].TimedOut | Should -BeTrue
+      $Result.Failures[0].AttemptCount | Should -Be 4
+      $Result.FailureSummary | Should -Match 'HTTP 504'
+      $Result.FailureSummary | Should -Match 'timed out'
     }
   }
 }
