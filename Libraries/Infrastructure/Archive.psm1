@@ -480,11 +480,23 @@ function Read-RarArchiveComment {
   $Archive = Get-InstallerArchive -Path $Path
   $Stream = [IO.File]::OpenRead((Get-Item -LiteralPath $Path -Force).FullName)
   try {
+    $Marker = Read-BinaryBytes -Stream $Stream -Offset 0 -Count ([Math]::Min(8, $Stream.Length))
+    $IsRar5 = $Marker.Length -eq 8 -and (Test-BinarySequence -Left $Marker -Right ([byte[]](0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00)))
+
+    # SharpCompress discovers the RAR5 CMT service record while enumerating
+    # the archive, not while constructing its volume object. Force one catalog
+    # pass before reading the public Comment property.
+    $null = @($Archive.Entries)
     $Volume = @($Archive.Volumes)[0]
     if ($Volume.Comment) {
       if ([Text.Encoding]::UTF8.GetByteCount($Volume.Comment) -gt $MaximumBytes) { throw 'The RAR comment exceeds the configured output limit.' }
       return $Volume.Comment
     }
+
+    # The reflective path below reconstructs the old RAR4 NewSub CMT entry.
+    # Applying it to RAR5 makes the header factory interpret RAR5 records with
+    # the wrong framing and produces misleading Unknown Rar Header failures.
+    if ($IsRar5) { return $null }
 
     $Assembly = [SharpCompress.Archives.ArchiveFactory].Assembly
     $FactoryType = $Assembly.GetType('SharpCompress.Common.Rar.Headers.RarHeaderFactory', $true)

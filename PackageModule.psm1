@@ -194,6 +194,9 @@ foreach ($Entry in $FunctionOwners.GetEnumerator()) {
   )
   $QualifiedName = "$($Owner.Name)\$Name"
   $ProxySource = $ProxySource.Replace("GetCommand('$Name',", "GetCommand('$QualifiedName',")
+  # Help resolution must use the same child-module qualification as command invocation. An
+  # unqualified forwarding target resolves back to this parent proxy after global import.
+  $ProxySource = $ProxySource.Replace(".ForwardHelpTargetName $Name", ".ForwardHelpTargetName $QualifiedName")
   Set-Item -Path "Function:script:$Name" -Value ([scriptblock]::Create($ProxySource))
 }
 

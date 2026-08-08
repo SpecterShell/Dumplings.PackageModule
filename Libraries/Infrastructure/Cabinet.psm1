@@ -5,13 +5,9 @@ function Import-CabinetDependency {
   .SYNOPSIS
     Load the bundled Microsoft cabinet reader
   #>
-  if (-not ([Management.Automation.PSTypeName]'Microsoft.Deployment.Compression.Cab.CabInfo').Type) {
-    foreach ($AssemblyName in @('Microsoft.Deployment.Compression.dll', 'Microsoft.Deployment.Compression.Cab.dll')) {
-      $AssemblyPath = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets', 'Assemblies', $AssemblyName
-      if (-not (Test-Path -LiteralPath $AssemblyPath)) { throw "The cabinet dependency is missing: $AssemblyPath" }
-      Add-Type -Path $AssemblyPath
-    }
-  }
+  $AssetRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets'
+  $null = Import-InstallerManagedAssembly -Name 'Microsoft.Deployment.Compression.dll' -TypeName 'Microsoft.Deployment.Compression.ArchiveInfo' -AssetRoot $AssetRoot
+  $null = Import-InstallerManagedAssembly -Name 'Microsoft.Deployment.Compression.Cab.dll' -TypeName 'Microsoft.Deployment.Compression.Cab.CabInfo' -AssetRoot $AssetRoot
 }
 
 function Get-CabinetEntry {

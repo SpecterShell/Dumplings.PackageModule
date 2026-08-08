@@ -4,6 +4,63 @@
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
+function Find-WinRarSfxArchive {
+  <#
+  .SYNOPSIS
+    Locate and validate the embedded RAR archive in a WinRAR SFX executable
+  .PARAMETER Path
+    Path to the WinRAR SFX PE file
+  .PARAMETER MaximumScanBytes
+    Maximum number of leading bytes searched for archive markers
+  .OUTPUTS
+    An object containing the validated archive offset and RAR generation
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [ValidateRange(8, 67108864)][long]$MaximumScanBytes = 16777216
+  )
+
+  $Installer = Get-Item -LiteralPath $Path -Force
+  $Markers = @(
+    [pscustomobject]@{ Format = 'WinRAR GUI SFX (RAR4)'; Bytes = [byte[]](0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00) }
+    [pscustomobject]@{ Format = 'WinRAR GUI SFX (RAR5)'; Bytes = [byte[]](0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00) }
+  )
+  $ScanLength = [Math]::Min([long]$Installer.Length, $MaximumScanBytes)
+  $Candidates = [Collections.Generic.List[psobject]]::new()
+
+  # SFX stubs can contain marker constants that are not archive starts. Gather
+  # a bounded candidate set and let SharpCompress validate record framing.
+  foreach ($Marker in $Markers) {
+    foreach ($Offset in Find-BinaryPattern -Path $Installer.FullName -Pattern $Marker.Bytes -Length $ScanLength -Maximum 32) {
+      $Candidates.Add([pscustomobject]@{ Offset = [long]$Offset; Format = $Marker.Format })
+    }
+  }
+
+  foreach ($Candidate in $Candidates | Sort-Object Offset -Unique) {
+    $Context = $null
+    try {
+      $Context = Open-InstallerArchiveRange -Path $Installer.FullName -Offset $Candidate.Offset -Length ($Installer.Length - $Candidate.Offset)
+      # Enumeration forces SharpCompress to validate the headers following the
+      # marker. Opening alone is insufficient because RAR parsing is lazy.
+      $Entries = @(Get-InstallerArchiveEntry -Archive $Context.Archive)
+      if ($Entries.Count -eq 0) { continue }
+      return [pscustomobject]@{
+        Offset = $Candidate.Offset
+        Format = $Candidate.Format
+      }
+    } catch {
+      # A rejected marker is ordinary evidence in a PE stub. Continue to the
+      # next candidate and report failure only when none form a valid archive.
+      continue
+    } finally {
+      if ($Context) { Close-InstallerArchiveRange -Context $Context }
+    }
+  }
+
+  throw 'No structurally valid embedded RAR archive was found.'
+}
+
 function ConvertFrom-WinRarSfxConfiguration {
   <#
   .SYNOPSIS
@@ -22,6 +79,7 @@ function ConvertFrom-WinRarSfxConfiguration {
   $Values = [ordered]@{}
   $SetupCommands = [Collections.Generic.List[string]]::new()
   $PresetupCommands = [Collections.Generic.List[string]]::new()
+  $FirstDirective = $true
 
   # Preserve repeated Setup/Presetup records in archive-comment order while
   # treating unrelated directives as ordinary key/value configuration.
@@ -31,6 +89,12 @@ function ConvertFrom-WinRarSfxConfiguration {
     if ($Trimmed -notmatch '^(?<Key>[^=]+?)(?:=(?<Value>.*))?$') { continue }
     $Key = $Matches.Key.Trim()
     $Value = if ($null -ne $Matches.Value) { $Matches.Value.Trim() } else { '' }
+
+    # Some RAR comment readers expose the RAR service-entry name (CMT)
+    # directly adjacent to the first Setup directive. Accept only this exact
+    # leading framing artifact; unrelated CMT-prefixed directives stay intact.
+    if ($FirstDirective -and $Key -ieq 'CMTSetup') { $Key = 'Setup' }
+    $FirstDirective = $false
     switch -Regex ($Key) {
       '^(?i)Setup$' { $SetupCommands.Add($Value); continue }
       '^(?i)Presetup$' { $PresetupCommands.Add($Value); continue }
@@ -68,16 +132,8 @@ function Get-WinRarSfxInfo {
   process {
     $Installer = Get-Item -LiteralPath $Path -Force
     if (-not (Get-PELayout -Path $Installer.FullName)) { throw 'The file is not a valid PE executable.' }
-    $Rar4Marker = [byte[]](0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00)
-    $Rar5Marker = [byte[]](0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00)
-    $ScanLength = [Math]::Min([long]$Installer.Length, 16777216)
-
-    # Scan the bounded SFX prefix for both generations and select the earliest
-    # validated archive signature when compatibility markers coexist.
-    $Rar4Offset = @(Find-BinaryPattern -Path $Installer.FullName -Pattern $Rar4Marker -Length $ScanLength -Maximum 1)[0]
-    $Rar5Offset = @(Find-BinaryPattern -Path $Installer.FullName -Pattern $Rar5Marker -Length $ScanLength -Maximum 1)[0]
-    $ArchiveOffset = @($Rar4Offset, $Rar5Offset | Where-Object { $null -ne $_ } | Sort-Object | Select-Object -First 1)[0]
-    if ($null -eq $ArchiveOffset) { throw 'The embedded RAR archive marker was not found.' }
+    $ArchiveLayout = Find-WinRarSfxArchive -Path $Installer.FullName
+    $ArchiveOffset = $ArchiveLayout.Offset
 
     # Copy the embedded range to an offset-zero temporary archive for catalog
     # and comment parsing; no SFX code or configured command is invoked.
@@ -125,7 +181,7 @@ function Get-WinRarSfxInfo {
         }
       )
       UnresolvedFields             = [string[]]@()
-      Format                       = if ($null -ne $Rar5Offset -and $ArchiveOffset -eq $Rar5Offset) { 'WinRAR GUI SFX (RAR5)' } else { 'WinRAR GUI SFX (RAR4)' }
+      Format                       = $ArchiveLayout.Format
       ArchiveOffset                = $ArchiveOffset
       Configuration                = $Config.Values
       Comment                      = $Comment

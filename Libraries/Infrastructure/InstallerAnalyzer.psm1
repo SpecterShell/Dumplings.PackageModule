@@ -2028,7 +2028,12 @@ function Invoke-InstallerAnalysisCore {
         }
       }
       'ZipArchive' {
-        $Analysis.ParserResults += Invoke-InstallerZipAnalysis -InstallerPath $Installer.FullName
+        # ParserResults is a collection of detector envelopes. Keep archive
+        # analysis behind the same success/error boundary as every other
+        # family so consumers never need to special-case raw ZIP results.
+        $Analysis.ParserResults += Invoke-InstallerDetector -Name 'ZIP/archive' -ScriptBlock {
+          Invoke-InstallerZipAnalysis -InstallerPath $Installer.FullName
+        }
       }
       'PE' {
         $ScanText = Read-InstallerStringWindows -File $Installer -Budget $ScanBytes

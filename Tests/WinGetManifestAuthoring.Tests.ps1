@@ -245,6 +245,36 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     $Suggestion.BlockingIssues -join "`n" | Should -Match 'specify NestedInstallerFile'
   }
 
+  It 'consumes the real ZIP analyzer envelope without StrictMode property failures' {
+    $ZipPath = Join-Path $TestDrive 'documents.zip'
+    $ZipSource = Join-Path $TestDrive 'documents-source'
+    $null = New-Item -Path $ZipSource -ItemType Directory
+    Set-Content -LiteralPath (Join-Path $ZipSource 'readme.txt') -Value 'No executable payload.'
+    Compress-Archive -Path (Join-Path $ZipSource '*') -DestinationPath $ZipPath
+
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/documents.zip' -InstallerPath $ZipPath
+
+    $Suggestion.Analysis.ParserResults[0].Name | Should -Be 'ZIP/archive'
+    $Suggestion.Analysis.ParserResults[0].Success | Should -BeTrue
+    $Suggestion.Analysis.ParserResults[0].Result.Family | Should -Be 'ZIP/archive'
+    $Suggestion.BlockingIssues -join "`n" | Should -Match 'no supported nested installer or portable PE candidate'
+  }
+
+  It 'turns a legacy raw ZIP parser result into a blocking issue' {
+    Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
+      [pscustomobject]@{
+        DetectedFileType = [pscustomobject]@{ Type = 'ZipArchive' }
+        ParserResults = @([pscustomobject]@{ Family = 'ZIP/archive'; NestedInstallerFiles = @(); PortableCandidates = @() })
+        DetectedFamilies = @(); FamilyCandidates = @(); RoutingHints = @(); RejectedCandidates = @()
+        PortableEvidence = $null; WrapperWarnings = @(); BlockingIssues = @(); SuggestedNextSteps = @()
+      }
+    }
+
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/legacy.zip' -InstallerPath $Script:InstallerPath
+
+    $Suggestion.BlockingIssues -join "`n" | Should -Match 'catalog could not be parsed'
+  }
+
   It 'downloads, hashes, analyzes once, and cleans its temporary file' {
     $Script:DownloadedPath = $null
     Mock Invoke-WinGetInstallerDownload -ModuleName WinGetManifestAuthoring {

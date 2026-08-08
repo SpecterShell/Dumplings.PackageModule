@@ -280,7 +280,11 @@ function Get-WinGetAuthoringAnalysisProjection {
     [AllowNull()][string]$PackageVersion
   )
 
-  $SuccessfulParsers = @($Analysis.ParserResults | Where-Object { $_.Success -and $null -ne $_.Result })
+  $SuccessfulParsers = @($Analysis.ParserResults | Where-Object {
+      $SuccessProperty = $_.PSObject.Properties['Success']
+      $ResultProperty = $_.PSObject.Properties['Result']
+      $SuccessProperty -and $SuccessProperty.Value -and $ResultProperty -and $null -ne $ResultProperty.Value
+    })
   $Warnings = [System.Collections.Generic.List[string]]::new()
   $Suggestions = [ordered]@{}
   $BlockingIssues = [System.Collections.Generic.List[string]]::new()
@@ -517,6 +521,18 @@ function Get-WinGetInstallerManifestSuggestion {
     Optional download request headers.
   .PARAMETER Proxy
     Optional explicit proxy passed to the WinGet downloader.
+  .OUTPUTS
+    Dumplings.WinGet.InstallerManifestSuggestion. Installers contains the complete effective
+    installer entries accepted by Add-WinGetManifestInstaller, including per-entry Architecture
+    and InstallerType values. AppliedEvidence records fields supported by static analysis;
+    Suggestions contains evidence requiring review; Warnings contains non-blocking concerns;
+    BlockingIssues contains conditions that prevent authoring; Analysis retains the full analyzer
+    result. A single result can contain multiple installer entries, so installer fields are not
+    duplicated at the top level.
+  .EXAMPLE
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl $InstallerUrl -InstallerPath $InstallerPath
+    if ($Suggestion.BlockingIssues) { throw ($Suggestion.BlockingIssues -join "`n") }
+    $Manifest = Add-WinGetManifestInstaller -Manifest $Manifest -Suggestion $Suggestion
   #>
   [OutputType([pscustomobject])]
   param (
@@ -556,7 +572,16 @@ function Get-WinGetInstallerManifestSuggestion {
     $SelectedNestedFile = $null
 
     if ($Analysis.DetectedFileType.Type -ceq 'ZipArchive') {
-      $ZipResult = @($Analysis.ParserResults | Where-Object { $_.Success -and $_.Result.Family -ceq 'ZIP/archive' } | Select-Object -First 1)[0]
+      # Analyzer results normally use the detector envelope contract. Check
+      # properties explicitly so malformed output from an independently loaded
+      # analyzer becomes a normal authoring issue rather than a StrictMode
+      # missing-property exception.
+      $ZipResult = $Analysis.ParserResults | Where-Object {
+          $SuccessProperty = $_.PSObject.Properties['Success']
+          $ResultProperty = $_.PSObject.Properties['Result']
+          $FamilyProperty = if ($ResultProperty -and $null -ne $ResultProperty.Value) { $ResultProperty.Value.PSObject.Properties['Family'] }
+          $SuccessProperty -and $SuccessProperty.Value -and $FamilyProperty -and $FamilyProperty.Value -ceq 'ZIP/archive'
+        } | Select-Object -First 1
       if ($null -eq $ZipResult) {
         $Analysis.BlockingIssues += 'The ZIP archive catalog could not be parsed.'
         $NestedCandidates = @()
@@ -564,7 +589,9 @@ function Get-WinGetInstallerManifestSuggestion {
         $NestedCandidates = @($ZipResult.Result.NestedInstallerFiles)
       }
       if ($NestedCandidates.Count -eq 0) {
-        $NestedCandidates = if ($ZipResult) { @($ZipResult.Result.PortableCandidates) } else { @() }
+        # Wrap the conditional itself. An empty array emitted from an if branch
+        # is otherwise enumerated away and assigned as $null by PowerShell.
+        $NestedCandidates = @(if ($ZipResult) { @($ZipResult.Result.PortableCandidates) })
       }
       if ($NestedCandidates.Count -eq 0) {
         $Analysis.BlockingIssues += 'The ZIP archive contains no supported nested installer or portable PE candidate.'

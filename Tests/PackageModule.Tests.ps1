@@ -24,6 +24,27 @@ Describe 'PackageModule manifest-backed loading' {
     $Module.ExportedVariables.Keys | Should -Contain 'DumplingsDefaultUserAgent'
   }
 
+  It 'resolves help for every parent-module function proxy' {
+    $Module = Get-Module PackageModule
+    $Failures = foreach ($Name in $Module.ExportedFunctions.Keys) {
+      try {
+        $Help = Get-Help -Name $Name -ErrorAction Stop
+        if ($null -eq $Help) { "${Name}: no help object was returned" }
+      } catch {
+        "${Name}: $($_.Exception.Message)"
+      }
+    }
+
+    @($Failures) | Should -BeNullOrEmpty
+  }
+
+  It 'preserves nested help forwarding through the GitHub API proxy' {
+    $Help = Get-Help -Name Invoke-GitHubApi -Full -ErrorAction Stop
+
+    $Help.Name | Should -Be 'Invoke-RestMethod'
+    @($Help.Parameters.Parameter.Name) | Should -Contain 'Uri'
+  }
+
   It 'supports repeated imports without duplicate managed-type failures' {
     { Import-Module $Script:ManifestPath -Force -Global -ErrorAction Stop } | Should -Not -Throw
     { Import-Module $Script:ManifestPath -Force -Global -ErrorAction Stop } | Should -Not -Throw

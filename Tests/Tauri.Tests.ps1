@@ -326,7 +326,7 @@ Describe 'Tauri analyzer integration' {
     [IO.Compression.ZipFile]::CreateFromDirectory($SourceDirectory, $ArchivePath)
 
     $Analysis = Get-WinGetInstallerAnalysis -Path $ArchivePath
-    $ArchiveEvidence = $Analysis.ParserResults | Where-Object Family -EQ 'ZIP/archive' | Select-Object -First 1
+    $ArchiveEvidence = $Analysis.ParserResults | Where-Object { $_.Success -and $_.Result.Family -eq 'ZIP/archive' } | Select-Object -ExpandProperty Result -First 1
     $Candidate = $ArchiveEvidence.PortableCandidateEvidence | Where-Object RelativeFilePath -EQ 'application.exe' | Select-Object -First 1
 
     $Candidate.Evidence.TauriExecutableInfo.Framework | Should -Be 'Tauri'

@@ -595,7 +595,7 @@ Describe 'Portable evidence in the WinGet installer analyzer' {
     Compress-Archive -Path (Join-Path $SourceDirectory '*') -DestinationPath $ZipPath -Force
 
     $Analysis = Get-WinGetInstallerAnalysis -Path $ZipPath
-    $ZipResult = $Analysis.ParserResults[0]
+    $ZipResult = $Analysis.ParserResults[0].Result
 
     $Analysis.DetectedFileType.Type | Should -Be 'ZipArchive'
     $ZipResult.PortableCandidateEvidence[0].RelativeFilePath | Should -Be 'Product.exe'
@@ -621,7 +621,7 @@ Describe 'Portable evidence in the WinGet installer analyzer' {
     Compress-Archive -Path (Join-Path $SourceDirectory '*') -DestinationPath $ZipPath -Force
 
     $Analysis = Get-WinGetInstallerAnalysis -Path $ZipPath
-    $ZipResult = $Analysis.ParserResults[0]
+    $ZipResult = $Analysis.ParserResults[0].Result
 
     $ZipResult.PortableCandidateEvidence[0].RelativeFilePath | Should -Be 'ZipDotNet.exe'
     $ZipResult.PortableCandidateEvidence[0].RelatedFilePaths.Count | Should -BeGreaterThan 0
@@ -657,7 +657,7 @@ Describe 'Portable evidence in the WinGet installer analyzer' {
     Compress-Archive -Path (Join-Path $SourceDirectory '*') -DestinationPath $ZipPath -Force
 
     $Analysis = Get-WinGetInstallerAnalysis -Path $ZipPath
-    $ZipResult = $Analysis.ParserResults[0]
+    $ZipResult = $Analysis.ParserResults[0].Result
 
     $ZipResult.PortableCandidateEvidence.RelativeFilePath | Should -Contain 'ZipWithRuntime.exe'
     $ZipResult.PortableCandidateEvidence.RelativeFilePath | Should -Not -Contain 'createdump.exe'
@@ -684,7 +684,7 @@ Describe 'Portable evidence in the WinGet installer analyzer' {
     Compress-Archive -Path (Join-Path $SourceDirectory '*') -DestinationPath $ZipPath -Force
 
     $Analysis = Get-WinGetInstallerAnalysis -Path $ZipPath
-    $ZipResult = $Analysis.ParserResults[0]
+    $ZipResult = $Analysis.ParserResults[0].Result
 
     $ZipResult.PortableCandidateEvidence.RelativeFilePath | Should -Contain 'DllApp.dll'
     $ZipResult.PortableCandidateEvidence.RelativeFilePath | Should -Not -Contain 'LibraryOnly.dll'

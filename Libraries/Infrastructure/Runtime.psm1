@@ -79,9 +79,22 @@ function Import-InstallerManagedAssembly {
   $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
   if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
   $AssemblyName = $Name
+  $SimpleAssemblyName = [IO.Path]::GetFileNameWithoutExtension($AssemblyName)
   Use-InstallerRuntimeLoadLock {
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
+
+    # Another module can load a compatible DTF/SharpCompress dependency from a
+    # different path before PowerShell has cached its public types. Reuse that
+    # assembly by identity rather than asking Add-Type to load the same strong
+    # name into the default AssemblyLoadContext a second time.
+    $LoadedAssembly = [AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -ceq $SimpleAssemblyName } | Select-Object -First 1
+    if ($LoadedAssembly) {
+      if (-not $LoadedAssembly.GetType($TypeName, $false, $false)) {
+        throw "Assembly '$SimpleAssemblyName' is already loaded from '$($LoadedAssembly.Location)' but does not expose required type '$TypeName'. Run the incompatible module in a separate PowerShell process."
+      }
+      return $LoadedAssembly
+    }
     $ResolvedAssetRoot = if ([string]::IsNullOrWhiteSpace($AssetRoot)) {
       Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets'
     } else {
