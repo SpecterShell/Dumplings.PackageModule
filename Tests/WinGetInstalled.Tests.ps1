@@ -68,6 +68,19 @@ Describe 'WinGet installed-entry matching helpers' {
     $Normalized.NormalizedNameAndPublisher | Should -Be 'Contoso.ContosoApp'
   }
 
+  It 'Should normalize short HP names without passing an invalid search offset to .NET' {
+    $Normalized = ConvertTo-WinGetNormalizedNameAndPublisher -Name 'HP Click' -Publisher 'HP'
+
+    $Normalized.NormalizedName | Should -Be 'HPClick'
+    $Normalized.NormalizedPublisher | Should -Be 'HP'
+    $Normalized.NormalizedNameAndPublisher | Should -Be 'HP.HPClick'
+  }
+
+  It 'Should retain WinGet suffix stripping at and beyond the third character' {
+    (ConvertTo-WinGetNormalizedNameAndPublisher -Name 'ABC@@metadata' -Publisher 'HP').NormalizedName | Should -Be 'ABC'
+    (ConvertTo-WinGetNormalizedNameAndPublisher -Name 'ABC' -Publisher 'HP').NormalizedName | Should -Be 'ABC'
+  }
+
   It 'Should build manifest match keys from installer-level and manifest-level fields' {
     $Keys = Get-WinGetManifestMatchKey -Manifest $Script:Manifest
 

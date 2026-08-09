@@ -396,7 +396,7 @@ function Resolve-UniqueInstallerFile {
   #>
   [OutputType([System.IO.FileInfo])]
   param (
-    [Parameter(Mandatory)][System.IO.FileInfo[]]$Item,
+    [Parameter(Mandatory)][AllowEmptyCollection()][System.IO.FileInfo[]]$Item,
     [Parameter(Mandatory)][string]$Pattern,
     [string]$BasePath,
     [string]$Description = 'installer payload'

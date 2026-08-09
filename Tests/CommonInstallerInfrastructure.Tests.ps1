@@ -383,6 +383,11 @@ Describe 'Test-ExtractionPattern' {
 }
 
 Describe 'Resolve-UniqueInstallerFile' {
+  It 'reports an empty candidate set without a parameter-binding failure' {
+    { Resolve-UniqueInstallerFile -Item ([System.IO.FileInfo[]]@()) -Pattern 'Setup.inx' -Description 'MSI Binary.ISSetup.dll payload' } |
+      Should -Throw 'No candidate files are available for the MSI Binary.ISSetup.dll payload.'
+  }
+
   It 'prefers one exact relative path over wildcard interpretation' {
     $Root = Join-Path $TestDrive 'UniqueSelection'
     $null = New-Item -Path (Join-Path $Root 'x64') -ItemType Directory -Force

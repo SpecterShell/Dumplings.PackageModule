@@ -292,64 +292,75 @@ namespace Dumplings.InstallShield
 
         private static void ReadSetupTypes(Catalog catalog, InstallShieldMediaMetadata metadata)
         {
-            // The setup-type locale directory is packed immediately before the
-            // file-group buckets. Its records were verified by changing only
-            // ISSetupType and ISSetupTypeFeatures in official-builder media.
+            // The setup-type directory is packed immediately before the
+            // file-group buckets. It contains one contiguous LCID array followed
+            // by one shared setup-type table; the table is not repeated for each
+            // language. A single-language directory happens to look like the
+            // older assumed 12-byte locale record, which hid this distinction
+            // until multi-language version-31 media was observed.
             if (catalog.DescriptorSize < 0x36) return;
             var localeCount = ReadUInt16(catalog.Header, catalog.DescriptorBase + 0x30);
             if (localeCount > MaximumSetupTypeLocaleCount)
                 throw new InvalidDataException("The setup-type locale count exceeds the parser limit.");
             if (localeCount == 0) return;
-            var localeTable = GetDescriptorAddress(
+            var directory = GetDescriptorAddress(
                 catalog,
                 ReadUInt32(catalog.Header, catalog.DescriptorBase + 0x32),
-                checked((long)localeCount * 12),
-                "setup-type locale table");
+                checked((long)localeCount * 4 + 8),
+                "setup-type directory");
+            var languages = new List<uint>(localeCount);
             for (var localeIndex = 0; localeIndex < localeCount; localeIndex++)
+                languages.Add(ReadUInt32(catalog.Header, directory + localeIndex * 4L));
+
+            var setupTypeDirectory = directory + localeCount * 4L;
+            var setupTypeCount = ReadUInt32(catalog.Header, setupTypeDirectory);
+            if (setupTypeCount > MaximumSetupTypeCount)
+                throw new InvalidDataException("The setup-type count exceeds the parser limit.");
+            if (setupTypeCount == 0) return;
+            var setupTypeTable = GetDescriptorAddress(
+                catalog,
+                ReadUInt32(catalog.Header, setupTypeDirectory + 4),
+                checked((long)setupTypeCount * 4),
+                "setup-type offset table");
+            for (var setupTypeIndex = 0; setupTypeIndex < setupTypeCount; setupTypeIndex++)
             {
-                var locale = localeTable + localeIndex * 12L;
-                var language = ReadUInt32(catalog.Header, locale);
-                var setupTypeCount = ReadUInt16(catalog.Header, locale + 4);
-                if (setupTypeCount > MaximumSetupTypeCount)
-                    throw new InvalidDataException("A setup-type count exceeds the parser limit.");
-                var setupTypeTable = GetDescriptorAddress(
+                var setupType = GetDescriptorAddress(
                     catalog,
-                    ReadUInt32(catalog.Header, locale + 8),
-                    checked((long)setupTypeCount * 4),
-                    "setup-type offset table");
-                for (var setupTypeIndex = 0; setupTypeIndex < setupTypeCount; setupTypeIndex++)
+                    ReadUInt32(catalog.Header, setupTypeTable + setupTypeIndex * 4L),
+                    20,
+                    "setup-type record");
+                var featureCount = ReadUInt32(catalog.Header, setupType + 12);
+                if (featureCount > MaximumSetupTypeFeatureCount)
+                    throw new InvalidDataException("A setup-type feature count exceeds the parser limit.");
+                var features = new List<string>((int)featureCount);
+                if (featureCount > 0)
                 {
-                    var setupType = GetDescriptorAddress(
+                    var featureTable = GetDescriptorAddress(
                         catalog,
-                        ReadUInt32(catalog.Header, setupTypeTable + setupTypeIndex * 4L),
-                        20,
-                        "setup-type record");
-                    var featureCount = ReadUInt32(catalog.Header, setupType + 12);
-                    if (featureCount > MaximumSetupTypeFeatureCount)
-                        throw new InvalidDataException("A setup-type feature count exceeds the parser limit.");
-                    var features = new List<string>((int)featureCount);
-                    if (featureCount > 0)
+                        ReadUInt32(catalog.Header, setupType + 16),
+                        checked((long)featureCount * 4),
+                        "setup-type feature table");
+                    for (var featureIndex = 0; featureIndex < featureCount; featureIndex++)
                     {
-                        var featureTable = GetDescriptorAddress(
+                        var feature = ReadMediaString(
                             catalog,
-                            ReadUInt32(catalog.Header, setupType + 16),
-                            checked((long)featureCount * 4),
-                            "setup-type feature table");
-                        for (var featureIndex = 0; featureIndex < featureCount; featureIndex++)
-                        {
-                            var feature = ReadMediaString(
-                                catalog,
-                                ReadUInt32(catalog.Header, featureTable + featureIndex * 4L),
-                                "setup-type feature path");
-                            if (!string.IsNullOrWhiteSpace(feature)) features.Add(feature);
-                        }
+                            ReadUInt32(catalog.Header, featureTable + featureIndex * 4L),
+                            "setup-type feature path");
+                        if (!string.IsNullOrWhiteSpace(feature)) features.Add(feature);
                     }
+                }
+
+                var name = ReadMediaString(catalog, ReadUInt32(catalog.Header, setupType), "setup-type name");
+                var description = ReadMediaString(catalog, ReadUInt32(catalog.Header, setupType + 4), "setup-type description");
+                var displayName = ReadMediaString(catalog, ReadUInt32(catalog.Header, setupType + 8), "setup-type display name");
+                foreach (var language in languages)
+                {
                     metadata.SetupTypes.Add(new InstallShieldMediaSetupType(
                         language,
-                        setupTypeIndex,
-                        ReadMediaString(catalog, ReadUInt32(catalog.Header, setupType), "setup-type name"),
-                        ReadMediaString(catalog, ReadUInt32(catalog.Header, setupType + 4), "setup-type description"),
-                        ReadMediaString(catalog, ReadUInt32(catalog.Header, setupType + 8), "setup-type display name"),
+                        checked((int)setupTypeIndex),
+                        name,
+                        description,
+                        displayName,
                         features));
                 }
             }
@@ -426,7 +437,11 @@ namespace Dumplings.InstallShield
                             14,
                             "registry-key record");
                         var key = ReadMediaString(catalog, ReadUInt32(catalog.Header, keyRecord), "registry key");
-                        var valueCount = ReadUInt16(catalog.Header, keyRecord + 8);
+                        // The high bit is a key-control flag in generated media,
+                        // not part of the value count. Empty flagged keys occur
+                        // in ordinary projects and must not turn into a 32768-item
+                        // table read. The lower 15 bits remain the bounded count.
+                        var valueCount = ReadUInt16(catalog.Header, keyRecord + 8) & 0x7FFF;
                         if (valueCount > MaximumRegistryValueCount)
                             throw new InvalidDataException("A registry-key value count exceeds the parser limit.");
                         if (valueCount == 0) continue;

@@ -721,14 +721,18 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     # sections even when the literal setup.iss filename is absent from the INX.
     $SilentSupport = 'ResponseFileRequired'
     $ResponseRequirement = 'External'
-    $Warnings.Add('The InstallShield framework callback reaches response-backed dialogs but the media does not ship a valid default setup.iss.')
+    if (-not $ResponseInfo) {
+      $Warnings.Add('The InstallShield framework callback reaches response-backed dialogs but the media does not ship a valid fresh-install setup.iss.')
+    }
   } elseif ($DialogCalls -and $ResponseReferences) {
     # Revenera's InstallShield Silent contract reads built-in/Sd dialog answers
     # from setup.iss. Imported dialog and response-runtime evidence without a
     # shipped default file therefore requires caller-supplied response data.
     $SilentSupport = 'ResponseFileRequired'
     $ResponseRequirement = 'External'
-    $Warnings.Add('The compiled script uses InstallShield response-backed dialog support but the media does not ship a valid default setup.iss.')
+    if (-not $ResponseInfo) {
+      $Warnings.Add('The compiled script uses InstallShield response-backed dialog support but the media does not ship a valid fresh-install setup.iss.')
+    }
   } else {
     $SilentSupport = 'Indeterminate'
     $ResponseRequirement = if ($ResponseReferences -or $DialogCalls) { 'Unknown' } else { 'None' }
@@ -1282,6 +1286,34 @@ function Get-InstallShieldInstallScriptInfo {
     $ScriptPath = $ScriptFile.FullName
     $ScriptDirectory = [IO.Path]::GetDirectoryName($ScriptPath)
     $ResponseCandidate = Get-ChildItem -LiteralPath $ScriptDirectory -Filter 'setup.iss' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $ResponseCandidate) {
+      # Focused cabinet extraction stores setup.inx under an artificial ordinal
+      # directory, while InstallShield reads setup.iss from the original media
+      # directory beside dataN.hdr. Follow that source relationship before a
+      # bounded exact-name fallback across the already enumerated extraction.
+      $CabinetSupportProperty = $Installer.PSObject.Properties['InstallShieldCabinetSupport']
+      $SupportEntries = if ($CabinetSupportProperty -and $CabinetSupportProperty.Value) {
+        @($CabinetSupportProperty.Value.SupportEntries)
+      } else {
+        @()
+      }
+      $ScriptHeader = @($SupportEntries | Where-Object Name -CEQ $ScriptFile.Name | Select-Object -First 1).HeaderPath
+      if ($ScriptHeader) {
+        $MediaResponsePath = Join-Path ([IO.Path]::GetDirectoryName([string]$ScriptHeader)) 'setup.iss'
+        if (Test-Path -LiteralPath $MediaResponsePath -PathType Leaf) {
+          $ResponseCandidate = Get-Item -LiteralPath $MediaResponsePath -Force
+        }
+      }
+    }
+    if (-not $ResponseCandidate) {
+      $ExtractedFilesProperty = $Installer.PSObject.Properties['ExtractedFiles']
+      $ResponseCandidates = if ($ExtractedFilesProperty) {
+        @($ExtractedFilesProperty.Value | Where-Object { [IO.Path]::GetFileName([string]$_) -ceq 'setup.iss' })
+      } else {
+        @()
+      }
+      if ($ResponseCandidates.Count -eq 1) { $ResponseCandidate = Get-Item -LiteralPath $ResponseCandidates[0] -Force }
+    }
     $StringTablePaths = [string[]]@($Installer.ExtractedFiles | Where-Object {
         $FileName = [IO.Path]::GetFileName($_)
         $FileName -like 'StringTable_*.ips' -or $FileName -like 'String*.txt'

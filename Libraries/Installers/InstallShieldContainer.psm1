@@ -966,7 +966,11 @@ function Expand-InstallShieldCabinetSupport {
   $ExtractedFiles = [Collections.Generic.List[string]]::new()
   $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $ExpandedBytes = 0L
-  $HeaderFiles = @(Get-ChildItem -LiteralPath $ExtractedPath -Filter '*.hdr' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName)
+  # Only canonical dataN.hdr names are proprietary cabinet catalogs. This also
+  # excludes collision-renamed leftovers such as data1 (1).hdr and unrelated
+  # InstallShield support headers from repeated analysis of the same directory.
+  $HeaderFiles = @(Get-ChildItem -LiteralPath $ExtractedPath -Filter '*.hdr' -Recurse -File -ErrorAction SilentlyContinue |
+      Where-Object Name -CMatch '^data\d+\.hdr$' | Sort-Object FullName)
   foreach ($HeaderFile in $HeaderFiles) {
     try {
       # The managed reader validates ISc(, version, descriptor/table ranges,

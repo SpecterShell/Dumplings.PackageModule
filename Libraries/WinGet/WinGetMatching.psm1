@@ -97,7 +97,10 @@ function ConvertTo-WinGetNameWithoutNoise {
   if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
 
   $Result = $Value.Normalize([System.Text.NormalizationForm]::FormC).Trim()
-  $AtIndex = $Result.IndexOf('@@', 3, [System.StringComparison]::Ordinal)
+  # std::wstring::find returns npos when its starting offset is beyond a short
+  # value, while String.IndexOf throws. Guard the translated WinGet operation so
+  # short publishers such as "HP" retain the source implementation's behavior.
+  $AtIndex = if ($Result.Length -ge 3) { $Result.IndexOf('@@', 3, [System.StringComparison]::Ordinal) } else { -1 }
   if ($AtIndex -ge 0) { $Result = $Result.Substring(0, $AtIndex).Trim() }
 
   while ($Result.Length -ge 2 -and (($Result[0] -eq '"' -and $Result[-1] -eq '"') -or ($Result[0] -eq '(' -and $Result[-1] -eq ')'))) {

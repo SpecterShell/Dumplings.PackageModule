@@ -1,4 +1,5 @@
 BeforeAll {
+  . (Join-Path $PSScriptRoot 'TestFixture.ps1')
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Runtime.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Binary.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\FileSystem.psm1') -Force
@@ -9,6 +10,7 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerEvidence.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\InstallerEvidence.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShieldInstallScript.psm1') -Force
+  $Script:InstallShieldFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallShield'
 
   function New-TestInstallScriptFile {
     param (
@@ -533,6 +535,44 @@ Company=Stale response publisher
     $Inspection.MediaMetadata.Shortcuts[0].Features | Should -Contain '<Data>\Main'
   }
 
+  It 'parses packed multi-language setup types and flagged registry-key counts' {
+    $Path = Join-Path $TestDrive 'media-multilanguage-data1.hdr'
+    New-TestInstallShieldMediaHeader -Path $Path
+    $Bytes = [IO.File]::ReadAllBytes($Path)
+    $DescriptorBase = 0x20
+    $WriteUInt16 = { param([int]$Offset, [uint16]$Value) [BitConverter]::GetBytes($Value).CopyTo($Bytes, $Offset) }
+    $WriteUInt32 = { param([int]$Offset, [uint32]$Value) [BitConverter]::GetBytes($Value).CopyTo($Bytes, $Offset) }
+
+    # Multi-language media stores a contiguous LCID array followed by one
+    # shared setup-type count and table pointer.
+    & $WriteUInt16 ($DescriptorBase + 0x30) ([uint16]2)
+    & $WriteUInt32 ($DescriptorBase + 0xAD8) ([uint32]1033)
+    & $WriteUInt32 ($DescriptorBase + 0xADC) ([uint32]1041)
+    & $WriteUInt32 ($DescriptorBase + 0xAE0) ([uint32]1)
+    & $WriteUInt32 ($DescriptorBase + 0xAE4) ([uint32]0xAEC)
+    & $WriteUInt32 ($DescriptorBase + 0xAEC) ([uint32]0xAF0)
+    & $WriteUInt32 ($DescriptorBase + 0xAF0) ([uint32]0xB70)
+    & $WriteUInt32 ($DescriptorBase + 0xAF4) ([uint32]0xB70)
+    & $WriteUInt32 ($DescriptorBase + 0xAF8) ([uint32]0xB70)
+    & $WriteUInt32 ($DescriptorBase + 0xAFC) ([uint32]1)
+    & $WriteUInt32 ($DescriptorBase + 0xB00) ([uint32]0xB04)
+
+    # InstallShield uses the high bit as key-control metadata. It is not part
+    # of the 15-bit registry-value count stored in the same field.
+    & $WriteUInt16 ($DescriptorBase + 0x370 + 8) ([uint16]0x8001)
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+
+    $Metadata = [Dumplings.InstallShield.InstallShieldCabinetExtractor]::Inspect($Path).MediaMetadata
+
+    $Metadata.Warnings | Should -BeNullOrEmpty
+    $Metadata.SetupTypes | Should -HaveCount 2
+    $Metadata.SetupTypes.Language | Should -Contain 1033
+    $Metadata.SetupTypes.Language | Should -Contain 1041
+    $Metadata.SetupTypes.Name | Should -Not -Contain ''
+    $Metadata.RegistryWrites | Should -HaveCount 1
+    $Metadata.RegistryWrites[0].Data | Should -Be 'Dumplings Media App'
+  }
+
   It 'decodes source-backed InstallScript media registry value encodings' {
     $Path = Join-Path $TestDrive 'media-registry-types-data1.hdr'
     New-TestInstallShieldRegistryTypeHeader -Path $Path
@@ -936,7 +976,27 @@ Company=Stale response publisher
     $Info.RegistryWrites | Where-Object { $_.Root -eq 'HKCR' -and $_.Key -eq '.pcprn' -and $_.Data -eq 'IndexEducation.pcprn' } | Should -HaveCount 1
     $Info.InstallScriptInfo.ParserVersionInfo.EmulationTruncated | Should -BeFalse
     $Info.InstallScriptInfo.UnsupportedOpcodes | Should -BeNullOrEmpty
-    $Info.InstallScriptInfo.Warnings -join ' ' | Should -Match 'does not ship a valid default setup\.iss'
+    $Info.InstallScriptInfo.Warnings -join ' ' | Should -Match 'does not ship a valid fresh-install setup\.iss'
+  }
+
+  It 'parses Dell Display and Peripheral Manager multi-language media when cached' {
+    Import-Module (Join-Path $PSScriptRoot '..\Libraries\Installers\InstallShield.psm1') -Force
+    $InstallerPath = Join-Path $Script:InstallShieldFixtureDirectory 'Dell\DDPM-Setup_2.3.0.17.exe'
+    if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'the Dell DDPM fixture is not cached'
+      return
+    }
+    Get-DumplingsTestFixtureHash -Path $InstallerPath | Should -Be '8B8FF94FA4B110F4A757DE455CE4D1C8A37FCF165ADB54107BF98F81557A7CC8'
+    $Info = Get-InstallShieldInfo -Path $InstallerPath -DestinationPath (Join-Path $TestDrive 'Dell-DDPM')
+
+    $Info.Variant | Should -Be 'InstallScript'
+    $Info.ProductCode | Should -Be '{21A24609-08A2-423E-80DE-4D33A933F1A1}'
+    $Info.DisplayName | Should -Be 'Dell Display and Peripheral Manager'
+    $Info.MediaSetupTypes | Should -HaveCount 34
+    $Info.InstallShieldCabinetSupport.RegistryWrites | Should -HaveCount 52
+    $Info.Warnings -join ' ' | Should -Not -Match 'media (?:setup-type|registry) records are malformed or unsupported'
+    $Info.InstallScriptInfo.EmbeddedResponseFile.DialogNames | Should -Contain 'SdWelcomeMaint'
+    $Info.InstallScriptInfo.Warnings -join ' ' | Should -Match 'does not match the statically reconstructed fresh-install dialog order'
   }
 
   It 'builds an instruction-backed Celsys dialog trace and validates the embedded response order' -Skip:(-not (Test-Path 'C:\Users\SpecterShell\Repository\Dumplings-TestFixtures\PackageModule\InstallShield\CSP_504w_setup_u\Disk1\setup.inx')) {

@@ -210,6 +210,23 @@ stagingPercentage: 25
     $Info.TauriEvidence | Should -Contain 'String:nsis_tauri_utils.dll'
   }
 
+  It 'Should preserve an equality-guarded Tauri machine scope across the GPL parser bridge' {
+    $Fixture = Get-InstallerFixture -Name 'TranslatorX_26.1.1_x64-setup.exe' `
+      -Url 'https://github.com/pgiralt/translatorx-releases/releases/download/v26.1.1/TranslatorX_26.1.1_x64-setup.exe' `
+      -Sha256 'FC1AA93FA0C746AE28E0AD8DDAEBADF1968FBB6A305470140AE8542460968EF4'
+
+    $Info = Get-NSISInfo -Path $Fixture -Architecture x64 -Scope machine
+
+    $Info.IsTauri | Should -BeTrue
+    $Info.TauriInstallerMode | Should -Be 'both'
+    $Info.SupportedScopes | Should -Be @('user', 'machine')
+    $Info.ProductCode | Should -Be 'TranslatorX'
+    $Info.Scope | Should -Be 'machine'
+    $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\TranslatorX'
+    @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
+    $Info.Warnings | Should -BeNullOrEmpty
+  }
+
   It 'Should return FileInfo objects from the InstallerParsers NSIS extraction bridge' {
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $ExpandedPath = Join-Path $Script:FixtureDirectory 'nsis-bridge-expanded'
@@ -257,6 +274,21 @@ stagingPercentage: 25
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
+  }
+
+  It 'Should return Inno 5.3.3 metadata through the parser CLI bridge' {
+    $Fixture = Get-InstallerFixture -Name 'WingGateway-1.1.2.exe' `
+      -Url 'https://www.wftpserver.com/download/WingGateway_Setup.exe' `
+      -Sha256 'F867D26C4957FDF0C95E6F4E843386434DC94F8DC4BE8B426D8BBEE1E940B2E1'
+
+    $Info = Get-InnoInfo -Path $Fixture
+
+    $Info.Signature | Should -Be 'Inno Setup Setup Data (5.3.3) (u)'
+    $Info.ProductCode | Should -Be '{1F5A1D86-7CAF-43D9-B8E4-572D0CA73208}_is1'
+    $Info.DisplayVersion | Should -Be '1.1.2'
+    $Info.Scope | Should -Be 'machine'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.ParserVersionInfo.FileLocationDigestAlgorithm | Should -Be 'MD5'
   }
 
   It 'Should read MSI metadata through the InstallerParsers Advanced Installer bridge' {
