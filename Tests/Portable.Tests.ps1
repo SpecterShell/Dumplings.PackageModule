@@ -190,6 +190,14 @@ BeforeAll {
       Write-TestBytes -Offset ($HeaderV2Offset + 16) -Value ([System.BitConverter]::GetBytes([int64]$RuntimeConfigOffset))
       Write-TestBytes -Offset ($HeaderV2Offset + 24) -Value ([System.BitConverter]::GetBytes([int64]$RuntimeConfigBytes.Length))
       Write-TestBytes -Offset ($HeaderV2Offset + 32) -Value ([System.BitConverter]::GetBytes([uint64]0))
+      $BundleEntryOffset = $HeaderV2Offset + 40
+      $BundleEntryNameBytes = [Text.Encoding]::UTF8.GetBytes('SingleFileBundle.runtimeconfig.json')
+      Write-TestBytes -Offset $BundleEntryOffset -Value ([BitConverter]::GetBytes([int64]$RuntimeConfigOffset))
+      Write-TestBytes -Offset ($BundleEntryOffset + 8) -Value ([BitConverter]::GetBytes([int64]$RuntimeConfigBytes.Length))
+      Write-TestBytes -Offset ($BundleEntryOffset + 16) -Value ([BitConverter]::GetBytes([int64]0))
+      $Bytes[$BundleEntryOffset + 24] = 4
+      $Bytes[$BundleEntryOffset + 25] = [byte]$BundleEntryNameBytes.Length
+      Write-TestBytes -Offset ($BundleEntryOffset + 26) -Value $BundleEntryNameBytes
     }
 
     $ParentDirectory = Split-Path -Path $Path -Parent
@@ -458,12 +466,16 @@ Describe 'PE dependency helpers' {
     $Exe = Get-PortableTestPEFixture -Name 'SingleFileBundle.exe' -Machine 0x8664 -PE32Plus -BundleRuntimeConfigJson $RuntimeConfigJson
 
     $Info = Get-PEDependencyInfo -Path $Exe
+    $BundleInfo = Get-PEDotNetBundleInfo -Path $Exe
 
     $Info.DotNetInfo.IsDotNetAppHost | Should -BeTrue
     $Info.DotNetInfo.AppHostInfo.BundleInfo.RuntimeConfigJson | Should -Not -BeNullOrEmpty
     $Info.DotNetInfo.RuntimeConfigPath | Should -BeLike 'bundle:*'
     $Info.RecommendedPackageDependencyIds | Should -Contain 'Microsoft.DotNet.DesktopRuntime.8'
     $Info.RecommendedPackageDependencyIds | Should -Not -Contain 'Microsoft.DotNet.Runtime.8'
+    $BundleInfo.Entries | Should -HaveCount 1
+    $BundleInfo.Entries[0].RelativePath | Should -Be 'SingleFileBundle.runtimeconfig.json'
+    $BundleInfo.Entries[0].Offset | Should -Be 0x2000
   }
 
   It 'Should map Windows Desktop runtimeconfig and suppress same-major NETCore runtime' {

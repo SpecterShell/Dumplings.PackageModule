@@ -487,9 +487,12 @@ function New-WinGetManifest {
     [ValidateNotNullOrEmpty()][string]$ManifestVersion = $Script:WinGetAuthoringManifestVersion
   )
 
+  $AuthoredDefaults = ConvertTo-WinGetAuthoringDictionary -InputObject $InstallerDefaults
+  $AuthoredInstallers = [System.Collections.IDictionary[]]@($Installer | ForEach-Object { ConvertTo-WinGetAuthoringDictionary -InputObject $_ })
+  $EffectiveInstallers = Get-WinGetAuthoredEffectiveInstallers -InstallerDefaults $AuthoredDefaults -Installers $AuthoredInstallers -ManifestVersion $ManifestVersion
   $Model = New-WinGetManifestModel -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -Channel $Channel -Moniker $Moniker `
-    -ManifestVersion $ManifestVersion -InstallerDefaults (ConvertTo-WinGetAuthoringDictionary -InputObject $InstallerDefaults) `
-    -Installers ([System.Collections.IDictionary[]]@($Installer | ForEach-Object { ConvertTo-WinGetAuthoringDictionary -InputObject $_ })) `
+    -ManifestVersion $ManifestVersion -InstallerDefaults $AuthoredDefaults `
+    -Installers $EffectiveInstallers `
     -DefaultLocalization (ConvertTo-WinGetAuthoringDictionary -InputObject $DefaultLocalization) `
     -Localizations ([System.Collections.IDictionary[]]@($Localization | ForEach-Object { ConvertTo-WinGetAuthoringDictionary -InputObject $_ })) -SourceFormat Memory
   $Validation = Get-WinGetManifestValidationResult -Manifest $Model
@@ -936,6 +939,121 @@ function ConvertFrom-WinGetAuthoringPointer {
   return @($Path.Substring(1).Split('/') | ForEach-Object { $_ -replace '~1', '/' -replace '~0', '~' })
 }
 
+function Test-WinGetAuthoringPointerPath {
+  <#
+  .SYNOPSIS
+    Test whether an RFC 6901 property path exists in a dictionary or array tree.
+  .PARAMETER Root
+    Dictionary at which traversal starts.
+  .PARAMETER Path
+    RFC 6901 property path relative to Root.
+  #>
+  [OutputType([bool])]
+  param (
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Root,
+    [Parameter(Mandatory)][string]$Path
+  )
+
+  $Current = $Root
+  foreach ($Segment in @(ConvertFrom-WinGetAuthoringPointer -Path $Path)) {
+    if ($Current -is [System.Collections.IDictionary]) {
+      if (-not $Current.Contains($Segment)) { return $false }
+      $Current = $Current[$Segment]
+      continue
+    }
+    if ($Current -is [System.Collections.IList]) {
+      $ArrayIndex = 0
+      if ($Segment -notmatch '^(?:0|[1-9]\d*)$' -or -not [int]::TryParse($Segment, [ref]$ArrayIndex)) { return $false }
+      if ($ArrayIndex -ge $Current.Count) { return $false }
+      $Current = $Current[$ArrayIndex]
+      continue
+    }
+    return $false
+  }
+  return $true
+}
+
+function Resolve-WinGetAuthoringPackagePath {
+  <#
+  .SYNOPSIS
+    Classify a package-target path as a logical-model field or installer default.
+  .PARAMETER Path
+    RFC 6901 path passed to a package-target authoring operation.
+  .PARAMETER ManifestVersion
+    Manifest schema version used to identify legal root installer fields.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$ManifestVersion
+  )
+
+  [string[]]$Segments = @(ConvertFrom-WinGetAuthoringPointer -Path $Path)
+  $TopLevelName = $Segments[0]
+  if ($TopLevelName -cin @('PackageIdentifier', 'PackageVersion', 'Channel', 'Moniker', 'ManifestVersion')) {
+    return [pscustomobject]@{ Kind = 'Model'; Path = $Path }
+  }
+  if ($TopLevelName -ceq 'InstallerDefaults') {
+    if ($Segments.Count -lt 2) { throw "Package path '$Path' must identify a field inside InstallerDefaults." }
+    $InstallerPath = '/' + (($Segments | Select-Object -Skip 1 | ForEach-Object { $_ -replace '~', '~0' -replace '/', '~1' }) -join '/')
+    return Resolve-WinGetAuthoringPackagePath -Path $InstallerPath -ManifestVersion $ManifestVersion
+  }
+  if ($TopLevelName -cin (Get-WinGetInstallerPropertyCatalog -ManifestVersion $ManifestVersion -RootOnly)) {
+    return [pscustomobject]@{ Kind = 'InstallerDefault'; Path = $Path }
+  }
+  if ($TopLevelName -cin @('Installers', 'DefaultLocalization', 'Localizations')) {
+    throw "Package path '$Path' targets '$TopLevelName'. Use Target Installer or Target Locale instead."
+  }
+  throw "Package path '$Path' is not a logical package field or a root-level installer field for manifest schema $ManifestVersion."
+}
+
+function Set-WinGetAuthoringInstallerDefaultValue {
+  <#
+  .SYNOPSIS
+    Apply or remove one authored root installer value across effective installers.
+  .PARAMETER Manifest
+    Detached logical manifest model to mutate.
+  .PARAMETER Path
+    RFC 6901 path relative to InstallerDefaults and each installer entry.
+  .PARAMETER Value
+    Value applied to the root installer defaults.
+  .PARAMETER Remove
+    Remove the value from defaults and every effective installer.
+  #>
+  [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Mutates only an internal detached manifest model.')]
+  param (
+    [Parameter(Mandatory)]$Manifest,
+    [Parameter(Mandatory)][string]$Path,
+    [AllowNull()]$Value,
+    [switch]$Remove
+  )
+
+  $Defaults = ConvertTo-WinGetAuthoringDictionary -InputObject $Manifest.InstallerDefaults
+  $PhysicalInstallers = [System.Collections.Generic.List[object]]::new()
+  $PathWasPresent = Test-WinGetAuthoringPointerPath -Root $Defaults -Path $Path
+  foreach ($Installer in $Manifest.Installers) {
+    $PhysicalInstaller = ConvertTo-WinGetAuthoringDictionary -InputObject $Installer
+    if (Test-WinGetAuthoringPointerPath -Root $PhysicalInstaller -Path $Path) {
+      $PathWasPresent = $true
+      Set-WinGetAuthoringPointerValue -Root $PhysicalInstaller -Path $Path -Remove
+    }
+    $PhysicalInstallers.Add($PhysicalInstaller)
+  }
+
+  if ($Remove) {
+    if (-not $PathWasPresent) { throw "Property path '$Path' does not exist in installer defaults or installer entries." }
+    if (Test-WinGetAuthoringPointerPath -Root $Defaults -Path $Path) { Set-WinGetAuthoringPointerValue -Root $Defaults -Path $Path -Remove }
+  } else {
+    Set-WinGetAuthoringPointerValue -Root $Defaults -Path $Path -Value $Value
+  }
+
+  $Manifest.InstallerDefaults = $Defaults
+  $Manifest.Installers = @(Get-WinGetAuthoredEffectiveInstallers -InstallerDefaults $Defaults -Installers ([System.Collections.IDictionary[]]$PhysicalInstallers.ToArray()) -ManifestVersion ([string]$Manifest.ManifestVersion))
+  if (-not $Remove -and -not @($Manifest.Installers | Where-Object { Test-WinGetAuthoringPointerPath -Root $_ -Path $Path }).Count) {
+    throw "Installer default path '$Path' does not apply to any current installer type."
+  }
+}
+
 function Set-WinGetAuthoringPointerValue {
   <#
   .SYNOPSIS
@@ -1090,8 +1208,13 @@ function Set-WinGetManifestValue {
     $Copy = Copy-WinGetAuthoringManifestModel -Manifest $Manifest
     switch ($Target) {
       'Package' {
+        $ResolvedPath = Resolve-WinGetAuthoringPackagePath -Path $Path -ManifestVersion ([string]$Copy.ManifestVersion)
+        if ($ResolvedPath.Kind -ceq 'InstallerDefault') {
+          Set-WinGetAuthoringInstallerDefaultValue -Manifest $Copy -Path $ResolvedPath.Path -Value $Value
+          return $Copy
+        }
         $State = Get-WinGetAuthoringModelState -Manifest $Copy
-        Set-WinGetAuthoringPointerValue -Root $State -Path $Path -Value $Value
+        Set-WinGetAuthoringPointerValue -Root $State -Path $ResolvedPath.Path -Value $Value
         return ConvertTo-WinGetAuthoringModelFromState -State $State
       }
       'Installer' {
@@ -1150,8 +1273,13 @@ function Remove-WinGetManifestValue {
     $Copy = Copy-WinGetAuthoringManifestModel -Manifest $Manifest
     switch ($Target) {
       'Package' {
+        $ResolvedPath = Resolve-WinGetAuthoringPackagePath -Path $Path -ManifestVersion ([string]$Copy.ManifestVersion)
+        if ($ResolvedPath.Kind -ceq 'InstallerDefault') {
+          Set-WinGetAuthoringInstallerDefaultValue -Manifest $Copy -Path $ResolvedPath.Path -Remove
+          return $Copy
+        }
         $State = Get-WinGetAuthoringModelState -Manifest $Copy
-        Set-WinGetAuthoringPointerValue -Root $State -Path $Path -Remove
+        Set-WinGetAuthoringPointerValue -Root $State -Path $ResolvedPath.Path -Remove
         return ConvertTo-WinGetAuthoringModelFromState -State $State
       }
       'Installer' {
@@ -1216,6 +1344,19 @@ function Save-WinGetManifest {
     if ([string]::IsNullOrWhiteSpace([IO.Path]::GetFileName($TargetPath)) -or [string]::IsNullOrWhiteSpace([IO.Path]::GetDirectoryName($TargetPath))) {
       throw "Target path '$TargetPath' is not a leaf package-version directory."
     }
+    $PathSegments = @($TargetPath.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) -split '[\\/]')
+    $ManifestsIndex = -1
+    for ($SegmentIndex = $PathSegments.Count - 1; $SegmentIndex -ge 0; $SegmentIndex--) {
+      if ($PathSegments[$SegmentIndex] -ieq 'manifests') { $ManifestsIndex = $SegmentIndex; break }
+    }
+    if ($ManifestsIndex -ge 0) {
+      $ExpectedSegments = @(([string]$OptimizedManifest.PackageIdentifier).Substring(0, 1).ToLowerInvariant()) + @(([string]$OptimizedManifest.PackageIdentifier).Split('.')) + @([string]$OptimizedManifest.PackageVersion)
+      $ActualSegments = @($PathSegments | Select-Object -Skip ($ManifestsIndex + 1))
+      if ($ActualSegments.Count -ne $ExpectedSegments.Count -or (Compare-Object -ReferenceObject $ExpectedSegments -DifferenceObject $ActualSegments -SyncWindow 0 -CaseSensitive)) {
+        $ExpectedPath = Join-Path ($PathSegments[0..$ManifestsIndex] -join [IO.Path]::DirectorySeparatorChar) ($ExpectedSegments -join [IO.Path]::DirectorySeparatorChar)
+        throw "Target path '$TargetPath' does not match the winget-pkgs package-version hierarchy for '$($OptimizedManifest.PackageIdentifier)'. Expected '$ExpectedPath'."
+      }
+    }
     if (Test-Path -LiteralPath $TargetPath) {
       if (-not (Test-Path -LiteralPath $TargetPath -PathType Container)) { throw "Target path '$TargetPath' is not a directory." }
       $UnexpectedDirectories = @(Get-ChildItem -LiteralPath $TargetPath -Directory -Force)
@@ -1273,4 +1414,4 @@ function Save-WinGetManifest {
   }
 }
 
-Export-ModuleMember -Function New-WinGetManifest, Get-WinGetInstallerManifestSuggestion, Add-WinGetManifestInstaller, Set-WinGetManifestInstaller, Remove-WinGetManifestInstaller, Add-WinGetManifestLocale, Set-WinGetManifestLocale, Remove-WinGetManifestLocale, Set-WinGetManifestValue, Remove-WinGetManifestValue, Save-WinGetManifest
+Export-ModuleMember -Function ConvertTo-WinGetAuthoringDictionary, New-WinGetManifest, Get-WinGetInstallerManifestSuggestion, Add-WinGetManifestInstaller, Set-WinGetManifestInstaller, Remove-WinGetManifestInstaller, Add-WinGetManifestLocale, Set-WinGetManifestLocale, Remove-WinGetManifestLocale, Set-WinGetManifestValue, Remove-WinGetManifestValue, Save-WinGetManifest

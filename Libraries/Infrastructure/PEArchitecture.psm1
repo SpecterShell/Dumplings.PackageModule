@@ -63,6 +63,8 @@ function Read-ProductVersionFromExe {
   <#
   .SYNOPSIS
     Read the product version of the EXE file
+  .DESCRIPTION
+    Returns the ProductVersion resource verbatim. The value may be a .NET informational version containing prerelease, build-metadata, or source-revision suffixes such as +abcdef. Compare it with publisher and ARP version evidence before assigning it to a WinGet PackageVersion; this function does not normalize or discard suffixes.
   .PARAMETER Path
     The path to the EXE file
   #>

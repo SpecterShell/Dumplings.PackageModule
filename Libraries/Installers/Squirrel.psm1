@@ -493,6 +493,18 @@ function Get-SquirrelInfo {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
 
     $File = Get-Item -Path $Path -Force
+    # Some custom .NET single-file launchers bundle Squirrel client libraries
+    # but download or construct their packages at runtime. Library names alone
+    # do not prove a Squirrel setup layout and cannot provide nuspec identity.
+    $DotNetBundle = Get-PEDotNetBundleInfo -Path $File.FullName
+    if ($DotNetBundle) {
+      $BundleEntryNames = @($DotNetBundle.Entries.RelativePath)
+      $HasSquirrelLibrary = @($BundleEntryNames | Where-Object { [IO.Path]::GetFileName($_) -iin @('Squirrel.dll', 'NuGet.Squirrel.dll') }).Count -gt 0
+      $HasPackageMetadata = @($BundleEntryNames | Where-Object { $_ -match '(?i)(?:^|/)(?:RELEASES|[^/]+\.(?:nupkg|nuspec))$' }).Count -gt 0
+      if ($HasSquirrelLibrary -and -not $HasPackageMetadata) {
+        throw 'The .NET single-file application contains Squirrel libraries but no embedded nupkg, nuspec, or RELEASES package metadata; treat it as a custom runtime bootstrapper and validate its installed ARP identity in a VM'
+      }
+    }
     $TemporaryPath = New-TempFolder
     try {
       # Candidate precedence follows format authority: documented PE resource,

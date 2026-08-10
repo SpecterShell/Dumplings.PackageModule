@@ -66,6 +66,28 @@ Describe 'WinGet manifest model authoring' {
     } | Should -Throw '*incomplete or invalid*'
   }
 
+  It 'applies InstallerDefaults to effective installers and serialized root fields' {
+    $InstallerDefaults = [ordered]@{
+      ProductCode     = 'Contoso.AuthoringTest'
+      Protocols       = @('contoso-authoring')
+      ReleaseDate     = '2026-08-10'
+      UpgradeBehavior = 'install'
+    }
+    $Installers = @(
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'nullsoft'; InstallerUrl = 'https://example.test/x64.exe'; InstallerSha256 = 'A' * 64 }
+      [ordered]@{ Architecture = 'x86'; InstallerType = 'nullsoft'; InstallerUrl = 'https://example.test/x86.exe'; InstallerSha256 = 'B' * 64 }
+    )
+    $Manifest = New-WinGetManifest -PackageIdentifier 'Contoso.AuthoringTest' -PackageVersion '1.2.3' -DefaultLocalization ([ordered]@{ PackageLocale = 'en-US'; Publisher = 'Contoso'; PackageName = 'Authoring Test'; License = 'MIT'; ShortDescription = 'Tests WinGet manifest authoring.' }) -Installer $Installers -InstallerDefaults $InstallerDefaults
+    $Documents = ConvertTo-WinGetManifestDocumentSet -Manifest $Manifest
+
+    @($Manifest.Installers.ProductCode) | Should -Be @('Contoso.AuthoringTest', 'Contoso.AuthoringTest')
+    @($Manifest.Installers | ForEach-Object { $_.Protocols[0] }) | Should -Be @('contoso-authoring', 'contoso-authoring')
+    $Documents.Installer.ProductCode | Should -Be 'Contoso.AuthoringTest'
+    $Documents.Installer.Protocols | Should -Be @('contoso-authoring')
+    $Documents.Installer.ReleaseDate | Should -Be '2026-08-10'
+    $Documents.Installer.UpgradeBehavior | Should -Be 'install'
+  }
+
   It 'recursively patches dictionaries, replaces arrays, removes null fields, and preserves input' {
     $Manifest = New-AuthoringTestModel
     $Manifest.Installers[0]['InstallerSwitches'] = [ordered]@{ Silent = '/S'; Custom = '/old' }
@@ -119,6 +141,34 @@ Describe 'WinGet manifest model authoring' {
 
     $Changed = Set-WinGetManifestValue -Manifest $Manifest -Target Package -Path '/Moniker' -Value 'authoring-test'
     $Changed.Moniker | Should -Be 'authoring-test'
+  }
+
+  It 'routes package-level installer fields through InstallerDefaults' {
+    $Manifest = New-AuthoringTestModel
+    $Manifest.Installers[0]['InstallerType'] = 'nullsoft'
+    $Entries = @([ordered]@{ DisplayName = 'Authoring Test'; Publisher = 'Contoso'; UpgradeCode = '{AUTHORING-TEST}' })
+
+    $Changed = Set-WinGetManifestValue -Manifest $Manifest -Target Package -Path '/AppsAndFeaturesEntries' -Value $Entries
+    $Changed.InstallerDefaults['AppsAndFeaturesEntries'][0]['DisplayName'] | Should -Be 'Authoring Test'
+    $Changed.Installers[0]['AppsAndFeaturesEntries'][0]['Publisher'] | Should -Be 'Contoso'
+    (ConvertTo-WinGetManifestDocumentSet -Manifest $Changed).Installer.AppsAndFeaturesEntries[0].UpgradeCode | Should -Be '{AUTHORING-TEST}'
+
+    $Removed = Remove-WinGetManifestValue -Manifest $Changed -Target Package -Path '/AppsAndFeaturesEntries'
+    $Removed.InstallerDefaults.Contains('AppsAndFeaturesEntries') | Should -BeFalse
+    $Removed.Installers[0].Contains('AppsAndFeaturesEntries') | Should -BeFalse
+  }
+
+  It 'rejects package paths that belong to installer or locale targets' {
+    $Manifest = New-AuthoringTestModel
+    { Set-WinGetManifestValue -Manifest $Manifest -Target Package -Path '/DefaultLocalization/Publisher' -Value 'Changed' } | Should -Throw '*Target Locale*'
+    { Set-WinGetManifestValue -Manifest $Manifest -Target Package -Path '/UnknownField' -Value 'Changed' } | Should -Throw '*not a logical package field*'
+  }
+
+  It 'exports the authoring dictionary converter' {
+    Get-Command ConvertTo-WinGetAuthoringDictionary -ErrorAction Stop | Should -Not -BeNullOrEmpty
+    $Dictionary = ConvertTo-WinGetAuthoringDictionary -InputObject ([pscustomobject]@{ Name = 'value' })
+    $Dictionary | Should -BeOfType ([System.Collections.IDictionary])
+    $Dictionary['Name'] | Should -Be 'value'
   }
 
   It 'traverses existing arrays through RFC 6901 numeric segments' {
@@ -353,7 +403,7 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
 
 Describe 'Save-WinGetManifest and CLI' {
   It 'atomically writes, replaces stale locales, and reads the saved model' {
-    $Path = Join-Path $TestDrive 'manifests'
+    $Path = Join-Path $TestDrive 'saved-manifests'
     $Manifest = New-AuthoringTestModel
     $WithLocale = Add-WinGetManifestLocale -Manifest $Manifest -Localization ([ordered]@{
         PackageLocale = 'fr-FR'; License = 'MIT'; ShortDescription = 'Test de creation de manifeste.'
@@ -365,6 +415,16 @@ Describe 'Save-WinGetManifest and CLI' {
     $Result.Written | Should -BeTrue
     (Get-ChildItem -LiteralPath $Path -Filter '*.locale.fr-FR.yaml').Count | Should -Be 0
     (Read-WinGetManifest -Path $Path).PackageIdentifier | Should -Be 'Contoso.AuthoringTest'
+  }
+
+  It 'rejects a malformed path inside a winget-pkgs manifests tree' {
+    $Manifest = New-AuthoringTestModel
+    $InvalidPath = Join-Path $TestDrive 'manifests\Contoso\AuthoringTest\1.2.3'
+    { Save-WinGetManifest -Manifest $Manifest -Path $InvalidPath } | Should -Throw '*package-version hierarchy*'
+
+    $ValidPath = Join-Path $TestDrive 'manifests\c\Contoso\AuthoringTest\1.2.3'
+    $Result = Save-WinGetManifest -Manifest $Manifest -Path $ValidPath -PassThru
+    $Result.Written | Should -BeTrue
   }
 
   It 'does not write under WhatIf and refuses unexpected target contents' {

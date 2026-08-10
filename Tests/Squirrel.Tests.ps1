@@ -6,6 +6,7 @@ BeforeAll {
   Import-Module (Join-Path $PSScriptRoot '..\Libraries\Infrastructure\Archive.psm1') -Force
   . (Join-Path $PSScriptRoot 'Import-DataInfrastructure.ps1')
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PE.psm1') -Force
+  Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Infrastructure' 'PEDependency.psm1') -Force
   Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Installers' 'Squirrel.psm1') -Force
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Squirrel'
@@ -21,9 +22,44 @@ BeforeAll {
 
     Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url
   }
+
+  function New-SquirrelLibraryBundleFixture {
+    $Path = Join-Path $TestDrive 'SquirrelLibraryBundle.exe'
+    $Bytes = [byte[]]::new(4096)
+    $HeaderOffset = 512
+    $MarkerOffset = 128
+    [BitConverter]::GetBytes([int64]$HeaderOffset).CopyTo($Bytes, $MarkerOffset)
+    $BundleSignature = [byte[]](0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38, 0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32, 0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18, 0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae)
+    $BundleSignature.CopyTo($Bytes, $MarkerOffset + 8)
+    [BitConverter]::GetBytes([uint32]6).CopyTo($Bytes, $HeaderOffset)
+    [BitConverter]::GetBytes([uint32]0).CopyTo($Bytes, $HeaderOffset + 4)
+    [BitConverter]::GetBytes([int32]2).CopyTo($Bytes, $HeaderOffset + 8)
+    $BundleId = [Text.Encoding]::UTF8.GetBytes('FakeBundleID')
+    $Bytes[$HeaderOffset + 12] = [byte]$BundleId.Length
+    $BundleId.CopyTo($Bytes, $HeaderOffset + 13)
+    $EntryOffset = $HeaderOffset + 13 + $BundleId.Length + 40
+    foreach ($Name in @('NuGet.Squirrel.dll', 'Squirrel.dll')) {
+      [BitConverter]::GetBytes([int64]0).CopyTo($Bytes, $EntryOffset)
+      [BitConverter]::GetBytes([int64]0).CopyTo($Bytes, $EntryOffset + 8)
+      [BitConverter]::GetBytes([int64]0).CopyTo($Bytes, $EntryOffset + 16)
+      $Bytes[$EntryOffset + 24] = 1
+      $NameBytes = [Text.Encoding]::UTF8.GetBytes($Name)
+      $Bytes[$EntryOffset + 25] = [byte]$NameBytes.Length
+      $NameBytes.CopyTo($Bytes, $EntryOffset + 26)
+      $EntryOffset += 26 + $NameBytes.Length
+    }
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+    return $Path
+  }
 }
 
 Describe 'Squirrel parser' {
+  It 'Should reject a .NET app bundle that contains Squirrel libraries without package metadata' {
+    $Fixture = New-SquirrelLibraryBundleFixture
+    { Get-SquirrelInfo -Path $Fixture } | Should -Throw '*contains Squirrel libraries but no embedded nupkg*'
+    Test-SquirrelInstaller -Path $Fixture | Should -BeFalse
+  }
+
   It 'Should convert Squirrel RELEASES feed content without fetching it' {
     $Releases = @'
 0123456789abcdef0123456789abcdef01234567 https://updates.example.test/win/App-1.2.3-full.nupkg?token=dynamic 12345 # 50%

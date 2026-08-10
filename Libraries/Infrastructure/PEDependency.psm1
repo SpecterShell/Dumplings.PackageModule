@@ -200,6 +200,94 @@ function Read-PEBundleString {
   }
 }
 
+function Read-PEDotNetBundleBinaryString {
+  <#
+  .SYNOPSIS
+    Read one BinaryWriter-compatible UTF-8 string from a .NET bundle manifest.
+  .PARAMETER Reader
+    Binary reader positioned at the seven-bit encoded byte length.
+  .PARAMETER MaximumBytes
+    Maximum accepted UTF-8 byte length.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(Mandatory)][System.IO.BinaryReader]$Reader,
+    [ValidateRange(1, 1048576)][int]$MaximumBytes = 32768
+  )
+
+  $Length = 0
+  $Shift = 0
+  $Terminated = $false
+  for ($Index = 0; $Index -lt 5; $Index++) {
+    $Value = $Reader.ReadByte()
+    $Length = $Length -bor (($Value -band 0x7F) -shl $Shift)
+    if (($Value -band 0x80) -eq 0) { $Terminated = $true; break }
+    $Shift += 7
+  }
+  if (-not $Terminated -or $Length -lt 0 -or $Length -gt $MaximumBytes) { throw 'The .NET bundle contains an invalid string length.' }
+  $Bytes = $Reader.ReadBytes($Length)
+  if ($Bytes.Count -ne $Length) { throw 'The .NET bundle string is truncated.' }
+  return [Text.Encoding]::UTF8.GetString($Bytes)
+}
+
+function Read-PEDotNetBundleEntryInfo {
+  <#
+  .SYNOPSIS
+    Parse validated file entries from a .NET single-file bundle manifest.
+  .PARAMETER Stream
+    Caller-owned seekable stream containing the bundle.
+  .PARAMETER HeaderOffset
+    Absolute offset of the bundle header.
+  .PARAMETER MaximumEntries
+    Maximum accepted embedded-file count.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory)][long]$HeaderOffset,
+    [ValidateRange(1, 100000)][int]$MaximumEntries = 100000
+  )
+
+  $OriginalPosition = $Stream.Position
+  $Reader = $null
+  try {
+    $Stream.Position = $HeaderOffset
+    $Reader = [IO.BinaryReader]::new($Stream, [Text.Encoding]::UTF8, $true)
+    $MajorVersion = $Reader.ReadUInt32()
+    $MinorVersion = $Reader.ReadUInt32()
+    $EmbeddedFileCount = $Reader.ReadInt32()
+    if (-not (($MajorVersion -eq 2 -or $MajorVersion -eq 6) -and $MinorVersion -eq 0)) { throw "Unsupported .NET bundle manifest version $MajorVersion.$MinorVersion." }
+    if ($EmbeddedFileCount -le 0 -or $EmbeddedFileCount -gt $MaximumEntries) { throw "The .NET bundle embedded-file count '$EmbeddedFileCount' is outside the parser limit." }
+    $null = Read-PEDotNetBundleBinaryString -Reader $Reader
+    for ($Index = 0; $Index -lt 4; $Index++) { $null = $Reader.ReadInt64() }
+    $null = $Reader.ReadUInt64()
+
+    $Entries = [System.Collections.Generic.List[object]]::new($EmbeddedFileCount)
+    for ($Index = 0; $Index -lt $EmbeddedFileCount; $Index++) {
+      $Offset = $Reader.ReadInt64()
+      $Size = $Reader.ReadInt64()
+      $CompressedSize = $MajorVersion -ge 6 ? $Reader.ReadInt64() : 0
+      $Type = $Reader.ReadByte()
+      $RelativePath = Read-PEDotNetBundleBinaryString -Reader $Reader
+      $StoredSize = $CompressedSize -gt 0 ? $CompressedSize : $Size
+      if ($Offset -lt 0 -or $Size -lt 0 -or $CompressedSize -lt 0 -or $StoredSize -gt $Stream.Length -or $Offset -gt $Stream.Length - $StoredSize) {
+        throw "The .NET bundle entry '$RelativePath' points outside the file."
+      }
+      $Entries.Add([pscustomobject]@{
+          RelativePath   = $RelativePath.Replace('\', '/')
+          Offset         = $Offset
+          Size           = $Size
+          CompressedSize = $CompressedSize
+          Type           = $Type
+        })
+    }
+    return $Entries.ToArray()
+  } finally {
+    if ($Reader) { $Reader.Dispose() }
+    $Stream.Position = $OriginalPosition
+  }
+}
+
 function Get-PEDotNetBundleInfo {
   <#
   .SYNOPSIS
@@ -235,7 +323,7 @@ function Get-PEDotNetBundleInfo {
         $MinorVersion = [System.BitConverter]::ToUInt32($HeaderBytes, 4)
         $EmbeddedFileCount = [System.BitConverter]::ToInt32($HeaderBytes, 8)
         if (-not (($MajorVersion -eq 6 -and $MinorVersion -eq 0) -or ($MajorVersion -eq 2 -and $MinorVersion -eq 0))) { continue }
-        if ($EmbeddedFileCount -le 0) { continue }
+        if ($EmbeddedFileCount -le 0 -or $EmbeddedFileCount -gt 100000) { continue }
 
         $ReadOffset = 12
         $BundleId = Read-PEBundleString -Bytes $HeaderBytes -Offset $ReadOffset
@@ -253,6 +341,7 @@ function Get-PEDotNetBundleInfo {
           $RuntimeConfigJson = [Text.Encoding]::UTF8.GetString((Read-BinaryBytes -Stream $Stream -Offset $RuntimeConfigJsonOffset -Count ([int]$RuntimeConfigJsonSize)))
         }
 
+        $Entries = Read-PEDotNetBundleEntryInfo -Stream $Stream -HeaderOffset $HeaderOffset
         $BundleHeaders.Add([pscustomobject]@{
             HeaderOffset            = $HeaderOffset
             SignatureOffset         = $SignatureOffset
@@ -267,6 +356,7 @@ function Get-PEDotNetBundleInfo {
             RuntimeConfigJson       = $RuntimeConfigJson
             Flags                   = $Flags
             IsNetCoreApp3CompatMode = ($Flags -band 1) -ne 0
+            Entries                 = $Entries
           })
       } catch {
         continue
@@ -960,4 +1050,4 @@ function Test-PEVCRedistDependency {
   }
 }
 
-Export-ModuleMember -Function Resolve-PortableVCRedistRuntime, Test-PortableUcrtImport, Get-PortableVCRedistPackageIdentifier, Get-PEDotNetAppHostBindingCandidateFromStream, Get-PEDependencyInfo, Test-PEVCRedistDependency
+Export-ModuleMember -Function Resolve-PortableVCRedistRuntime, Test-PortableUcrtImport, Get-PortableVCRedistPackageIdentifier, Get-PEDotNetAppHostBindingCandidateFromStream, Get-PEDotNetBundleInfo, Get-PEDependencyInfo, Test-PEVCRedistDependency
