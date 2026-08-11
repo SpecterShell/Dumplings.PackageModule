@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Chromium mini-installer PE resources, install constants, and nested setup identity.
+# Chromium mini-installer PE resources, install constants, and nested setup metadata.
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 $UpdaterPath = (Join-Path $PSScriptRoot 'ChromiumUpdater.psm1')
@@ -234,46 +234,6 @@ function Export-ChromiumMiniInstallerSetupFromContext {
   throw "The selected Chromium setup resource type '$($Evidence.Type)' is not supported."
 }
 
-function Read-ChromiumUtf16StringContainingOffset {
-  <#
-  .SYNOPSIS
-    Read one bounded null-terminated UTF-16LE string around a known pattern offset
-  .PARAMETER Stream
-    Caller-owned seekable setup.exe stream. Its original position is restored.
-  .PARAMETER Offset
-    Absolute file offset of a UTF-16LE pattern inside the requested string.
-  .PARAMETER MaximumCharacters
-    Maximum characters inspected on either side of the pattern.
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory)][IO.Stream]$Stream,
-    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Offset,
-    [ValidateRange(1, 4096)][int]$MaximumCharacters = 512
-  )
-
-  $MaximumBytes = $MaximumCharacters * 2
-  $WindowStart = [Math]::Max(0L, $Offset - $MaximumBytes)
-  $WindowEnd = [Math]::Min($Stream.Length, $Offset + $MaximumBytes)
-  $Bytes = Read-BinaryBytes -Stream $Stream -Offset $WindowStart -Count ([int]($WindowEnd - $WindowStart))
-  $PatternIndex = [int]($Offset - $WindowStart)
-
-  # Walk on the pattern's UTF-16 alignment only. A missing terminator at either bounded edge means
-  # the candidate is incomplete and must not become registry evidence.
-  $Start = $PatternIndex
-  while ($Start -ge 2 -and -not ($Bytes[$Start - 2] -eq 0 -and $Bytes[$Start - 1] -eq 0)) { $Start -= 2 }
-  if ($Start -lt 2 -and $WindowStart -ne 0) { return $null }
-  $End = $PatternIndex
-  while ($End + 1 -lt $Bytes.Length -and -not ($Bytes[$End] -eq 0 -and $Bytes[$End + 1] -eq 0)) { $End += 2 }
-  if ($End + 1 -ge $Bytes.Length) { return $null }
-  if ($End -le $Start -or ($End - $Start) % 2 -ne 0) { return $null }
-
-  [pscustomobject]@{
-    Offset = $WindowStart + $Start
-    Text   = [Text.Encoding]::Unicode.GetString($Bytes, $Start, $End - $Start)
-  }
-}
-
 function Read-ChromiumImageString {
   <#
   .SYNOPSIS
@@ -326,7 +286,7 @@ function Read-ChromiumImageString {
 function Read-ChromiumInstallConstantsRecord {
   <#
   .SYNOPSIS
-    Parse the source-defined identity prefix of one Chromium InstallConstants record
+    Parse the source-defined configuration prefix of one Chromium InstallConstants record
   .PARAMETER Stream
     Caller-owned seekable setup.exe stream.
   .PARAMETER Layout
@@ -459,320 +419,6 @@ function Get-ChromiumInstallModeInfo {
   }
 }
 
-function Find-ChromiumProductPathName {
-  <#
-  .SYNOPSIS
-    Verify a canonical kProductPathName candidate derived from an install mode
-  .PARAMETER Stream
-    Caller-owned seekable setup.exe stream.
-  .PARAMETER Candidate
-    Candidate product path derived from a source-defined InstallConstants field.
-  .PARAMETER ExcludedOffset
-    File offsets of InstallConstants strings that cannot serve as independent product-path evidence.
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Mandatory)][IO.Stream]$Stream,
-    [Parameter(Mandatory)][AllowEmptyString()][string]$Candidate,
-    [long[]]$ExcludedOffset = @()
-  )
-
-  if ([string]::IsNullOrWhiteSpace($Candidate) -or $Candidate.Length -gt 128 -or $Candidate -match '[\x00-\x1F\\/]') { return $null }
-  # A product-path candidate becomes evidence only when setup.exe stores it as an independent,
-  # null-terminated wchar_t constant. Excluding the InstallConstants field itself prevents the
-  # base application name from proving its own use as kProductPathName.
-  $Pattern = [Text.Encoding]::Unicode.GetBytes("$Candidate$([char]0)")
-  $CandidateOffsets = [Collections.Generic.List[long]]::new()
-  foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern $Pattern -Maximum 16 -Alignment 1)) {
-    if ($Offset -in $ExcludedOffset) { continue }
-    if ($Offset -ge 2) {
-      $Prefix = Read-BinaryBytes -Stream $Stream -Offset ($Offset - 2) -Count 2
-      if ($Prefix[0] -ne 0 -or $Prefix[1] -ne 0) { continue }
-    }
-    $CandidateOffsets.Add($Offset)
-  }
-  if ($CandidateOffsets.Count -eq 1) { return $Candidate }
-  return $null
-}
-
-function Read-ChromiumAsciiStringContainingOffset {
-  <#
-  .SYNOPSIS
-    Read one bounded null-terminated ASCII string containing a known offset
-  .PARAMETER Stream
-    Caller-owned seekable stream. Its original position is restored.
-  .PARAMETER Offset
-    Absolute file offset of an ASCII pattern inside the requested string.
-  .PARAMETER MaximumCharacters
-    Maximum characters inspected on either side of the pattern.
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory)][IO.Stream]$Stream,
-    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Offset,
-    [ValidateRange(1, 512)][int]$MaximumCharacters = 80
-  )
-
-  $WindowStart = [Math]::Max(0L, $Offset - $MaximumCharacters)
-  $WindowEnd = [Math]::Min($Stream.Length, $Offset + $MaximumCharacters)
-  $Bytes = Read-BinaryBytes -Stream $Stream -Offset $WindowStart -Count ([int]($WindowEnd - $WindowStart))
-  $PatternIndex = [int]($Offset - $WindowStart)
-  $Start = $PatternIndex
-  while ($Start -ge 1 -and $Bytes[$Start - 1] -ne 0) { $Start-- }
-  if ($Start -lt 1 -and $WindowStart -ne 0) { return $null }
-  $End = $PatternIndex
-  while ($End -lt $Bytes.Length -and $Bytes[$End] -ne 0) { $End++ }
-  if ($End -ge $Bytes.Length -or $End -le $Start) { return $null }
-
-  [pscustomobject]@{
-    Offset = $WindowStart + $Start
-    Text   = [Text.Encoding]::ASCII.GetString($Bytes, $Start, $End - $Start)
-  }
-}
-
-function Get-ChromiumLegacyProductIdentityInfo {
-  <#
-  .SYNOPSIS
-    Resolve product identity used by legacy Chromium-family setup forks
-  .DESCRIPTION
-    Some vendor forks do not retain Chromium's current InstallConstants layout. They instead
-    embed an ASCII product-specific install-directory switch, a matching Software\<product>
-    registry root, and the standalone product path appended to Chromium's composed uninstall
-    registry root. This function requires all three literals and returns no identity when more
-    than one product agrees.
-  .PARAMETER Stream
-    Caller-owned seekable setup.exe stream. Random reads restore its original position.
-  #>
-  [OutputType([pscustomobject])]
-  param ([Parameter(Mandatory)][IO.Stream]$Stream)
-
-  $Candidates = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
-  $InstallDirectorySuffix = [Text.Encoding]::ASCII.GetBytes('-install-dir')
-  foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern $InstallDirectorySuffix -Maximum 128 -Alignment 1)) {
-    $InstallDirectorySwitch = Read-ChromiumAsciiStringContainingOffset -Stream $Stream -Offset $Offset -MaximumCharacters 80
-    if (-not $InstallDirectorySwitch) { continue }
-    $Match = [regex]::Match($InstallDirectorySwitch.Text, '^(?<Token>[A-Za-z][A-Za-z0-9-]{1,63})-install-dir$', 'CultureInvariant')
-    if (-not $Match.Success) { continue }
-
-    $Token = $Match.Groups['Token'].Value.ToLowerInvariant()
-    # Chromium uninstall paths preserve the product path's display casing. Reconstruct only the
-    # deterministic title-cased token, then require that exact null-terminated UTF-16 literal in
-    # the binary. Multiple occurrences are acceptable; they all prove the same candidate value.
-    $ProductPathName = [Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($Token)
-    $ProductPattern = [Text.Encoding]::Unicode.GetBytes("$ProductPathName$([char]0)")
-    $HasProductPathName = $false
-    foreach ($ProductOffset in (Find-BinaryPattern -Stream $Stream -Pattern $ProductPattern -Maximum 32 -Alignment 1)) {
-      if ($ProductOffset -eq 0) { $HasProductPathName = $true; break }
-      if ($ProductOffset -lt 2) { continue }
-      $Prefix = Read-BinaryBytes -Stream $Stream -Offset ($ProductOffset - 2) -Count 2
-      if ($Prefix[0] -eq 0 -and $Prefix[1] -eq 0) { $HasProductPathName = $true; break }
-    }
-    if (-not $HasProductPathName -or $Candidates.ContainsKey($ProductPathName)) { continue }
-
-    # The same product path must independently own a registry namespace. This excludes generic
-    # switches such as user-data-dir even when their token happens to appear as display text.
-    $ProductRegistryPattern = [Text.Encoding]::Unicode.GetBytes("Software\$ProductPathName$([char]0)")
-    $ProductRegistryMatches = @(Find-BinaryPattern -Stream $Stream -Pattern $ProductRegistryPattern -Maximum 8 -Alignment 1)
-    if ($ProductRegistryMatches.Count -eq 0) { continue }
-    $Candidates[$ProductPathName] = [pscustomobject]@{
-      ProductCode            = $ProductPathName
-      InstallDirectorySwitch = $InstallDirectorySwitch.Text
-      ProductRegistryPath    = "Software\$ProductPathName"
-    }
-  }
-
-  $ResolvedCandidate = if ($Candidates.Count -eq 1) { @($Candidates.Values)[0] } else { $null }
-  [pscustomobject]@{
-    ProductCode            = if ($ResolvedCandidate) { $ResolvedCandidate.ProductCode } else { $null }
-    InstallDirectorySwitch = if ($ResolvedCandidate) { $ResolvedCandidate.InstallDirectorySwitch } else { $null }
-    ProductRegistryPath    = if ($ResolvedCandidate) { $ResolvedCandidate.ProductRegistryPath } else { $null }
-    Candidates             = @($Candidates.Values)
-    IsAmbiguous            = $Candidates.Count -gt 1
-  }
-}
-
-function Get-ChromiumNestedSetupRegistryInfo {
-  <#
-  .SYNOPSIS
-    Read explicit Chromium ARP identity evidence from a nested setup.exe
-  .DESCRIPTION
-    Chromium's install_static::GetUninstallRegistryPath constructs the visible
-    ARP key from kCompanyPathName, kProductPathName, and the selected install
-    suffix. Vendor forks either leave the resulting literal uninstall path in
-    setup.exe or expose the same company/product pair in their updater Clients
-    registry path. Literal uninstall paths take precedence; repeated literals
-    outrank incidental auxiliary-product keys.
-  .PARAMETER Path
-    Path to the statically extracted nested setup.exe. The file is never run.
-  #>
-  [OutputType([pscustomobject])]
-  param ([Parameter(Mandatory)][string]$Path)
-
-  $File = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-  $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-  try {
-    $DirectCandidates = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
-    $UpdateCandidates = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
-    $UpdateCompanyCandidates = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
-    $UninstallPaths = [Collections.Generic.List[string]]::new()
-    $UpdateClientPaths = [Collections.Generic.List[string]]::new()
-    $ComposesUninstallRegistryPath = $false
-    $InstallModeInfo = $null
-    $LegacyProductIdentity = $null
-
-    # Modern Chromium setup binaries carry a linked kInstallModes table. Non-PE synthetic fixtures
-    # and older vendor forks simply continue through the explicit registry-path parser.
-    try {
-      $Layout = Get-PELayout -Stream $Stream
-      if ($Layout) { $InstallModeInfo = Get-ChromiumInstallModeInfo -Stream $Stream -Layout $Layout }
-    } catch { }
-
-    # Match only registry structures used by Chromium setup. This deliberately avoids arbitrary
-    # branding/version strings, which are not authoritative ARP identity evidence.
-    $UninstallSuffix = '\Microsoft\Windows\CurrentVersion\Uninstall\'
-    foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern ([Text.Encoding]::Unicode.GetBytes($UninstallSuffix)) -Maximum 512 -Alignment 1)) {
-      $String = Read-ChromiumUtf16StringContainingOffset -Stream $Stream -Offset $Offset
-      if (-not $String) { continue }
-      if ($String.Text -match '^Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$') {
-        $ComposesUninstallRegistryPath = $true
-        continue
-      }
-      $Match = [regex]::Match($String.Text, 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\(?<Key>.+)$', 'IgnoreCase,CultureInvariant')
-      if (-not $Match.Success) { continue }
-      $Key = $Match.Groups['Key'].Value.Trim()
-      # ProductCode is the immediate uninstall subkey. Reject templates, partial GUIDs, nested
-      # paths, and control characters rather than trying to complete or normalize them.
-      if ($Key.Length -gt 200 -or $Key -match '[\\/%\x00-\x1F]' -or
-        (($Key.Contains('{') -or $Key.Contains('}')) -and $Key -notmatch '^\{[0-9A-Fa-f-]{36}\}(?:.+)?$')) { continue }
-      $UninstallPaths.Add($String.Text)
-      if (-not $DirectCandidates.ContainsKey($Key)) {
-        $DirectCandidates[$Key] = [pscustomobject]@{ ProductCode = $Key; Count = 0; Source = 'DirectUninstallRegistryPath' }
-      }
-      $DirectCandidates[$Key].Count++
-    }
-
-    # Some modern vendor builds compose the uninstall path at runtime. Their updater integration
-    # still embeds Software\<company>\<product>\Update\Clients, exposing the same two constants
-    # consumed by GetUninstallRegistryPath without relying on PE display branding.
-    $UpdateClientsSuffix = '\Update\Clients'
-    foreach ($Offset in (Find-BinaryPattern -Stream $Stream -Pattern ([Text.Encoding]::Unicode.GetBytes($UpdateClientsSuffix)) -Maximum 512 -Alignment 1)) {
-      $String = Read-ChromiumUtf16StringContainingOffset -Stream $Stream -Offset $Offset
-      if (-not $String) { continue }
-      $Match = [regex]::Match($String.Text, 'Software\\(?<Root>.+?)\\Update\\Clients\\?$', 'IgnoreCase,CultureInvariant')
-      if (-not $Match.Success) { continue }
-      $Segments = @($Match.Groups['Root'].Value.Split([char]'\') | ForEach-Object Trim | Where-Object { $_ })
-      if ($Segments.Count -eq 0 -or @($Segments | Where-Object { $_ -match '[/%\x00-\x1F]' }).Count -gt 0) { continue }
-      $UpdateClientPaths.Add($Match.Value)
-      if ($Segments.Count -ge 2) {
-        $ProductCode = [string]::Join(' ', $Segments)
-        if (-not $UpdateCandidates.ContainsKey($ProductCode)) {
-          $UpdateCandidates[$ProductCode] = [pscustomobject]@{ ProductCode = $ProductCode; Count = 0; Source = 'ChromiumUpdateClientPath' }
-        }
-        $UpdateCandidates[$ProductCode].Count++
-      } else {
-        $Company = $Segments[0]
-        if (-not $UpdateCompanyCandidates.ContainsKey($Company)) {
-          $UpdateCompanyCandidates[$Company] = [pscustomobject]@{ Company = $Company; Count = 0 }
-        }
-        $UpdateCompanyCandidates[$Company].Count++
-      }
-    }
-
-    $Warnings = [Collections.Generic.List[string]]::new()
-    $Selected = $null
-    # A repeated direct path is stronger than a one-off auxiliary uninstall key. Equal-frequency
-    # candidates are intentionally left unresolved because static evidence cannot choose safely.
-    $Candidates = if ($DirectCandidates.Count -gt 0) {
-      @($DirectCandidates.Values)
-    } elseif ($ComposesUninstallRegistryPath) {
-      @($UpdateCandidates.Values)
-    } else {
-      @()
-    }
-    if ($Candidates.Count -gt 0) {
-      $Ranked = @($Candidates | Sort-Object -Property @{ Expression = 'Count'; Descending = $true }, @{ Expression = 'ProductCode'; Descending = $false })
-      if ($Ranked.Count -gt 1 -and $Ranked[0].Count -eq $Ranked[1].Count) {
-        $Warnings.Add("Chromium setup contains ambiguous $($Ranked[0].Source) ProductCode candidates: $([string]::Join(', ', @($Ranked | ForEach-Object ProductCode))).")
-      } else {
-        $Selected = $Ranked[0]
-      }
-    }
-    if (-not $Selected -and $Candidates.Count -eq 0 -and $ComposesUninstallRegistryPath -and
-      $UpdateCompanyCandidates.Count -gt 0 -and $InstallModeInfo -and $InstallModeInfo.InstallModes.Count -gt 0) {
-      $Companies = @($UpdateCompanyCandidates.Values | Sort-Object -Property @{ Expression = 'Count'; Descending = $true }, @{ Expression = 'Company'; Descending = $false })
-      if ($Companies.Count -gt 1 -and $Companies[0].Count -eq $Companies[1].Count) {
-        $Warnings.Add("Chromium setup contains ambiguous updater company-path constants: $([string]::Join(', ', @($Companies | ForEach-Object Company))).")
-      } else {
-        $Company = $Companies[0].Company
-        $PrimaryMode = @($InstallModeInfo.InstallModes | Where-Object Index -EQ 0)[0]
-        if ($PrimaryMode.BaseApplicationName.StartsWith("$Company ", [StringComparison]::OrdinalIgnoreCase)) {
-          $Selected = [pscustomobject]@{ ProductCode = $PrimaryMode.BaseApplicationName; Count = 1; Source = 'ChromiumCompanyAndInstallConstants' }
-        } else {
-          $DirectLaunchCandidate = if ([string]::IsNullOrWhiteSpace($PrimaryMode.DirectLaunchUrlScheme)) {
-            $null
-          } else {
-            [Globalization.CultureInfo]::InvariantCulture.TextInfo.ToTitleCase($PrimaryMode.DirectLaunchUrlScheme.ToLowerInvariant())
-          }
-          $ProductPathName = Find-ChromiumProductPathName -Stream $Stream -Candidate $DirectLaunchCandidate
-          if (-not $ProductPathName) {
-            # Some vendor builds use a branded launch scheme unrelated to kProductPathName. In that
-            # case, accept the base application name only when a second independent PE literal proves
-            # that the same value is also compiled as a product-path constant.
-            $ProductPathName = Find-ChromiumProductPathName -Stream $Stream -Candidate $PrimaryMode.BaseApplicationName -ExcludedOffset $PrimaryMode.BaseApplicationNameOffset
-          }
-          if ($ProductPathName) {
-            $Selected = [pscustomobject]@{ ProductCode = "$Company $ProductPathName"; Count = 1; Source = 'ChromiumCompanyAndProductConstants' }
-          }
-        }
-      }
-    }
-    if (-not $Selected -and $Candidates.Count -eq 0 -and $ComposesUninstallRegistryPath) {
-      # Legacy Chromium forks can replace InstallConstants with product-specific switch constants.
-      # Resolve the appended uninstall key only when the install-dir switch, product registry root,
-      # and product path all agree; no PE publisher or product-name branding participates.
-      $LegacyProductIdentity = Get-ChromiumLegacyProductIdentityInfo -Stream $Stream
-      if ($LegacyProductIdentity.IsAmbiguous) {
-        $Warnings.Add("Chromium setup contains ambiguous legacy product identity candidates: $([string]::Join(', ', @($LegacyProductIdentity.Candidates | ForEach-Object ProductCode))).")
-      } elseif ($LegacyProductIdentity.ProductCode) {
-        $Selected = [pscustomobject]@{ ProductCode = $LegacyProductIdentity.ProductCode; Count = 1; Source = 'LegacyChromiumProductSwitchAndRegistryPath' }
-      }
-    }
-    if ($InstallModeInfo) { foreach ($Warning in $InstallModeInfo.Warnings) { $Warnings.Add($Warning) } }
-
-    $ResolvedInstallModes = [Collections.Generic.List[object]]::new()
-    if ($InstallModeInfo) {
-      foreach ($Mode in $InstallModeInfo.InstallModes) {
-        $ResolvedInstallModes.Add([pscustomobject]@{
-            Index                 = $Mode.Index
-            InstallSwitch         = $Mode.InstallSwitch
-            InstallSuffix         = $Mode.InstallSuffix
-            ApplicationId         = $Mode.ApplicationId
-            BaseApplicationName   = $Mode.BaseApplicationName
-            DirectLaunchUrlScheme = $Mode.DirectLaunchUrlScheme
-            SupportsSystemLevel   = $Mode.SupportsSystemLevel
-            ProductCode           = if ($Selected) { "$($Selected.ProductCode)$($Mode.InstallSuffix)" } else { $null }
-          })
-      }
-    }
-
-    [pscustomobject]@{
-      ProductCode                   = if ($Selected) { $Selected.ProductCode } else { $null }
-      ProductCodeSource             = if ($Selected) { $Selected.Source } else { $null }
-      ComposesUninstallRegistryPath = $ComposesUninstallRegistryPath
-      UninstallRegistryPaths        = $UninstallPaths.ToArray()
-      UpdateClientRegistryPaths     = $UpdateClientPaths.ToArray()
-      ProductCodeCandidates         = @($DirectCandidates.Values) + @($UpdateCandidates.Values)
-      InstallModes                  = $ResolvedInstallModes.ToArray()
-      InstallConstantsOffset        = if ($InstallModeInfo) { $InstallModeInfo.Offset } else { $null }
-      InstallConstantsSize          = if ($InstallModeInfo) { $InstallModeInfo.StructureSize } else { $null }
-      LegacyProductIdentity         = $LegacyProductIdentity
-      Warnings                      = $Warnings.ToArray()
-    }
-  } finally {
-    $Stream.Dispose()
-  }
-}
-
 function Get-ChromiumMiniInstallerNestedSetupInfo {
   <#
   .SYNOPSIS
@@ -787,22 +433,29 @@ function Get-ChromiumMiniInstallerNestedSetupInfo {
   try {
     $SetupFile = Export-ChromiumMiniInstallerSetupFromContext -Context $Context -DestinationPath $TemporaryFolder
     $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($SetupFile.FullName)
-    $RegistryInfo = Get-ChromiumNestedSetupRegistryInfo -Path $SetupFile.FullName
+    $InstallModeInfo = $null
+    $Warnings = [Collections.Generic.List[string]]::new()
+    $Stream = [IO.File]::Open($SetupFile.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+      # InstallConstants describes source-defined channel selectors and system-level support. It is
+      # retained as configuration evidence, but is not used to construct an ARP ProductCode.
+      $Layout = Get-PELayout -Stream $Stream
+      if ($Layout) { $InstallModeInfo = Get-ChromiumInstallModeInfo -Stream $Stream -Layout $Layout }
+    } catch {
+      $Warnings.Add("The nested Chromium setup install modes could not be parsed: $($_.Exception.Message)")
+    } finally {
+      $Stream.Dispose()
+    }
+    if ($InstallModeInfo) { foreach ($Warning in $InstallModeInfo.Warnings) { $Warnings.Add($Warning) } }
+
     [pscustomobject]@{
-      ProductName                   = $VersionInfo.ProductName
-      ProductVersion                = $VersionInfo.ProductVersion
-      Publisher                     = $VersionInfo.CompanyName
-      ProductCode                   = $RegistryInfo.ProductCode
-      ProductCodeSource             = $RegistryInfo.ProductCodeSource
-      ComposesUninstallRegistryPath = $RegistryInfo.ComposesUninstallRegistryPath
-      UninstallRegistryPaths        = $RegistryInfo.UninstallRegistryPaths
-      UpdateClientRegistryPaths     = $RegistryInfo.UpdateClientRegistryPaths
-      ProductCodeCandidates         = $RegistryInfo.ProductCodeCandidates
-      InstallModes                  = $RegistryInfo.InstallModes
-      InstallConstantsOffset        = $RegistryInfo.InstallConstantsOffset
-      InstallConstantsSize          = $RegistryInfo.InstallConstantsSize
-      LegacyProductIdentity         = $RegistryInfo.LegacyProductIdentity
-      Warnings                      = $RegistryInfo.Warnings
+      ProductName            = $VersionInfo.ProductName
+      ProductVersion         = $VersionInfo.ProductVersion
+      Publisher              = $VersionInfo.CompanyName
+      InstallModes           = if ($InstallModeInfo) { @($InstallModeInfo.InstallModes) } else { @() }
+      InstallConstantsOffset = if ($InstallModeInfo) { $InstallModeInfo.Offset } else { $null }
+      InstallConstantsSize   = if ($InstallModeInfo) { $InstallModeInfo.StructureSize } else { $null }
+      Warnings               = $Warnings.ToArray()
     }
   } finally {
     Remove-Item -LiteralPath $TemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue

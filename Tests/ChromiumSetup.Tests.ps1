@@ -73,78 +73,6 @@ Describe 'Chromium updater tag parser' {
   }
 }
 
-Describe 'Chromium nested setup registry identity' {
-  It 'Should prefer a repeated literal uninstall key over an auxiliary product key' {
-    $Path = Join-Path $Script:FixtureDirectory 'synthetic-chromium-registry-identity.bin'
-    $Text = @(
-      'Software\Microsoft\Windows\CurrentVersion\Uninstall\huabao'
-      'Software\Microsoft\Windows\CurrentVersion\Uninstall\360ent'
-      'Software\Microsoft\Windows\CurrentVersion\Uninstall\360ent'
-      'Software\360\360ent\Update\Clients'
-    ) -join ([char]0)
-    [IO.File]::WriteAllBytes($Path, [Text.Encoding]::Unicode.GetBytes("$Text$([char]0)"))
-
-    InModuleScope ChromiumSetup -Parameters @{ Path = $Path } {
-      param($Path)
-      $Info = Get-ChromiumNestedSetupRegistryInfo -Path $Path
-      $Info.ProductCode | Should -BeExactly '360ent'
-      $Info.ProductCodeSource | Should -BeExactly 'DirectUninstallRegistryPath'
-      $Info.ProductCodeCandidates.ProductCode | Should -Contain 'huabao'
-    }
-  }
-
-  It 'Should reconstruct the primary ARP key from Chromium updater company and product path constants' {
-    $Path = Join-Path $Script:FixtureDirectory 'synthetic-chromium-composed-identity.bin'
-    $Text = @(
-      'Software\Microsoft\Windows\CurrentVersion\Uninstall\'
-      'Software\Zoho\Ulaa\Update\Clients\'
-      'Software\Zoho\Ulaa\Update\ClientState\'
-    ) -join ([char]0)
-    [IO.File]::WriteAllBytes($Path, [Text.Encoding]::Unicode.GetBytes("$Text$([char]0)"))
-
-    InModuleScope ChromiumSetup -Parameters @{ Path = $Path } {
-      param($Path)
-      $Info = Get-ChromiumNestedSetupRegistryInfo -Path $Path
-      $Info.ProductCode | Should -BeExactly 'Zoho Ulaa'
-      $Info.ProductCodeSource | Should -BeExactly 'ChromiumUpdateClientPath'
-      $Info.ComposesUninstallRegistryPath | Should -BeTrue
-      $Info.UpdateClientRegistryPaths | Should -Contain 'Software\Zoho\Ulaa\Update\Clients\'
-    }
-  }
-
-  It 'Should not infer an ARP key from an updater path without Chromium uninstall composition evidence' {
-    $Path = Join-Path $Script:FixtureDirectory 'synthetic-chromium-updater-only-identity.bin'
-    [IO.File]::WriteAllBytes($Path, [Text.Encoding]::Unicode.GetBytes("Software\Example\Browser\Update\Clients\$([char]0)"))
-
-    InModuleScope ChromiumSetup -Parameters @{ Path = $Path } {
-      param($Path)
-      $Info = Get-ChromiumNestedSetupRegistryInfo -Path $Path
-      $Info.ProductCode | Should -BeNullOrEmpty
-      $Info.ComposesUninstallRegistryPath | Should -BeFalse
-    }
-  }
-
-  It 'Should derive a legacy fork ARP key from corroborated product path constants' {
-    $Path = Join-Path $Script:FixtureDirectory 'synthetic-chromium-legacy-product.bin'
-    $UnicodeEvidence = @(
-      'Software\Microsoft\Windows\CurrentVersion\Uninstall\'
-      'Software\Example'
-      'Example'
-    ) -join ([char]0)
-    $Bytes = [Text.Encoding]::Unicode.GetBytes("$UnicodeEvidence$([char]0)") + [Text.Encoding]::ASCII.GetBytes("example-install-dir$([char]0)")
-    [IO.File]::WriteAllBytes($Path, $Bytes)
-
-    InModuleScope ChromiumSetup -Parameters @{ Path = $Path } {
-      param($Path)
-      $Info = Get-ChromiumNestedSetupRegistryInfo -Path $Path
-      $Info.ProductCode | Should -BeExactly 'Example'
-      $Info.ProductCodeSource | Should -BeExactly 'LegacyChromiumProductSwitchAndRegistryPath'
-      $Info.LegacyProductIdentity.InstallDirectorySwitch | Should -BeExactly 'example-install-dir'
-      $Info.LegacyProductIdentity.ProductRegistryPath | Should -BeExactly 'Software\Example'
-    }
-  }
-}
-
 Describe 'Chromium resource classification' {
   BeforeEach {
     $Script:SyntheticPath = Join-Path $Script:FixtureDirectory 'synthetic-chromium.exe'
@@ -221,7 +149,7 @@ Describe 'Chromium resource classification' {
             Packages      = @([pscustomobject]@{ Name = 'mini_installer.exe' })
             InstallAction = [pscustomobject]@{ Run = 'mini_installer.exe'; Arguments = '--system-level' }
           }
-          NestedSetupInfo   = [pscustomobject]@{ ProductCode = 'Vendor Browser'; ProductCodeSource = 'TestEvidence'; Warnings = @() }
+          NestedSetupInfo   = [pscustomobject]@{ ProductName = 'Vendor Browser'; Warnings = @() }
           NestedSetupError  = $null
           ManifestEntryName = 'bin/Offline/{BUNDLE}/OfflineManifest.gup'
           TargetEntryName   = 'bin/Offline/{BUNDLE}/{APP-ID}/mini_installer.exe'
@@ -230,8 +158,8 @@ Describe 'Chromium resource classification' {
 
       $Info = Get-ChromiumSetupInfo -Path $SyntheticPath
 
-      $Info.ProductCode | Should -BeExactly 'Vendor Browser'
-      $Info.ProductCodeSource | Should -BeExactly 'ChromiumUpdaterTarget/TestEvidence'
+      $Info.ProductCode | Should -BeNullOrEmpty
+      $Info.UnresolvedFields | Should -Contain 'ProductCode'
       $Info.DisplayVersion | Should -BeExactly '10.20.30.40'
       $Info.IsOnlineBootstrapper | Should -BeFalse
       $Info.Warnings | Should -BeNullOrEmpty
@@ -253,7 +181,7 @@ Describe 'Chromium resource classification' {
       $Info.ApplicationId | Should -Be '{APP-ID}'
       $Info.ProductCode | Should -BeNullOrEmpty
       $Info.Scope | Should -Be 'machine'
-      $Info.Warnings[0] | Should -BeLike '*does not contain source-backed target ARP ProductCode evidence*'
+      ($Info.Warnings -join ' ') | Should -Not -BeLike '*ProductCode*'
     }
   }
 
@@ -294,70 +222,35 @@ Describe 'Chromium resource classification' {
     }
   }
 
-  It 'Should resolve source-parsed Chromium ARP keys from install-mode switches' {
-    $Info = [pscustomobject]@{
-      Variant      = 'ChromiumMiniInstaller'
-      ProductCode  = 'Google Chrome'
-      InstallModes = @(
-        [pscustomobject]@{ Index = 0; InstallSwitch = ''; ProductCode = 'Google Chrome' }
-        [pscustomobject]@{ Index = 1; InstallSwitch = 'chrome-beta'; ProductCode = 'Google Chrome Beta' }
-        [pscustomobject]@{ Index = 2; InstallSwitch = 'chrome-dev'; ProductCode = 'Google Chrome Dev' }
-        [pscustomobject]@{ Index = 3; InstallSwitch = 'chrome-sxs'; ProductCode = 'Google Chrome SxS' }
-      )
-    }
-
-    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--chrome-sxs --do-not-launch-chrome' }) | Should -Be 'Google Chrome SxS'
-    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--do-not-launch-chrome --chrome-beta' }) | Should -Be 'Google Chrome Beta'
-    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--chrome-dev --do-not-launch-chrome' }) | Should -Be 'Google Chrome Dev'
-    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--do-not-launch-chrome' }) | Should -Be 'Google Chrome'
-  }
-
-  It 'Should not infer a ProductCode for non-Google Chromium installers' {
-    $Info = [pscustomobject]@{
-      Variant     = 'ChromiumMiniInstaller'
-      Publisher   = 'Example Publisher'
-      ProductName = 'Example Browser Installer'
-    }
-
-    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--chrome-sxs' }) | Should -BeNullOrEmpty
-  }
-
-  It 'Should not resolve an ARP key from Vivaldi branding alone' {
-    $Info = [pscustomobject]@{
-      Variant             = 'ChromiumMiniInstaller'
-      Publisher           = 'Vivaldi Technologies AS'
-      ProductName         = 'Vivaldi Installer'
-      ArchiveResourceName = 'VIVALDI.PACKED.7Z'
-    }
-
-    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--do-not-launch-chrome' }) | Should -BeNullOrEmpty
+  It 'Should not export Chromium ProductCode inference helpers' {
+    Get-Command Resolve-ChromiumSetupProductCode -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    Get-Command Read-ProductCodeFromChromiumSetup -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
   }
 }
 
 Describe 'Chromium real installer fixtures' {
-  It 'Should derive Ulaa ProductCode from its nested Chromium updater registry path' {
+  It 'Should leave Ulaa ProductCode unresolved' {
     $Installer = Join-Path $Script:FixtureDirectory 'Zoho.Ulaa-150.0.7871.129.exe'
     if (-not (Test-Path -LiteralPath $Installer)) { Set-ItResult -Skipped -Because 'The Ulaa mini-installer fixture is not cached.'; return }
 
     $Info = Get-ChromiumSetupInfo -Path $Installer
 
     $Info.Variant | Should -BeExactly 'ChromiumMiniInstaller'
-    $Info.ProductCode | Should -BeExactly 'Zoho Ulaa'
-    $Info.ProductCodeSource | Should -BeExactly 'ChromiumUpdateClientPath'
-    $Info.NestedSetupInfo.ComposesUninstallRegistryPath | Should -BeTrue
-    $Info.NestedSetupInfo.UpdateClientRegistryPaths | Should -Contain 'Software\Zoho\Ulaa\Update\Clients\'
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
+    $Info.NestedSetupInfo.PSObject.Properties.Name | Should -Not -Contain 'ProductCode'
   }
 
-  It 'Should derive 360 Enterprise ProductCode from repeated literal uninstall registry paths' {
+  It 'Should leave 360 Enterprise ProductCode unresolved' {
     $Installer = Join-Path $Script:FixtureDirectory '360.360Ent-13.3.4100.143-x86.exe'
     if (-not (Test-Path -LiteralPath $Installer)) { Set-ItResult -Skipped -Because 'The 360 Enterprise mini-installer fixture is not cached.'; return }
 
     $Info = Get-ChromiumSetupInfo -Path $Installer
 
     $Info.Variant | Should -BeExactly 'ChromiumMiniInstaller'
-    $Info.ProductCode | Should -BeExactly '360ent'
-    $Info.ProductCodeSource | Should -BeExactly 'DirectUninstallRegistryPath'
-    $Info.NestedSetupInfo.ProductCodeCandidates.ProductCode | Should -Contain 'huabao'
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
+    $Info.NestedSetupInfo.PSObject.Properties.Name | Should -Not -Contain 'ProductCode'
   }
 
   It 'Should identify and expand legacy Google Updater <Version> as Omaha' -ForEach @(
@@ -411,7 +304,6 @@ Describe 'Chromium real installer fixtures' {
       Url           = 'https://dl.google.com/chrome/install/latest/chrome_installer.exe'
       Variant       = 'ChromiumUpdater'
       ApplicationId = '{8A69D345-D564-463C-AFF1-A69D9E530F96}'
-      ProductCode   = $null
     }
     @{
       Package       = 'Brave.Brave.Beta'
@@ -419,7 +311,6 @@ Describe 'Chromium real installer fixtures' {
       Url           = 'https://github.com/brave/brave-browser/releases/download/v1.93.120/BraveBrowserBetaSetup.exe'
       Variant       = 'Omaha'
       ApplicationId = '{103BD053-949B-43A8-9120-2E424887DE11}'
-      ProductCode   = $null
     }
     @{
       Package       = 'Brave Origin Beta installer'
@@ -427,7 +318,6 @@ Describe 'Chromium real installer fixtures' {
       Url           = 'https://github.com/brave/brave-browser/releases/download/v1.93.120/BraveOriginBetaSetup.exe'
       Variant       = 'Omaha'
       ApplicationId = '{56DA94FD-D872-416B-BFC4-1D7011DA7473}'
-      ProductCode   = $null
     }
     @{
       Package       = 'Microsoft.EdgeWebView2Runtime'
@@ -435,7 +325,6 @@ Describe 'Chromium real installer fixtures' {
       Url           = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
       Variant       = 'Omaha'
       ApplicationId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
-      ProductCode   = $null
     }
   ) {
     $Installer = Get-ChromiumFixture -Name $Name -Url $Url
@@ -443,7 +332,8 @@ Describe 'Chromium real installer fixtures' {
 
     $Info.Variant | Should -BeExactly $Variant
     $Info.ApplicationId | Should -BeExactly $ApplicationId
-    $Info.ProductCode | Should -BeExactly $ProductCode
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
     $Info.IsOnlineBootstrapper | Should -BeTrue
   }
 
@@ -455,10 +345,10 @@ Describe 'Chromium real installer fixtures' {
     $Info.Variant | Should -Be 'ChromiumMiniInstaller'
     $Info.Resources.Name | Should -Contain 'CHROME.7Z'
     $Info.Resources.Name | Should -Contain 'SETUP.EXE'
-    $Info.ProductCode | Should -BeExactly 'Google Chrome'
-    $Info.ProductCodeSource | Should -BeExactly 'ChromiumCompanyAndInstallConstants'
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
     $Info.InstallModes | Should -HaveCount 4
-    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--chrome-sxs --do-not-launch-chrome' }) | Should -BeExactly 'Google Chrome SxS'
+    $Info.InstallModes | ForEach-Object { $_.PSObject.Properties.Name | Should -Not -Contain 'ProductCode' }
   }
 
   It 'Should parse and expand a cached Vivaldi branded mini-installer' {
@@ -473,11 +363,9 @@ Describe 'Chromium real installer fixtures' {
     $Info.Variant | Should -Be 'ChromiumMiniInstaller'
     $Info.ArchiveResourceName | Should -Be 'VIVALDI.PACKED.7Z'
     $Info.NestedFiles | Should -Contain 'vivaldi.7z'
-    $Info.ProductCode | Should -BeExactly 'Vivaldi'
-    $Info.ProductCodeSource | Should -BeExactly 'LegacyChromiumProductSwitchAndRegistryPath'
-    $Info.NestedSetupInfo.LegacyProductIdentity.InstallDirectorySwitch | Should -BeExactly 'vivaldi-install-dir'
-    $Info.NestedSetupInfo.LegacyProductIdentity.ProductRegistryPath | Should -BeExactly 'Software\Vivaldi'
-    Resolve-ChromiumSetupProductCode -Info $Info -InstallerSwitches ([ordered]@{ Custom = '--do-not-launch-chrome' }) | Should -BeExactly 'Vivaldi'
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
+    $Info.NestedSetupInfo.PSObject.Properties.Name | Should -Not -Contain 'ProductCode'
     $Files | Should -HaveCount 1
     $Files[0].Name | Should -Be 'setup.exe'
     [Diagnostics.FileVersionInfo]::GetVersionInfo($Files[0].FullName).ProductVersion | Should -Be '8.2.4106.4'
@@ -494,8 +382,8 @@ Describe 'Chromium real installer fixtures' {
     $Files[0].Name | Should -Be 'BraveUpdate.exe'
     $Files.Name | Should -Contain 'BraveUpdateCore.exe'
     $Info.Variant | Should -Be 'Omaha'
-    $Info.ProductCode | Should -BeExactly 'BraveSoftware Brave-Browser'
-    $Info.ProductCodeSource | Should -BeExactly 'OmahaTarget/ChromiumCompanyAndProductConstants'
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
     $Info.DisplayVersion | Should -BeExactly '150.1.92.139'
     $Info.IsOnlineBootstrapper | Should -BeFalse
     $Info.OfflineManifest.Packages[0].Name | Should -BeExactly 'brave_installer.exe'
@@ -516,10 +404,11 @@ Describe 'Chromium real installer fixtures' {
     $Info.DisplayVersion | Should -BeExactly '150.0.4078.65'
     $Info.ProductCode | Should -BeNullOrEmpty
     $Info.NestedSetupInfo.ProductCode | Should -BeNullOrEmpty
+    $Info.NestedSetupInfo.UnresolvedFields | Should -Contain 'ProductCode'
     $Info.SupportedScopes | Should -Be @('user', 'machine')
     $Info.IsOnlineBootstrapper | Should -BeFalse
     $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--msedgewebview --verbose-logging --do-not-launch-msedge'
-    ($Info.Warnings -join ' ') | Should -BeLike '*does not contain source-backed target ARP ProductCode evidence*'
+    ($Info.Warnings -join ' ') | Should -Not -BeLike '*ProductCode*'
   }
 
   It 'Should parse the cached Perplexity Comet offline Chromium Updater bundle' {
@@ -531,8 +420,8 @@ Describe 'Chromium real installer fixtures' {
     $Info.Variant | Should -BeExactly 'ChromiumUpdater'
     $Info.IsOnlineBootstrapper | Should -BeFalse
     $Info.DisplayVersion | Should -BeExactly '150.0.7871.230'
-    $Info.ProductCode | Should -BeExactly 'Perplexity Comet'
-    $Info.ProductCodeSource | Should -BeExactly 'ChromiumUpdaterTarget/ChromiumCompanyAndProductConstants'
+    $Info.ProductCode | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -Contain 'ProductCode'
     $Info.OfflineManifest.InstallAction.Run | Should -BeExactly 'mini_installer.exe'
     $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--system-level'
     $Info.Warnings | Should -BeNullOrEmpty

@@ -1483,79 +1483,18 @@ Describe 'WinGet installer manifest metadata updates' {
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New Squirrel Publisher'
     }
 
-    It 'Resolves a Chromium Setup ProductCode from the manifest channel switch' {
+    It 'Preserves an existing ProductCode for Chromium <Variant>' -ForEach @(
+      @{ Variant = 'ChromiumMiniInstaller'; ExistingProductCode = 'Google Chrome SxS' }
+      @{ Variant = 'ChromiumUpdater'; ExistingProductCode = 'Zoho Ulaa' }
+      @{ Variant = 'Omaha'; ExistingProductCode = 'BraveSoftware Brave-Origin-Nightly' }
+    ) {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
           ParserResults    = @([pscustomobject]@{
               Name    = 'Chromium Setup'
               Success = $true
               Result  = [pscustomobject]@{
-                Variant        = 'ChromiumMiniInstaller'
-                Publisher      = 'Google LLC'
-                ProductCode    = $null
-                DisplayName    = 'Google Chrome Installer'
-                DisplayVersion = '152.0.7953.0'
-                InstallModes   = @(
-                  [pscustomobject]@{ Index = 0; InstallSwitch = ''; ProductCode = 'Google Chrome' }
-                  [pscustomobject]@{ Index = 1; InstallSwitch = 'chrome-sxs'; ProductCode = 'Google Chrome SxS' }
-                )
-              }
-            })
-          FamilyCandidates = @()
-        }
-      }
-      $Installer = [ordered]@{
-        Architecture      = 'x64'
-        InstallerType     = 'exe'
-        InstallerUrl      = $Script:InstallerUrl
-        InstallerSwitches = [ordered]@{ Custom = '--chrome-sxs --do-not-launch-chrome' }
-        ProductCode       = 'Google Chrome SxS'
-      }
-
-      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
-
-      $Result.ProductCode | Should -Be 'Google Chrome SxS'
-      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
-    }
-
-    It 'Uses a source-backed ProductCode returned by a tagged Chromium wrapper' {
-      Mock Get-WinGetInstallerAnalysis {
-        [pscustomobject]@{
-          ParserResults    = @([pscustomobject]@{
-              Name    = 'Chromium Setup'
-              Success = $true
-              Result  = [pscustomobject]@{
-                Variant        = 'Omaha'
-                ProductCode    = 'BraveSoftware Brave-Origin-Nightly'
-                DisplayName    = 'Brave-Origin-Nightly'
-                DisplayVersion = '151.1.94.75'
-                Warnings       = @()
-              }
-            })
-          FamilyCandidates = @()
-        }
-      }
-      $Installer = [ordered]@{
-        Architecture  = 'x64'
-        InstallerType = 'exe'
-        InstallerUrl  = $Script:InstallerUrl
-        ProductCode   = 'BraveSoftware Brave-Origin-Nightly'
-      }
-
-      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
-
-      $Result.ProductCode | Should -BeExactly 'BraveSoftware Brave-Origin-Nightly'
-      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
-    }
-
-    It 'preserves an existing Chromium ProductCode when static evidence cannot resolve the ARP identity' {
-      Mock Get-WinGetInstallerAnalysis {
-        [pscustomobject]@{
-          ParserResults    = @([pscustomobject]@{
-              Name    = 'Chromium Setup'
-              Success = $true
-              Result  = [pscustomobject]@{
-                Variant          = 'ChromiumUpdater'
+                Variant          = $Variant
                 ProductCode      = $null
                 UnresolvedFields = @('ProductCode')
                 Warnings         = @()
@@ -1568,12 +1507,12 @@ Describe 'WinGet installer manifest metadata updates' {
         Architecture  = 'x64'
         InstallerType = 'exe'
         InstallerUrl  = $Script:InstallerUrl
-        ProductCode   = 'Zoho Ulaa'
+        ProductCode   = $ExistingProductCode
       }
 
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
-      $Result.ProductCode | Should -BeExactly 'Zoho Ulaa'
+      $Result.ProductCode | Should -BeExactly $ExistingProductCode
       @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
     }
 

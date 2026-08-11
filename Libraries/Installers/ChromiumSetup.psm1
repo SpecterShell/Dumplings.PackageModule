@@ -60,32 +60,21 @@ function Get-ChromiumSetupInfoFromContext {
     }
   }
   $IsOnlineBootstrapper = if (-not $Tag.IsTagged) { $false } elseif ($OfflineManifest) { $false } elseif ($OfflineManifestChecked -and -not $OfflineManifestError) { $true } else { $null }
-  $ProductCode = $null
-  $ProductCodeSource = $null
-
   $NestedSetupInfo = $null
   $NestedSetupError = $null
   if ($Variant -eq 'ChromiumMiniInstaller') {
     try {
       # The outer stub contains only generic launcher metadata. Inspect the exact nested setup.exe
-      # selected by mini_installer resource precedence for literal ARP registry evidence.
+      # selected by mini_installer resource precedence for version and install-mode evidence.
       $NestedSetupInfo = Get-ChromiumMiniInstallerNestedSetupInfo -Context $Context
-      if (-not $ProductCode -and $NestedSetupInfo.ProductCode) {
-        $ProductCode = $NestedSetupInfo.ProductCode
-        $ProductCodeSource = $NestedSetupInfo.ProductCodeSource
-      }
     } catch {
       $NestedSetupError = $_.Exception.Message
     }
   } elseif ($OfflinePayloadInfo) {
     # Tagged offline wrappers contain the target installer named by OfflineManifest.gup. Its own
-    # Chromium setup metadata, not the outer updater appguid, supplies ARP identity.
+    # parser result supplies target metadata without treating the updater appguid as ARP identity.
     $NestedSetupInfo = $OfflinePayloadInfo.NestedSetupInfo
     $NestedSetupError = $OfflinePayloadInfo.NestedSetupError
-    if ($NestedSetupInfo -and $NestedSetupInfo.ProductCode) {
-      $ProductCode = $NestedSetupInfo.ProductCode
-      $ProductCodeSource = "$($Variant)Target/$($NestedSetupInfo.ProductCodeSource)"
-    }
   }
 
   $SupportedScopes = @()
@@ -166,19 +155,18 @@ function Get-ChromiumSetupInfoFromContext {
   }
   $Warnings = [Collections.Generic.List[string]]::new()
   if ($OfflineManifestError) { $Warnings.Add("The tagged Chromium payload could not be checked for an offline manifest: $OfflineManifestError") }
-  if ($NestedSetupError) { $Warnings.Add("The nested Chromium setup.exe could not be checked for ARP registry identity: $NestedSetupError") }
+  if ($NestedSetupError) { $Warnings.Add("The nested Chromium setup.exe could not be inspected: $NestedSetupError") }
   if ($NestedSetupInfo) { foreach ($Warning in $NestedSetupInfo.Warnings) { $Warnings.Add($Warning) } }
-  if ($Tag.ApplicationId -and -not $ProductCode) { $Warnings.Add("Updater appguid '$($Tag.ApplicationId)' is update-protocol identity; this wrapper does not contain source-backed target ARP ProductCode evidence.") }
   if ($IsOnlineBootstrapper) { $Warnings.Add("This setup is a tagged online bootstrapper. Outer version '$($VersionInfo.ProductVersion)' belongs to the updater and is not target-application version evidence; final version, ARP, and switch behavior require target-package evidence.") }
   if ($Variant -eq 'Omaha' -and -not $OfflineManifest) { $Warnings.Add('Omaha executes the first EXE in its decoded TAR payload. Expand and analyze that file before composing nested installer switches.') }
   if ($Variant -eq 'Omaha' -and -not $Tag.IsTagged) { $Warnings.Add('This is an untagged Omaha runtime installer. Its /install runtime tag controls user versus machine scope; do not substitute Chromium Updater --system switches.') }
   if ($Tag.IsTagged -and -not $SupportedScopes) { $Warnings.Add("The updater tag needsadmin value '$($Tag.NeedsAdmin)' does not provide deterministic WinGet scope evidence.") }
 
-  $WritesAppsAndFeaturesEntry = if ($Variant -eq 'ChromiumMiniInstaller' -or $ProductCode) { $true } else { $null }
+  $WritesAppsAndFeaturesEntry = if ($Variant -eq 'ChromiumMiniInstaller') { $true } else { $null }
   [pscustomobject][ordered]@{
     Path                         = $Context.File.FullName
     InstallerType                = 'Chromium Setup'
-    ProductCode                  = $ProductCode
+    ProductCode                  = $null
     UpgradeCode                  = $null
     DisplayName                  = $Tag.ApplicationName ?? $VersionInfo.ProductName
     DisplayVersion               = if ($OfflineManifest) { $OfflineManifest.Version } elseif ($Tag.IsTagged) { $null } else { $VersionInfo.ProductVersion }
@@ -186,19 +174,18 @@ function Get-ChromiumSetupInfoFromContext {
     Scope                        = $Scope
     DefaultInstallLocation       = $null
     WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
-    AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
+    AppsAndFeaturesProductCode   = $null
     AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
     Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-    # A tagged updater application ID is not necessarily the visible uninstall key. Preserve an
-    # existing manifest ProductCode when source-backed vendor/channel mapping cannot resolve it.
+    # Chromium setup variants do not expose one stable source-backed ARP identity contract across
+    # vendors and channels. Keep an authored ProductCode unresolved so update processing preserves it.
     UnresolvedFields             = [string[]]@(
-      if ([string]::IsNullOrWhiteSpace($ProductCode)) { 'ProductCode' }
+      'ProductCode'
       if ($Tag.IsTagged -and -not $OfflineManifest) { 'DisplayVersion' }
     )
     Variant                      = $Variant
     OuterProductVersion          = $VersionInfo.ProductVersion
     OriginalFilename             = $VersionInfo.OriginalFilename
-    ProductCodeSource            = $ProductCodeSource
     ApplicationId                = $Tag.ApplicationId
     ArchiveResourceName          = $MiniArchiveResourceName
     SetupResourceName            = $MiniSetupResourceName
@@ -222,8 +209,8 @@ function Get-ChromiumSetupInfoFromContext {
     CanExpand                    = $true
     ParserVersionInfo            = [pscustomobject]@{
       Parser      = 'Dumplings.PackageModule.ChromiumSetup'
-      ParserMajor = 4
-      Sources     = @('Chromium mini_installer B7, BL, and BN resource precedence', 'Chromium install_static InstallConstants and GetUninstallRegistryPath construction', 'Chromium Updater metainstaller resources, offline payload layout, and UTF-8 or UTF-16 certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload and OfflineManifest.gup target execution', 'Microsoft Edge UTF-16 certificate tag framing')
+      ParserMajor = 5
+      Sources     = @('Chromium mini_installer B7, BL, and BN resource precedence', 'Chromium install_static InstallConstants layout and system-level support', 'Chromium Updater metainstaller resources, offline payload layout, and UTF-8 or UTF-16 certificate tag', 'Google Omaha LZMA/BCJ2/TAR payload and OfflineManifest.gup target execution', 'Microsoft Edge UTF-16 certificate tag framing')
     }
   }
 }
@@ -248,57 +235,6 @@ function Get-ChromiumSetupInfo {
     try { Get-ChromiumSetupInfoFromContext -Context $Context -SkipOfflineManifest:$SkipOfflineManifest }
     finally { Close-ChromiumSetupContext -Context $Context }
   }
-}
-
-function Resolve-ChromiumSetupProductCode {
-  <#
-  .SYNOPSIS
-    Resolve a Chromium-family ARP key from parsed install modes and switches
-  .DESCRIPTION
-    Chromium's kInstallModes table supplies each source-defined selector and
-    uninstall suffix. Legacy Chromium forks expose their selected product code
-    through Get-ChromiumSetupInfo's corroborated switch and registry evidence.
-  .PARAMETER Info
-    The result returned by Get-ChromiumSetupInfo
-  .PARAMETER InstallerSwitches
-    The WinGet InstallerSwitches dictionary applied to the installer
-  #>
-  [OutputType([string])]
-  param (
-    [Parameter(Mandatory)][psobject]$Info,
-    [Parameter(Mandatory)][System.Collections.IDictionary]$InstallerSwitches
-  )
-
-  # Prefer explicit parser identity. A bare mini-installer may expose several source-defined modes,
-  # in which case the manifest switches select the effective uninstall suffix.
-  $MetadataProperty = $Info.PSObject.Properties['Metadata']
-  $IdentityInfo = if ($MetadataProperty -and $MetadataProperty.Value) { $MetadataProperty.Value } else { $Info }
-  $ProductCodeProperty = $IdentityInfo.PSObject.Properties['ProductCode']
-  $ExplicitProductCode = if ($ProductCodeProperty -and -not [string]::IsNullOrWhiteSpace([string]$ProductCodeProperty.Value)) { [string]$ProductCodeProperty.Value } else { $null }
-  if ($IdentityInfo.Variant -cne 'ChromiumMiniInstaller') {
-    return $ExplicitProductCode
-  }
-
-  $ModesProperty = $IdentityInfo.PSObject.Properties['InstallModes']
-  $InstallModes = if ($ModesProperty -and $ModesProperty.Value) { @($ModesProperty.Value) } else { @() }
-  if ($InstallModes.Count -gt 0) {
-    $SwitchValues = [Collections.Generic.List[string]]::new()
-    foreach ($Value in $InstallerSwitches.Values) { if ($Value -is [string]) { $SwitchValues.Add($Value) } }
-    $CommandLine = [string]::Join(' ', $SwitchValues)
-    $SelectedModes = [Collections.Generic.List[object]]::new()
-    foreach ($Mode in $InstallModes) {
-      if ([string]::IsNullOrWhiteSpace([string]$Mode.InstallSwitch)) { continue }
-      $Selector = "--$($Mode.InstallSwitch)"
-      if ($CommandLine -match "(?i)(?<![A-Za-z0-9-])$([regex]::Escape($Selector))(?![A-Za-z0-9-])") { $SelectedModes.Add($Mode) }
-    }
-    # Contradictory mode selectors are not resolved by ordering; manifest validation must fix them.
-    if ($SelectedModes.Count -gt 1) { return $null }
-    if ($SelectedModes.Count -eq 1) { return [string]$SelectedModes[0].ProductCode }
-    $PrimaryMode = @($InstallModes | Where-Object Index -EQ 0)[0]
-    if ($PrimaryMode -and -not [string]::IsNullOrWhiteSpace([string]$PrimaryMode.ProductCode)) { return [string]$PrimaryMode.ProductCode }
-  }
-
-  return $ExplicitProductCode
 }
 
 function Expand-ChromiumSetupInstaller {
@@ -458,17 +394,6 @@ function Read-PublisherFromChromiumSetup {
   process { (Get-ChromiumSetupInfo -Path $Path).Publisher }
 }
 
-function Read-ProductCodeFromChromiumSetup {
-  <#
-  .SYNOPSIS
-    Return explicit Chromium setup ARP ProductCode evidence when available
-  .PARAMETER Path
-    The path to the Chromium setup installer
-  #>
-  param ([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
-  process { (Get-ChromiumSetupInfo -Path $Path).ProductCode }
-}
-
 function Read-ScopeFromChromiumSetup {
   <#
   .SYNOPSIS
@@ -516,4 +441,4 @@ function Read-FileExtensionsFromChromiumSetup {
   process { (Get-ChromiumSetupInfo -Path $Path).FileExtensions }
 }
 
-Export-ModuleMember -Function ConvertFrom-ChromiumUpdaterTagData, Read-ChromiumInstallerTag, Get-ChromiumSetupInfo, Resolve-ChromiumSetupProductCode, Expand-ChromiumSetupInstaller, Test-ChromiumSetup, Test-ChromiumMiniInstaller, Test-ChromiumUpdater, Test-OmahaInstaller, Read-ProductVersionFromChromiumSetup, Read-ProductNameFromChromiumSetup, Read-PublisherFromChromiumSetup, Read-ProductCodeFromChromiumSetup, Read-ScopeFromChromiumSetup, Read-SupportedScopesFromChromiumSetup, Read-ProtocolsFromChromiumSetup, Read-FileExtensionsFromChromiumSetup
+Export-ModuleMember -Function ConvertFrom-ChromiumUpdaterTagData, Read-ChromiumInstallerTag, Get-ChromiumSetupInfo, Expand-ChromiumSetupInstaller, Test-ChromiumSetup, Test-ChromiumMiniInstaller, Test-ChromiumUpdater, Test-OmahaInstaller, Read-ProductVersionFromChromiumSetup, Read-ProductNameFromChromiumSetup, Read-PublisherFromChromiumSetup, Read-ScopeFromChromiumSetup, Read-SupportedScopesFromChromiumSetup, Read-ProtocolsFromChromiumSetup, Read-FileExtensionsFromChromiumSetup
