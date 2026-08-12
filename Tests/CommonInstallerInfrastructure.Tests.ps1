@@ -97,11 +97,11 @@ Describe 'Shared installer infrastructure parity' {
       @{ Package = 'Libraries\Infrastructure\Archive.psm1'; Parser = 'Libraries\Infrastructure\Archive.psm1' }
       @{ Package = 'Libraries\Infrastructure\PE.psm1'; Parser = 'Libraries\Infrastructure\PE.psm1' }
       @{ Package = 'Libraries\Infrastructure\InstallerEvidence.psm1'; Parser = 'Libraries\Infrastructure\InstallerEvidence.psm1' }
-      @{ Package = 'Assets\Source\InstallerInfrastructure\BinaryIO.cs'; Parser = 'Assets\InstallerInfrastructure\BinaryIO.cs' }
-      @{ Package = 'Assets\Source\InstallerInfrastructure\PatternSearch.cs'; Parser = 'Assets\InstallerInfrastructure\PatternSearch.cs' }
-      @{ Package = 'Assets\Source\InstallerInfrastructure\PEImageReader.cs'; Parser = 'Assets\InstallerInfrastructure\PEImageReader.cs' }
-      @{ Package = 'Assets\Assemblies\SharpCompress.dll'; Parser = 'Assets\SharpCompress.dll' }
-      @{ Package = 'Assets\Assemblies\ZstdSharp.dll'; Parser = 'Assets\ZstdSharp.dll' }
+      @{ Package = 'Assets\Source\InstallerInfrastructure\BinaryIO.cs'; Parser = 'Assets\Source\InstallerInfrastructure\BinaryIO.cs' }
+      @{ Package = 'Assets\Source\InstallerInfrastructure\PatternSearch.cs'; Parser = 'Assets\Source\InstallerInfrastructure\PatternSearch.cs' }
+      @{ Package = 'Assets\Source\InstallerInfrastructure\PEImageReader.cs'; Parser = 'Assets\Source\InstallerInfrastructure\PEImageReader.cs' }
+      @{ Package = 'Assets\Assemblies\SharpCompress.dll'; Parser = 'Assets\Assemblies\SharpCompress.dll' }
+      @{ Package = 'Assets\Assemblies\ZstdSharp.dll'; Parser = 'Assets\Assemblies\ZstdSharp.dll' }
       @{ Package = 'Tests\TestFixture.ps1'; Parser = 'Tests\TestFixture.ps1' }
     )
     foreach ($Pair in $PathPairs) {
@@ -561,6 +561,29 @@ Describe 'Shared archive helpers' {
       $Decoder.Dispose()
       foreach ($Stream in $Streams) { $Stream.Dispose() }
     }
+  }
+
+  It 'decodes Zstandard streams and enforces their declared output size' {
+    Import-InstallerArchiveDependency
+    $Expected = [Text.Encoding]::UTF8.GetBytes(('bounded-zstandard-' * 32))
+    $Compressor = [ZstdSharp.Compressor]::new(3)
+    try {
+      $Compressed = [byte[]]::new([ZstdSharp.Compressor]::GetCompressBound($Expected.Length))
+      $CompressedLength = $Compressor.Wrap($Expected, $Compressed, 0)
+    } finally { $Compressor.Dispose() }
+
+    $CompressedInput = [IO.MemoryStream]::new($Compressed, 0, $CompressedLength, $false)
+    $Output = [IO.MemoryStream]::new()
+    try {
+      Expand-InstallerCompressedStream -Algorithm Zstd -Stream $CompressedInput -Destination $Output -MaximumBytes 4096 -CompressedSize $CompressedLength -UncompressedSize $Expected.Length | Should -Be $Expected.Length
+      $Output.ToArray() | Should -Be $Expected
+    } finally { $Output.Dispose(); $CompressedInput.Dispose() }
+
+    $CompressedInput = [IO.MemoryStream]::new($Compressed, 0, $CompressedLength, $false)
+    $Output = [IO.MemoryStream]::new()
+    try {
+      { Expand-InstallerCompressedStream -Algorithm Zstd -Stream $CompressedInput -Destination $Output -MaximumBytes 4096 -CompressedSize $CompressedLength -UncompressedSize ($Expected.Length - 1) } | Should -Throw '*exceeds its declared*'
+    } finally { $Output.Dispose(); $CompressedInput.Dispose() }
   }
 
   It 'opens and exports a bounded ZIP entry' {

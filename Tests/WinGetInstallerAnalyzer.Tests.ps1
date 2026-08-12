@@ -8,6 +8,7 @@ BeforeAll {
 
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallerAnalyzer'
   $Script:DeclaredTypeFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'ManifestUpdateDeclaredTypes'
+  $Script:InstallShieldFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallShield'
   $ProgressPreference = 'SilentlyContinue'
 
   function Get-AnalyzerInstallerFixture {
@@ -98,6 +99,24 @@ install4j i4jruntime.jar.pack;i4jparams.conf;user.jar.pack allinstdirs1234-5678-
 '@ | Set-Content -LiteralPath $FixturePath -Encoding UTF8
 
     return $FixturePath
+  }
+}
+
+Describe 'InstallShield structural analyzer routing' {
+  It 'invokes the parser for an exact InstallShield 3 engine identity' {
+    $Fixture = Join-Path $Script:InstallShieldFixtureDirectory 'Classic3\setup32.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The official InstallShield 3 engine fixture is unavailable.'
+      return
+    }
+
+    $Analysis = Get-InstallerAnalysis -Path $Fixture
+
+    $Analysis.DetectedFamilies.Family | Should -Contain 'InstallShield'
+    $ParserResult = $Analysis.ParserResults | Where-Object Name -EQ 'InstallShield' | Select-Object -First 1
+    $ParserResult.Success | Should -BeTrue
+    $ParserResult.Result.Metadata.InstallShieldStructuralRoutes.RouteId | Should -Be 'Classic3/Engine'
+    $Analysis.RoutingHints.Family | Should -Not -Contain 'InstallShield'
   }
 }
 

@@ -47,10 +47,6 @@ function Import-InstallerInfrastructure {
     if (([System.Management.Automation.PSTypeName]'Dumplings.InstallerInfrastructure.BinaryIO').Type) { return }
     $AssetRoot = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets'
     $SourceRoot = Join-Path -Path $AssetRoot -ChildPath 'Source' -AdditionalChildPath 'InstallerInfrastructure'
-    if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
-      # InstallerParsers retains the original independently consumable layout.
-      $SourceRoot = Join-Path -Path $AssetRoot -ChildPath 'InstallerInfrastructure'
-    }
     $SourceFiles = @(Get-ChildItem -LiteralPath $SourceRoot -Filter '*.cs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
     if ($SourceFiles.Count -eq 0) { throw "The installer infrastructure source is missing: $SourceRoot" }
     Add-Type -Path $SourceFiles -ErrorAction Stop
@@ -101,10 +97,6 @@ function Import-InstallerManagedAssembly {
       [IO.Path]::GetFullPath($AssetRoot)
     }
     $AssemblyPath = Join-Path -Path $ResolvedAssetRoot -ChildPath 'Assemblies' -AdditionalChildPath $AssemblyName
-    if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) {
-      # InstallerParsers retains the original independently consumable layout.
-      $AssemblyPath = Join-Path -Path $ResolvedAssetRoot -ChildPath $AssemblyName
-    }
     if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) { throw "The managed dependency is missing: $AssemblyPath" }
     Add-Type -Path $AssemblyPath -PassThru -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Assembly
   }

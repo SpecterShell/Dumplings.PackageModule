@@ -56,6 +56,7 @@ namespace Dumplings.InstallShield.InstallScript
         {
             Offset = offset;
             Opcode = opcode;
+            SourceOpcode = opcode;
             Operation = operation;
             Operands = new List<InstallScriptOperand>();
             LabelIndexes = new List<int>();
@@ -65,6 +66,12 @@ namespace Dumplings.InstallShield.InstallScript
 
         public long Offset { get; private set; }
         public int Opcode { get; private set; }
+        /// <summary>
+        /// Opcode encoded by the source generation. Legacy INS actions are
+        /// normalized to the modern interpreter vocabulary in <see cref="Opcode"/>
+        /// while retaining their original action identifier here.
+        /// </summary>
+        public int SourceOpcode { get; internal set; }
         public string Operation { get; internal set; }
         public InstallScriptOperand Destination { get; internal set; }
         public List<InstallScriptOperand> Operands { get; private set; }
@@ -93,6 +100,10 @@ namespace Dumplings.InstallShield.InstallScript
         public string Name { get; internal set; }
         public string DllName { get; internal set; }
         public int FunctionType { get; internal set; }
+        /// <summary>Compiler flags that classify DLL, internal, predefined, exported, and property prototypes.</summary>
+        public int Flags { get; internal set; }
+        /// <summary>Whether the object module exports this prototype to the InstallScript linker.</summary>
+        public bool IsExported { get { return (Flags & 0x08) != 0; } }
         public int ReturnType { get; internal set; }
         public int LabelIndex { get; internal set; }
         public long StartOffset { get; internal set; }
@@ -100,6 +111,34 @@ namespace Dumplings.InstallShield.InstallScript
         public List<int> ParameterFlags { get; private set; }
         public List<InstallScriptInstruction> Instructions { get; private set; }
         public bool BodyDecoded { get; internal set; }
+    }
+
+    /// <summary>One named global imported by an OBS object module.</summary>
+    public sealed class InstallScriptExternalSymbol
+    {
+        internal InstallScriptExternalSymbol(int type, int address, string name)
+        {
+            Type = type;
+            Address = address;
+            Name = name ?? string.Empty;
+        }
+
+        public int Type { get; private set; }
+        public int Address { get; private set; }
+        public string Name { get; private set; }
+    }
+
+    /// <summary>One OBS linker address-resolution record retained as structural evidence.</summary>
+    public sealed class InstallScriptAddressResolution
+    {
+        internal InstallScriptAddressResolution(int type, long offset)
+        {
+            Type = type;
+            Offset = offset;
+        }
+
+        public int Type { get; private set; }
+        public long Offset { get; private set; }
     }
 
     /// <summary>Contains the immutable structural evidence returned by the INX reader.</summary>
@@ -110,16 +149,29 @@ namespace Dumplings.InstallShield.InstallScript
             Functions = new List<InstallScriptFunction>();
             LabelOffsets = new List<long>();
             Warnings = new List<string>();
+            ExternalSymbols = new List<InstallScriptExternalSymbol>();
+            AddressResolutions = new List<InstallScriptAddressResolution>();
             InfoString = string.Empty;
+            CompilerVersion = string.Empty;
+            FormatProfile = string.Empty;
+            LibraryMemberName = string.Empty;
         }
 
         public uint HeaderValue { get; internal set; }
+        /// <summary>Structural bytecode profile used by the reader.</summary>
+        public string FormatProfile { get; internal set; }
+        /// <summary>OBL member name when this program came from a script library.</summary>
+        public string LibraryMemberName { get; internal set; }
         public string InfoString { get; internal set; }
+        /// <summary>Compiler-version text carried by an OBS object-module header.</summary>
+        public string CompilerVersion { get; internal set; }
         public long CatalogOffset { get; internal set; }
         public long CodeOffset { get; internal set; }
         public long EndCodeOffset { get; internal set; }
         public int DataTypeCount { get; internal set; }
         public List<InstallScriptFunction> Functions { get; private set; }
+        public List<InstallScriptExternalSymbol> ExternalSymbols { get; private set; }
+        public List<InstallScriptAddressResolution> AddressResolutions { get; private set; }
         public List<long> LabelOffsets { get; private set; }
         public List<string> Warnings { get; private set; }
         public int InstructionCount { get; internal set; }

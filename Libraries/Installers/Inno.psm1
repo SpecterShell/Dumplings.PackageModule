@@ -21,17 +21,82 @@ function Get-InnoInfo {
     Get static metadata from an Inno Setup installer through the separate GPL parser module
   .PARAMETER Path
     The path to the Inno Setup installer
+  .PARAMETER IncludePascalScriptAnalysis
+    Include detailed compiled Pascal Script evidence without reparsing the installer.
+  .PARAMETER IncludeDisassembly
+    Include bounded textual IFPS disassembly. This implies Pascal Script analysis.
+  .PARAMETER MaximumDisassemblyCharacters
+    Maximum characters retained from optional disassembly.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the Inno Setup installer')]
+    [string]$Path,
+    [switch]$IncludePascalScriptAnalysis,
+    [switch]$IncludeDisassembly,
+    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = 4194304
+  )
+
+  process {
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.GetInfo' -Argument @{
+      Path                         = $InstallerPath
+      IncludePascalScriptAnalysis  = [bool]$IncludePascalScriptAnalysis
+      IncludeDisassembly           = [bool]$IncludeDisassembly
+      MaximumDisassemblyCharacters = $MaximumDisassemblyCharacters
+    }
+    return $Info
+  }
+}
+
+function Get-InnoFormatInfo {
+  <#
+  .SYNOPSIS
+    Identify an Inno edition and its catalogued parser routes through the GPL parser process.
+  .PARAMETER Path
+    Path to the Inno Setup installer.
+  .OUTPUTS
+    Structured edition, character-mode, layout-route, and support evidence.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]
     [string]$Path
   )
 
   process {
-    $InstallerPath = (Get-Item -Path $Path -Force).FullName
-    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.GetInfo' -Argument @{ Path = $InstallerPath }
-    return $Info
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.GetFormatInfo' -Argument @{ Path = $InstallerPath }
+  }
+}
+
+function Get-InnoPascalScriptInfo {
+  <#
+  .SYNOPSIS
+    Analyze compiled Inno Pascal Script through the process-isolated GPL parser.
+  .PARAMETER Path
+    Path to the Inno Setup installer.
+  .PARAMETER IncludeDisassembly
+    Include bounded textual IFPS disassembly in the result.
+  .PARAMETER MaximumDisassemblyCharacters
+    Maximum characters retained from the optional disassembly.
+  .OUTPUTS
+    Structural IFPS version, function, external-call, instruction, and optional disassembly evidence.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
+    [switch]$IncludeDisassembly,
+    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = 4194304
+  )
+
+  process {
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.GetPascalScriptInfo' -Argument @{
+      Path                         = $InstallerPath
+      IncludeDisassembly           = [bool]$IncludeDisassembly
+      MaximumDisassemblyCharacters = $MaximumDisassemblyCharacters
+    }
   }
 }
 
@@ -231,6 +296,8 @@ function Expand-InnoInstaller {
     Behavior when an output path already exists or multiple records resolve to the same path.
   .PARAMETER MaximumExpandedBytes
     Maximum aggregate bytes written, including aliases that share one payload location.
+  .PARAMETER DiskSourcePath
+    Optional directories or explicit setup-*.bin files used for external multi-disk media. The setup executable directory is searched automatically.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -250,7 +317,10 @@ function Expand-InnoInstaller {
     [string]$CollisionAction = 'Prompt',
 
     [ValidateRange(1, [long]::MaxValue)]
-    [long]$MaximumExpandedBytes = 17179869184
+    [long]$MaximumExpandedBytes = 17179869184,
+
+    [Parameter(HelpMessage = 'Directories or explicit files containing external Inno Setup disk slices')]
+    [string[]]$DiskSourcePath
   )
 
   process {
@@ -264,10 +334,13 @@ function Expand-InnoInstaller {
     if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
       $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     }
+    if ($DiskSourcePath) {
+      $Arguments.DiskSourcePath = @($DiskSourcePath | ForEach-Object { Resolve-InstallerFileSystemPath -Path $_ })
+    }
     $Result = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.Expand' -Argument $Arguments
 
     return Convert-InstallerBridgePathsToFileInfo -Path $Result
   }
 }
 
-Export-ModuleMember -Function Get-InnoInfo, Read-ProductVersionFromInno, Read-ProductNameFromInno, Read-PublisherFromInno, Read-ProductCodeFromInno, Test-InnoDualScope, Read-SupportedScopesFromInno, Read-UnsupportedArchitecturesFromInno, Test-InnoUnsupportedArchitecture, Test-InnoAppsAndFeaturesEntry, Expand-InnoInstaller
+Export-ModuleMember -Function Get-InnoFormatInfo, Get-InnoInfo, Get-InnoPascalScriptInfo, Read-ProductVersionFromInno, Read-ProductNameFromInno, Read-PublisherFromInno, Read-ProductCodeFromInno, Test-InnoDualScope, Read-SupportedScopesFromInno, Read-UnsupportedArchitecturesFromInno, Test-InnoUnsupportedArchitecture, Test-InnoAppsAndFeaturesEntry, Expand-InnoInstaller

@@ -33,9 +33,159 @@ BeforeAll {
     }
   }
 
+  function New-TestLegacyInstallScriptBytes {
+    $Stream = [IO.MemoryStream]::new()
+    $Writer = [IO.BinaryWriter]::new($Stream, [Text.Encoding]::ASCII, $true)
+    try {
+      $Writer.Write([byte[]](0xB8, 0xC9, 0x0C, 0x00))
+      $Writer.Write([byte[]]::new(9))
+      $Writer.Write([uint16]3)
+      $Writer.Write([Text.Encoding]::ASCII.GetBytes('INS'))
+      $Writer.Write([uint16]1) # event count
+      $Writer.Write([uint16]0) # global strings
+      $Writer.Write([uint16]0) # loadable strings
+      $Writer.Write([uint16]0) # global numbers
+      $Writer.Write([uint16]0) # loadable numbers
+      $Writer.Write([uint16]0) # structures
+      $Writer.Write([uint16]1) # prototypes
+      $Writer.Write([byte]2)   # internal prototype
+      $Writer.Write([byte]0)   # return type
+      $Writer.Write([uint16]0) # DLL name
+      $Writer.Write([uint16]7)
+      $Writer.Write([Text.Encoding]::ASCII.GetBytes('program'))
+      $Writer.Write([uint16]0) # event index
+      $Writer.Write([uint16]0) # parameters
+      $Writer.Write([uint16]0) # event reserved
+      $Writer.Write([uint16]2) # actions
+      $Writer.Write([uint16]0x13) # Assign
+      $Writer.Write([byte]0x30)
+      $Writer.Write([int16]1)
+      $Writer.Write([byte]0x41)
+      $Writer.Write([int32]7)
+      $Writer.Write([uint16]0xB8) # Return without a value
+      return $Stream.ToArray()
+    } finally {
+      $Writer.Dispose()
+      $Stream.Dispose()
+    }
+  }
+
+  function New-TestInstallScriptLibrary {
+    param ([Parameter(Mandatory)][string]$Path)
+
+    [byte[]]$Program = @(New-TestLegacyInstallScriptBytes)
+    $Unknown = [byte[]](1, 2, 3, 4)
+    $Names = @('legacy.ins', 'opaque.bin')
+    $CatalogLength = 12 + (2 + $Names[0].Length + 8) + (2 + $Names[1].Length + 8)
+    $Stream = [IO.MemoryStream]::new()
+    $Writer = [IO.BinaryWriter]::new($Stream, [Text.Encoding]::ASCII, $true)
+    try {
+      $Writer.Write([Text.Encoding]::ASCII.GetBytes('pOdA'))
+      $Writer.Write([uint32]1)
+      $Writer.Write([uint32]2)
+      $Offset = $CatalogLength
+      foreach ($Index in 0..1) {
+        $Payload = $Index -eq 0 ? $Program : $Unknown
+        $Writer.Write([uint16]$Names[$Index].Length)
+        $Writer.Write([Text.Encoding]::ASCII.GetBytes($Names[$Index]))
+        $Writer.Write([uint32]$Offset)
+        $Writer.Write([uint32]$Payload.Length)
+        $Offset += $Payload.Length
+      }
+      $Writer.Write([byte[]]$Program)
+      $Writer.Write([byte[]]$Unknown)
+      [IO.File]::WriteAllBytes($Path, $Stream.ToArray())
+    } finally {
+      $Writer.Dispose()
+      $Stream.Dispose()
+    }
+  }
+
+  function New-TestInstallScriptObjectModuleBytes {
+    $Stream = [IO.MemoryStream]::new()
+    $Writer = [IO.BinaryWriter]::new($Stream, [Text.Encoding]::ASCII, $true)
+    try {
+      $Stream.SetLength(0x100)
+      $Stream.Position = 0
+      $Writer.Write([Convert]::ToUInt32('C9F34F48', 16))
+      $Writer.Write([Text.Encoding]::ASCII.GetBytes('v3.99.002'.PadRight(12, [char]0)))
+      $Writer.Write([Text.Encoding]::ASCII.GetBytes('Synthetic OBS fixture'.PadRight(80, [char]0)))
+      $Stream.Position = 0x62
+      $Writer.Write([uint16]2)
+
+      $Stream.Position = 0x100
+      $ExternalOffset = $Stream.Position
+      $Writer.Write([uint16]1)
+      $Writer.Write([byte]3)
+      $Writer.Write([int16]-1)
+      $Writer.Write([uint16]15)
+      $Writer.Write([Text.Encoding]::ASCII.GetBytes('EXTERNAL_STRING'))
+
+      $PrototypeOffset = $Stream.Position
+      $Writer.Write([uint16]1)
+      $Writer.Write([byte]0x0A) # Internal and exported.
+      $Writer.Write([byte]8)    # Void return type.
+      $Writer.Write([uint16]0)
+      $Writer.Write([uint16]7)
+      $Writer.Write([Text.Encoding]::ASCII.GetBytes('program'))
+      $Writer.Write([uint16]0)
+      $Writer.Write([uint16]0)
+
+      $TypeOffset = $Stream.Position
+      $Writer.Write([uint16]0)
+
+      $AddressOffset = $Stream.Position
+      $Writer.Write([uint16]1)
+      $Writer.Write([byte]0)
+      $AddressRecordPosition = $Stream.Position
+      $Writer.Write([uint32]0)
+
+      $BlockTableOffset = $Stream.Position
+      $BlockRecordPosition = $Stream.Position
+      $Writer.Write([uint32]0)
+      $SecondBlockRecordPosition = $Stream.Position
+      $Writer.Write([uint32]0)
+      $BlockOffset = $Stream.Position
+      $Writer.Write([uint16]3)
+      $Writer.Write([uint16]0x22)
+      $Writer.Write([uint16]1)
+      $Writer.Write([byte]7)
+      $Writer.Write([int32]0)
+      $Writer.Write([uint16]0x01)
+      $Writer.Write([uint16]0)
+      $Writer.Write([uint16]0x26)
+      $Writer.Write([uint16]0)
+      $Writer.Write([uint16]0)
+      $Writer.Write([uint16]0)
+      $Writer.Write([uint16]0)
+      $Writer.Write([uint16]0)
+      $SecondBlockOffset = $Stream.Position
+      $Writer.Write([uint16]0)
+
+      $Stream.Position = $AddressRecordPosition
+      $Writer.Write([uint32]$BlockOffset)
+      $Stream.Position = $BlockRecordPosition
+      $Writer.Write([uint32]$BlockOffset)
+      $Stream.Position = $SecondBlockRecordPosition
+      $Writer.Write([uint32]$SecondBlockOffset)
+      $Stream.Position = 0x84
+      $Writer.Write([uint32]$ExternalOffset)
+      $Writer.Write([uint32]$PrototypeOffset)
+      $Writer.Write([uint32]$TypeOffset)
+      $Writer.Write([uint32]$AddressOffset)
+      $Stream.Position = 0xD8
+      $Writer.Write([uint32]$BlockTableOffset)
+      return $Stream.ToArray()
+    } finally {
+      $Writer.Dispose()
+      $Stream.Dispose()
+    }
+  }
+
   function New-TestInstallShieldMediaHeader {
     param (
       [Parameter(Mandatory)][string]$Path,
+      [uint32]$RawVersion = 0x04000C80,
       [switch]$MalformedRegistryPointer
     )
 
@@ -53,7 +203,7 @@ BeforeAll {
     # Minimal valid ISc( catalog. No payload entries are required to exercise
     # descriptor-extension metadata, but the ordinary file table remains valid.
     & $WriteUInt32 0 ([uint32]0x28635349)
-    & $WriteUInt32 4 ([uint32]0x04000C80)
+    & $WriteUInt32 4 $RawVersion
     & $WriteUInt32 12 ([uint32]$DescriptorBase)
     & $WriteUInt32 16 ([uint32]$DescriptorSize)
     & $WriteUInt32 ($DescriptorBase + 0x0C) ([uint32]0x880)
@@ -181,6 +331,172 @@ BeforeAll {
       & $WriteString $Pair.Data $Pair.DataText
     }
     [IO.File]::WriteAllBytes($Path, $Bytes)
+  }
+}
+
+Describe 'InstallScript structural header classification' {
+  It 'classifies each source-backed compiled-script header family' {
+    $Cases = [ordered]@{
+      OBS       = [byte[]](0x48, 0x4F, 0xF3, 0xC9)
+      aLuZ      = [Text.Encoding]::ASCII.GetBytes('aLuZ')
+      kUtZ      = [Text.Encoding]::ASCII.GetBytes('kUtZ')
+      OBL       = [Text.Encoding]::ASCII.GetBytes('pOdA')
+      'INS-Old' = [byte[]](0xB8, 0xC9, 0x0C, 0x00)
+    }
+    foreach ($Case in $Cases.GetEnumerator()) {
+      $Path = Join-Path $TestDrive "$($Case.Key).bin"
+      [IO.File]::WriteAllBytes($Path, $Case.Value + [byte[]]::new(128))
+      $Info = Get-InstallShieldInstallScriptHeaderInfo -Path $Path
+      $Info.HeaderKind | Should -Be $Case.Key
+      $Info.SupportStatus | Should -Be 'Supported'
+    }
+  }
+
+  It 'decodes the old INS event and action stream into the bounded IR' {
+    $Path = Join-Path $TestDrive 'legacy.ins'
+    [IO.File]::WriteAllBytes($Path, (New-TestLegacyInstallScriptBytes))
+
+    $Program = Read-InstallShieldInstallScriptProgram -Path $Path
+
+    $Program.FormatProfile | Should -Be 'INS-Old'
+    $Program.Functions.Name | Should -Contain 'program'
+    $Program.InstructionCount | Should -Be 2
+    $Program.Functions[0].Instructions[0].SourceOpcode | Should -Be 0x13
+    $Program.Functions[0].Instructions[0].Opcode | Should -Be 0x06
+    $Program.Functions[0].Instructions[0].Destination.IntegerValue | Should -Be 1
+    $Program.Functions[0].Instructions[0].Operands[0].IntegerValue | Should -Be 7
+    $Program.Warnings | Should -BeNullOrEmpty
+  }
+
+  It 'decodes an OBS object module through its independent table layout' {
+    $Path = Join-Path $TestDrive 'synthetic.obs'
+    [IO.File]::WriteAllBytes($Path, (New-TestInstallScriptObjectModuleBytes))
+
+    $Program = Read-InstallShieldInstallScriptProgram -Path $Path
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $Path
+
+    $Program.FormatProfile | Should -Be 'OBS Object Module'
+    $Program.CompilerVersion | Should -Be 'v3.99.002'
+    $Program.ExternalSymbols.Name | Should -Be 'EXTERNAL_STRING'
+    $Program.AddressResolutions | Should -HaveCount 1
+    $Program.Functions | Should -HaveCount 1
+    $Program.Functions[0].Name | Should -Be 'program'
+    $Program.Functions[0].IsExported | Should -BeTrue
+    $Program.Functions[0].BodyDecoded | Should -BeTrue
+    $Program.InstructionCount | Should -Be 3
+    $Program.Functions[0].Instructions[1].SourceOpcode | Should -Be 0x01
+    $Program.Functions[0].Instructions[1].Opcode | Should -Be 0x27
+    $Program.Functions[0].Instructions[1].Operation | Should -Be 'Nop'
+    $Program.Functions[0].Instructions[1].BranchTarget | Should -Be -1
+    $Program.Warnings | Should -BeNullOrEmpty
+    $Analysis.ExternalSymbols.Name | Should -Be 'EXTERNAL_STRING'
+    $Analysis.ExportedFunctions | Should -Be 'program'
+    $Analysis.ParserVersionInfo.BytecodeProfile | Should -Be 'OBS Object Module'
+    $Analysis.ParserVersionInfo.CompilerVersion | Should -Be 'v3.99.002'
+    $Analysis.ParserVersionInfo.ExternalSymbolCount | Should -Be 1
+    $Analysis.ParserVersionInfo.AddressResolutionCount | Should -Be 1
+  }
+
+  It 'keeps a malformed OBS action inside its declared basic-block range' {
+    $Path = Join-Path $TestDrive 'cross-block.obs'
+    $Bytes = New-TestInstallScriptObjectModuleBytes
+    $BlockTableOffset = [BitConverter]::ToUInt32($Bytes, 0xD8)
+    $FirstBlockOffset = [BitConverter]::ToUInt32($Bytes, $BlockTableOffset)
+    [BitConverter]::GetBytes([uint16]4).CopyTo($Bytes, $FirstBlockOffset)
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+
+    $Program = Read-InstallShieldInstallScriptProgram -Path $Path
+
+    $Program.Functions[0].BodyDecoded | Should -BeFalse
+    $Program.Warnings -join ' ' | Should -Match 'record is truncated'
+  }
+
+  It 'catalogues OBL members and selects one embedded program for analysis' {
+    $Path = Join-Path $TestDrive 'library.obl'
+    New-TestInstallScriptLibrary -Path $Path
+
+    $Library = Get-InstallShieldInstallScriptLibraryInfo -Path $Path
+    $Program = Read-InstallShieldInstallScriptProgram -Path $Path
+    $Analysis = Invoke-InstallShieldInstallScriptAnalysis -Path $Path -LibraryMemberName 'legacy.ins'
+
+    $Library.MemberCount | Should -Be 2
+    $Library.Members.Name | Should -Be @('legacy.ins', 'opaque.bin')
+    $Library.Members.FormatProfile | Should -Be @('INS-Old', 'Unknown')
+    $Program.LibraryMemberName | Should -Be 'legacy.ins'
+    $Program.FormatProfile | Should -Be 'INS-Old'
+    $Analysis.ParserVersionInfo.HeaderKind | Should -Be 'OBL'
+    $Analysis.ParserVersionInfo.Format | Should -Be 'INS-Old'
+    $Analysis.ParserVersionInfo.LibraryMemberName | Should -Be 'legacy.ins'
+    $Analysis.ParserVersionInfo.LibraryMemberCount | Should -Be 2
+  }
+
+  It 'rejects an OBL member range that overlaps its catalog' {
+    $Path = Join-Path $TestDrive 'overlap.obl'
+    New-TestInstallScriptLibrary -Path $Path
+    $Bytes = [IO.File]::ReadAllBytes($Path)
+    [BitConverter]::GetBytes([uint32]0).CopyTo($Bytes, 24)
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+
+    { Get-InstallShieldInstallScriptLibraryInfo -Path $Path } | Should -Throw '*overlaps the catalog*'
+  }
+
+  It 'decodes official 11.5 and 2026 builder OBS libraries when cached' {
+    $Cases = @(
+      [pscustomobject]@{
+        Generation   = '11.5'
+        Path         = Join-Path $Script:InstallShieldFixtureDirectory 'BuilderReference\11.5\Libraries\IFX.obl'
+        Sha256       = '800A653905220939DF0285DC975D06B9157A9140147DA617F822638503EECFD0'
+        Functions    = 913
+        Externals    = 118
+        Resolutions  = 473
+        Instructions = 1005
+      }
+      [pscustomobject]@{
+        Generation   = '2026 R1'
+        Path         = Join-Path $Script:InstallShieldFixtureDirectory 'BuilderReference\2026R1\Libraries\IFX.obl'
+        Sha256       = 'C22BEE4E70454071729616A86B0A3F4BECD1E75C8C3E8F302D196D3BD0E8C002'
+        Functions    = 1156
+        Externals    = 166
+        Resolutions  = 533
+        Instructions = 1088
+      }
+    )
+    if (@($Cases | Where-Object { -not (Test-Path -LiteralPath $_.Path -PathType Leaf) })) {
+      Set-ItResult -Skipped -Because 'The official InstallShield builder OBL fixtures are unavailable.'
+      return
+    }
+
+    foreach ($Case in $Cases) {
+      Get-DumplingsTestFixtureHash -Path $Case.Path | Should -Be $Case.Sha256
+      $Library = Get-InstallShieldInstallScriptLibraryInfo -Path $Case.Path
+      $Program = Read-InstallShieldInstallScriptProgram -Path $Case.Path -LibraryMemberName 'EventsSetup.obs'
+
+      $Library.Members.Name | Should -Be @('EventsPriv.obs', 'EventsSetup.obs', 'EventsSetupPriv.obs', 'PersistPropertyBag.obs')
+      $Program.FormatProfile | Should -Be 'OBS Object Module'
+      $Program.CompilerVersion | Should -Be 'v3.99.002'
+      $Program.Functions | Should -HaveCount $Case.Functions
+      $Program.ExternalSymbols | Should -HaveCount $Case.Externals
+      $Program.AddressResolutions | Should -HaveCount $Case.Resolutions
+      $Program.InstructionCount | Should -Be $Case.Instructions
+      $Program.Warnings | Should -BeNullOrEmpty
+    }
+  }
+
+  It 'classifies a scrambled kUtZ header without mutating the source bytes' {
+    $Decoded = [Text.Encoding]::ASCII.GetBytes('kUtZ' + ([string][char]0 * 124))
+    $Encoded = [byte[]]::new($Decoded.Length)
+    for ($Index = 0; $Index -lt $Decoded.Length; $Index++) {
+      $Value = ($Decoded[$Index] + ($Index % 71)) -band 0xFF
+      $Encoded[$Index] = [byte](((($Value -shl 2) -bor ($Value -shr 6)) -band 0xFF) -bxor 0xF1)
+    }
+    $Path = Join-Path $TestDrive 'scrambled-kutz.inx'
+    [IO.File]::WriteAllBytes($Path, $Encoded)
+
+    $Info = Get-InstallShieldInstallScriptHeaderInfo -Path $Path
+
+    $Info.HeaderKind | Should -Be 'kUtZ'
+    $Info.WasScrambled | Should -BeTrue
+    [IO.File]::ReadAllBytes($Path) | Should -Be $Encoded
   }
 }
 
@@ -599,6 +915,19 @@ Company=Stale response publisher
     $Inspection.MediaMetadata.Warnings -join ' ' | Should -Match 'registry records are malformed or unsupported'
   }
 
+  It 'rolls back an ungrounded Unicode optional graph without hiding an independent valid graph' {
+    $Path = Join-Path $TestDrive 'transactional-major22-data1.hdr'
+    New-TestInstallShieldMediaHeader -Path $Path -RawVersion 0x04000898 -MalformedRegistryPointer
+
+    $Inspection = [Dumplings.InstallShield.InstallShieldCabinetExtractor]::Inspect($Path)
+
+    $Inspection.MediaMetadata.MajorVersion | Should -Be 22
+    $Inspection.MediaMetadata.RegistrySets | Should -BeNullOrEmpty
+    $Inspection.MediaMetadata.RegistryWrites | Should -BeNullOrEmpty
+    $Inspection.MediaMetadata.Shortcuts | Should -HaveCount 1
+    $Inspection.MediaMetadata.Warnings -join ' ' | Should -Not -Match 'registry records are malformed or unsupported'
+  }
+
   It 'promotes only default or statically selected InstallScript media records' {
     $DefaultWrite = [pscustomobject]@{ Root = 'HKLM'; Key = 'Software\Default'; Name = 'Value'; Type = 'REG_SZ'; Data = 'Default'; RegistrySet = '<Default>'; IsDefaultSet = $true; Components = @(); Complete = $true }
     $NamedWrite = [pscustomobject]@{ Root = 'HKCU'; Key = 'Software\Named'; Name = 'Value'; Type = 'REG_SZ'; Data = 'Named'; RegistrySet = 'Optional Set'; IsDefaultSet = $false; Components = @(); Complete = $true }
@@ -994,6 +1323,9 @@ Company=Stale response publisher
     $Info.DisplayName | Should -Be 'Dell Display and Peripheral Manager'
     $Info.MediaSetupTypes | Should -HaveCount 34
     $Info.InstallShieldCabinetSupport.RegistryWrites | Should -HaveCount 52
+    $Info.InstallShieldRelease.ReleaseName | Should -Be 'InstallShield 2025'
+    $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Cabinet17/UnicodeCatalog'
+    $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Script/aLuZ'
     $Info.Warnings -join ' ' | Should -Not -Match 'media (?:setup-type|registry) records are malformed or unsupported'
     $Info.InstallScriptInfo.EmbeddedResponseFile.DialogNames | Should -Contain 'SdWelcomeMaint'
     $Info.InstallScriptInfo.Warnings -join ' ' | Should -Match 'does not match the statically reconstructed fresh-install dialog order'

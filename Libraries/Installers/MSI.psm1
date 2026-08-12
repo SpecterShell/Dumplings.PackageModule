@@ -217,6 +217,8 @@ function Read-MsiProperty {
   )
 
   process {
+    $View = $null
+    $Record = $null
     $Database = switch ($PSCmdlet.ParameterSetName) {
       'Path' {
         $Path = Convert-Path -Path $Path
@@ -248,10 +250,11 @@ function Read-MsiProperty {
       $View = $Database.OpenView($Query)
       $View.Execute()
       $Record = $View.Fetch()
+      if (-not $Record) { throw "The Windows Installer query returned no rows: $Query" }
       $Record.GetString($Field)
     } finally {
-      $Record.Close()
-      $View.Close()
+      if ($Record) { $Record.Close() }
+      if ($View) { $View.Close() }
       switch ($PSCmdlet.ParameterSetName) {
         'Path' { $Database.Close() }
         'Database' { } # Do not close user-provided stream
@@ -1277,6 +1280,8 @@ function Get-MsiInstallerInfo {
         UnresolvedFields                    = [string[]]@()
         AllUsers                            = $Properties['ALLUSERS']
         InstallerBuilder                    = $AppsAndFeaturesInfo.InstallerBuilder
+        SummaryCreatingApplication          = [string]$StaticTableInfo.SummaryInfo.CreatingApp
+        SummaryComments                     = [string]$StaticTableInfo.SummaryInfo.Comments
         InstallShieldProjectType            = $InstallShieldProjectInfo.ProjectType
         InstallShieldProjectTypeEvidence    = $InstallShieldProjectInfo
         InstallShieldLauncherRequirement    = $InstallShieldLauncherRequirement

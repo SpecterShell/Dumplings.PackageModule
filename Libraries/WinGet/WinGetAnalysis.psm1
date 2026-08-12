@@ -114,6 +114,33 @@ function Get-WinGetInstallerExeFamilyDefault {
         )
       }
     }
+    'MicaSetup' {
+      [pscustomobject]@{
+        InstallerType       = 'exe # MicaSetup'
+        InstallModes        = @('interactive')
+        InstallerSwitches   = [ordered]@{}
+        ExpectedReturnCodes = @()
+        Notes               = @(
+          'Use Get-MicaSetupInfo once for compiled Pack/Option, ARP, scope, resource, payload architecture, and dependency evidence.',
+          'Upstream /q and /a handling is unfinished; add silent switches only when the exact fork proves and passes unattended VM validation.',
+          'Treat Kachina Installer as a separate family even when an older package manifest was labeled MicaSetup.'
+        )
+      }
+    }
+    'Kachina' {
+      [pscustomobject]@{
+        InstallerType       = 'exe # Kachina'
+        InstallModes        = @('interactive', 'silent', 'silentWithProgress')
+        InstallerSwitches   = [ordered]@{ Silent = '-S'; SilentWithProgress = '-I'; InstallLocation = '-D "<INSTALLPATH>"' }
+        ExpectedReturnCodes = @()
+        ElevationRequirement = 'elevatesSelf'
+        Notes               = @(
+          'Use Get-KachinaInfo once for compiled configuration, indexed payload, ARP, scope, architecture, runtime, and patch evidence.',
+          'The default Program Files route is machine scope. Non-force UAC strategies can use user scope only when -D selects an eligible user-writable path.',
+          'Configured or appended runtime packages are evidence; do not copy them into manifest Dependencies without validating the application requirements.'
+        )
+      }
+    }
     'Velopack' {
       [pscustomobject]@{
         InstallerType       = 'exe # Velopack'

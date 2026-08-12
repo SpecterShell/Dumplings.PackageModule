@@ -779,9 +779,15 @@ function Get-InstallShieldAdvancedUiInfo {
     $SetupXmlPath = (Get-Item -LiteralPath $Path -Force).FullName
     [xml]$Xml = Get-Content -LiteralPath $SetupXmlPath -Raw
     $Root = $Xml.DocumentElement
-    if ($Root.LocalName -ne 'Setup' -or $Root.NamespaceURI -notmatch '^installshield/\d{4}/bootstrap$') {
+    # Early Suite/Advanced UI releases encoded a point release in the XML
+    # namespace (for example, 2012.2). Preserve that exact token while using
+    # its leading year for release-catalog correlation.
+    $NamespaceMatch = [regex]::Match($Root.NamespaceURI, '^installshield/(?<Release>\d{4}(?:\.\d+)?)/bootstrap$')
+    if ($Root.LocalName -ne 'Setup' -or -not $NamespaceMatch.Success) {
       throw 'Setup.xml is not an InstallShield Advanced UI bootstrap catalog'
     }
+    $ReleaseVersion = $NamespaceMatch.Groups['Release'].Value
+    $ReleaseYear = [int]$ReleaseVersion.Substring(0, 4)
 
     $LanguageSelection = $Root.SelectSingleNode("./*[local-name()='LanguageSelection']")
     $DefaultLanguage = if ($LanguageSelection) { $LanguageSelection.GetAttribute('Default') } else { $null }
@@ -972,7 +978,10 @@ function Get-InstallShieldAdvancedUiInfo {
           EligibilityConditionXml = $EligibilityNode ? $EligibilityNode.OuterXml : $null
           EligibilityCondition    = $EligibilityNode ? (ConvertFrom-InstallShieldSuiteCondition -Node $EligibilityNode) : $null
           Selections              = [string[]]@($Selections | Where-Object { $PackageId -in $_.InstallPackageIds -or $PackageId -in $_.RemovePackageIds } | ForEach-Object Name)
-          HidesNestedArp          = (@($Operations.CommandLine) -match '(?i)(?:^|\s)ARPSYSTEMCOMPONENT\s*=\s*1(?:\s|$)').Count -gt 0
+          # Suite authors can place ARPSYSTEMCOMPONENT in either the ordinary
+          # or silent operation arguments. Both routes install the same nested
+          # MSI and therefore provide evidence that the suite owns visible ARP.
+          HidesNestedArp          = (@($Operations | ForEach-Object { $_.CommandLine; $_.Silent }) -match '(?i)(?:^|\s)ARPSYSTEMCOMPONENT\s*=\s*1(?:\s|$)').Count -gt 0
         })
     }
 
@@ -1062,6 +1071,8 @@ function Get-InstallShieldAdvancedUiInfo {
       Variant                      = 'Advanced UI'
       SuiteId                      = $SuiteId
       Namespace                    = $Root.NamespaceURI
+      ReleaseVersion               = $ReleaseVersion
+      ReleaseYear                  = $ReleaseYear
       DefaultLanguage              = $DefaultLanguage
       Packages                     = [object[]]$Packages
       Selections                   = [object[]]$Selections
@@ -1076,7 +1087,7 @@ function Get-InstallShieldAdvancedUiInfo {
       PackageArchitectures         = [string[]]@($Packages.Architecture | Where-Object { $_ } | Sort-Object -Unique)
       ExecutedPayloads             = [object[]]$ExecutedPayloads
       InstallDirectoryExpression   = $InstallDirectoryExpression
-      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallShield.AdvancedUI'; ParserMajor = 3; Sources = @('Setup.xml bootstrap catalog', 'ARPInfo', 'Parcels', 'SelectionTree', 'Mode', 'Actions', 'Events', 'Operation', 'Eligibility conditions', 'Nested package dispatch') }
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallShield.AdvancedUI'; ParserMajor = 4; Sources = @('Setup.xml bootstrap catalog', 'ARPInfo', 'Parcels', 'SelectionTree', 'Mode', 'Actions', 'Events', 'Operation', 'Eligibility conditions', 'Nested package dispatch') }
     }
   }
 }

@@ -57,11 +57,18 @@ namespace Dumplings.InstallShield.InstallScript
         public static InstallScriptProgram Read(byte[] bytes, int maximumInstructions)
         {
             if (bytes == null) throw new ArgumentNullException("bytes");
+            if (InstallScriptLegacyBytecodeReader.IsLegacyIns(bytes))
+                return InstallScriptLegacyBytecodeReader.Read(bytes, maximumInstructions);
+            if (InstallScriptLibraryReader.IsLibrary(bytes))
+                throw new InvalidDataException("The input is an InstallScript OBL library. Read its member catalog and analyze the embedded programs individually.");
+            if (InstallScriptObjectBytecodeReader.IsObjectModule(bytes))
+                return InstallScriptObjectBytecodeReader.Read(bytes, maximumInstructions);
             if (bytes.Length < 128) throw new InvalidDataException("The decoded InstallScript header is truncated.");
             if (maximumInstructions <= 0) maximumInstructions = DefaultMaximumInstructions;
 
             var reader = new BoundedReader(bytes);
             var program = new InstallScriptProgram();
+            program.FormatProfile = "Modern INX/OBS";
             program.HeaderValue = reader.ReadUInt32();
             reader.ReadUInt16();
             program.InfoString = reader.ReadAscii(InfoStringLength).TrimEnd('\0');
@@ -240,7 +247,7 @@ namespace Dumplings.InstallShield.InstallScript
             }
         }
 
-        private static void DecodeInstruction(BoundedReader reader, InstallScriptInstruction instruction)
+        internal static void DecodeInstruction(BoundedReader reader, InstallScriptInstruction instruction)
         {
             var opcode = instruction.Opcode;
             if (opcode == 0x0020 || opcode == 0x0021)
@@ -430,7 +437,7 @@ namespace Dumplings.InstallShield.InstallScript
             for (var index = 0; index < count; index++) instruction.Operands.Add(ReadOperand(reader));
         }
 
-        private static InstallScriptOperand ReadOperand(BoundedReader reader)
+        internal static InstallScriptOperand ReadOperand(BoundedReader reader)
         {
             var tag = reader.ReadByte();
             switch (tag)
@@ -466,7 +473,7 @@ namespace Dumplings.InstallShield.InstallScript
             return candidate >= 0 && candidate < 0x8000 ? candidate : encodedIndex;
         }
 
-        private static string GetOperationName(int opcode)
+        internal static string GetOperationName(int opcode)
         {
             string value;
             return OperationNames.TryGetValue(opcode, out value) ? value : "Opcode0x" + opcode.ToString("X4");
@@ -478,19 +485,32 @@ namespace Dumplings.InstallShield.InstallScript
                 throw new InvalidDataException("The InstallScript " + name + " range is outside the file.");
         }
 
-        private sealed class BoundedReader
+        internal sealed class BoundedReader
         {
             private readonly byte[] bytes;
+            private readonly long start;
+            private readonly long end;
             private long position;
 
-            internal BoundedReader(byte[] bytes) { this.bytes = bytes; }
+            internal BoundedReader(byte[] bytes) : this(bytes, 0, bytes == null ? 0 : bytes.LongLength) { }
+
+            internal BoundedReader(byte[] bytes, long offset, long length)
+            {
+                if (bytes == null) throw new ArgumentNullException("bytes");
+                if (offset < 0 || length < 0 || offset > bytes.LongLength || length > bytes.LongLength - offset)
+                    throw new ArgumentOutOfRangeException("offset", "The InstallScript reader range is outside the file.");
+                this.bytes = bytes;
+                start = offset;
+                end = offset + length;
+                position = offset;
+            }
 
             internal long Position
             {
                 get { return position; }
                 set
                 {
-                    if (value < 0 || value > bytes.LongLength) throw new EndOfStreamException("An InstallScript offset is outside the file.");
+                    if (value < start || value > end) throw new EndOfStreamException("An InstallScript offset is outside the bounded record.");
                     position = value;
                 }
             }
@@ -538,7 +558,7 @@ namespace Dumplings.InstallShield.InstallScript
 
             private void Ensure(long length)
             {
-                if (length < 0 || position < 0 || position > bytes.LongLength || length > bytes.LongLength - position)
+                if (length < 0 || position < start || position > end || length > end - position)
                     throw new EndOfStreamException("The InstallScript record is truncated.");
             }
         }

@@ -8,21 +8,37 @@
 # Prerequisite elevation: https://docs.revenera.com/installshield27helplib/helplibrary/SetupPrereqEditorAdminPrivs.htm
 # Launcher execution level: https://docs.revenera.com/installshield26helplib/helplibrary/SpecifyingRequiredExecution.htm
 # Cabinet reader source: https://github.com/wixtoolset/wix3
+# InstallShield 3 source: https://github.com/ostrich/setup30
+# InstallShield 5/6+ source: https://github.com/twogood/unshield
 # Supported InstallShield binary structures:
 #
 #   PE launcher -> overlay
 #     +-- PackageForTheWeb metadata -> embedded Microsoft Cabinet to EOF
 #     |   `-- Setup.exe, Setup.ini, setup.inx, and data*.cab
+#     +-- InstallShield 3 FILE resources or external Setup30 media
+#     |   `-- TTCOMP members -> footer catalog in final 2048 bytes
 #     `-- optional "NB10" prefix
 #         +-- encoded "InstallShield"/"ISSetupStream" 46-byte header
 #         |   -> old 0x138-byte or stream attributes -> transformed/zlib ranges
 #         `-- plain ANSI/UTF-16 records -> adjacent bounded payloads
 #
-#   Legacy external Basic MSI media (physical sibling files)
+#   Proprietary media catalog
+#     +-- data1.hdr: ISc( + raw format version + descriptor range
+#     |   +-- v5: 0x3A file records, ANSI strings
+#     |   +-- v6-v16: 0x57 file records, ANSI strings
+#     |   `-- v17+: 0x57 file records, UTF-16 strings
+#     `-- dataN.cab
+#         +-- v5: 40-byte volume header + raw-Deflate chunks
+#         `-- v6+: generation-specific volume ranges and chunk framing
+#
+#   External media (physical sibling files; no application overlay)
 #     +-- setup.exe: InstallShield bootstrapper
 #     +-- Setup.ini
+#     |   +-- [Startup] EngineVersion / ProductGUID
 #     |   +-- [Startup] PackageName -> package section name
 #     |   `-- [PackageName] Location -> exact media-relative MSI path
+#     +-- setup.inx / setup.ins: compiled InstallScript
+#     +-- dataN.hdr / dataN.cab: catalog and split payload volumes
 #     `-- selected sibling MSI: parsed only after safe exact-path resolution
 #
 # File names and lengths come from decoded records. A nested MSI path is selected
@@ -49,6 +65,258 @@ $null = Import-InstallerManagedSource -Path $InstallShieldCabinetSource -TypeNam
 
 # InstallShield extraction and PackageForTheWeb handling.
 
+function Get-InstallShieldClassicArchiveGroup {
+  <#
+  .SYNOPSIS
+    Resolve a classic Setup30 archive or its numbered multipart siblings.
+  .PARAMETER Path
+    Existing archive path. Numeric suffixes are grouped by common basename.
+  .OUTPUTS
+    Ordered absolute archive paths.
+  #>
+  [OutputType([string[]])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $File = Get-Item -LiteralPath $ResolvedPath -Force
+  if ($File.Extension -notmatch '^\.\d+$') { return [string[]]@($ResolvedPath) }
+  $BaseName = $File.Name.Substring(0, $File.Name.Length - $File.Extension.Length)
+  $Parts = @(Get-ChildItem -LiteralPath $File.DirectoryName -File | Where-Object {
+      $_.Name.Substring(0, $_.Name.Length - $_.Extension.Length) -ieq $BaseName -and $_.Extension -match '^\.\d+$'
+    } | Sort-Object { [int]$_.Extension.TrimStart('.') } | Select-Object -ExpandProperty FullName)
+  return $Parts.Count -ge 2 ? [string[]]$Parts : [string[]]@($ResolvedPath)
+}
+
+function Get-InstallShieldClassicArchiveInfo {
+  <#
+  .SYNOPSIS
+    Inspect a raw InstallShield 3 Setup30 archive without extracting it.
+  .PARAMETER Path
+    Path to .Z, _SETUP.LIB, Setup.pkg, or a numbered archive part.
+  .OUTPUTS
+    Validated footer entries and multipart evidence.
+  #>
+  [OutputType([Dumplings.InstallShield.InstallShieldClassicInspection])]
+  param ([Parameter(Mandatory, Position = 0, ValueFromPipeline)][string]$Path)
+
+  process {
+    $Parts = @(Get-InstallShieldClassicArchiveGroup -Path $Path)
+    if ($Parts.Count -gt 1) { return [Dumplings.InstallShield.InstallShieldClassicExtractor]::InspectMultipart($Parts) }
+    return [Dumplings.InstallShield.InstallShieldClassicExtractor]::Inspect($Parts[0], $true)
+  }
+}
+
+function Expand-InstallShieldClassicArchive {
+  <#
+  .SYNOPSIS
+    Extract selected members from an InstallShield 3 Setup30 archive.
+  .PARAMETER Path
+    Path to a raw or numbered multipart archive.
+  .PARAMETER DestinationPath
+    Extraction root.
+  .PARAMETER Name
+    Optional wildcard matched against footer member names.
+  .PARAMETER CollisionAction
+    Existing-output policy.
+  .PARAMETER MaximumExpandedBytes
+    Aggregate TTCOMP output bound.
+  .OUTPUTS
+    Paths written by the bounded TTCOMP decoder.
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory, Position = 0, ValueFromPipeline)][string]$Path,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
+    [ValidateRange(1, [int]::MaxValue)][long]$MaximumExpandedBytes = 1GB
+  )
+
+  process {
+    $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+    $null = New-Item -Path $DestinationPath -ItemType Directory -Force
+    $Parts = @(Get-InstallShieldClassicArchiveGroup -Path $Path)
+    $Inspection = $Parts.Count -gt 1 ?
+    [Dumplings.InstallShield.InstallShieldClassicExtractor]::InspectMultipart($Parts) :
+    [Dumplings.InstallShield.InstallShieldClassicExtractor]::Inspect($Parts[0], $true)
+    $Targets = [Collections.Generic.Dictionary[int, string]]::new()
+    $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $ExpandedBytes = 0L
+    foreach ($Entry in @($Inspection.Entries | Where-Object Name -Like $Name)) {
+      if ([long]$Entry.ExpandedSize -gt $MaximumExpandedBytes - $ExpandedBytes) {
+        throw 'Selected InstallShield 3 output exceeds the configured expansion limit.'
+      }
+      $ExpandedBytes += [long]$Entry.ExpandedSize
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Name `
+        -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if ($Target.ShouldWrite) { $Targets.Add([int]$Entry.Index, [string]$Target.Path) }
+    }
+    if ($Targets.Count -eq 0) { throw "No InstallShield 3 archive entries matched '$Name'." }
+    if ($Parts.Count -gt 1) {
+      return [string[]][Dumplings.InstallShield.InstallShieldClassicExtractor]::ExtractMultipart($Parts, $Targets, $MaximumExpandedBytes)
+    }
+    return [string[]][Dumplings.InstallShield.InstallShieldClassicExtractor]::Extract($Parts[0], $Targets, $MaximumExpandedBytes)
+  }
+}
+
+function Expand-InstallShieldClassicInstaller {
+  <#
+  .SYNOPSIS
+    Extract classic InstallShield 3 FILE resources and Setup30 media.
+  .PARAMETER Path
+    PE wrapper or raw Setup30 archive.
+  .PARAMETER DestinationPath
+    Extraction root.
+  .PARAMETER Name
+    Optional member wildcard.
+  .PARAMETER CollisionAction
+    Existing-output policy.
+  .PARAMETER MaximumExpandedBytes
+    Aggregate bound passed to each legacy archive set.
+  .OUTPUTS
+    Extraction and route evidence, or null when no classic structure exists.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename',
+    [ValidateRange(1, [int]::MaxValue)][long]$MaximumExpandedBytes = 1GB
+  )
+
+  $Path = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  $null = New-Item -Path $DestinationPath -ItemType Directory -Force
+  $ArchiveCandidates = [Collections.Generic.List[string]]::new()
+  $ResourceEvidence = [Collections.Generic.List[object]]::new()
+
+  # A raw archive can be analyzed directly even when its historical extension
+  # is missing or incorrect. Footer validation, rather than the name, decides.
+  $HeaderStream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $IsPeWrapper = $HeaderStream.Length -ge 2 -and $HeaderStream.ReadByte() -eq 0x4D -and $HeaderStream.ReadByte() -eq 0x5A
+  } finally { $HeaderStream.Dispose() }
+  if (-not $IsPeWrapper) {
+    try {
+      $RawInfo = Get-InstallShieldClassicArchiveInfo -Path $Path
+      if ($RawInfo.Entries.Count) { $ArchiveCandidates.Add($Path) }
+    } catch { }
+  }
+
+  # Setup30 self-extractors store archive files as named PE resources of type
+  # FILE. Each resource begins with a four-byte launcher prefix not included in
+  # the archive. Export only validated resource ranges beneath the destination.
+  try {
+    foreach ($Resource in @(Get-PEResourceInfo -Path $Path | Where-Object TypeName -CEQ 'FILE')) {
+      if ([string]::IsNullOrWhiteSpace([string]$Resource.Name) -or $Resource.Size -le 4) { continue }
+      $ResourceRoot = Join-Path $DestinationPath '_Classic3Resources'
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $ResourceRoot -RelativePath ([string]$Resource.Name) `
+        -CollisionAction $CollisionAction
+      if (-not $Target.ShouldWrite) { continue }
+      $null = New-Item -Path (Split-Path -Path $Target.Path -Parent) -ItemType Directory -Force
+      $Source = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+      $Output = [IO.File]::Open($Target.Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+      try { Copy-BinaryStreamRange -Source $Source -Destination $Output -Offset ($Resource.Offset + 4) -Length ($Resource.Size - 4) }
+      finally { $Output.Dispose(); $Source.Dispose() }
+      try {
+        $ResourceInfo = Get-InstallShieldClassicArchiveInfo -Path $Target.Path
+        if ($ResourceInfo.Entries.Count) {
+          $ArchiveCandidates.Add($Target.Path)
+          $ResourceEvidence.Add([pscustomobject]@{ Name = $Resource.Name; Offset = $Resource.Offset; Size = $Resource.Size; Path = $Target.Path })
+        }
+      } catch { }
+    }
+  } catch { }
+
+  # External-media Setup.exe launchers keep the classic archives beside the PE.
+  # Limit discovery to canonical Setup30 names and numeric multipart members.
+  if ([IO.Path]::GetExtension($Path) -ieq '.exe') {
+    foreach ($Sibling in @(Get-ChildItem -LiteralPath (Split-Path -Path $Path -Parent) -File | Where-Object {
+          $_.Name -imatch '^(?:setup\.pkg|_setup\.lib|.+\.z|.+\.\d+)$'
+        })) {
+      try {
+        $SiblingInfo = Get-InstallShieldClassicArchiveInfo -Path $Sibling.FullName
+        if ($SiblingInfo.Entries.Count -and -not $ArchiveCandidates.Contains($Sibling.FullName)) { $ArchiveCandidates.Add($Sibling.FullName) }
+      } catch { }
+    }
+  }
+
+  if ($ArchiveCandidates.Count -eq 0) { return $null }
+  $Extracted = [Collections.Generic.List[string]]::new()
+  $Entries = [Collections.Generic.List[object]]::new()
+  $ProcessedGroups = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  $RemainingExpandedBytes = $MaximumExpandedBytes
+  foreach ($ArchivePath in $ArchiveCandidates) {
+    $Parts = @(Get-InstallShieldClassicArchiveGroup -Path $ArchivePath)
+    $GroupKey = $Parts -join '|'
+    if (-not $ProcessedGroups.Add($GroupKey)) { continue }
+    $Info = $Parts.Count -gt 1 ?
+    [Dumplings.InstallShield.InstallShieldClassicExtractor]::InspectMultipart($Parts) :
+    [Dumplings.InstallShield.InstallShieldClassicExtractor]::Inspect($Parts[0], $true)
+    foreach ($Entry in $Info.Entries) { $Entries.Add($Entry) }
+    $SelectedExpandedBytes = [long](@($Info.Entries | Where-Object Name -Like $Name | Measure-Object ExpandedSize -Sum).Sum)
+    if ($SelectedExpandedBytes -gt $RemainingExpandedBytes) {
+      throw 'Selected InstallShield 3 output exceeds the aggregate extraction limit.'
+    }
+    $ArchiveRoot = Join-Path $DestinationPath (Join-Path '_Classic3' ([IO.Path]::GetFileNameWithoutExtension($Parts[0])))
+    foreach ($OutputPath in @(Expand-InstallShieldClassicArchive -Path $Parts[0] -DestinationPath $ArchiveRoot -Name $Name `
+          -CollisionAction $CollisionAction -MaximumExpandedBytes $RemainingExpandedBytes)) { $Extracted.Add($OutputPath) }
+    $RemainingExpandedBytes -= $SelectedExpandedBytes
+  }
+
+  return [pscustomobject][ordered]@{
+    Format          = 'InstallShield 3 Setup30'
+    DestinationPath = $DestinationPath
+    ExtractedFiles  = [string[]]$Extracted.ToArray()
+    Archives        = [string[]]$ArchiveCandidates.ToArray()
+    Entries         = [object[]]$Entries.ToArray()
+    Evidence        = [object[]]$ResourceEvidence.ToArray()
+    SupportStatus   = 'Supported'
+    Limitations     = [string[]]@('The historical crc_or_stamp field is preserved but is not treated as a verified checksum.')
+  }
+}
+
+function Invoke-InstallShieldExtractionWithClassicFallback {
+  <#
+  .SYNOPSIS
+    Try the modern overlay parser, then the isolated InstallShield 3 route.
+  .PARAMETER Path
+    Resolved installer or classic archive path.
+  .PARAMETER DestinationPath
+    Extraction root.
+  .PARAMETER Name
+    Optional member wildcard.
+  .PARAMETER CollisionAction
+    Existing-output policy.
+  .PARAMETER MaximumExpandedBytes
+    Outer extraction bound.
+  .PARAMETER SourceStream
+    Optional caller-owned PE stream used only by the modern overlay route.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [string]$Name = '*',
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename',
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = $Script:InstallShieldOverlayMaximumExpandedBytes,
+    [IO.Stream]$SourceStream
+  )
+
+  try {
+    return Invoke-InstallShieldExtraction -Path $Path -DestinationPath $DestinationPath -Name $Name `
+      -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes -SourceStream $SourceStream
+  } catch {
+    $ModernError = $_
+    $ClassicLimit = [Math]::Min($MaximumExpandedBytes, [long][int]::MaxValue)
+    $Classic = Expand-InstallShieldClassicInstaller -Path $Path -DestinationPath $DestinationPath -Name $Name `
+      -CollisionAction $CollisionAction -MaximumExpandedBytes $ClassicLimit
+    if ($Classic) { return $Classic }
+    throw $ModernError
+  }
+}
+
 function ConvertFrom-InstallShieldCString {
   <#
   .SYNOPSIS
@@ -70,6 +338,25 @@ function ConvertFrom-InstallShieldCString {
   $Length = [Array]::IndexOf($Bytes, [byte]0)
   if ($Length -lt 0) { $Length = $Bytes.Length }
   return $Encoding.GetString($Bytes, 0, $Length).TrimEnd([char]0)
+}
+
+function ConvertFrom-InstallShieldCabinetVersion {
+  <#
+  .SYNOPSIS
+    Normalize the raw uint32 following ISc( to its cabinet major version.
+  .PARAMETER RawVersion
+    Raw little-endian common-header version field.
+  #>
+  [OutputType([int])]
+  param ([Parameter(Mandatory)][uint32]$RawVersion)
+
+  $Family = $RawVersion -shr 24
+  if ($Family -eq 1) { return [int](($RawVersion -shr 12) -band 0x0F) }
+  if ($Family -in 2, 4) {
+    $Value = [int]($RawVersion -band 0xFFFF)
+    return $Value -eq 0 ? 0 : [int]($Value / 100)
+  }
+  return 0
 }
 
 function Test-InstallShieldZlibStream {
@@ -273,25 +560,26 @@ function Skip-InstallShieldNb10Prefix {
   $Prefix = [System.Text.Encoding]::ASCII.GetString((Read-PEFileBytes -Stream $Stream -Offset $Offset -Count 4))
   if ($Prefix -ne 'NB10') { return $Offset }
 
-  # Some launchers retain a short CodeView/debug prefix at the overlay start.
-  # Scan only its bounded printable fields rather than searching arbitrarily
-  # for a later archive signature that might belong to embedded content.
-  $Scan = $Offset + 4
-  $PrintableRuns = 0
-  $InPrintable = $false
-  while ($Scan -lt $Stream.Length -and $Scan -lt $Offset + 1024) {
-    $Stream.Position = $Scan
-    $Byte = $Stream.ReadByte()
-    if ($Byte -ge 0x20 -and $Byte -le 0xFE) {
-      if (-not $InPrintable) {
-        $PrintableRuns++
-        $InPrintable = $true
-      }
-    } else {
-      $InPrintable = $false
+  # The NB10 prefix contains binary timestamp fields before the source-PDB
+  # path. Counting printable runs is unsafe because timestamp bytes can look
+  # like delimiters and make the cursor stop before the actual catalog header.
+  # Search only the bounded CodeView prefix for the two format signatures, then
+  # validate the complete fixed header before accepting its offset.
+  $SearchStart = $Offset + 4
+  $SearchLength = [Math]::Min(1024L, $Stream.Length - $SearchStart)
+  if ($SearchLength -le 0) { return $Offset }
+
+  $Candidates = [System.Collections.Generic.List[long]]::new()
+  foreach ($Signature in @('InstallShield', 'ISSetupStream')) {
+    $Pattern = [System.Text.Encoding]::ASCII.GetBytes($Signature)
+    foreach ($Candidate in @(Find-BinaryPattern -Stream $Stream -Pattern $Pattern -StartOffset $SearchStart -Length $SearchLength -Maximum 8)) {
+      if (-not $Candidates.Contains([long]$Candidate)) { $Candidates.Add([long]$Candidate) }
     }
-    $Scan++
-    if ($PrintableRuns -ge 2 -and $Byte -lt 0x20) { return $Scan }
+  }
+
+  foreach ($Candidate in @($Candidates | Sort-Object)) {
+    $Header = Get-InstallShieldHeader -Stream $Stream -Offset $Candidate
+    if ($Header -and $Header.NumFiles -gt 0) { return [long]$Candidate }
   }
 
   return $Offset
@@ -933,12 +1221,22 @@ function Expand-InstallShieldCabinetSupport {
   .DESCRIPTION
     InstallShield script-driven media often stores setup.inx inside an ISc(
     cabinet set rather than beside Setup.exe. This helper enumerates data*.hdr
-    catalogs and extracts only setup.inx, setup.ins, or setup.iss. Application
-    payloads remain compressed, avoiding a potentially multi-gigabyte expansion.
+    catalogs and legacy data1.cab catalogs, then extracts only setup.inx,
+    setup.ins, setup.iss, compiled OBL libraries, or string tables from modern
+    media. Application payloads remain compressed, avoiding a potentially
+    multi-gigabyte expansion. Legacy InstallShield 5 scripts are external media
+    files, so their application cabinet is cataloged but not searched for nested
+    setup scripts that belong to installed templates or products.
     The same bounded header read returns registry sets, shell objects, setup
     types, feature/component topology, and cabinet file-group ranges.
   .PARAMETER ExtractedPath
-    Resolved outer InstallShield extraction root containing data*.hdr/cab files.
+    Resolved media root containing data*.hdr/cab files. For external media this
+    is the source directory beside setup.exe and remains read-only. A canonical
+    data1.cab is accepted as a catalog only when its directory has no data*.hdr
+    catalog and its first four bytes are ISc(.
+  .PARAMETER DestinationPath
+    Directory that receives selected setup.inx, setup.ins, setup.iss, OBL, and
+    string table files. Defaults to ExtractedPath for embedded-media compatibility.
   .PARAMETER CollisionAction
     Existing-file policy applied before selected support files are decoded.
   .OUTPUTS
@@ -949,9 +1247,15 @@ function Expand-InstallShieldCabinetSupport {
     [Parameter(Mandatory)]
     [string]$ExtractedPath,
 
+    [string]$DestinationPath = $ExtractedPath,
+
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
     [string]$CollisionAction = 'Rename'
   )
+
+  $ExtractedPath = Resolve-InstallerFileSystemPath -Path $ExtractedPath -PathType Container
+  $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
+  $null = New-Item -Path $DestinationPath -ItemType Directory -Force
 
   $Warnings = [Collections.Generic.List[string]]::new()
   $SupportEntries = [Collections.Generic.List[object]]::new()
@@ -962,22 +1266,53 @@ function Expand-InstallShieldCabinetSupport {
   $MediaSetupTypes = [Collections.Generic.List[object]]::new()
   $ShellFolders = [Collections.Generic.List[object]]::new()
   $Shortcuts = [Collections.Generic.List[object]]::new()
+  $MediaVersions = [Collections.Generic.List[object]]::new()
   $CatalogEntryCount = 0
   $ExtractedFiles = [Collections.Generic.List[string]]::new()
   $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $ExpandedBytes = 0L
-  # Only canonical dataN.hdr names are proprietary cabinet catalogs. This also
-  # excludes collision-renamed leftovers such as data1 (1).hdr and unrelated
-  # InstallShield support headers from repeated analysis of the same directory.
-  $HeaderFiles = @(Get-ChildItem -LiteralPath $ExtractedPath -Filter '*.hdr' -Recurse -File -ErrorAction SilentlyContinue |
-      Where-Object Name -CMatch '^data\d+\.hdr$' | Sort-Object FullName)
-  foreach ($HeaderFile in $HeaderFiles) {
+  # Enumerate the media tree once. Modern sets expose canonical dataN.hdr
+  # catalogs. Early InstallShield 5 media has no .hdr and places the catalog at
+  # the start of data1.cab; later dataN.cab files are payload volumes and must
+  # not be parsed as independent catalogs.
+  $MediaFiles = @(Get-ChildItem -LiteralPath $ExtractedPath -Recurse -File -ErrorAction SilentlyContinue)
+  $HeaderFiles = @($MediaFiles | Where-Object Name -Match '^data\d+\.hdr$')
+  $HeaderDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($HeaderFile in $HeaderFiles) { $null = $HeaderDirectories.Add($HeaderFile.DirectoryName) }
+  $LegacyCatalogFiles = [Collections.Generic.List[IO.FileInfo]]::new()
+  foreach ($CabinetFile in @($MediaFiles | Where-Object Name -Match '^data1\.cab$')) {
+    if ($HeaderDirectories.Contains($CabinetFile.DirectoryName) -or $CabinetFile.Length -lt 20) { continue }
+    $CabinetStream = [IO.File]::Open($CabinetFile.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try { $Signature = [Text.Encoding]::ASCII.GetString((Read-BinaryBytes -Stream $CabinetStream -Offset 0 -Count 4)) } finally { $CabinetStream.Dispose() }
+    if ($Signature -ceq 'ISc(') { $LegacyCatalogFiles.Add($CabinetFile) }
+  }
+  $CatalogFiles = @($HeaderFiles + $LegacyCatalogFiles.ToArray() | Sort-Object FullName)
+  foreach ($HeaderFile in $CatalogFiles) {
+    $Inspection = $null
     try {
       # The managed reader validates ISc(, version, descriptor/table ranges,
       # record counts, per-entry ranges, Deflate framing, expanded size, and MD5.
       $Inspection = [Dumplings.InstallShield.InstallShieldCabinetExtractor]::Inspect($HeaderFile.FullName)
       $Entries = @($Inspection.Entries)
       $CatalogEntryCount += $Entries.Count
+      $MajorVersion = [int]$Inspection.MediaMetadata.MajorVersion
+      # The known Unicode catalog profile begins at major 17. A newer major can
+      # still satisfy the bounded base layout, but unobserved extensions prevent
+      # us from claiming complete support for the future format.
+      $IsFutureProfile = $MajorVersion -gt 32
+      $ProfileLimitations = [Collections.Generic.List[string]]::new()
+      if ($IsFutureProfile) { $ProfileLimitations.Add("Cabinet major $MajorVersion is newer than the latest source-backed profile (32); the parsed base layout may omit future fields.") }
+      if ($MajorVersion -ge 6 -and $MajorVersion -lt 17) { $ProfileLimitations.Add("Cabinet major $MajorVersion has a supported core catalog, but its generation-specific optional registry and shell pointer layouts are not projected.") }
+      if ($MajorVersion -ge 17 -and $MajorVersion -lt 30) { $ProfileLimitations.Add("Cabinet major $MajorVersion has a supported core catalog. Optional registry and shell graphs are published only when their complete bounded pointer structure validates.") }
+      $MediaVersions.Add([pscustomobject][ordered]@{
+          HeaderPath        = $HeaderFile.FullName
+          RawVersion        = [uint32]$Inspection.MediaMetadata.RawVersion
+          MajorVersion      = $MajorVersion
+          StructuralProfile = [string]$Inspection.MediaMetadata.StructuralProfile
+          Signature         = 'ISc('
+          SupportStatus     = $IsFutureProfile ? 'Partial' : 'Supported'
+          Limitations       = [string[]]$ProfileLimitations.ToArray()
+        })
 
       # The same bounded header read also exposes author-authored registry and
       # shell records. Named registry sets are definitions, not proof that the
@@ -1075,9 +1410,19 @@ function Expand-InstallShieldCabinetSupport {
           })
       }
 
-      $SelectedEntries = @($Entries | Where-Object {
-          $_.IsValid -and ($_.Name -cin @('setup.inx', 'setup.ins', 'setup.iss') -or $_.Name -like 'StringTable_*.ips')
-        })
+      $SelectedEntries = if ($MajorVersion -in 0, 5) {
+        # InstallShield 5 keeps its active setup.ins beside Setup.exe. A legacy
+        # application cabinet may itself install samples or templates named
+        # setup.ins; analyzing those as the outer script would be incorrect.
+        @()
+      } else {
+        @($Entries | Where-Object {
+            # OBL files are build-time object libraries installed as payloads;
+            # they are not programs selected by the setup runtime. Analyze an
+            # OBL only through the explicit library API, never as an outer route.
+            $_.IsValid -and ($_.Name -cin @('setup.inx', 'setup.ins', 'setup.iss') -or $_.Name -like 'StringTable_*.ips')
+          })
+      }
       if (-not $SelectedEntries) { continue }
       $Targets = [Collections.Generic.Dictionary[int, string]]::new()
       foreach ($Entry in $SelectedEntries) {
@@ -1099,7 +1444,7 @@ function Expand-InstallShieldCabinetSupport {
         # Keep each ordinal in its own directory. The catalog may legitimately
         # contain duplicate setup.inx names for different components.
         $RelativePath = Join-Path '_InstallShieldCabinet' (Join-Path $HeaderFile.BaseName (Join-Path ([string]$Entry.Index) ([string]$Entry.Name)))
-        $Target = Resolve-InstallerExtractionTarget -DestinationPath $ExtractedPath -RelativePath $RelativePath `
+        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $RelativePath `
           -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
         if ($Target.ShouldWrite) { $Targets.Add([int]$Entry.Index, [string]$Target.Path) }
       }
@@ -1112,12 +1457,41 @@ function Expand-InstallShieldCabinetSupport {
         $ExtractedFiles.Add([string]$OutputPath)
       }
     } catch {
+      $CabinetError = $_
       $Warnings.Add("InstallShield cabinet support metadata could not be decoded from '$($HeaderFile.Name)': $($_.Exception.Message)")
+      # Preserve a route for malformed, unsupported, or future ISc( catalogs
+      # rather than reducing that layer to an unstructured warning. A missing
+      # payload volume after successful catalog inspection is an extraction
+      # failure and must not create a second malformed-catalog route.
+      if (-not $Inspection) {
+        try {
+          $HeaderStream = [IO.File]::Open($HeaderFile.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+          try {
+            if ($HeaderStream.Length -lt 8) { throw 'The ISc( common header is truncated.' }
+            $HeaderBytes = Read-BinaryBytes -Stream $HeaderStream -Offset 0 -Count 8
+          } finally { $HeaderStream.Dispose() }
+          if ([Text.Encoding]::ASCII.GetString($HeaderBytes, 0, 4) -ceq 'ISc(') {
+            $RawVersion = [BitConverter]::ToUInt32($HeaderBytes, 4)
+            $BaseException = $CabinetError.Exception.GetBaseException()
+            $MediaVersions.Add([pscustomobject][ordered]@{
+                HeaderPath        = $HeaderFile.FullName
+                RawVersion        = [uint32]$RawVersion
+                MajorVersion      = ConvertFrom-InstallShieldCabinetVersion -RawVersion $RawVersion
+                StructuralProfile = 'UnknownOrMalformedCatalog'
+                Signature         = 'ISc('
+                SupportStatus     = $BaseException -is [NotSupportedException] ? 'Unsupported' : 'Malformed'
+                Limitations       = [string[]]@($BaseException.Message)
+              })
+          }
+        } catch { }
+      }
     }
   }
 
   return [pscustomobject][ordered]@{
-    HeaderFiles       = [string[]]@($HeaderFiles | Select-Object -ExpandProperty FullName)
+    HeaderFiles       = [string[]]@($CatalogFiles | Select-Object -ExpandProperty FullName)
+    CatalogFiles      = [string[]]@($CatalogFiles | Select-Object -ExpandProperty FullName)
+    ExtractionRoot    = $DestinationPath
     CatalogEntryCount = $CatalogEntryCount
     SupportEntries    = [object[]]$SupportEntries.ToArray()
     RegistrySets      = [object[]]$RegistrySets.ToArray()
@@ -1125,6 +1499,7 @@ function Expand-InstallShieldCabinetSupport {
     CabinetFileGroups = [object[]]$CabinetFileGroups.ToArray()
     CabinetComponents = [object[]]$CabinetComponents.ToArray()
     MediaSetupTypes   = [object[]]$MediaSetupTypes.ToArray()
+    MediaVersions     = [object[]]$MediaVersions.ToArray()
     ShellFolders      = [object[]]$ShellFolders.ToArray()
     Shortcuts         = [object[]]$Shortcuts.ToArray()
     ExtractedFiles    = [string[]]$ExtractedFiles.ToArray()
@@ -1492,11 +1867,15 @@ function Get-InstallShieldExternalMediaSelection {
     Resolved path to the InstallShield setup launcher.
   .PARAMETER ExtractedPath
     Existing extraction root used to preserve the normal result contract.
+  .PARAMETER Configuration
+    Optional already parsed Setup.ini dictionary. Supplying it avoids parsing
+    the same bounded configuration twice during a top-level analysis.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][string]$InstallerPath,
-    [Parameter(Mandatory)][string]$ExtractedPath
+    [Parameter(Mandatory)][string]$ExtractedPath,
+    [System.Collections.IDictionary]$Configuration
   )
 
   $MediaRoot = [IO.Path]::GetDirectoryName($InstallerPath)
@@ -1504,7 +1883,9 @@ function Get-InstallShieldExternalMediaSelection {
   if (-not (Test-Path -LiteralPath $SetupIniPath -PathType Leaf)) { return $null }
 
   $SetupIniFile = Get-Item -LiteralPath $SetupIniPath -Force
-  $Configuration = Read-InstallShieldIniConfiguration -Path $SetupIniFile.FullName
+  if ($null -eq $Configuration) {
+    $Configuration = Read-InstallShieldIniConfiguration -Path $SetupIniFile.FullName
+  }
   $PackageName = [string](Get-InstallShieldIniValue -Configuration $Configuration -Section 'Startup' -Name 'PackageName')
   $PackageLocation = if ([string]::IsNullOrWhiteSpace($PackageName)) {
     $null
@@ -1635,7 +2016,7 @@ function Expand-InstallShieldInstaller {
     }
 
     $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
-    Invoke-InstallShieldExtraction -Path $InstallerPath -DestinationPath $DestinationPath -Name $Name `
+    Invoke-InstallShieldExtractionWithClassicFallback -Path $InstallerPath -DestinationPath $DestinationPath -Name $Name `
       -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes | Out-Null
     return $DestinationPath
   }

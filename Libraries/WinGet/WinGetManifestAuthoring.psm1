@@ -330,6 +330,7 @@ function Get-WinGetAuthoringAnalysisProjection {
   $DisplayVersion = Get-WinGetAuthoringPropertyValue -Source $Sources -Name @('DisplayVersion', 'ProductVersion')
   $Scope = Get-WinGetAuthoringPropertyValue -Source $Sources -Name Scope
   $SupportedScopes = @(Get-WinGetAuthoringPropertyValue -Source $Sources -Name SupportedScopes)
+  $DefaultScopeIsAuthoritative = [bool](Get-WinGetAuthoringPropertyValue -Source $Sources -Name DefaultScopeIsAuthoritative)
   $Architecture = ConvertTo-WinGetAuthoringArchitecture -Architecture ([string](Get-WinGetAuthoringPropertyValue -Source $Sources -Name @('PackageArchitecture', 'Architecture', 'RecommendedWinGetArchitecture')))
   $SupportedArchitectures = @(
     @(Get-WinGetAuthoringPropertyValue -Source $Sources -Name @('RecommendedWinGetArchitectures', 'SupportedArchitectures')) |
@@ -360,7 +361,7 @@ function Get-WinGetAuthoringAnalysisProjection {
 
   if ($SupportedScopes.Count -gt 1) {
     $Suggestions['Scope'] = @($SupportedScopes)
-    $Scope = $null
+    if (-not $DefaultScopeIsAuthoritative) { $Scope = $null }
   }
   if (-not $Architecture -and $SupportedArchitectures.Count -gt 1) {
     $Suggestions['Architectures'] = @($SupportedArchitectures)

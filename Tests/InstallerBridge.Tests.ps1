@@ -276,12 +276,36 @@ stagingPercentage: 25
     }
   }
 
+  It 'Should pass external Inno disk sources through the parser CLI bridge' {
+    $FixtureRoot = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\InnoMultiDisk'
+    $InstallerFixture = Join-Path $FixtureRoot 'inno-multidisk-6.7.exe'
+    if (-not (Test-Path -LiteralPath $InstallerFixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The optional VM-compiled Inno multi-disk fixture is not cached.'
+      return
+    }
+
+    # Keep setup.exe away from its slices so success proves that the array-valued
+    # DiskSourcePath survives JSON bridge serialization and CLI parameter binding.
+    $StagingPath = Join-Path $TestDrive 'inno-multidisk-bridge'
+    $null = New-Item -Path $StagingPath -ItemType Directory
+    $Installer = Join-Path $StagingPath 'inno-multidisk-6.7.exe'
+    Copy-Item -LiteralPath $InstallerFixture -Destination $Installer
+    $ExpandedPath = Join-Path $StagingPath 'expanded'
+
+    $Extracted = @(Expand-InnoInstaller -Path $Installer -DestinationPath $ExpandedPath -Name 'payload.bin' `
+        -DiskSourcePath $FixtureRoot -CollisionAction Rename)
+    $Extracted | Should -HaveCount 1
+    $Extracted[0].Length | Should -Be 12000000
+    (Get-FileHash -LiteralPath $Extracted[0].FullName -Algorithm SHA256).Hash | Should -Be '5A8E2B4A1B862AFDE493EBCE8CE78817EF317CE9D4E5979EFB86AA968E26886F'
+  }
+
   It 'Should return Inno 5.3.3 metadata through the parser CLI bridge' {
     $Fixture = Get-InstallerFixture -Name 'WingGateway-1.1.2.exe' `
       -Url 'https://www.wftpserver.com/download/WingGateway_Setup.exe' `
       -Sha256 'F867D26C4957FDF0C95E6F4E843386434DC94F8DC4BE8B426D8BBEE1E940B2E1'
 
     $Info = Get-InnoInfo -Path $Fixture
+    $Format = Get-InnoFormatInfo -Path $Fixture
 
     $Info.Signature | Should -Be 'Inno Setup Setup Data (5.3.3) (u)'
     $Info.ProductCode | Should -Be '{1F5A1D86-7CAF-43D9-B8E4-572D0CA73208}_is1'
@@ -289,6 +313,30 @@ stagingPercentage: 25
     $Info.Scope | Should -Be 'machine'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $Info.ParserVersionInfo.FileLocationDigestAlgorithm | Should -Be 'MD5'
+    $Info.MetadataTablesResolved | Should -BeTrue
+    $Info.MetadataRecordCounts.Registry | Should -Be 1
+    @($Info.RegistryWrites).Count | Should -Be 1
+    $Format.CatalogFormatId | Should -Be '5303-u'
+    $Format.EditionId | Should -Be 'official'
+    $Format.CharacterMode | Should -Be 'Unicode'
+    $Format.LoaderRoute | Should -Be 'resource-v1'
+    $Format.MetadataRoute | Should -Be 'chunked32'
+  }
+
+  It 'Should return bounded Inno Pascal Script evidence through the parser CLI bridge' {
+    $Fixture = Get-InstallerFixture -Name 'winscp-6.5.6-setup.exe' -Url 'https://sourceforge.net/projects/winscp/files/WinSCP/6.5.6/WinSCP-6.5.6-Setup.exe/download' -UseSourceForgeMetaRefresh
+    $Info = Get-InnoPascalScriptInfo -Path $Fixture -IncludeDisassembly -MaximumDisassemblyCharacters 2048
+    $CombinedInfo = Get-InnoInfo -Path $Fixture -IncludePascalScriptAnalysis
+
+    $Info.FileVersion | Should -Be 23
+    $Info.FunctionCount | Should -Be 223
+    $Info.Functions | Should -HaveCount 223
+    $Info.RuntimeEffects | Should -Not -BeNullOrEmpty
+    $Info.DllImports | Should -HaveCount 3
+    $Info.Disassembly.Length | Should -Be 2048
+    $Info.DisassemblyTruncated | Should -BeTrue
+    $CombinedInfo.DisplayName | Should -Be 'WinSCP 6.5.6'
+    $CombinedInfo.PascalScriptInfo.Functions | Should -HaveCount 223
   }
 
   It 'Should read MSI metadata through the InstallerParsers Advanced Installer bridge' {

@@ -116,28 +116,57 @@ namespace Dumplings.InstallShield
             headerPath = Path.GetFullPath(headerPath);
             if (!File.Exists(headerPath)) throw new FileNotFoundException("The InstallShield cabinet header does not exist.", headerPath);
 
-            // The parser needs random access to the descriptor/string tables,
-            // but a catalog should never justify an unbounded ReadAllBytes.
-            // Bound the source before allocation and cap object fan-out below.
-            var headerLength = new FileInfo(headerPath).Length;
-            if (headerLength > MaximumHeaderBytes)
-                throw new InvalidDataException("The InstallShield cabinet header exceeds the 256 MiB catalog limit.");
-            var header = File.ReadAllBytes(headerPath);
-            if (header.Length < CommonHeaderSize) throw new InvalidDataException("The InstallShield cabinet header is truncated.");
-            var common = ReadCommonHeader(header, 0);
+            // Early media stores the catalog at the beginning of data1.cab,
+            // followed by an arbitrarily large payload. Read only the common
+            // header and descriptor prefix first, derive the complete catalog
+            // range, then materialize that bounded prefix for random access.
+            byte[] header;
+            CommonHeader common;
+            uint fileTableOffset;
+            uint fileTableSize;
+            uint fileTableSize2;
+            uint directoryCount;
+            uint fileCount;
+            uint fileTableOffset2;
+            using (var source = new FileStream(headerPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                if (source.Length < CommonHeaderSize)
+                    throw new InvalidDataException("The InstallShield cabinet header is truncated.");
+                common = ReadCommonHeader(ReadExactly(source, CommonHeaderSize), 0);
+                if (common.DescriptorSize < 0x30)
+                    throw new InvalidDataException("The InstallShield cabinet descriptor is too small for its required fields.");
+
+                var descriptorBaseCandidate = (long)common.DescriptorOffset;
+                var descriptorEnd = checked(descriptorBaseCandidate + common.DescriptorSize);
+                if (descriptorBaseCandidate < CommonHeaderSize || descriptorEnd > source.Length)
+                    throw new InvalidDataException("The InstallShield cabinet descriptor is outside the source file.");
+                source.Position = descriptorBaseCandidate;
+                var descriptorHeader = ReadExactly(source, 0x30);
+                var descriptorCursor = 0x0C;
+                fileTableOffset = ReadUInt32(descriptorHeader, descriptorCursor); descriptorCursor += 8;
+                fileTableSize = ReadUInt32(descriptorHeader, descriptorCursor); descriptorCursor += 4;
+                fileTableSize2 = ReadUInt32(descriptorHeader, descriptorCursor); descriptorCursor += 4;
+                directoryCount = ReadUInt32(descriptorHeader, descriptorCursor); descriptorCursor += 12;
+                fileCount = ReadUInt32(descriptorHeader, descriptorCursor); descriptorCursor += 4;
+                fileTableOffset2 = ReadUInt32(descriptorHeader, descriptorCursor);
+
+                var catalogTableEnd = checked(descriptorBaseCandidate + fileTableOffset + fileTableSize);
+                var requiredBytes = Math.Max(descriptorEnd, catalogTableEnd);
+                if (requiredBytes > source.Length)
+                    throw new InvalidDataException("The InstallShield cabinet catalog is truncated.");
+                if (requiredBytes > MaximumHeaderBytes || requiredBytes > int.MaxValue)
+                    throw new InvalidDataException("The InstallShield cabinet catalog exceeds the 256 MiB limit.");
+                source.Position = 0;
+                header = ReadExactly(source, checked((int)requiredBytes));
+            }
             var major = GetMajorVersion(common.Version);
-            if (major < 6) throw new NotSupportedException("The focused InstallShield cabinet reader supports version 6 and later.");
+            // Early InstallShield 5 media uses family-1 version 0. Unshield
+            // treats that profile separately from the later version-5
+            // descriptor because the earlier record has no trailing MD5.
+            if (major != 0 && major < 5)
+                throw new NotSupportedException("The focused InstallShield cabinet reader supports the legacy version-0 profile and version 5 or later.");
 
             var descriptorBase = CheckedRange(header, common.DescriptorOffset, common.DescriptorSize, "cabinet descriptor");
-            if (common.DescriptorSize < 0x30)
-                throw new InvalidDataException("The InstallShield cabinet descriptor is too small for its required fields.");
-            var cursor = CheckedAdd(descriptorBase, 0x0C, header.Length, "cabinet descriptor fields");
-            var fileTableOffset = ReadUInt32(header, cursor); cursor += 8;
-            var fileTableSize = ReadUInt32(header, cursor); cursor += 4;
-            var fileTableSize2 = ReadUInt32(header, cursor); cursor += 4;
-            var directoryCount = ReadUInt32(header, cursor); cursor += 12;
-            var fileCount = ReadUInt32(header, cursor); cursor += 4;
-            var fileTableOffset2 = ReadUInt32(header, cursor);
             if (fileTableSize != fileTableSize2) throw new InvalidDataException("InstallShield cabinet file-table sizes do not match.");
             if (directoryCount > MaximumDirectoryCount || fileCount > MaximumFileCount)
                 throw new InvalidDataException("InstallShield cabinet catalog counts exceed parser limits.");
@@ -154,35 +183,87 @@ namespace Dumplings.InstallShield
             for (var index = 0; index < directories.Length; index++)
                 directories[index] = ReadCatalogString(header, CheckedAdd(tableBase, offsets[index], tableEnd, "directory name"), tableEnd, major);
 
-            var descriptorTable = CheckedAdd(tableBase, fileTableOffset2, tableEnd, "file descriptor table");
-            CheckedSubrange(descriptorTable, checked((long)fileCount * ModernFileDescriptorSize), tableBase, tableEnd, "file descriptor table");
             var entries = new List<InstallShieldCabinetEntry>((int)fileCount);
             for (var index = 0; index < (int)fileCount; index++)
             {
-                var record = descriptorTable + index * (long)ModernFileDescriptorSize;
-                var flags = ReadUInt16(header, record);
-                var expandedSize = ToInt64(ReadUInt64(header, record + 2), "expanded size");
-                var compressedSize = ToInt64(ReadUInt64(header, record + 10), "compressed size");
-                var dataOffset = ToInt64(ReadUInt64(header, record + 18), "data offset");
-                var md5 = new byte[16];
-                Buffer.BlockCopy(header, checked((int)(record + 26)), md5, 0, md5.Length);
-                var nameOffset = ReadUInt32(header, record + 58);
-                var directoryIndex = ReadUInt16(header, record + 62);
-                if (directoryIndex >= directories.Length) throw new InvalidDataException("An InstallShield cabinet file references an invalid directory.");
-                var name = ReadCatalogString(header, CheckedAdd(tableBase, nameOffset, tableEnd, "file name"), tableEnd, major);
-                var linkPrevious = ReadUInt32(header, record + 76);
-                var linkNext = ReadUInt32(header, record + 80);
-                var linkFlags = header[checked((int)(record + 84))];
-                var volume = ReadUInt16(header, record + 85);
-                entries.Add(new InstallShieldCabinetEntry(index, name, directories[directoryIndex], flags, expandedSize, compressedSize, dataOffset, md5, volume, linkPrevious, linkNext, linkFlags));
+                long record;
+                ushort flags;
+                long expandedSize;
+                long compressedSize;
+                long dataOffset;
+                byte[] md5;
+                uint nameOffset;
+                ushort directoryIndex;
+                uint linkPrevious = 0;
+                uint linkNext = 0;
+                byte linkFlags = 0;
+                ushort volume = 1;
+
+                if (major == 0 || major == 5)
+                {
+                    // InstallShield 5 stores each descriptor at the file's own
+                    // offset-table entry rather than in the v6+ contiguous
+                    // descriptor array. Version 0 ends at 0x2A; version 5 adds
+                    // a 16-byte MD5 and therefore occupies 0x3A bytes.
+                    record = CheckedAdd(tableBase, offsets[checked((int)directoryCount + index)], tableEnd, "legacy file descriptor");
+                    CheckedSubrange(record, major == 5 ? 0x3A : 0x2A, tableBase, tableEnd, "legacy file descriptor");
+                    nameOffset = ReadUInt32(header, record);
+                    directoryIndex = ReadUInt16(header, record + 4);
+                    flags = ReadUInt16(header, record + 8);
+                    expandedSize = ReadUInt32(header, record + 10);
+                    compressedSize = ReadUInt32(header, record + 14);
+                    dataOffset = ReadUInt32(header, record + 38);
+                    md5 = major == 5 ? new byte[16] : Array.Empty<byte>();
+                    if (major == 5)
+                        Buffer.BlockCopy(header, checked((int)(record + 42)), md5, 0, md5.Length);
+                }
+                else
+                {
+                    var descriptorTable = CheckedAdd(tableBase, fileTableOffset2, tableEnd, "file descriptor table");
+                    CheckedSubrange(descriptorTable, checked((long)fileCount * ModernFileDescriptorSize), tableBase, tableEnd, "file descriptor table");
+                    record = descriptorTable + index * (long)ModernFileDescriptorSize;
+                    flags = ReadUInt16(header, record);
+                    expandedSize = ToInt64(ReadUInt64(header, record + 2), "expanded size");
+                    compressedSize = ToInt64(ReadUInt64(header, record + 10), "compressed size");
+                    dataOffset = ToInt64(ReadUInt64(header, record + 18), "data offset");
+                    md5 = new byte[16];
+                    Buffer.BlockCopy(header, checked((int)(record + 26)), md5, 0, md5.Length);
+                    nameOffset = ReadUInt32(header, record + 58);
+                    directoryIndex = ReadUInt16(header, record + 62);
+                    linkPrevious = ReadUInt32(header, record + 76);
+                    linkNext = ReadUInt32(header, record + 80);
+                    linkFlags = header[checked((int)(record + 84))];
+                    volume = ReadUInt16(header, record + 85);
+                }
+                // Legacy catalogs retain unused descriptor slots whose fields
+                // are deliberately nonsensical and whose invalid bit is set.
+                // Match the runtime/Unshield ordering: validate and resolve
+                // strings only for entries that can own payload data.
+                var isValid = (flags & 8) == 0 && dataOffset > 0 && nameOffset > 0;
+                if (isValid && directoryIndex >= directories.Length)
+                    throw new InvalidDataException("An InstallShield cabinet file references an invalid directory.");
+                var name = isValid
+                    ? ReadCatalogString(header, CheckedAdd(tableBase, nameOffset, tableEnd, "file name"), tableEnd, major)
+                    : string.Empty;
+                var directory = isValid ? directories[directoryIndex] : string.Empty;
+                entries.Add(new InstallShieldCabinetEntry(index, name, directory, flags, expandedSize, compressedSize, dataOffset, md5, volume, linkPrevious, linkNext, linkFlags));
             }
 
-            return new Catalog(headerPath, major, header, descriptorBase, common.DescriptorSize, entries);
+            return new Catalog(headerPath, common.Version, major, header, descriptorBase, common.DescriptorSize, entries);
         }
 
         private static InstallShieldMediaMetadata ReadMediaMetadata(Catalog catalog)
         {
-            var metadata = new InstallShieldMediaMetadata(catalog.HeaderPath, catalog.MajorVersion);
+            var profile = catalog.MajorVersion == 0
+                ? "LegacyDescriptorWithoutDigest"
+                : catalog.MajorVersion == 5 ? "LegacyDescriptor"
+                : catalog.MajorVersion >= 17 ? "UnicodeCatalog" : "AnsiCatalog";
+            var metadata = new InstallShieldMediaMetadata(catalog.HeaderPath, catalog.RawVersion, catalog.MajorVersion, profile);
+
+            // The hash-table offsets interpreted below belong to the v6+
+            // descriptor family. InstallShield 5 uses the legacy descriptor
+            // and volume records but does not expose these v6+ metadata graphs.
+            if (catalog.MajorVersion == 0 || catalog.MajorVersion == 5) return metadata;
 
             // Parse file-transfer topology before registry and shell records so
             // component-associated effects can report their eligible features
@@ -198,20 +279,59 @@ namespace Dumplings.InstallShield
                 metadata.Warnings.Add("InstallShield media setup-type records are malformed or unsupported: " + exception.Message);
             }
 
-            // Registry and shell records are independent extension graphs. A
-            // malformed proprietary graph should not hide the ordinary file
-            // catalog or prevent the other graphs from being inspected.
+            // Unicode media can carry the same registry and shell graphs, as
+            // proven by major-22 and major-30/32 fixtures. Older generations
+            // may reuse these descriptor offsets for another purpose. Parse
+            // each graph transactionally: failed probes publish no partial
+            // records, and only fully grounded modern profiles report damage.
+            if (catalog.MajorVersion >= 17)
+            {
+                var reportOptionalGraphFailure = catalog.MajorVersion >= 30;
+                TryReadRegistryMetadata(catalog, metadata, reportOptionalGraphFailure);
+                TryReadShellMetadata(catalog, metadata, reportOptionalGraphFailure);
+            }
+            return metadata;
+        }
+
+        private static void TryReadRegistryMetadata(Catalog catalog, InstallShieldMediaMetadata metadata, bool reportFailure)
+        {
+            // The decoder resolves selections through topology already stored
+            // on metadata, so retain the shared object and roll back only the
+            // collections owned by this optional graph when validation fails.
+            var setCount = metadata.RegistrySets.Count;
+            var writeCount = metadata.RegistryWrites.Count;
+            var warningCount = metadata.Warnings.Count;
             try { ReadRegistryMetadata(catalog, metadata); }
             catch (Exception exception) when (exception is InvalidDataException || exception is OverflowException)
             {
-                metadata.Warnings.Add("InstallShield media registry records are malformed or unsupported: " + exception.Message);
+                RemoveTail(metadata.RegistrySets, setCount);
+                RemoveTail(metadata.RegistryWrites, writeCount);
+                RemoveTail(metadata.Warnings, warningCount);
+                if (reportFailure)
+                    metadata.Warnings.Add("InstallShield media registry records are malformed or unsupported: " + exception.Message);
             }
+        }
+
+        private static void TryReadShellMetadata(Catalog catalog, InstallShieldMediaMetadata metadata, bool reportFailure)
+        {
+            var folderCount = metadata.ShellFolders.Count;
+            var shortcutCount = metadata.Shortcuts.Count;
+            var warningCount = metadata.Warnings.Count;
             try { ReadShellMetadata(catalog, metadata); }
             catch (Exception exception) when (exception is InvalidDataException || exception is OverflowException)
             {
-                metadata.Warnings.Add("InstallShield media shell-object records are malformed or unsupported: " + exception.Message);
+                RemoveTail(metadata.ShellFolders, folderCount);
+                RemoveTail(metadata.Shortcuts, shortcutCount);
+                RemoveTail(metadata.Warnings, warningCount);
+                if (reportFailure)
+                    metadata.Warnings.Add("InstallShield media shell-object records are malformed or unsupported: " + exception.Message);
             }
-            return metadata;
+        }
+
+        private static void RemoveTail<T>(List<T> items, int retainedCount)
+        {
+            if (items.Count > retainedCount)
+                items.RemoveRange(retainedCount, items.Count - retainedCount);
         }
 
         private static void ReadTransferTopology(Catalog catalog, InstallShieldMediaMetadata metadata)
@@ -368,8 +488,8 @@ namespace Dumplings.InstallShield
 
         private static void ReadRegistryMetadata(Catalog catalog, InstallShieldMediaMetadata metadata)
         {
-            // InstallShield 2026 and observed version-30 media store the
-            // registry-directory pointer at descriptor-relative 0x282.
+            // Validated Unicode major-22, major-30, and major-32 media store
+            // the registry-directory pointer at descriptor-relative 0x282.
             if (catalog.DescriptorSize < 0x286) return;
             var directoryRelative = ReadUInt32(catalog.Header, catalog.DescriptorBase + 0x282);
             if (directoryRelative == 0) return;
@@ -764,12 +884,14 @@ namespace Dumplings.InstallShield
                     using (var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5))
                     {
                         var written = entry.IsCompressed
-                            ? InflateChunks(stream, storedSize, output, md5, entry.IsObfuscated, entry.ExpandedSize)
+                            ? (catalog.MajorVersion <= 5
+                                ? InflateLegacyChunks(stream, storedSize, output, md5, entry.IsObfuscated, entry.ExpandedSize)
+                                : InflateChunks(stream, storedSize, output, md5, entry.IsObfuscated, entry.ExpandedSize))
                             : CopyStoredRange(stream, storedSize, output, md5, entry.IsObfuscated, entry.ExpandedSize);
                         if (written != entry.ExpandedSize)
                             throw new InvalidDataException("InstallShield cabinet expanded size does not match its descriptor.");
                         var actual = md5.GetHashAndReset();
-                        if (!FixedTimeEquals(actual, entry.Md5))
+                        if (entry.Md5.Length == 16 && !FixedTimeEquals(actual, entry.Md5))
                             throw new InvalidDataException("InstallShield cabinet MD5 verification failed.");
                     }
                 }
@@ -786,7 +908,7 @@ namespace Dumplings.InstallShield
         private static Stream OpenEntryStream(Catalog catalog, InstallShieldCabinetEntry entry, long storedSize)
         {
             if (storedSize < 0) throw new InvalidDataException("An InstallShield cabinet stored size is negative.");
-            if (entry.IsSplit)
+            if (entry.IsSplit || catalog.MajorVersion <= 5 && IsLegacyEntrySplit(catalog, entry, storedSize))
                 return new InstallShieldSpannedStream(GetSpannedSegments(catalog, entry, storedSize));
 
             var volumePath = GetVolumePath(catalog.HeaderPath, entry.Volume);
@@ -794,7 +916,8 @@ namespace Dumplings.InstallShield
             try
             {
                 ValidateVolume(stream, catalog.MajorVersion);
-                if (entry.DataOffset < CommonHeaderSize + 64 || entry.DataOffset > stream.Length)
+                var minimumDataOffset = CommonHeaderSize + (catalog.MajorVersion <= 5 ? 40 : 64);
+                if (entry.DataOffset < minimumDataOffset || entry.DataOffset > stream.Length)
                     throw new InvalidDataException("An InstallShield cabinet file offset is outside its volume.");
                 if (storedSize > stream.Length - entry.DataOffset)
                     throw new InvalidDataException("An InstallShield cabinet file range is truncated.");
@@ -832,28 +955,46 @@ namespace Dumplings.InstallShield
                     // Match InstallShield/Unshield ordering: when a descriptor
                     // is both the first and last file in a volume, the trailing
                     // segment fields are authoritative.
-                    if ((uint)entry.Index == lastFileIndex)
+                    var legacyLastOffset = catalog.MajorVersion <= 5 ? ReadUInt32(header, CommonHeaderSize + 28) : 1U;
+                    if ((uint)entry.Index == lastFileIndex && legacyLastOffset != 0)
                     {
-                        dataOffset = ToInt64(ReadUInt64(header, CommonHeaderSize + 40), "split last-file offset");
-                        segmentStoredSize = ToInt64(ReadUInt64(
-                            header,
-                            CommonHeaderSize + (entry.IsCompressed ? 56 : 48)),
-                            "split last-file size");
+                        if (catalog.MajorVersion <= 5)
+                        {
+                            dataOffset = ReadUInt32(header, CommonHeaderSize + 28);
+                            segmentStoredSize = ReadUInt32(header, CommonHeaderSize + (entry.IsCompressed ? 36 : 32));
+                        }
+                        else
+                        {
+                            dataOffset = ToInt64(ReadUInt64(header, CommonHeaderSize + 40), "split last-file offset");
+                            segmentStoredSize = ToInt64(ReadUInt64(
+                                header,
+                                CommonHeaderSize + (entry.IsCompressed ? 56 : 48)),
+                                "split last-file size");
+                        }
                     }
                     else if ((uint)entry.Index == firstFileIndex)
                     {
-                        dataOffset = ToInt64(ReadUInt64(header, CommonHeaderSize + 16), "split first-file offset");
-                        segmentStoredSize = ToInt64(ReadUInt64(
-                            header,
-                            CommonHeaderSize + (entry.IsCompressed ? 32 : 24)),
-                            "split first-file size");
+                        if (catalog.MajorVersion <= 5)
+                        {
+                            dataOffset = ReadUInt32(header, CommonHeaderSize + 16);
+                            segmentStoredSize = ReadUInt32(header, CommonHeaderSize + (entry.IsCompressed ? 24 : 20));
+                        }
+                        else
+                        {
+                            dataOffset = ToInt64(ReadUInt64(header, CommonHeaderSize + 16), "split first-file offset");
+                            segmentStoredSize = ToInt64(ReadUInt64(
+                                header,
+                                CommonHeaderSize + (entry.IsCompressed ? 32 : 24)),
+                                "split first-file size");
+                        }
                     }
                     else
                     {
                         throw new InvalidDataException("A split InstallShield cabinet volume does not reference the selected entry.");
                     }
 
-                    if (dataOffset < CommonHeaderSize + 64 || segmentStoredSize <= 0)
+                    var minimumDataOffset = CommonHeaderSize + (catalog.MajorVersion <= 5 ? 40 : 64);
+                    if (dataOffset < minimumDataOffset || segmentStoredSize <= 0)
                         throw new InvalidDataException("A split InstallShield cabinet segment has an invalid range.");
                     if (segmentStoredSize > remaining)
                         throw new InvalidDataException("Split InstallShield cabinet segment sizes exceed the file descriptor.");
@@ -871,11 +1012,26 @@ namespace Dumplings.InstallShield
         private static byte[] ValidateVolume(Stream stream, int expectedMajorVersion)
         {
             stream.Position = 0;
-            var header = ReadExactly(stream, CommonHeaderSize + 64);
+            var header = ReadExactly(stream, CommonHeaderSize + (expectedMajorVersion <= 5 ? 40 : 64));
             var common = ReadCommonHeader(header, 0);
             if (GetMajorVersion(common.Version) != expectedMajorVersion)
                 throw new InvalidDataException("An InstallShield cabinet volume version does not match its catalog.");
             return header;
+        }
+
+        private static bool IsLegacyEntrySplit(Catalog catalog, InstallShieldCabinetEntry entry, long storedSize)
+        {
+            var volumePath = GetVolumePath(catalog.HeaderPath, entry.Volume);
+            using (var stream = new FileStream(volumePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                var header = ValidateVolume(stream, catalog.MajorVersion);
+                var firstFileIndex = ReadUInt32(header, CommonHeaderSize + 8);
+                var lastFileIndex = ReadUInt32(header, CommonHeaderSize + 12);
+                var firstStored = ReadUInt32(header, CommonHeaderSize + (entry.IsCompressed ? 24 : 20));
+                var lastStored = ReadUInt32(header, CommonHeaderSize + (entry.IsCompressed ? 36 : 32));
+                return (uint)entry.Index == firstFileIndex && firstStored != storedSize ||
+                    (uint)entry.Index == lastFileIndex && lastStored != storedSize;
+            }
         }
 
         private static long CopyStoredRange(
@@ -946,6 +1102,111 @@ namespace Dumplings.InstallShield
                 }
             }
             return written;
+        }
+
+        private static long InflateLegacyChunks(
+            Stream input,
+            long storedSize,
+            Stream output,
+            IncrementalHash hash,
+            bool obfuscated,
+            long expectedSize)
+        {
+            // InstallShield 5 concatenates raw-Deflate streams separated by
+            // 00 00 FF FF. A set marker followed by a byte whose low bit is one
+            // can occur inside Deflate data, matching Unshield's source-backed
+            // disambiguation rule.
+            var reader = new LegacyStoredByteReader(input, storedSize, obfuscated);
+            var outputBuffer = new byte[8192];
+            long written = 0;
+            while (reader.Remaining > 0)
+            {
+                var chunk = reader.ReadChunk();
+                if (chunk.Length == 0) continue;
+                using (var chunkInput = new MemoryStream(chunk, false))
+                using (var inflater = new DeflateStream(chunkInput, CompressionMode.Decompress, false))
+                {
+                    int read;
+                    while ((read = inflater.Read(outputBuffer, 0, outputBuffer.Length)) > 0)
+                    {
+                        if (written + read > expectedSize)
+                            throw new InvalidDataException("An InstallShield 5 Deflate chunk exceeds its output descriptor.");
+                        output.Write(outputBuffer, 0, read);
+                        hash.AppendData(outputBuffer, 0, read);
+                        written += read;
+                    }
+                }
+            }
+            return written;
+        }
+
+        private sealed class LegacyStoredByteReader
+        {
+            private const int MaximumChunkBytes = 64 * 1024 * 1024;
+            private readonly Stream stream;
+            private readonly bool obfuscated;
+            private long ordinal;
+            private int pending = -1;
+
+            internal LegacyStoredByteReader(Stream stream, long length, bool obfuscated)
+            {
+                this.stream = stream;
+                Remaining = length;
+                this.obfuscated = obfuscated;
+            }
+
+            internal long Remaining { get; private set; }
+
+            internal byte[] ReadChunk()
+            {
+                var bytes = new List<byte>();
+                while (Remaining > 0 || pending >= 0)
+                {
+                    var value = ReadByte();
+                    if (value < 0) break;
+                    bytes.Add((byte)value);
+                    if (bytes.Count > MaximumChunkBytes)
+                        throw new InvalidDataException("An InstallShield 5 Deflate chunk exceeds the 64 MiB compressed limit.");
+                    if (bytes.Count < 4 || bytes[bytes.Count - 4] != 0 || bytes[bytes.Count - 3] != 0 ||
+                        bytes[bytes.Count - 2] != 0xFF || bytes[bytes.Count - 1] != 0xFF) continue;
+
+                    var next = ReadByte();
+                    if (next >= 0 && (next & 1) != 0)
+                    {
+                        bytes.Add((byte)next);
+                        continue;
+                    }
+                    if (next >= 0) pending = next;
+                    bytes.RemoveRange(bytes.Count - 4, 4);
+                    break;
+                }
+                // DeflateStream tolerates the raw stream, but one zero byte
+                // preserves Unshield's behavior for abbreviated terminal blocks.
+                bytes.Add(0);
+                return bytes.ToArray();
+            }
+
+            private int ReadByte()
+            {
+                if (pending >= 0)
+                {
+                    var result = pending;
+                    pending = -1;
+                    return result;
+                }
+                if (Remaining <= 0) return -1;
+                var value = stream.ReadByte();
+                if (value < 0) throw new EndOfStreamException("An InstallShield 5 cabinet range is truncated.");
+                Remaining--;
+                if (obfuscated)
+                {
+                    var decoded = (byte)(value ^ 0xD5);
+                    decoded = (byte)((decoded >> 2) | (decoded << 6));
+                    value = unchecked((byte)(decoded - ordinal % 0x47));
+                }
+                ordinal++;
+                return value;
+            }
         }
 
         private static void ReadStoredExactly(
@@ -1204,6 +1465,7 @@ namespace Dumplings.InstallShield
         {
             internal Catalog(
                 string headerPath,
+                uint rawVersion,
                 int majorVersion,
                 byte[] header,
                 long descriptorBase,
@@ -1211,6 +1473,7 @@ namespace Dumplings.InstallShield
                 List<InstallShieldCabinetEntry> entries)
             {
                 HeaderPath = headerPath;
+                RawVersion = rawVersion;
                 MajorVersion = majorVersion;
                 Header = header;
                 DescriptorBase = descriptorBase;
@@ -1219,6 +1482,7 @@ namespace Dumplings.InstallShield
             }
 
             internal string HeaderPath { get; private set; }
+            internal uint RawVersion { get; private set; }
             internal int MajorVersion { get; private set; }
             internal byte[] Header { get; private set; }
             internal long DescriptorBase { get; private set; }

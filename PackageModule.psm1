@@ -62,6 +62,8 @@ $ModulePaths = @(
   'Libraries\Installers\InstallBuilder.psm1'
   'Libraries\Installers\InstallForge.psm1'
   'Libraries\Installers\InstallMate.psm1'
+  'Libraries\Installers\Kachina.psm1'
+  'Libraries\Installers\MicaSetup.psm1'
   'Libraries\Installers\InstallShieldContainer.psm1'
   'Libraries\Installers\InstallShieldAdvancedUI.psm1'
   'Libraries\Installers\InstallShield.psm1'

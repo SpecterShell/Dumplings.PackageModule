@@ -606,6 +606,18 @@ function Get-InstallerStructuralExeFamilyCandidate {
     [pscustomobject]@{ Family = 'Burn'; Confidence = 'high'; MatchedMarkers = @('.wixburn PE section'); SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'burn' } }
   }
 
+  # InstallShield 3 distributed a reusable setup32 engine without an embedded
+  # package overlay. Exact version-resource identity is structural runtime
+  # evidence and is intentionally narrower than an InstallShield text marker.
+  $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
+  if ($VersionInfo.ProductName -ieq 'InstallShield' -and
+    $VersionInfo.FileDescription -ieq 'InstallShield Engine EXE' -and
+    $VersionInfo.CompanyName -match '(?i)^InstallShield Corporation' -and
+    $VersionInfo.ProductVersion -match '^3(?:\.|$)' -and
+    $Seen.Add('InstallShield')) {
+    [pscustomobject]@{ Family = 'InstallShield'; Confidence = 'high'; MatchedMarkers = @('InstallShield 3 setup32 PE version identity'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'InstallShield' }
+  }
+
   $Resources = @(Get-PEResourceInfo -Path $File.FullName -MaximumResources 16384 -ErrorAction SilentlyContinue)
   if ($Resources | Where-Object { $_.TypeId -eq 10 -and $_.Id -eq 11111 } | Select-Object -First 1) {
     if ($Seen.Add('Inno Setup')) {
@@ -619,6 +631,18 @@ function Get-InstallerStructuralExeFamilyCandidate {
   $ManagedConfig = Get-PEManagedResourceInfo -Path $File.FullName -Name 'ZeroInstall.BootstrapConfig.ini' -MaximumResources 16384 -MaximumResourceBytes 1048576 -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($ManagedConfig -and $Seen.Add('Zero Install')) {
     [pscustomobject]@{ Family = 'Zero Install'; Confidence = 'high'; MatchedMarkers = @('CLR ManifestResource ZeroInstall.BootstrapConfig.ini'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Zero Install' }
+  }
+
+  # Kachina is a native Tauri executable with a validated JSON-bearing TLV
+  # stream. Route it before managed MicaSetup and generic Tauri evidence.
+  if ((Test-KachinaInstaller -Path $File.FullName) -and $Seen.Add('Kachina')) {
+    [pscustomobject]@{ Family = 'Kachina'; Confidence = 'high'; MatchedMarkers = @('PE overlay Kachina TLV stream + compiled configuration'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Kachina' }
+  }
+
+  # MicaSetup detection requires both its managed host model and the WPF payload
+  # stream. This rejects ordinary WPF applications and native Kachina installers.
+  if ((Test-MicaSetupInstaller -Path $File.FullName) -and $Seen.Add('MicaSetup')) {
+    [pscustomobject]@{ Family = 'MicaSetup'; Confidence = 'high'; MatchedMarkers = @('CLR MicaSetup configuration host + WPF resources/setups/publish.7z'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'MicaSetup' }
   }
 
   $NsisSignature = [byte[]](0xEF, 0xBE, 0xAD, 0xDE) + [Text.Encoding]::ASCII.GetBytes('NullsoftInst')
@@ -1375,11 +1399,14 @@ function Invoke-InstallerExeParser {
       ProductCode             = $Info.ProductCode
       Scope                   = $Info.Scope
       SupportedScopes         = @($Info.SupportedScopes)
+      DefaultScopeIsAuthoritative = [bool]($Info.PSObject.Properties['DefaultScopeIsAuthoritative'] -and $Info.DefaultScopeIsAuthoritative)
+      AppsAndFeaturesEntries  = if ($Info.PSObject.Properties['AppsAndFeaturesEntries']) { @($Info.AppsAndFeaturesEntries) } else { @() }
       Protocols               = @($Info.Protocols)
       FileExtensions          = @($Info.FileExtensions)
       RegistryAssociationInfo = $Info.RegistryAssociationInfo
       NestedInstallerFiles    = @($Info.ExtractedFiles)
       CanExpand               = $Info.CanExpand
+      Notices                 = if ($Info.PSObject.Properties['Notices']) { @($Info.Notices) } else { @() }
       Warnings                = @($Info.Warnings)
       SuggestedManifestFields = $SuggestedManifestFields
     }
@@ -1388,6 +1415,36 @@ function Invoke-InstallerExeParser {
   # Structured generic-family parsers are authoritative. Stop before broad SFX
   # heuristics when one succeeds because many installer engines embed archives.
   $StructuredParserResults = @(
+    if (Test-InstallerCandidateFamily -Family 'Kachina') {
+      Invoke-InstallerDetector -Name 'Kachina' -ScriptBlock {
+        $Info = Get-KachinaInfo -Path $AnalyzerInstallerPath
+        $Evidence = ConvertTo-GenericExeParserEvidence -Family 'Kachina' -Info $Info
+        $Evidence.NestedInstallerFiles = @($Info.PayloadFiles.Path)
+        $Evidence | Add-Member -NotePropertyName PayloadArchitectures -NotePropertyValue @($Info.PayloadArchitectures) -Force
+        $Evidence | Add-Member -NotePropertyName DependencyInfo -NotePropertyValue $Info.DependencyInfo -Force
+        $Evidence | Add-Member -NotePropertyName RuntimePackages -NotePropertyValue @($Info.RuntimePackages) -Force
+        $Evidence | Add-Member -NotePropertyName EmbeddedRuntimePackages -NotePropertyValue @($Info.EmbeddedRuntimePackages) -Force
+        $Evidence | Add-Member -NotePropertyName PatchFiles -NotePropertyValue @($Info.PatchFiles) -Force
+        $Evidence.SuggestedManifestFields.InstallModes = @($Info.InstallModes)
+        $Evidence.SuggestedManifestFields.InstallerSwitches = $Info.InstallerSwitches
+        $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName ElevationRequirement -NotePropertyValue $Info.ElevationRequirement -Force
+        $Evidence
+      }
+    }
+
+    if (Test-InstallerCandidateFamily -Family 'MicaSetup') {
+      Invoke-InstallerDetector -Name 'MicaSetup' -ScriptBlock {
+        $Info = Get-MicaSetupInfo -Path $AnalyzerInstallerPath
+        $Evidence = ConvertTo-GenericExeParserEvidence -Family 'MicaSetup' -Info $Info
+        $Evidence.NestedInstallerFiles = @($Info.PayloadFiles.Path)
+        $Evidence | Add-Member -NotePropertyName PayloadArchitectures -NotePropertyValue @($Info.PayloadArchitectures) -Force
+        $Evidence | Add-Member -NotePropertyName DependencyInfo -NotePropertyValue $Info.DependencyInfo -Force
+        $Evidence.SuggestedManifestFields.InstallModes = @($Info.InstallModes)
+        $Evidence.SuggestedManifestFields.InstallerSwitches = $Info.InstallerSwitches
+        $Evidence
+      }
+    }
+
     if (Test-InstallerCandidateFamily -Family 'Zero Install') {
       Invoke-InstallerDetector -Name 'Zero Install' -ScriptBlock {
         $Info = Get-ZeroInstallInfo -Path $AnalyzerInstallerPath
@@ -2041,7 +2098,7 @@ function Invoke-InstallerAnalysisCore {
             # These structures identify the outer container by format. The raw
             # NSIS signature and InstallBuilder project marker remain routes until
             # their parsers validate surrounding offsets and records.
-            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
+            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Kachina', 'MicaSetup', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
             ConvertTo-InstallerFamilyEvidence -Candidate $_ -EvidenceKind Structural -IsOuterContainer:$OuterContainer
           })
         $HeuristicCandidates = @(Get-InstallerGenericExeFamilyCandidate -File $Installer -Budget $ScanBytes -Text $ScanText | ForEach-Object {

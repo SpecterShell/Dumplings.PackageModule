@@ -248,10 +248,12 @@ namespace Dumplings.InstallShield
     /// <summary>Bounded InstallScript authoring records recovered from one data*.hdr.</summary>
     public sealed class InstallShieldMediaMetadata
     {
-        internal InstallShieldMediaMetadata(string headerPath, int majorVersion)
+        internal InstallShieldMediaMetadata(string headerPath, uint rawVersion, int majorVersion, string structuralProfile)
         {
             HeaderPath = headerPath;
+            RawVersion = rawVersion;
             MajorVersion = majorVersion;
+            StructuralProfile = structuralProfile;
             RegistrySets = new List<InstallShieldMediaRegistrySet>();
             RegistryWrites = new List<InstallShieldMediaRegistryWrite>();
             FileGroups = new List<InstallShieldCabinetFileGroup>();
@@ -263,7 +265,9 @@ namespace Dumplings.InstallShield
         }
 
         public string HeaderPath { get; private set; }
+        public uint RawVersion { get; private set; }
         public int MajorVersion { get; private set; }
+        public string StructuralProfile { get; private set; }
         public List<InstallShieldMediaRegistrySet> RegistrySets { get; private set; }
         public List<InstallShieldMediaRegistryWrite> RegistryWrites { get; private set; }
         public List<InstallShieldCabinetFileGroup> FileGroups { get; private set; }

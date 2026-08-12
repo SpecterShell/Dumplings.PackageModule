@@ -38,6 +38,100 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
+## setup30
+
+Source: <https://github.com/ostrich/setup30>
+
+`Assets/Source/InstallShield/InstallShieldClassicReader.cs` adapts the
+InstallShield 3 Setup30 footer catalog, multipart-media, and TTCOMP framing
+behavior from setup30.
+
+Copyright (c) 2026 contributors
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## zlib blast
+
+Source: <https://github.com/madler/zlib/tree/develop/contrib/blast>
+
+The bounded TTCOMP decoder in
+`Assets/Source/InstallShield/InstallShieldClassicReader.cs` adapts the PKWARE
+implode decoding tables and state machine from `blast.c`.
+
+Copyright (C) 2003, 2012, 2013 Mark Adler
+
+This software is provided 'as-is', without any express or implied warranty.
+In no event will the authors be held liable for any damages arising from the
+use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim
+   that you wrote the original software. If you use this software in a
+   product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+
+## InstallScript Decompiler
+
+Source: <https://github.com/jte/installscript-decompiler>
+
+InstallScript header families, old INS operand framing, OBS object-module
+tables, and OBL member catalogs were adapted from or cross-checked against this
+project. Dumplings does not distribute or execute the decompiler.
+
+Copyright (c) 2018 jte
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## MicaSetup
+
+Source: <https://github.com/lemutec/MicaSetup>
+
+`Assets/Source/MicaSetup/MicaSetupReader.cs` and `Libraries/Installers/MicaSetup.psm1` independently implement the compiled Pack/Option configuration, WPF resource, payload, scope, ARP, and system-effect behavior documented by MicaSetup's MIT-licensed source. PackageModule does not distribute or load a MicaSetup assembly.
+
+Copyright (c) 2023-2026 Contributors
+
 ## Tauri
 
 Source: <https://github.com/tauri-apps/tauri>

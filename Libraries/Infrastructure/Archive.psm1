@@ -9,7 +9,7 @@ function New-InstallerDecompressionStream {
   #>
   [OutputType([System.IO.Stream])]
   param (
-    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate')][string]$Algorithm,
+    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [byte[]]$Properties,
     [long]$CompressedSize = -1,
@@ -29,6 +29,7 @@ function New-InstallerDecompressionStream {
     'BZip2' { return [SharpCompress.Compressors.BZip2.BZip2Stream]::new($Stream, [SharpCompress.Compressors.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Zlib' { return [System.IO.Compression.ZLibStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Deflate' { return [System.IO.Compression.DeflateStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
+    'Zstd' { return [ZstdSharp.DecompressionStream]::new($Stream, 131072, $true, $LeaveOpen.IsPresent) }
   }
 }
 
@@ -39,7 +40,7 @@ function Expand-InstallerCompressedStream {
   #>
   [OutputType([long])]
   param (
-    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate')][string]$Algorithm,
+    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [Parameter(Mandatory)][System.IO.Stream]$Destination,
     [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes,
@@ -52,7 +53,11 @@ function Expand-InstallerCompressedStream {
   try {
     $CopyArguments = @{ Source = $Decoder; Destination = $Destination; MaximumBytes = $MaximumBytes }
     if ($UncompressedSize -ge 0) { $CopyArguments.ExpectedBytes = $UncompressedSize }
-    return Copy-BoundedStream @CopyArguments
+    $CopiedBytes = Copy-BoundedStream @CopyArguments
+    # Copy-BoundedStream proves a short stream, while this extra read proves the
+    # decoder did not produce bytes beyond the format's declared output size.
+    if ($UncompressedSize -ge 0 -and $Decoder.ReadByte() -ge 0) { throw "The decompressed stream exceeds its declared $UncompressedSize-byte length." }
+    return $CopiedBytes
   } finally {
     $Decoder.Dispose()
   }

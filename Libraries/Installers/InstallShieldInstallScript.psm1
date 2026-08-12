@@ -13,6 +13,7 @@
 # - https://docs.revenera.com/installshield/LangRef/LangrefLaunchAppAndWait.htm
 # - https://docs.revenera.com/installshield28helplib/LangRef/LangrefMODE.htm
 # - https://docs.revenera.com/installshield28helplib/helplibrary/CreatetheResponseFile.htm
+# - https://github.com/jte/installscript-decompiler
 #
 # InstallScript media layout consumed by this module:
 #
@@ -20,15 +21,30 @@
 #   +-- setup.ini
 #   |   `-- [Startup]: Product, ProductGUID, CompanyName
 #   +-- setup.inx / setup.ins: compiled InstallScript
-#   |   +-- 0x00: CRC/signature-like DWORD and compiler WORD
-#   |   +-- 0x06: 74-byte NUL-padded compiler copyright field
-#   |   +-- 0x68: five absolute uint32 LE offsets
-#   |   |   +-- offset[2] -> type/function/label catalog
-#   |   |   `-- offset[4] -> end of instruction segment
-#   |   `-- catalog and function bodies
+#   |   +-- 0x00: source-backed header route
+#   |   |   +-- B8 C9 0C 00 -> INS-Old event/action stream
+#   |   |   +-- 48 4F F3 C9 -> OBS
+#   |   |   +-- 61 4C 75 5A -> aLuZ
+#   |   |   +-- 6B 55 74 5A -> kUtZ
+#   |   |   `-- 70 4F 64 41 -> OBL authoring-library catalog
+#   |   +-- INS-Old
+#   |   |   +-- uint16-length info string and event count
+#   |   |   +-- globals, structures, and function/DLL prototypes
+#   |   |   `-- repeated event headers and tagged action records
+#   |   +-- OBS object module
+#   |   |   +-- fixed 0x100-byte header
+#   |   |   +-- extern, prototype, typedef, address-resolution, and BB tables
+#   |   |   `-- independently decodable compiler/linker input
+#   |   +-- OBL
+#   |   |   +-- version and member count, uint32 LE
+#   |   |   +-- uint16-length name + uint32 offset + uint32 length
+#   |   |   `-- bounded embedded INS/OBS/aLuZ/kUtZ compiler inputs
+#   |   `-- decoded OBS/aLuZ/kUtZ program profile
+#   |       +-- compiler metadata and bounded table offsets
+#   |       +-- type/function/label catalogs
 #   |       +-- typed function prototypes and absolute label offsets
-#   |       +-- 0x0022 function-start / variable-length opcodes
-#   |       `-- 0x0026 function-end records
+#   |       +-- function-start / variable-length action records
+#   |       `-- function-end records
 #   +-- setup.iss: optional default silent-response file
 #   +-- StringTable_0xLLLL.ips: localized compiler resources
 #   `-- data1.hdr: cabinet and project-media descriptor
@@ -62,6 +78,93 @@ $Script:InstallScriptMaximumStrings = 32768
 $Script:InstallScriptDialogPattern = '^(?:Sd(?:Welcome(?:Maint)?|License(?:Rtf)?|AskDestPath\d*|StartCopy\d*|Finish(?:Reboot|Update)?|FeatureTree|ComponentTree|SetupCompleteError)|LicenseDialog|MessageBox(?:Ex|W)?|SelectDir)$'
 $Script:InstallScriptInstallPattern = '^(?:FeatureTransferData|ComponentMoveData|CopyFile|XCopyFile|LaunchApp(?:AndWait)?|RegDBSet|AddFolderIcon|CreateDir)'
 $Script:InstallScriptUninstallRegistryPath = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
+
+function Get-InstallShieldInstallScriptHeaderKind {
+  <#
+  .SYNOPSIS
+    Classify a bounded compiled InstallScript header by source-backed magic bytes.
+  .PARAMETER Bytes
+    At least four bytes from offset zero of the decoded or encoded script file.
+  .PARAMETER DecodeScrambled
+    Apply InstallShield's position-dependent F1/ROR2 transform before testing
+    aLuZ and kUtZ. The input array is not modified.
+  .OUTPUTS
+    HeaderKind, scrambling evidence, magic bytes, and handler support status.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][byte[]]$Bytes,
+    [switch]$DecodeScrambled
+  )
+
+  if ($Bytes.Length -lt 4) { return $null }
+  $Probe = if ($DecodeScrambled) {
+    $Decoded = [byte[]]::new($Bytes.Length)
+    for ($Index = 0; $Index -lt $Bytes.Length; $Index++) {
+      $Value = $Bytes[$Index] -bxor 0xF1
+      $Rotated = (($Value -shr 2) -bor (($Value -shl 6) -band 0xFF)) -band 0xFF
+      $Decoded[$Index] = [byte](($Rotated - ($Index % 71)) -band 0xFF)
+    }
+    $Decoded
+  } else { $Bytes }
+
+  $MagicAscii = [Text.Encoding]::ASCII.GetString($Probe, 0, 4)
+  $HeaderKind = if ($Probe[0] -eq 0x48 -and $Probe[1] -eq 0x4F -and $Probe[2] -eq 0xF3 -and $Probe[3] -eq 0xC9) {
+    'OBS'
+  } elseif ($MagicAscii -ceq 'pOdA') {
+    'OBL'
+  } elseif ($MagicAscii -ceq 'aLuZ') {
+    'aLuZ'
+  } elseif ($MagicAscii -ceq 'kUtZ') {
+    'kUtZ'
+  } elseif ($Probe[0] -eq 0xB8 -and $Probe[1] -eq 0xC9 -and $Probe[2] -eq 0x0C -and $Probe[3] -eq 0x00) {
+    'INS-Old'
+  } else { $null }
+  if (-not $HeaderKind) { return $null }
+
+  $SupportStatus = 'Supported'
+  [pscustomobject][ordered]@{
+    HeaderKind    = $HeaderKind
+    WasScrambled  = [bool]$DecodeScrambled
+    MagicHex      = [Convert]::ToHexString($Probe[0..3])
+    MagicAscii    = $MagicAscii
+    SupportStatus = $SupportStatus
+    Handler       = $HeaderKind -eq 'INS-Old' ? 'InstallScript old-layout reader' : ($HeaderKind -eq 'OBL' ? 'InstallScript OBL library reader' : 'InstallScriptBytecodeReader')
+    Limitations   = [string[]]@(
+      if ($HeaderKind -eq 'INS-Old') { 'Old INS event/action records are decoded; generation-dependent actions remain explicit opaque evidence.' }
+      if ($HeaderKind -eq 'OBL') { 'OBL is a build-time object library. Analyze the final linked INX when installer-runtime behavior is required.' }
+    )
+  }
+}
+
+function Get-InstallShieldInstallScriptHeaderInfo {
+  <#
+  .SYNOPSIS
+    Read and classify only the bounded header of a compiled InstallScript file.
+  .PARAMETER Path
+    Path to setup.inx, setup.ins, an OBS object, or an OBL library.
+  .OUTPUTS
+    Structural header evidence without decoding the complete instruction stream.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory, Position = 0, ValueFromPipeline)][string]$Path)
+
+  process {
+    $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Stream = [IO.File]::Open($ResolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+      $Length = [int][Math]::Min(512L, $Stream.Length)
+      if ($Length -lt 4) { throw 'The compiled InstallScript header is truncated.' }
+      $Bytes = Read-BinaryBytes -Stream $Stream -Offset 0 -Count $Length
+    } finally { $Stream.Dispose() }
+
+    $Info = Get-InstallShieldInstallScriptHeaderKind -Bytes $Bytes
+    if (-not $Info) { $Info = Get-InstallShieldInstallScriptHeaderKind -Bytes $Bytes -DecodeScrambled }
+    if (-not $Info) { throw 'The file does not contain a recognized OBS, aLuZ, kUtZ, OBL, or old INS header.' }
+    $Info | Add-Member -NotePropertyName Path -NotePropertyValue $ResolvedPath
+    return $Info
+  }
+}
 
 # InstallScript configuration and response-file handling.
 function Get-InstallShieldInstallScriptConfigurationValue {
@@ -367,12 +470,13 @@ function ConvertFrom-InstallShieldInstallScriptByteStream {
   )
 
   $File = Get-Item -LiteralPath $Path -Force
-  if ($File.Length -lt 96) { throw 'The compiled InstallScript file is truncated.' }
+  if ($File.Length -lt 4) { throw 'The compiled InstallScript file is truncated.' }
   if ($File.Length -gt $Script:InstallScriptMaximumBytes) { throw 'The compiled InstallScript file exceeds the 32 MiB analysis limit.' }
   $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try { $Bytes = Read-BinaryBytes -Stream $Stream -Offset 0 -Count ([int]$File.Length) }
   finally { $Stream.Dispose() }
   $Ascii = [Text.Encoding]::ASCII
+  $HeaderKindInfo = Get-InstallShieldInstallScriptHeaderKind -Bytes $Bytes
 
   # Decoded generations expose the copyright marker immediately after the
   # CRC/version prefix. Search only the bounded header instead of accepting a
@@ -383,7 +487,7 @@ function ConvertFrom-InstallShieldInstallScriptByteStream {
     $HeaderText.Contains($_, [StringComparison]::Ordinal)
   } | Select-Object -First 1
   $WasScrambled = $false
-  if (-not $CopyrightMarker) {
+  if (-not $CopyrightMarker -and -not $HeaderKindInfo) {
     $Decoded = [byte[]]::new($Bytes.Length)
     for ($Index = 0; $Index -lt $Bytes.Length; $Index++) {
       $Value = $Bytes[$Index] -bxor 0xF1
@@ -399,11 +503,18 @@ function ConvertFrom-InstallShieldInstallScriptByteStream {
     }
     $Bytes = $Decoded
     $WasScrambled = $true
+    $HeaderKindInfo = Get-InstallShieldInstallScriptHeaderKind -Bytes $Bytes
   }
 
-  $MarkerOffset = $HeaderText.IndexOf($CopyrightMarker, [StringComparison]::Ordinal)
-  if ($MarkerOffset -lt 4 -or $MarkerOffset + $CopyrightMarker.Length -gt $HeaderLength) {
+  $MarkerOffset = $CopyrightMarker ? $HeaderText.IndexOf($CopyrightMarker, [StringComparison]::Ordinal) : -1
+  if ($CopyrightMarker -and ($MarkerOffset -lt 4 -or $MarkerOffset + $CopyrightMarker.Length -gt $HeaderLength)) {
     throw 'The InstallScript copyright marker is outside the validated header range.'
+  }
+  if (-not $HeaderKindInfo) {
+    # Existing builder generations with the validated compiler notice retain
+    # the legacy INX route even if their first DWORD is not one of the newer
+    # decompiler's named action-file magics.
+    $HeaderKindInfo = [pscustomobject]@{ HeaderKind = ($File.Extension -ieq '.ins' ? 'INS-Old' : 'INX'); WasScrambled = $WasScrambled; SupportStatus = 'Partial' }
   }
 
   # The first DWORD is checksum-like metadata. The following WORD and offset
@@ -417,7 +528,90 @@ function ConvertFrom-InstallShieldInstallScriptByteStream {
     HeaderValue     = [BitConverter]::ToUInt16($Bytes, 4)
     MarkerOffset    = $MarkerOffset
     CopyrightMarker = $CopyrightMarker
-    Format          = if ($File.Extension -ieq '.ins') { 'Legacy INS' } else { 'INX' }
+    HeaderKind      = $HeaderKindInfo.HeaderKind
+    SupportStatus   = $HeaderKindInfo.SupportStatus
+    Format          = $HeaderKindInfo.HeaderKind
+  }
+}
+
+function Get-InstallShieldInstallScriptLibraryInfo {
+  <#
+  .SYNOPSIS
+    Read the bounded member catalog from an InstallScript OBL library.
+  .PARAMETER Path
+    Path to a pOdA OBL file. The function resolves the path and reads no member
+    outside its declared offset and length.
+  .OUTPUTS
+    OBL version, member names, byte ranges, structural member profiles, and
+    parser warnings. Member payload bytes are not returned.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory, Position = 0, ValueFromPipeline)][string]$Path)
+
+  process {
+    $Decoded = ConvertFrom-InstallShieldInstallScriptByteStream -Path $Path
+    if ($Decoded.HeaderKind -ne 'OBL') { throw 'The compiled script is not an InstallScript OBL library.' }
+    $Library = [Dumplings.InstallShield.InstallScript.InstallScriptLibraryReader]::Read($Decoded.Bytes)
+    [pscustomobject][ordered]@{
+      Path              = $Decoded.Path
+      Version           = $Library.Version
+      CatalogLength     = $Library.CatalogLength
+      MemberCount       = $Library.Members.Count
+      Members           = [object[]]$Library.Members
+      Warnings          = [string[]]$Library.Warnings
+      ParserVersionInfo = [pscustomobject][ordered]@{
+        Parser        = 'Dumplings.PackageModule.InstallShieldInstallScript'
+        ParserMajor   = 11
+        Format        = 'OBL'
+        HeaderKind    = 'OBL'
+        SupportStatus = 'Supported'
+      }
+    }
+  }
+}
+
+function Resolve-InstallShieldInstallScriptProgramContent {
+  <#
+  .SYNOPSIS
+    Select the byte range that contains one analyzable InstallScript program.
+  .PARAMETER Decoded
+    Result from ConvertFrom-InstallShieldInstallScriptByteStream.
+  .PARAMETER LibraryMemberName
+    Exact OBL member name. It may be omitted only when the library has one
+    structurally recognized program member.
+  .OUTPUTS
+    Selected bytes, optional OBL member name, member count, and format profile.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][pscustomobject]$Decoded,
+    [string]$LibraryMemberName
+  )
+
+  if ($Decoded.HeaderKind -ne 'OBL') {
+    return [pscustomobject]@{ Bytes = $Decoded.Bytes; LibraryMemberName = $null; LibraryMemberCount = 0; Format = $Decoded.Format }
+  }
+
+  $Library = [Dumplings.InstallShield.InstallScript.InstallScriptLibraryReader]::Read($Decoded.Bytes)
+  $Candidates = if ($LibraryMemberName) {
+    @($Library.Members | Where-Object Name -CEQ $LibraryMemberName)
+  } else {
+    @($Library.Members | Where-Object FormatProfile -NE 'Unknown')
+  }
+  if ($Candidates.Count -ne 1) {
+    $Available = [string]::Join(', ', [string[]]@($Library.Members.Name))
+    if ($LibraryMemberName) { throw "The OBL library does not contain exactly one member named '$LibraryMemberName'. Available members: $Available" }
+    throw "The OBL library contains $($Candidates.Count) analyzable members. Select one with -LibraryMemberName. Available members: $Available"
+  }
+
+  $Member = $Candidates[0]
+  $MemberBytes = [Dumplings.InstallShield.InstallScript.InstallScriptLibraryReader]::ReadMember(
+    $Decoded.Bytes, $Member, $Script:InstallScriptMaximumBytes)
+  [pscustomobject]@{
+    Bytes              = $MemberBytes
+    LibraryMemberName  = $Member.Name
+    LibraryMemberCount = $Library.Members.Count
+    Format             = $Member.FormatProfile
   }
 }
 
@@ -436,6 +630,9 @@ function Read-InstallShieldInstallScriptProgram {
   .PARAMETER MaximumInstructions
     Upper bound for decoded instructions across the program. This prevents a
     malformed catalog from producing unbounded parser work.
+  .PARAMETER LibraryMemberName
+    Exact member name when Path is an OBL library. Omit it only when the OBL has
+    exactly one structurally recognized program member.
   .OUTPUTS
     Dumplings.InstallShield.InstallScript.InstallScriptProgram.
   #>
@@ -445,14 +642,22 @@ function Read-InstallShieldInstallScriptProgram {
     [string]$Path,
 
     [ValidateRange(1, 10000000)]
-    [int]$MaximumInstructions = 1000000
+    [int]$MaximumInstructions = 1000000,
+
+    [string]$LibraryMemberName
   )
 
   process {
     $Decoded = ConvertFrom-InstallShieldInstallScriptByteStream -Path $Path
+    $Selected = Resolve-InstallShieldInstallScriptProgramContent -Decoded $Decoded -LibraryMemberName $LibraryMemberName
     # The byte array is caller-owned by PowerShell and remains valid for the
     # duration of this synchronous parse. The returned IR does not retain it.
-    [Dumplings.InstallShield.InstallScript.InstallScriptBytecodeReader]::Read($Decoded.Bytes, $MaximumInstructions)
+    $Program = if ($Selected.LibraryMemberName) {
+      [Dumplings.InstallShield.InstallScript.InstallScriptLibraryReader]::ReadProgram($Selected.Bytes, $Selected.LibraryMemberName, $MaximumInstructions)
+    } else {
+      [Dumplings.InstallShield.InstallScript.InstallScriptBytecodeReader]::Read($Selected.Bytes, $MaximumInstructions)
+    }
+    return $Program
   }
 }
 
@@ -592,6 +797,9 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     StandaloneInstaller applies InstallShield Silent response-file rules.
     EmbeddedAction records only behavior reachable from selected custom actions
     because the containing MSI or suite owns silent invocation.
+  .PARAMETER LibraryMemberName
+    Exact OBL member to analyze. Omit it only when the library contains one
+    structurally recognized program member.
   .OUTPUTS
     Conservative silent-capability, opcode, registry, association, launch,
     file-operation, and shortcut evidence. No installer instruction is executed.
@@ -609,13 +817,16 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     [string[]]$EntryPoint,
 
     [ValidateSet('StandaloneInstaller', 'EmbeddedAction')]
-    [string]$AnalysisScope = 'StandaloneInstaller'
+    [string]$AnalysisScope = 'StandaloneInstaller',
+
+    [string]$LibraryMemberName
   )
 
   $SelectedEntryPoints = [string[]]@($EntryPoint | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
 
   $Decoded = ConvertFrom-InstallShieldInstallScriptByteStream -Path $Path
-  $Strings = Get-InstallShieldInstallScriptStringEvidence -Bytes $Decoded.Bytes
+  $SelectedProgram = Resolve-InstallShieldInstallScriptProgramContent -Decoded $Decoded -LibraryMemberName $LibraryMemberName
+  $Strings = Get-InstallShieldInstallScriptStringEvidence -Bytes $SelectedProgram.Bytes
   # Compiled symbol names may carry one-byte flag characters rendered as
   # punctuation by a broad string scan. Normalize only trailing punctuation;
   # do not rewrite paths, messages, or arbitrary string constants.
@@ -627,7 +838,11 @@ function Invoke-InstallShieldInstallScriptAnalysis {
   try {
     # Parse the already-decoded bytes once. Passing the array directly avoids a
     # second file read and descramble pass when the higher-level analyzer is used.
-    $Program = [Dumplings.InstallShield.InstallScript.InstallScriptBytecodeReader]::Read($Decoded.Bytes, 1000000)
+    $Program = if ($SelectedProgram.LibraryMemberName) {
+      [Dumplings.InstallShield.InstallScript.InstallScriptLibraryReader]::ReadProgram($SelectedProgram.Bytes, $SelectedProgram.LibraryMemberName, 1000000)
+    } else {
+      [Dumplings.InstallShield.InstallScript.InstallScriptBytecodeReader]::Read($SelectedProgram.Bytes, 1000000)
+    }
     $DialogTraces = @(Get-InstallShieldInstallScriptDialogTrace -Program $Program -EntryPoint $SelectedEntryPoints)
     $Resources = if ($StringTablePath) {
       Read-InstallShieldInstallScriptStringTable -Path $StringTablePath
@@ -767,6 +982,9 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     PropertyHandlers           = [object[]]@($StaticAnalysis.PropertyHandlers)
     Shortcuts                  = [object[]]@($StaticAnalysis.Shortcuts)
     StaticCalls                = [object[]]@($StaticAnalysis.Calls)
+    ExternalSymbols            = if ($Program) { [object[]]@($Program.ExternalSymbols) } else { [object[]]@() }
+    AddressResolutions         = if ($Program) { [object[]]@($Program.AddressResolutions) } else { [object[]]@() }
+    ExportedFunctions          = if ($Program) { [string[]]@($Program.Functions | Where-Object IsExported | ForEach-Object Name) } else { [string[]]@() }
     OpcodeCoverage             = [object[]]@($StaticAnalysis.OpcodeCoverage)
     UnsupportedOpcodes         = [string[]]@($StaticAnalysis.UnsupportedOpcodes)
     UnresolvedCalls            = [string[]]$IrWarnings.ToArray()
@@ -777,8 +995,14 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     Warnings                   = [string[]]$Warnings.ToArray()
     ParserVersionInfo          = [pscustomobject][ordered]@{
       Parser                   = 'Dumplings.PackageModule.InstallShieldInstallScript'
-      ParserMajor              = 8
-      Format                   = $Decoded.Format
+      ParserMajor              = 11
+      Format                   = $SelectedProgram.Format
+      BytecodeProfile          = $Program ? $Program.FormatProfile : $SelectedProgram.Format
+      CompilerVersion          = $Program ? $Program.CompilerVersion : $null
+      HeaderKind               = $Decoded.HeaderKind
+      SupportStatus            = $Decoded.SupportStatus
+      LibraryMemberName        = $SelectedProgram.LibraryMemberName
+      LibraryMemberCount       = $SelectedProgram.LibraryMemberCount
       WasScrambled             = $Decoded.WasScrambled
       HeaderValue              = $Decoded.HeaderValue
       MarkerOffset             = $Decoded.MarkerOffset
@@ -786,6 +1010,9 @@ function Invoke-InstallShieldInstallScriptAnalysis {
       AnalysisMode             = $Program ? 'BoundedStaticEmulation' : 'ConservativeStaticEvidenceFallback'
       AnalysisScope            = $AnalysisScope
       FunctionCount            = $Program ? $Program.Functions.Count : 0
+      ExportedFunctionCount    = $Program ? @($Program.Functions | Where-Object IsExported).Count : 0
+      ExternalSymbolCount      = $Program ? $Program.ExternalSymbols.Count : 0
+      AddressResolutionCount   = $Program ? $Program.AddressResolutions.Count : 0
       InstructionCount         = $Program ? $Program.InstructionCount : 0
       ExploredInstructionCount = $StaticAnalysis ? $StaticAnalysis.ExploredInstructionCount : 0
       EmulationTruncated       = $StaticAnalysis ? $StaticAnalysis.Truncated : $false
@@ -1422,6 +1649,9 @@ function Get-InstallShieldInstallScriptInfo {
       PropertyHandlers                   = [object[]]$Analysis.PropertyHandlers
       Shortcuts                          = [object[]]$Analysis.Shortcuts
       StaticCalls                        = [object[]]$Analysis.StaticCalls
+      ExternalSymbols                    = [object[]]$Analysis.ExternalSymbols
+      AddressResolutions                 = [object[]]$Analysis.AddressResolutions
+      ExportedFunctions                  = [string[]]$Analysis.ExportedFunctions
       OpcodeCoverage                     = [object[]]$Analysis.OpcodeCoverage
       UnsupportedOpcodes                 = [string[]]$Analysis.UnsupportedOpcodes
       UnresolvedCalls                    = [string[]]$Analysis.UnresolvedCalls
@@ -1430,8 +1660,12 @@ function Get-InstallShieldInstallScriptInfo {
       EmbeddedResponseValidation         = $Analysis.EmbeddedResponseValidation
       ParserVersionInfo                  = [pscustomobject][ordered]@{
         Parser                   = 'Dumplings.PackageModule.InstallShieldInstallScript'
-        ParserMajor              = 9
+        ParserMajor              = 11
         Format                   = $Analysis.ParserVersionInfo.Format
+        BytecodeProfile          = $Analysis.ParserVersionInfo.BytecodeProfile
+        CompilerVersion          = $Analysis.ParserVersionInfo.CompilerVersion
+        HeaderKind               = $Analysis.ParserVersionInfo.HeaderKind
+        SupportStatus            = $Analysis.ParserVersionInfo.SupportStatus
         WasScrambled             = $Analysis.ParserVersionInfo.WasScrambled
         HeaderValue              = $Analysis.ParserVersionInfo.HeaderValue
         MarkerOffset             = $Analysis.ParserVersionInfo.MarkerOffset
@@ -1439,6 +1673,9 @@ function Get-InstallShieldInstallScriptInfo {
         AnalysisMode             = $AnalysisScope -eq 'EmbeddedAction' ? 'ScopedBoundedStaticEmulation' : 'BoundedStaticEmulationAndMaintenanceDefaults'
         AnalysisScope            = $AnalysisScope
         FunctionCount            = $Analysis.ParserVersionInfo.FunctionCount
+        ExportedFunctionCount    = $Analysis.ParserVersionInfo.ExportedFunctionCount
+        ExternalSymbolCount      = $Analysis.ParserVersionInfo.ExternalSymbolCount
+        AddressResolutionCount   = $Analysis.ParserVersionInfo.AddressResolutionCount
         InstructionCount         = $Analysis.ParserVersionInfo.InstructionCount
         ExploredInstructionCount = $Analysis.ParserVersionInfo.ExploredInstructionCount
         EmulationTruncated       = $Analysis.ParserVersionInfo.EmulationTruncated
@@ -1454,6 +1691,8 @@ function Get-InstallShieldInstallScriptInfo {
 
 Export-ModuleMember -Function @(
   'Get-InstallShieldInstallScriptInfo'
+  'Get-InstallShieldInstallScriptHeaderInfo'
+  'Get-InstallShieldInstallScriptLibraryInfo'
   'Get-InstallShieldInstallScriptArpInfo'
   'Invoke-InstallShieldInstallScriptAnalysis'
   'Read-InstallShieldInstallScriptProgram'
