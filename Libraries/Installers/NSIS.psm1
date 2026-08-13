@@ -15,6 +15,29 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 # Force stop on error
 $ErrorActionPreference = 'Stop'
 
+function Get-NSISFormatInfo {
+  <#
+  .SYNOPSIS
+    Identify the serialized NSIS edition and format routes through the GPL parser bridge.
+  .PARAMETER Path
+    Path to the NSIS installer.
+  .OUTPUTS
+    Edition, version range, character mode, loader-stub architecture, selected catalog
+    profile, route IDs, candidate evidence, support status, and warnings.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]
+    [string]$Path
+  )
+
+  process {
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetFormatInfo' -Argument @{
+      Path = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    }
+  }
+}
+
 function Get-NSISInfo {
   <#
   .SYNOPSIS
@@ -25,6 +48,16 @@ function Get-NSISInfo {
     The target Windows architecture used when the installer selects architecture-specific ARP metadata
   .PARAMETER Scope
     The target installation scope used when the installer selects scope-specific ARP metadata
+  .PARAMETER Environment
+    Virtual target environment variables used by ReadEnvStr.
+  .PARAMETER CommandLine
+    Virtual installer command line.
+  .PARAMETER FileSystem
+    Explicit virtual target filesystem facts keyed by Windows path.
+  .PARAMETER FileSystemComplete
+    Treat unlisted target paths as absent rather than unknown.
+  .PARAMETER AnsiCodePage
+    Explicit source code page for ANSI NSIS strings.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -37,7 +70,17 @@ function Get-NSISInfo {
 
     [Parameter(HelpMessage = 'The target installation scope used to resolve scope-specific ARP metadata')]
     [ValidateSet('user', 'machine')]
-    [string]$Scope
+    [string]$Scope,
+
+    [hashtable]$Environment = @{},
+
+    [AllowEmptyString()][string]$CommandLine = '',
+
+    [hashtable]$FileSystem = @{},
+
+    [switch]$FileSystemComplete,
+
+    [ValidateRange(1, 65535)][int]$AnsiCodePage
   )
 
   process {
@@ -45,6 +88,11 @@ function Get-NSISInfo {
     $Arguments = @{ Path = $InstallerPath }
     if (-not [string]::IsNullOrWhiteSpace($Architecture)) { $Arguments.Architecture = $Architecture }
     if (-not [string]::IsNullOrWhiteSpace($Scope)) { $Arguments.Scope = $Scope }
+    if ($Environment.Count -gt 0) { $Arguments.EnvironmentJson = $Environment | ConvertTo-Json -Compress }
+    if ($FileSystem.Count -gt 0) { $Arguments.FileSystemJson = $FileSystem | ConvertTo-Json -Compress -Depth 8 }
+    if ($FileSystemComplete) { $Arguments.FileSystemComplete = $true }
+    if ($PSBoundParameters.ContainsKey('CommandLine')) { $Arguments.CommandLine = $CommandLine }
+    if ($AnsiCodePage -gt 0) { $Arguments.AnsiCodePage = $AnsiCodePage }
     $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetInfo' -Argument $Arguments
     return $Info
   }
@@ -64,6 +112,8 @@ function Expand-NSISInstaller {
     Maximum total bytes written by the GPL parser, including payload aliases.
   .PARAMETER CollisionAction
     Behavior when an output path already exists or multiple File commands resolve to the same path.
+  .PARAMETER ExternalDataPath
+    Optional legacy .nsisbin file, current setupN.bin files, or their directory.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
@@ -82,7 +132,9 @@ function Expand-NSISInstaller {
     [long]$MaximumExpandedBytes = 1073741824,
 
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
-    [string]$CollisionAction = 'Prompt'
+    [string]$CollisionAction = 'Prompt',
+
+    [string[]]$ExternalDataPath
   )
 
   process {
@@ -95,6 +147,7 @@ function Expand-NSISInstaller {
     if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
       $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     }
+    if ($ExternalDataPath) { $Arguments.ExternalDataPath = @($ExternalDataPath | ForEach-Object { Resolve-InstallerFileSystemPath -Path $_ }) }
     $Result = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.Expand' -Argument $Arguments
     return Convert-InstallerBridgePathsToFileInfo -Path $Result
   }
@@ -421,4 +474,4 @@ function Read-AdditionalInstallerSwitchesFromNSIS {
   }
 }
 
-Export-ModuleMember -Function Get-NSISInfo, Expand-NSISInstaller, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, ConvertFrom-ElectronBuilderUpdateFeed, ConvertFrom-ElectronBuilderLatestYaml, Read-ProtocolsFromNSIS, Read-FileExtensionsFromNSIS, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS
+Export-ModuleMember -Function Get-NSISFormatInfo, Get-NSISInfo, Expand-NSISInstaller, Get-NSISInstallerSwitchInfo, Read-AdditionalInstallerSwitchesFromNSIS, Test-ElectronBuilder, Get-ElectronBuilderNSISInfo, ConvertFrom-ElectronBuilderUpdateFeed, ConvertFrom-ElectronBuilderLatestYaml, Read-ProtocolsFromNSIS, Read-FileExtensionsFromNSIS, Read-ProductVersionFromNSIS, Read-ProductNameFromNSIS, Read-PublisherFromNSIS, Read-ProductCodeFromNSIS

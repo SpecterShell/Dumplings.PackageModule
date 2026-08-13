@@ -12,7 +12,7 @@ Core loads PackageModule through `Index.ps1` in every task worker. Standalone ca
 Import-Module .\Modules\PackageModule\PackageModule.psd1 -Force
 ```
 
-`PackageModule.psd1` is the supported command surface. `PackageModule.psm1` imports child modules in explicit dependency order and re-exports their established functions, aliases, and variables. `Index.ps1` imports that manifest globally, then loads the task model classes for Core.
+`PackageModule.psd1` is the supported entry point. `PackageModule.psm1` imports focused implementation modules in explicit dependency order; each command retains its implementation-module owner so PowerShell exposes one command with its native help and completion metadata. `Index.ps1` imports that manifest globally, then loads the task model classes for Core.
 
 Libraries are grouped by responsibility:
 

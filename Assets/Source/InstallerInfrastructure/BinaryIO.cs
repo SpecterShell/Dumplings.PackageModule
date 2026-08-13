@@ -280,6 +280,11 @@ namespace Dumplings.InstallerInfrastructure
 
         public static uint Crc32(Stream stream, bool restorePosition, long maximumBytes)
         {
+            return Crc32(stream, restorePosition, maximumBytes, null);
+        }
+
+        public static uint Crc32(Stream stream, bool restorePosition, long maximumBytes, byte[] suffix)
+        {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (!stream.CanRead) throw new ArgumentException("The stream must be readable.", nameof(stream));
             long original = stream.CanSeek ? stream.Position : 0;
@@ -294,6 +299,10 @@ namespace Dumplings.InstallerInfrastructure
                     total += read;
                     if (total > maximumBytes) throw new InvalidDataException($"The stream exceeds the {maximumBytes}-byte CRC limit.");
                     for (int i = 0; i < read; i++) crc = CrcTable[(crc ^ buffer[i]) & 0xFF] ^ (crc >> 8);
+                }
+                if (suffix != null)
+                {
+                    for (int i = 0; i < suffix.Length; i++) crc = CrcTable[(crc ^ suffix[i]) & 0xFF] ^ (crc >> 8);
                 }
                 return crc ^ uint.MaxValue;
             }

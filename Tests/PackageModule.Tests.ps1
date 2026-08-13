@@ -13,20 +13,21 @@ Describe 'PackageModule manifest-backed loading' {
     $Manifest.PowerShellVersion | Should -BeGreaterOrEqual ([version]'7.4')
   }
 
-  It 're-exports established commands through the parent module' {
+  It 'loads established commands through their focused implementation modules' {
     $Module = Get-Module PackageModule
 
-    $Module.ExportedFunctions.Keys | Should -Contain 'Get-WinGetInstallerAnalysis'
-    $Module.ExportedFunctions.Keys | Should -Contain 'ConvertFrom-Ini'
-    $Module.ExportedFunctions.Keys | Should -Contain 'ConvertFrom-ProtoBuf'
-    $Module.ExportedFunctions.Keys | Should -Contain 'Get-NSISInfo'
-    $Module.ExportedAliases.Keys | Should -Contain 'Read-SignatureSha256FromMSIX'
-    $Module.ExportedVariables.Keys | Should -Contain 'DumplingsDefaultUserAgent'
+    $Module.ExportedFunctions.Keys | Should -BeNullOrEmpty
+    (Get-Command Get-WinGetInstallerAnalysis).ModuleName | Should -Be 'WinGetAnalysis'
+    (Get-Command ConvertFrom-Ini).ModuleName | Should -Be 'Object'
+    (Get-Command ConvertFrom-ProtoBuf).ModuleName | Should -Be 'ProtocolBuffers'
+    (Get-Command Get-NSISInfo).ModuleName | Should -Be 'NSIS'
+    (Get-Command Read-SignatureSha256FromMSIX).ModuleName | Should -Be 'MSIX'
+    $DumplingsDefaultUserAgent | Should -Not -BeNullOrEmpty
   }
 
-  It 'resolves help for every parent-module function proxy' {
-    $Module = Get-Module PackageModule
-    $Failures = foreach ($Name in $Module.ExportedFunctions.Keys) {
+  It 'resolves help for commands loaded by the root module' {
+    $CommandNames = Get-Module | Where-Object Path -Like "$((Get-Item (Join-Path $PSScriptRoot '..')).FullName)\Libraries\*.psm1" | ForEach-Object { $_.ExportedFunctions.Keys } | Sort-Object -Unique
+    $Failures = foreach ($Name in $CommandNames) {
       try {
         $Help = Get-Help -Name $Name -ErrorAction Stop
         if ($null -eq $Help) { "${Name}: no help object was returned" }
@@ -50,6 +51,29 @@ Describe 'PackageModule manifest-backed loading' {
     { Import-Module $Script:ManifestPath -Force -Global -ErrorAction Stop } | Should -Not -Throw
   }
 
+  It 'supports wildcard command discovery and function-name completion' {
+    { Get-Command -Name 'Get-WinGetMan*' -ErrorAction Stop } | Should -Not -Throw
+    $Completion = [System.Management.Automation.CommandCompletion]::CompleteInput('Get-WinGetMan', 13, $null)
+
+    @($Completion.CompletionMatches.CompletionText | Where-Object { $_ -eq 'Get-WinGetManifestValidationResult' -or $_ -like '*\Get-WinGetManifestValidationResult' }) | Should -Not -BeNullOrEmpty
+  }
+
+  It 'preserves dynamic and static argument completers from implementation modules' {
+    $EncodingCompletion = [System.Management.Automation.CommandCompletion]::CompleteInput('ConvertFrom-Base64 -Encoding u', 30, $null)
+    $LineEndingInput = 'Convert-LineEndings -LineEnding '
+    $LineEndingCompletion = [System.Management.Automation.CommandCompletion]::CompleteInput($LineEndingInput, $LineEndingInput.Length, $null)
+
+    $EncodingCompletion.CompletionMatches.CompletionText | Should -Contain 'utf-8'
+    $LineEndingCompletion.CompletionMatches.CompletionText | Should -Contain "`n"
+    $LineEndingCompletion.CompletionMatches.CompletionText | Should -Contain "`r`n"
+  }
+
+  It 'exposes each function through only its implementation module' {
+    @(Get-Command Get-InnoInfo -All) | Should -HaveCount 1
+    (Get-Command Get-InnoInfo).ModuleName | Should -Be 'Inno'
+    (Get-Command 'Inno\Get-InnoInfo').ModuleName | Should -Be 'Inno'
+  }
+
   It 'retains the default manifest schema version after global parent-module imports' {
     $Schema = Get-WinGetManifestSchema -ManifestType version
 
@@ -57,7 +81,7 @@ Describe 'PackageModule manifest-backed loading' {
     $ManifestVersion | Should -Be '1.12.0'
   }
 
-  It 'retains internal state for the globally re-exported installer cache' {
+  It 'retains internal state for the globally loaded installer cache' {
     $UpdateModule = Get-Module WinGetManifestUpdate
     $InternalCache = & $UpdateModule { $Script:WinGetSharedInstallerFiles }
 
@@ -75,12 +99,8 @@ Describe 'PackageModule manifest-backed loading' {
   }
 
   It 'loads focused data and provider-neutral infrastructure modules' {
-    foreach ($Name in @('Text', 'Format', 'HTML', 'Conversion', 'Object')) {
-      Get-Module $Name | Should -Not -BeNullOrEmpty
-    }
-    foreach ($Name in @('ARP', 'InstallerAnalyzer', 'PEArchitecture', 'PEDependency')) {
-      (Get-Module $Name).Path | Should -Match '[\\/]Libraries[\\/]Infrastructure[\\/]'
-    }
+    foreach ($Name in @('Text', 'Format', 'HTML', 'Conversion', 'Object')) { Get-Module $Name | Should -Not -BeNullOrEmpty }
+    foreach ($Name in @('ARP', 'InstallerAnalyzer', 'PEArchitecture', 'PEDependency')) { (Get-Module $Name).Path | Should -Match '[\\/]Libraries[\\/]Infrastructure[\\/]' }
 
     (Get-Module Text).ExportedFunctions.Keys | Should -Not -Contain 'Format-Text'
     (Get-Module Text).ExportedFunctions.Keys | Should -Not -Contain 'Get-TextContent'

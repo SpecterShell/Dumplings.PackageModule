@@ -8,10 +8,10 @@
   Description          = 'Package automation, installer analysis, and WinGet manifest tooling for Dumplings.'
   PowerShellVersion    = '7.4'
   CompatiblePSEditions = @('Core')
-  FunctionsToExport    = '*'
+  FunctionsToExport    = @()
   CmdletsToExport      = @()
-  VariablesToExport    = '*'
-  AliasesToExport      = '*'
+  VariablesToExport    = @()
+  AliasesToExport      = @()
   PrivateData          = @{
     PSData = @{
       LicenseUri = 'https://www.apache.org/licenses/LICENSE-2.0'

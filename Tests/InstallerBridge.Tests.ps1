@@ -173,6 +173,18 @@ stagingPercentage: 25
     $Info.DisplayVersion | Should -Be '3.60.0'
   }
 
+  It 'Should return catalogued NSIS format evidence through the Apache-2.0 wrapper' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $Info = Get-NSISFormatInfo -Path $Fixture
+
+    $Info.EditionId | Should -Be 'official'
+    $Info.Generation | Should -Be 'NSIS3'
+    $Info.CharacterMode | Should -Be 'Unicode'
+    $Info.CatalogProfileId | Should -Be 'official-nsis3-unicode'
+    $Info.OpcodeRoute | Should -Be 'official'
+    $Info.IsSupported | Should -BeTrue
+  }
+
   It 'Should forward target architecture to the NSIS parser bridge' {
     $Fixture = Get-InstallerFixture -Name 'BitComet_2.21_setup.exe' -Url 'https://download.bitcomet.com/achive/BitComet_2.21_setup.exe' -Sha256 '2BB0AC769FE8B75B1B1B8CA42FA55D29D94AAF68480611538DBB4395D05082D2'
 
@@ -196,6 +208,14 @@ stagingPercentage: 25
     $MachineInfo.ProductCode | Should -Be 'DBeaver'
     $MachineInfo.Scope | Should -Be 'machine'
     $MachineInfo.AppsAndFeaturesEntries.ProductCode | Should -Contain 'DBeaver'
+  }
+
+  It 'Should forward virtual filesystem completeness to the NSIS parser bridge' {
+    $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
+    $Info = Get-NSISInfo -Path $Fixture -FileSystemComplete
+
+    $Info.ProductCode | Should -Be 'alist-desktop'
+    @($Info.ParserVersionInfo.UnresolvedFileSystemPredicates).Count | Should -Be 0
   }
 
   It 'Should preserve Tauri NSIS mode evidence across the GPL parser bridge' {

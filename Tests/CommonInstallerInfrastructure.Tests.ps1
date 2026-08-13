@@ -356,6 +356,11 @@ Describe 'Bounded binary streams' {
     Get-BinaryCrc32 -Bytes $CrcBytes -Offset 2 -Count 9 | Should -Be ([uint32]3421780262)
     Get-BinaryCrc32 -Bytes $CrcBytes | Should -Not -Be ([uint32]3421780262)
     { Get-BinaryCrc32 -Bytes $CrcBytes -Offset 8 -Count 6 } | Should -Throw
+    $CrcSource = [IO.MemoryStream]::new([byte[]](1, 2))
+    try {
+      Get-BinaryCrc32 -Stream $CrcSource -SuffixBytes ([byte[]](3)) | Should -Be (Get-BinaryCrc32 -Bytes ([byte[]](1, 2, 3)))
+      $CrcSource.Position | Should -Be 0
+    } finally { $CrcSource.Dispose() }
     $Source = [IO.MemoryStream]::new([byte[]](1, 2, 3))
     $Destination = [IO.MemoryStream]::new()
     try { { Copy-BoundedStream -Source $Source -Destination $Destination -MaximumBytes 2 } | Should -Throw }

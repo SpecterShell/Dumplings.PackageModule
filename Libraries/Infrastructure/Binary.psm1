@@ -216,6 +216,8 @@ function Get-BinaryCrc32 {
     The number of byte-array values to include, or -1 for the remaining values
   .PARAMETER MaximumBytes
     The maximum number of stream or file bytes to checksum
+  .PARAMETER SuffixBytes
+    Optional bytes incorporated after the stream or file range without buffering it.
   #>
   [OutputType([uint32])]
   param (
@@ -224,7 +226,10 @@ function Get-BinaryCrc32 {
     [Parameter(Mandatory, ParameterSetName = 'Bytes')][byte[]]$Bytes,
     [Parameter(ParameterSetName = 'Bytes')][ValidateRange(0, [int]::MaxValue)][int]$Offset = 0,
     [Parameter(ParameterSetName = 'Bytes')][ValidateRange(-1, [int]::MaxValue)][int]$Count = -1,
-    [ValidateRange(0, [long]::MaxValue)][long]$MaximumBytes = [long]::MaxValue
+    [ValidateRange(0, [long]::MaxValue)][long]$MaximumBytes = [long]::MaxValue,
+    [Parameter(ParameterSetName = 'Path')]
+    [Parameter(ParameterSetName = 'Stream')]
+    [AllowEmptyCollection()][byte[]]$SuffixBytes
   )
   Assert-InstallerInfrastructureLoaded
   switch ($PSCmdlet.ParameterSetName) {
@@ -234,10 +239,10 @@ function Get-BinaryCrc32 {
       if ($Count -gt $Bytes.Length - $Offset) { throw 'The CRC32 byte range is outside the input array.' }
       return [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32($Bytes, $Offset, $Count)
     }
-    'Stream' { return [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32($Stream, $true, $MaximumBytes) }
+    'Stream' { return [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32($Stream, $true, $MaximumBytes, $SuffixBytes) }
     'Path' {
       $InputStream = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, 'Open', 'Read', 'ReadWrite')
-      try { return [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32($InputStream, $false, $MaximumBytes) }
+      try { return [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32($InputStream, $false, $MaximumBytes, $SuffixBytes) }
       finally { $InputStream.Dispose() }
     }
   }
