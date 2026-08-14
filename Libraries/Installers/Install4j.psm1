@@ -1,19 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
-# install4j binary structures consumed here:
+# install4j Windows setup structures consumed here:
 #
-#   PE overlay -> D5 13 E4 E8 launcher magic -> int64 data length
-#     -> UTF-8/UTF-16 parameter maps -> startup-file ranges -> CRC32
-#   legacy table -> E8 E4 13 D5 -> Java DataInput-style BE records
-#     -> config/0.dat/runtime payloads (stored or bounded LZMA)
+#   PE image
+#   `-- overlay (absolute file offset from the PE section layout)
+#       +-- D5 13 E4 E8
+#       +-- legacy 3.x/4.x launcher
+#       |   +-- int32 LE ANSI parameter count and records
+#       |   +-- int32 LE UTF-16LE parameter count and records
+#       |   `-- repeated startup payloads
+#       |       +-- 3.x: int32 LE length + XOR-88 bytes
+#       |       `-- 4.x: int64 LE length + XOR-88 bytes
+#       +-- modern 5.x-13.x launcher
+#       |   +-- uint32 LE flags and expected CRC32
+#       |   +-- int64 LE bounded data length
+#       |   +-- ANSI, localized, and named nested parameter maps
+#       |   `-- int64 LE startup lengths + XOR-88 bytes
+#       `-- optional ContentCollector table
+#           +-- E8 E4 13 D5 + int32 BE count
+#           +-- repeated modified-UTF8 name + int64 BE length
+#           `-- contiguous payloads (0.dat or generation-4 .000 LZMA)
 #
-# Overlay pointers and lengths are validated before reading. Marker strings and
-# application IDs are accepted only within structurally valid records.
+# Parameter 2000 identifies the structural launcher generation when present.
+# Markerless application media can use the explicit version in a validated
+# i4jparams.conf. Parameter 2003 owns the startup-file order. All ranges are
+# validated before metadata or payloads are exposed; modern data is additionally
+# authenticated by CRC32.
+#
+# Behavioral references:
+# - https://www.ej-technologies.com/install4j/changelog
+# - https://www.ej-technologies.com/resources/install4j/help/doc/concepts/mediaFiles.html
+# - https://www.ej-technologies.com/resources/install4j/help/doc/concepts/launchers.html
+#
+# Historical field layouts are independently documented from official archived
+# builders and controlled media generated from licensed builders inside the VM.
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
-
-# Force stop on error
-$ErrorActionPreference = 'Stop'
 
 $Script:Install4jUnextractedMagic = [byte[]](0xE8, 0xE4, 0x13, 0xD5)
 $Script:Install4jApplicationIdPattern = '(?<ApplicationId>\d{4}-\d{4}-\d{4}-\d{4})'
@@ -26,106 +48,21 @@ $Script:Install4jLauncherMagic = [byte[]](0xD5, 0x13, 0xE4, 0xE8)
 $Script:Install4jLauncherTransformKey = [byte]0x88
 $Script:Install4jMaximumParameterCount = 4096
 $Script:Install4jMaximumParameterBytes = 8388608
-
-function Import-Install4jSharpCompress {
-  <#
-  .SYNOPSIS
-    Load the PackageModule copy of SharpCompress used for install4j LZMA decoding
-  #>
-  Import-InstallerArchiveDependency
+$Script:Install4jCatalog = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'Install4jFormatCatalog.psd1')
+$Script:Install4jFormats = @($Script:Install4jCatalog.Formats | ForEach-Object { [pscustomobject]$_ })
+$Script:Install4jLauncherHandlers = @{
+  LegacyParameterBlock32 = 'Get-Install4jLegacyLauncherConfiguration'
+  LegacyParameterBlock64 = 'Get-Install4jLegacyLauncherConfiguration'
+  ModernOverlayV1        = 'Get-Install4jModernLauncherConfiguration'
 }
-
-function Read-Install4jFileByteRange {
-  <#
-  .SYNOPSIS
-    Read a bounded byte range from an install4j file
-  #>
-  [OutputType([byte[]])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The file stream to read from')]
-    [System.IO.Stream]$Stream,
-
-    [Parameter(Mandatory, HelpMessage = 'The file offset to start reading at')]
-    [long]$Offset,
-
-    [Parameter(Mandatory, HelpMessage = 'The maximum number of bytes to read')]
-    [int]$Count
-  )
-
-  if ($Offset -lt 0 -or $Offset -ge $Stream.Length -or $Count -le 0) { return , ([byte[]]::new(0)) }
-
-  return , (Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Count -AllowPartial)
+$Script:Install4jContentTableHandlers = @{
+  None               = 'Get-Install4jNoEmbeddedFileTable'
+  ContentCollectorV1 = 'Get-Install4jEmbeddedFileTable'
 }
-
-function Read-Install4jInt32BigEndian {
-  <#
-  .SYNOPSIS
-    Read a Java DataInputStream-style signed 32-bit integer
-  #>
-  [OutputType([int])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The file stream to read from')]
-    [System.IO.Stream]$Stream
-  )
-
-  $Offset = $Stream.Position
-  $Value = Read-BinaryInteger -Stream $Stream -Offset $Offset -Size 4 -Endian BigEndian -Signed
-  $Stream.Position = $Offset + 4
-  return $Value
-}
-
-function Read-Install4jUInt16BigEndian {
-  <#
-  .SYNOPSIS
-    Read a Java DataInputStream-style unsigned 16-bit integer
-  #>
-  [OutputType([uint16])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The file stream to read from')]
-    [System.IO.Stream]$Stream
-  )
-
-  $Offset = $Stream.Position
-  $Value = Read-BinaryInteger -Stream $Stream -Offset $Offset -Size 2 -Endian BigEndian
-  $Stream.Position = $Offset + 2
-  return $Value
-}
-
-function Read-Install4jInt64BigEndian {
-  <#
-  .SYNOPSIS
-    Read a Java DataInputStream-style signed 64-bit integer
-  #>
-  [OutputType([long])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The file stream to read from')]
-    [System.IO.Stream]$Stream
-  )
-
-  $Offset = $Stream.Position
-  $Value = Read-BinaryInteger -Stream $Stream -Offset $Offset -Size 8 -Endian BigEndian -Signed
-  $Stream.Position = $Offset + 8
-  return $Value
-}
-
-function Find-Install4jBytePattern {
-  <#
-  .SYNOPSIS
-    Find a bounded number of byte-pattern offsets in a file
-  #>
-  [OutputType([long[]])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The file to scan')]
-    [string]$Path,
-
-    [Parameter(Mandatory, HelpMessage = 'The byte pattern to locate')]
-    [byte[]]$Pattern,
-
-    [Parameter(HelpMessage = 'The maximum number of offsets to return')]
-    [int]$Maximum = 32
-  )
-
-  Find-BinaryPattern -Path $Path -Pattern $Pattern -Maximum $Maximum
+$Script:Install4jPayloadHandlers = @{
+  InlineContentZip = 'Expand-Install4jInlineContentArchive'
+  SplitLzmaArchive = 'Expand-Install4jLzmaArchiveEntry'
+  LzmaZipContent   = 'Expand-Install4jLzmaArchiveEntry'
 }
 
 function Get-Install4jVersionInfo {
@@ -162,11 +99,16 @@ function Get-Install4jScanText {
   [OutputType([string])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The installer file')]
-    [System.IO.FileInfo]$File
+    [System.IO.FileInfo]$File,
+
+    [Parameter(HelpMessage = 'Caller-owned seekable installer stream')]
+    [IO.Stream]$Stream
   )
 
   $StringBuilder = [System.Text.StringBuilder]::new()
-  $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  $OwnsStream = $null -eq $Stream
+  if ($OwnsStream) { $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite) }
+  $OriginalPosition = if ($Stream.CanSeek) { $Stream.Position } else { 0L }
   try {
     # Collect only the launcher prefix, file tail, and a bounded overlay window. This fallback is
     # intentionally secondary to the structured startup and embedded-file tables.
@@ -174,7 +116,7 @@ function Get-Install4jScanText {
         [pscustomobject]@{ Offset = [long]0; Count = [int][Math]::Min(4194304, $File.Length) },
         [pscustomobject]@{ Offset = [long][Math]::Max(0, $File.Length - 4194304); Count = [int][Math]::Min(4194304, $File.Length) }
       )) {
-      $Bytes = Read-Install4jFileByteRange -Stream $Stream -Offset $Range.Offset -Count $Range.Count
+      $Bytes = Read-BinaryBytes -Stream $Stream -Offset $Range.Offset -Count $Range.Count -AllowPartial
       if ($Bytes.Length -gt 0) {
         $null = $StringBuilder.Append([System.Text.Encoding]::Latin1.GetString($Bytes))
         $null = $StringBuilder.Append("`n")
@@ -186,7 +128,7 @@ function Get-Install4jScanText {
       if ($OverlayOffset -gt 0 -and $OverlayOffset -lt $File.Length) {
         # install4j launcher records and the embedded file list are stored near
         # the PE overlay start; a bounded read avoids scanning large payloads.
-        $Bytes = Read-Install4jFileByteRange -Stream $Stream -Offset $OverlayOffset -Count ([int][Math]::Min($Script:Install4jMaximumScanBytes, $File.Length - $OverlayOffset))
+        $Bytes = Read-BinaryBytes -Stream $Stream -Offset $OverlayOffset -Count ([int][Math]::Min($Script:Install4jMaximumScanBytes, $File.Length - $OverlayOffset)) -AllowPartial
         if ($Bytes.Length -gt 0) {
           $null = $StringBuilder.Append([System.Text.Encoding]::Latin1.GetString($Bytes))
           $null = $StringBuilder.Append("`n")
@@ -194,7 +136,7 @@ function Get-Install4jScanText {
       }
     }
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } elseif ($Stream.CanSeek) { $Stream.Position = $OriginalPosition }
   }
 
   return $StringBuilder.ToString()
@@ -315,7 +257,7 @@ function Get-Install4jCompilerVariableMap {
   )
 
   $Variables = @{}
-  foreach ($Variable in @($Xml.SelectNodes('/config/compilerVariables/variable'))) {
+  foreach ($Variable in @($Xml.SelectNodes('/config/compilerVariables/variable | /config/variables/variable'))) {
     $Name = Get-Install4jXmlAttribute -Element $Variable -Name 'name'
     if ([string]::IsNullOrWhiteSpace($Name)) { continue }
     $Variables[$Name] = Get-Install4jXmlAttribute -Element $Variable -Name 'value'
@@ -374,13 +316,27 @@ function ConvertFrom-Install4jConfigXml {
     [string]$Content,
 
     [Parameter(HelpMessage = 'The source that provided this XML')]
-    [string]$Source = 'Xml'
+    [string]$Source = 'Xml',
+
+    [Parameter(HelpMessage = 'Catalog-selected configuration schema route')]
+    [ValidateSet('Auto', 'Legacy3Xml', 'Legacy4Xml', 'ModernXml')]
+    [string]$ConfigRoute = 'Auto'
   )
 
   [xml]$Xml = $Content
   if (-not $Xml.config) { throw 'The XML document is not an install4j config document' }
 
   $Root = $Xml.config
+  if ($ConfigRoute -eq 'Auto') {
+    $EncodedVersion = Get-Install4jXmlAttribute -Element $Root -Name 'install4jVersion'
+    $ConfigRoute = if ([string]::IsNullOrWhiteSpace($EncodedVersion)) {
+      'Legacy3Xml'
+    } elseif ($EncodedVersion -match '^4(?:\.|$)') {
+      'Legacy4Xml'
+    } else {
+      'ModernXml'
+    }
+  }
   $GeneralNode = $Xml.SelectSingleNode('/config/general')
   if (-not $GeneralNode) { throw 'The install4j config does not contain a general element' }
 
@@ -398,6 +354,8 @@ function ConvertFrom-Install4jConfigXml {
     JreVersion                   = Get-Install4jXmlAttribute -Element $GeneralNode -Name 'jreVersion'
     MinimumJavaVersion           = Get-Install4jXmlAttribute -Element $GeneralNode -Name 'minJavaVersion'
     LzmaCompression              = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlAttribute -Element $GeneralNode -Name 'lzmaCompression')
+    Pack200Compression           = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlAttribute -Element $GeneralNode -Name 'pack200Compression')
+    AdminRequired                = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlAttribute -Element $GeneralNode -Name 'adminRequired')
     PrivilegedInstallerRequest   = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlAttribute -Element $GeneralNode -Name 'privilegedInstallerRequest')
   }
 
@@ -427,17 +385,44 @@ function ConvertFrom-Install4jConfigXml {
   $FileAssociationActions = foreach ($ActionNode in @($Xml.SelectNodes("//*[@class='com.install4j.runtime.beans.actions.desktop.CreateFileAssociationAction']"))) {
     $Extension = Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'extension'
     $Extension = Expand-Install4jStaticText -Value $Extension -General $General -CompilerVariables $CompilerVariables
+    $Windows = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'windows')
+    $Selected = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'selected')
     [pscustomobject]@{
       Extension   = $Extension
       Description = Expand-Install4jStaticText -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'description') -General $General -CompilerVariables $CompilerVariables
       LauncherId  = Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'launcherId'
-      Windows     = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'windows')
-      Selected    = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlDecoderPropertyValue -ObjectNode $ActionNode -Name 'selected')
+      # XMLDecoder omits constructor defaults. CreateFileAssociationAction initializes both
+      # properties to true, so absence is affirmative rather than unknown or false.
+      Windows     = $null -eq $Windows ? $true : $Windows
+      Selected    = $null -eq $Selected ? $true : $Selected
     }
+  }
+  if ($ConfigRoute -eq 'Legacy3Xml') {
+    # install4j 3 stores associations as direct elements rather than XMLDecoder action beans.
+    $FileAssociationActions = @($FileAssociationActions) + @(
+      foreach ($AssociationNode in @($Xml.SelectNodes('/config/associations/association'))) {
+        [pscustomobject]@{
+          Extension   = Get-Install4jXmlAttribute -Element $AssociationNode -Name 'extension'
+          Description = Get-Install4jXmlAttribute -Element $AssociationNode -Name 'description'
+          LauncherId  = Get-Install4jXmlAttribute -Element $AssociationNode -Name 'launcher'
+          Windows     = $true
+          Selected    = ConvertTo-Install4jBoolean -Value (Get-Install4jXmlAttribute -Element $AssociationNode -Name 'selected')
+        }
+      }
+    )
+  }
+
+  # Generation 3 creates uninstall registration as part of its built-in install phase; later
+  # generations serialize RegisterAddRemoveAction explicitly.
+  $HasRegisterAddRemoveAction = [bool]$RegisterActionNode
+  if ($ConfigRoute -eq 'Legacy3Xml' -and -not [string]::IsNullOrWhiteSpace($General.ApplicationId) -and
+    -not [string]::IsNullOrWhiteSpace($General.UninstallerFilename)) {
+    $HasRegisterAddRemoveAction = $true
   }
 
   [pscustomobject]@{
     Source                       = $Source
+    ConfigRoute                  = $ConfigRoute
     Install4jVersion             = Get-Install4jXmlAttribute -Element $Root -Name 'install4jVersion'
     Install4jBuild               = Get-Install4jXmlAttribute -Element $Root -Name 'install4jBuild'
     Type                         = Get-Install4jXmlAttribute -Element $Root -Name 'type'
@@ -445,7 +430,7 @@ function ConvertFrom-Install4jConfigXml {
     Bitness                      = Get-Install4jXmlAttribute -Element $Root -Name 'bitness'
     General                      = [pscustomobject]$General
     CompilerVariables            = [pscustomobject]$CompilerVariables
-    HasRegisterAddRemoveAction   = [bool]$RegisterActionNode
+    HasRegisterAddRemoveAction   = $HasRegisterAddRemoveAction
     RegisterAddRemoveItemName    = $RegisterItemName
     HasRequestPrivilegesAction   = [bool]$RequestPrivilegesNode
     RequestPrivileges            = $RequestPrivileges
@@ -497,27 +482,66 @@ function Get-Install4jAssociationInfo {
   }
 }
 
-function Read-Install4jLauncherInteger {
+function Get-Install4jRuntimeInfo {
   <#
   .SYNOPSIS
-    Read a little-endian integer from the current launcher stream position
-  .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
-  .PARAMETER Size
-    Declared size or parser bound in bytes or characters, as named by the field; ranges are validated before reading.
-  .PARAMETER Unsigned
-    Interprets the current integer field as unsigned when the format version requires it.
+    Classify whether install4j media carries a private Java runtime.
+  .PARAMETER Config
+    Parsed i4jparams.conf evidence. general@jreVersion records the bundled runtime version,
+    while general@minJavaVersion records the minimum runtime accepted by the application.
+  .PARAMETER EmbeddedFiles
+    Startup-file and content-table names recovered from the installer. Modern bundled media
+    normally exposes the private runtime as jre.tar.gz.
+  .PARAMETER HasMediaCatalog
+    Indicates that EmbeddedFiles came from a parsed installer rather than a standalone config.
+  .OUTPUTS
+    Structured runtime classification, version, archive name, confidence, evidence, and warnings.
   #>
+  [OutputType([pscustomobject])]
   param (
-    [Parameter(Mandatory)][System.IO.Stream]$Stream,
-    [Parameter(Mandatory)][ValidateSet(4, 8)][int]$Size,
-    [switch]$Unsigned
+    [AllowNull()][psobject]$Config,
+    [AllowNull()][string[]]$EmbeddedFiles,
+    [bool]$HasMediaCatalog
   )
 
-  $Offset = $Stream.Position
-  $Value = Read-BinaryInteger -Stream $Stream -Offset $Offset -Size $Size -Signed:(-not $Unsigned)
-  $Stream.Position = $Offset + $Size
-  return $Value
+  $Evidence = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[string]]::new()
+  $BundledVersion = if ($Config) { [string]$Config.General.JreVersion } else { $null }
+  $MinimumVersion = if ($Config) { [string]$Config.General.MinimumJavaVersion } else { $null }
+  $RuntimeArchive = @($EmbeddedFiles | Where-Object { $_ -in 'jre.tar.gz', 'jre.tar', 'jre.zip' }) | Select-Object -First 1
+
+  if (-not [string]::IsNullOrWhiteSpace($BundledVersion)) {
+    $HasBundledRuntime = $true
+    $Evidence.Add("i4jparams.conf declares bundled Java runtime version '$BundledVersion'.")
+    if ($RuntimeArchive) {
+      $Evidence.Add("The installer startup-file catalog contains '$RuntimeArchive'.")
+    } elseif ($HasMediaCatalog) {
+      $Warnings.Add('i4jparams.conf declares a bundled Java runtime, but the parsed media catalog does not expose its runtime archive.')
+    }
+  } elseif ($RuntimeArchive) {
+    $HasBundledRuntime = $true
+    $Evidence.Add("The installer startup-file catalog contains '$RuntimeArchive'.")
+    $Warnings.Add('The installer contains a Java runtime archive, but i4jparams.conf does not declare its version.')
+  } elseif ($Config) {
+    $HasBundledRuntime = $false
+    $Evidence.Add('i4jparams.conf does not declare a bundled Java runtime.')
+  } else {
+    $HasBundledRuntime = $null
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($MinimumVersion)) {
+    $Evidence.Add("i4jparams.conf requires Java $MinimumVersion or later when no private runtime is used.")
+  }
+
+  [pscustomobject]@{
+    HasBundledRuntime     = $HasBundledRuntime
+    BundledRuntimeVersion = [string]::IsNullOrWhiteSpace($BundledVersion) ? $null : $BundledVersion
+    MinimumJavaVersion    = [string]::IsNullOrWhiteSpace($MinimumVersion) ? $null : $MinimumVersion
+    RuntimeArchive        = $RuntimeArchive
+    Confidence            = if ($Config -and ($RuntimeArchive -or $HasBundledRuntime -eq $false)) { 'high' } elseif ($Config -or $RuntimeArchive) { 'medium' } else { 'unknown' }
+    Evidence              = [string[]]@($Evidence)
+    Warnings              = [string[]]@($Warnings)
+  }
 }
 
 function Read-Install4jLauncherString {
@@ -538,7 +562,7 @@ function Read-Install4jLauncherString {
     [Parameter(Mandatory)][long]$DataEnd
   )
 
-  $Length = Read-Install4jLauncherInteger -Stream $Stream -Size 4
+  $Length = Read-BinarySequentialInteger -Stream $Stream -Size 4 -Signed
   if ($Length -lt 0 -or $Length -gt $Script:Install4jMaximumParameterBytes -or $Stream.Position + $Length -gt $DataEnd) {
     throw "Invalid install4j launcher string length: $Length"
   }
@@ -566,22 +590,22 @@ function Read-Install4jLauncherParameterMap {
     [Parameter(Mandatory)][long]$DataEnd
   )
 
-  $Count = Read-Install4jLauncherInteger -Stream $Stream -Size 4
+  $Count = Read-BinarySequentialInteger -Stream $Stream -Size 4 -Signed
   if ($Count -lt 0 -or $Count -gt $Script:Install4jMaximumParameterCount) {
     throw "Invalid install4j launcher parameter count: $Count"
   }
   $Result = @{}
   for ($Index = 0; $Index -lt $Count; $Index++) {
-    $Key = Read-Install4jLauncherInteger -Stream $Stream -Size 4
+    $Key = Read-BinarySequentialInteger -Stream $Stream -Size 4 -Signed
     $Result[$Key] = Read-Install4jLauncherString -Stream $Stream -Encoding $Encoding -DataEnd $DataEnd
   }
   return $Result
 }
 
-function Get-Install4jLauncherConfiguration {
+function Get-Install4jModernLauncherConfiguration {
   <#
   .SYNOPSIS
-    Read the install4j launcher parameter block and transformed startup files
+    Read a generation 5 or later install4j launcher parameter block and transformed startup files
   .DESCRIPTION
     install4j writes this block at the PE overlay start. The block is bounded by
     a declared byte count and CRC32. Parameter 2003 lists startup files in the
@@ -590,10 +614,17 @@ function Get-Install4jLauncherConfiguration {
     Path to the installer or format artifact read by this function.
   #>
   [OutputType([pscustomobject])]
-  param ([Parameter(Mandatory)][string]$Path)
+  param (
+    [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream
+  )
 
-  $File = Get-Item -LiteralPath $Path -Force
-  $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  $OwnsStream = $PSCmdlet.ParameterSetName -eq 'Path'
+  if ($OwnsStream) {
+    $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Stream = [IO.File]::Open($ResolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  }
+  $OriginalPosition = if ($Stream.CanSeek) { $Stream.Position } else { 0L }
   try {
     # The launcher's CRC-protected parameter block must begin exactly at the PE overlay boundary.
     $OverlayOffset = Get-PEOverlayOffset -Stream $Stream
@@ -604,9 +635,9 @@ function Get-Install4jLauncherConfiguration {
     }
 
     $Stream.Position = $OverlayOffset + 4
-    $Flags = Read-Install4jLauncherInteger -Stream $Stream -Size 4 -Unsigned
-    $ExpectedCrc32 = Read-Install4jLauncherInteger -Stream $Stream -Size 4 -Unsigned
-    $DataLength = Read-Install4jLauncherInteger -Stream $Stream -Size 8
+    $Flags = Read-BinarySequentialInteger -Stream $Stream -Size 4
+    $ExpectedCrc32 = Read-BinarySequentialInteger -Stream $Stream -Size 4
+    $DataLength = Read-BinarySequentialInteger -Stream $Stream -Size 8 -Signed
     $DataStart = $Stream.Position
     if ($DataLength -le 0 -or $DataLength -gt $Script:Install4jMaximumExpandedBytes -or $DataStart + $DataLength -gt $Stream.Length) {
       throw "Invalid install4j launcher configuration length: $DataLength"
@@ -616,7 +647,7 @@ function Get-Install4jLauncherConfiguration {
     # install4j serializes ANSI, localized UTF-16, and named nested parameter maps in sequence.
     $AnsiParameters = Read-Install4jLauncherParameterMap -Stream $Stream -Encoding ([System.Text.Encoding]::UTF8) -DataEnd $DataEnd
     $LocalizedParameters = Read-Install4jLauncherParameterMap -Stream $Stream -Encoding ([System.Text.Encoding]::Unicode) -DataEnd $DataEnd
-    $NestedCount = Read-Install4jLauncherInteger -Stream $Stream -Size 4
+    $NestedCount = Read-BinarySequentialInteger -Stream $Stream -Size 4 -Signed
     if ($NestedCount -lt 0 -or $NestedCount -gt $Script:Install4jMaximumParameterCount) {
       throw "Invalid install4j nested parameter-map count: $NestedCount"
     }
@@ -635,7 +666,7 @@ function Get-Install4jLauncherConfiguration {
     $Entries = [System.Collections.Generic.List[psobject]]::new()
     foreach ($Name in $Names) {
       if ($Stream.Position + 8 -gt $DataEnd) { throw 'The install4j startup-file table is truncated' }
-      $Length = Read-Install4jLauncherInteger -Stream $Stream -Size 8
+      $Length = Read-BinarySequentialInteger -Stream $Stream -Size 8 -Signed
       if ($Length -lt 0 -or $Length -gt $Script:Install4jMaximumExpandedBytes -or $Stream.Position + $Length -gt $DataEnd) {
         throw "Invalid install4j startup-file length for '$Name': $Length"
       }
@@ -657,6 +688,8 @@ function Get-Install4jLauncherConfiguration {
     }
 
     return [pscustomobject]@{
+      Route               = 'ModernOverlayV1'
+      Marker              = [string]$AnsiParameters[2000]
       Offset              = [long]$OverlayOffset
       Flags               = [uint32]$Flags
       DataStart           = [long]$DataStart
@@ -672,8 +705,190 @@ function Get-Install4jLauncherConfiguration {
       RemainingDataBytes  = [long]($DataEnd - $Stream.Position)
     }
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } elseif ($Stream.CanSeek) { $Stream.Position = $OriginalPosition }
   }
+}
+
+function Get-Install4jLegacyLauncherConfiguration {
+  <#
+  .SYNOPSIS
+    Read a generation 3 or 4 install4j PE-overlay parameter block.
+  .DESCRIPTION
+    Legacy launchers place the two parameter maps directly after the common
+    D5 13 E4 E8 magic. Generation 3 prefixes each XOR-transformed startup file
+    with an int32 length; generation 4 uses int64 lengths.
+  .PARAMETER Path
+    Path to the native Windows setup executable.
+  .PARAMETER LengthSize
+    Width in bytes of each little-endian startup-file length.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream,
+    [Parameter(Mandatory)][ValidateSet(4, 8)][int]$LengthSize
+  )
+
+  $OwnsStream = $PSCmdlet.ParameterSetName -eq 'Path'
+  if ($OwnsStream) {
+    $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Stream = [IO.File]::Open($ResolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  }
+  $OriginalPosition = if ($Stream.CanSeek) { $Stream.Position } else { 0L }
+  try {
+    $OverlayOffset = Get-PEOverlayOffset -Stream $Stream
+    if ($OverlayOffset -le 0 -or $OverlayOffset + 12 -gt $Stream.Length) {
+      throw 'The install4j launcher has no bounded legacy configuration overlay'
+    }
+    $Magic = Read-BinaryBytes -Stream $Stream -Offset $OverlayOffset -Count 4
+    if (-not (Test-BinarySequence -Left $Magic -Right $Script:Install4jLauncherMagic)) {
+      throw 'The PE overlay does not start with the install4j launcher magic'
+    }
+
+    $Stream.Position = $OverlayOffset + 4
+    $AnsiParameters = Read-Install4jLauncherParameterMap -Stream $Stream -Encoding ([Text.Encoding]::UTF8) -DataEnd $Stream.Length
+    $LocalizedParameters = Read-Install4jLauncherParameterMap -Stream $Stream -Encoding ([Text.Encoding]::Unicode) -DataEnd $Stream.Length
+    $Marker = [string]$AnsiParameters[2000]
+    $Names = @(([string]$AnsiParameters[2003]).Split(';', [StringSplitOptions]::RemoveEmptyEntries))
+    if ([string]::IsNullOrWhiteSpace($Marker) -or $Names.Count -le 0 -or $Names.Count -gt $Script:Install4jMaximumParameterCount) {
+      throw 'The legacy install4j launcher does not contain the required marker and startup-file list'
+    }
+
+    $Entries = [Collections.Generic.List[psobject]]::new()
+    foreach ($Name in $Names) {
+      if ($Stream.Position + $LengthSize -gt $Stream.Length) { throw 'The legacy install4j startup-file table is truncated' }
+      $Length = [long](Read-BinarySequentialInteger -Stream $Stream -Size $LengthSize -Signed)
+      if ($Length -lt 0 -or $Length -gt $Script:Install4jMaximumExpandedBytes -or $Stream.Position + $Length -gt $Stream.Length) {
+        throw "Invalid legacy install4j startup-file length for '$Name': $Length"
+      }
+      $Entries.Add([pscustomobject]@{
+          Name         = $Name
+          Offset       = [long]$Stream.Position
+          Length       = $Length
+          Transform    = 'Xor88'
+          TransformKey = $Script:Install4jLauncherTransformKey
+        })
+      $Stream.Position += $Length
+    }
+
+    [pscustomobject]@{
+      Route               = "LegacyParameterBlock$($LengthSize * 8)"
+      Marker              = $Marker
+      Offset              = [long]$OverlayOffset
+      Flags               = $null
+      DataStart           = [long]($OverlayOffset + 4)
+      DataLength          = [long]($Stream.Position - ($OverlayOffset + 4))
+      DataEnd             = [long]$Stream.Position
+      ExpectedCrc32       = $null
+      ActualCrc32         = $null
+      IsCrc32Valid        = $null
+      AnsiParameters      = $AnsiParameters
+      LocalizedParameters = $LocalizedParameters
+      NestedParameters    = @{}
+      Entries             = @($Entries)
+      RemainingDataBytes  = [long]($Stream.Length - $Stream.Position)
+    }
+  } finally {
+    if ($OwnsStream) { $Stream.Dispose() } elseif ($Stream.CanSeek) { $Stream.Position = $OriginalPosition }
+  }
+}
+
+function Resolve-Install4jFormatDescriptor {
+  <#
+  .SYNOPSIS
+    Resolve one immutable catalog descriptor from validated launcher evidence.
+  .PARAMETER Marker
+    Parameter 2000 from a structurally parsed launcher map.
+  .PARAMETER LauncherRoute
+    Route that fully consumed the launcher parameter and startup-file records.
+  .PARAMETER AllowFutureFallback
+    Permit the nearest compatible modern descriptor after strict structural validation.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Marker,
+    [Parameter(Mandatory)][string]$LauncherRoute,
+    [switch]$AllowFutureFallback
+  )
+
+  $CatalogMatches = @($Script:Install4jFormats | Where-Object {
+      $_.LauncherRoute -eq $LauncherRoute -and $Marker -match $_.MarkerPattern
+    })
+  if ($CatalogMatches.Count -eq 1) {
+    $Descriptor = $CatalogMatches[0].PSObject.Copy()
+    $Descriptor | Add-Member -NotePropertyName IsFallback -NotePropertyValue $false
+    return $Descriptor
+  }
+  if ($CatalogMatches.Count -gt 1) { throw "The install4j marker '$Marker' ambiguously matches multiple catalog descriptors" }
+
+  $FutureMatch = [regex]::Match($Marker, '^[LS]-M(?<Generation>\d+)-[A-Za-z0-9_]+#[0-9]+-$')
+  if ($AllowFutureFallback -and $LauncherRoute -eq 'ModernOverlayV1' -and $FutureMatch.Success) {
+    $Generation = [int]$FutureMatch.Groups['Generation'].Value
+    $Latest = $Script:Install4jFormats | Where-Object LauncherRoute -EQ 'ModernOverlayV1' | Sort-Object Generation -Descending | Select-Object -First 1
+    if ($Generation -gt $Latest.Generation) {
+      $Descriptor = $Latest.PSObject.Copy()
+      $Descriptor.Id = "install4j-$Generation-fallback"
+      $Descriptor.Generation = $Generation
+      $Descriptor.MarkerPattern = "^[LS]-M$Generation-[A-Za-z0-9_]+#[0-9]+-$"
+      $Descriptor | Add-Member -NotePropertyName IsFallback -NotePropertyValue $true
+      return $Descriptor
+    }
+  }
+}
+
+function Get-Install4jLauncherProbe {
+  <#
+  .SYNOPSIS
+    Select exactly one catalog-compatible launcher route for a native setup executable.
+  .PARAMETER Path
+    Path to the native Windows setup executable.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream
+  )
+
+  $OwnsStream = $PSCmdlet.ParameterSetName -eq 'Path'
+  if ($OwnsStream) {
+    $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Stream = [IO.File]::Open($ResolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  }
+  $Candidates = [Collections.Generic.List[psobject]]::new()
+  try {
+    foreach ($Probe in @(
+        [pscustomobject]@{ Route = 'ModernOverlayV1'; LengthSize = 0 },
+        [pscustomobject]@{ Route = 'LegacyParameterBlock32'; LengthSize = 4 },
+        [pscustomobject]@{ Route = 'LegacyParameterBlock64'; LengthSize = 8 }
+      )) {
+      try {
+        $Handler = $Script:Install4jLauncherHandlers[$Probe.Route]
+        $Launcher = if ($Probe.LengthSize) { & $Handler -Stream $Stream -LengthSize $Probe.LengthSize } else { & $Handler -Stream $Stream }
+        $Descriptor = if (-not [string]::IsNullOrWhiteSpace([string]$Launcher.Marker)) {
+          Resolve-Install4jFormatDescriptor -Marker $Launcher.Marker -LauncherRoute $Probe.Route -AllowFutureFallback
+        } else {
+          $null
+        }
+        # Generated application media does not always serialize parameter 2000. Retain a fully
+        # consumed modern launcher when it carries a bounded configuration startup file; the
+        # decoded configuration may select a same-route descriptor later in the analysis.
+        $CanResolveFromConfiguration = $Probe.Route -eq 'ModernOverlayV1' -and
+        $Launcher.IsCrc32Valid -eq $true -and $Launcher.RemainingDataBytes -eq 0 -and
+        @($Launcher.Entries | Where-Object Name -IEQ 'i4jparams.conf').Count -eq 1
+        if ($Descriptor -or $Launcher.Marker -match '^[LS]-[A-Za-z0-9_-]+#[0-9]+-$' -or $CanResolveFromConfiguration) {
+          $Candidates.Add([pscustomobject]@{ Launcher = $Launcher; Descriptor = $Descriptor })
+        }
+      } catch {
+        # A route probe is speculative. Only a complete, catalog-compatible parse becomes evidence.
+      }
+    }
+  } finally {
+    if ($OwnsStream) { $Stream.Dispose() }
+  }
+
+  if ($Candidates.Count -eq 0) { return }
+  if ($Candidates.Count -gt 1) { throw 'The install4j launcher matches multiple incompatible structural routes' }
+  return $Candidates[0]
 }
 
 function Read-Install4jLauncherFile {
@@ -689,22 +904,79 @@ function Read-Install4jLauncherFile {
   #>
   [OutputType([byte[]])]
   param (
-    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Stream')][IO.Stream]$Stream,
     [Parameter(Mandatory)][psobject]$Entry,
     [ValidateRange(1, [int]::MaxValue)][int]$MaximumBytes = $Script:Install4jMaximumConfigBytes
   )
 
   if ($Entry.Length -gt $MaximumBytes) { throw "The install4j startup file '$($Entry.Name)' is too large to read safely" }
-  $Source = [System.IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, 'Open', 'Read', 'ReadWrite')
+  $OwnsStream = $PSCmdlet.ParameterSetName -eq 'Path'
+  if ($OwnsStream) {
+    $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Stream = [IO.File]::Open($ResolvedPath, 'Open', 'Read', 'ReadWrite')
+  }
+  $OriginalPosition = if ($Stream.CanSeek) { $Stream.Position } else { 0L }
   $Destination = [System.IO.MemoryStream]::new([int]$Entry.Length)
   try {
-    $Source.Position = $Entry.Offset
-    $null = Copy-BinaryXorStream -Source $Source -Destination $Destination -Key ([byte]$Entry.TransformKey) -ExpectedBytes $Entry.Length
+    $Stream.Position = $Entry.Offset
+    $null = Copy-BinaryXorStream -Source $Stream -Destination $Destination -Key ([byte]$Entry.TransformKey) -ExpectedBytes $Entry.Length
     return , ($Destination.ToArray())
   } finally {
     $Destination.Dispose()
-    $Source.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } elseif ($Stream.CanSeek) { $Stream.Position = $OriginalPosition }
   }
+}
+
+function ConvertFrom-Install4jModifiedUtf8 {
+  <#
+  .SYNOPSIS
+    Decode one Java DataInput modified-UTF8 string.
+  .PARAMETER Bytes
+    Exact byte payload following the unsigned big-endian length field.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][byte[]]$Bytes)
+
+  $Characters = [Collections.Generic.List[char]]::new()
+  for ($Index = 0; $Index -lt $Bytes.Length; ) {
+    $First = $Bytes[$Index++]
+    if (($First -band 0x80) -eq 0) {
+      if ($First -eq 0) { throw 'A modified-UTF8 string contains an unencoded null byte' }
+      $Characters.Add([char]$First)
+      continue
+    }
+    if (($First -band 0xE0) -eq 0xC0) {
+      if ($Index -ge $Bytes.Length) { throw 'A modified-UTF8 two-byte sequence is truncated' }
+      $Second = $Bytes[$Index++]
+      if (($Second -band 0xC0) -ne 0x80) { throw 'A modified-UTF8 continuation byte is invalid' }
+      $Characters.Add([char]((($First -band 0x1F) -shl 6) -bor ($Second -band 0x3F)))
+      continue
+    }
+    if (($First -band 0xF0) -eq 0xE0) {
+      if ($Index + 1 -ge $Bytes.Length) { throw 'A modified-UTF8 three-byte sequence is truncated' }
+      $Second = $Bytes[$Index++]
+      $Third = $Bytes[$Index++]
+      if (($Second -band 0xC0) -ne 0x80 -or ($Third -band 0xC0) -ne 0x80) { throw 'A modified-UTF8 continuation byte is invalid' }
+      $Characters.Add([char]((($First -band 0x0F) -shl 12) -bor (($Second -band 0x3F) -shl 6) -bor ($Third -band 0x3F)))
+      continue
+    }
+    throw 'A modified-UTF8 leading byte is invalid'
+  }
+  return -join $Characters
+}
+
+function Get-Install4jNoEmbeddedFileTable {
+  <#
+  .SYNOPSIS
+    Represent the generation-3 route that has no ContentCollector table.
+  .PARAMETER Stream
+    Caller-owned stream, unused by this route.
+  #>
+  [OutputType([pscustomobject[]])]
+  param ([Parameter(Mandatory)][IO.Stream]$Stream)
+  $null = $Stream
+  return @()
 }
 
 function Get-Install4jEmbeddedFileTable {
@@ -714,61 +986,67 @@ function Get-Install4jEmbeddedFileTable {
   #>
   [OutputType([pscustomobject[]])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The path to the installer')]
-    [string]$Path
+    [Parameter(Mandatory, ParameterSetName = 'Path', HelpMessage = 'The path to the installer')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Stream', HelpMessage = 'Caller-owned seekable installer stream')][IO.Stream]$Stream
   )
 
-  $File = Get-Item -LiteralPath $Path -Force
-  # Marker bytes can occur in payloads, so accept a table only when all BE names, lengths, and the
-  # contiguous payload extent remain inside the installer.
-  foreach ($Offset in Find-Install4jBytePattern -Path $File.FullName -Pattern $Script:Install4jUnextractedMagic -Maximum 16) {
-    $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-    try {
-      $Stream.Position = $Offset
-      if ((Read-Install4jInt32BigEndian -Stream $Stream) -ne -387705899) { continue }
-      $Count = Read-Install4jInt32BigEndian -Stream $Stream
-      if ($Count -le 0 -or $Count -gt 4096) { continue }
+  $OwnsStream = $PSCmdlet.ParameterSetName -eq 'Path'
+  if ($OwnsStream) {
+    $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Stream = [IO.File]::Open($ResolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  }
+  $OriginalPosition = if ($Stream.CanSeek) { $Stream.Position } else { 0L }
+  try {
+    # Marker bytes can occur in payloads, so accept a table only when all BE names, lengths, and the
+    # contiguous payload extent remain inside the installer.
+    foreach ($Offset in Find-BinaryPattern -Stream $Stream -Pattern $Script:Install4jUnextractedMagic -Maximum 16) {
+      try {
+        $Stream.Position = $Offset
+        if ((Read-BinarySequentialInteger -Stream $Stream -Size 4 -Endian BigEndian -Signed) -ne -387705899) { continue }
+        $Count = Read-BinarySequentialInteger -Stream $Stream -Size 4 -Endian BigEndian -Signed
+        if ($Count -le 0 -or $Count -gt 4096) { continue }
 
-      $Entries = [System.Collections.Generic.List[psobject]]::new()
-      $PayloadRelativeOffset = [long]0
-      for ($Index = 0; $Index -lt $Count; $Index++) {
-        $NameLength = [int](Read-Install4jUInt16BigEndian -Stream $Stream)
-        if ($NameLength -le 0 -or $NameLength -gt 32767) { throw 'Invalid install4j embedded file name length' }
+        $Entries = [System.Collections.Generic.List[psobject]]::new()
+        $PayloadRelativeOffset = [long]0
+        for ($Index = 0; $Index -lt $Count; $Index++) {
+          $NameLength = [int](Read-BinarySequentialInteger -Stream $Stream -Size 2 -Endian BigEndian)
+          if ($NameLength -le 0 -or $NameLength -gt 32767) { throw 'Invalid install4j embedded file name length' }
 
-        $NameBytes = [byte[]]::new($NameLength)
-        if ($Stream.Read($NameBytes, 0, $NameLength) -ne $NameLength) { throw 'Unexpected end of file while reading install4j embedded file name' }
-        $Name = [System.Text.Encoding]::UTF8.GetString($NameBytes)
-        $Length = Read-Install4jInt64BigEndian -Stream $Stream
-        if ($Length -lt 0 -or $Length -gt $File.Length) { throw 'Invalid install4j embedded file length' }
+          $NameBytes = [byte[]]::new($NameLength)
+          if ($Stream.Read($NameBytes, 0, $NameLength) -ne $NameLength) { throw 'Unexpected end of file while reading install4j embedded file name' }
+          $Name = ConvertFrom-Install4jModifiedUtf8 -Bytes $NameBytes
+          $Length = Read-BinarySequentialInteger -Stream $Stream -Size 8 -Endian BigEndian -Signed
+          if ($Length -lt 0 -or $Length -gt $Stream.Length) { throw 'Invalid install4j embedded file length' }
 
-        $Entries.Add([pscustomobject]@{
-            Name                  = $Name
-            Length                = $Length
-            PayloadRelativeOffset = $PayloadRelativeOffset
-            Offset                = [long]0
-          })
-        $PayloadRelativeOffset += $Length
+          $Entries.Add([pscustomobject]@{
+              Name                  = $Name
+              Length                = $Length
+              PayloadRelativeOffset = $PayloadRelativeOffset
+              Offset                = [long]0
+            })
+          $PayloadRelativeOffset += $Length
+        }
+
+        # Payload bytes immediately follow the complete catalog in catalog order.
+        $PayloadStart = $Stream.Position
+        foreach ($Entry in $Entries) {
+          $Entry.Offset = $PayloadStart + $Entry.PayloadRelativeOffset
+          if ($Entry.Offset + $Entry.Length -gt $Stream.Length) { throw 'install4j embedded file entry exceeds the file length' }
+        }
+
+        [pscustomobject]@{
+          Offset       = $Offset
+          PayloadStart = $PayloadStart
+          Count        = $Count
+          Entries      = @($Entries)
+        }
+      } catch {
+        # Continue after false-positive marker candidates; no partial table is returned.
+        continue
       }
-
-      # Payload bytes immediately follow the complete catalog in catalog order.
-      $PayloadStart = $Stream.Position
-      foreach ($Entry in $Entries) {
-        $Entry.Offset = $PayloadStart + $Entry.PayloadRelativeOffset
-        if ($Entry.Offset + $Entry.Length -gt $File.Length) { throw 'install4j embedded file entry exceeds the file length' }
-      }
-
-      [pscustomobject]@{
-        Offset       = $Offset
-        PayloadStart = $PayloadStart
-        Count        = $Count
-        Entries      = @($Entries)
-      }
-    } catch {
-      # Continue after false-positive marker candidates; no partial table is returned.
-      continue
-    } finally {
-      $Stream.Dispose()
     }
+  } finally {
+    if ($OwnsStream) { $Stream.Dispose() } elseif ($Stream.CanSeek) { $Stream.Position = $OriginalPosition }
   }
 }
 
@@ -779,8 +1057,8 @@ function Read-Install4jEmbeddedFile {
   #>
   [OutputType([byte[]])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The path to the installer')]
-    [string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Path', HelpMessage = 'The path to the installer')][string]$Path,
+    [Parameter(Mandatory, ParameterSetName = 'Stream', HelpMessage = 'Caller-owned seekable installer stream')][IO.Stream]$Stream,
 
     [Parameter(Mandatory, HelpMessage = 'The embedded file table entry')]
     [psobject]$Entry,
@@ -791,59 +1069,84 @@ function Read-Install4jEmbeddedFile {
 
   if ($Entry.Length -gt $MaximumBytes) { throw "The install4j embedded file '$($Entry.Name)' is too large to read safely" }
 
-  $Stream = [System.IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  $OwnsStream = $PSCmdlet.ParameterSetName -eq 'Path'
+  if ($OwnsStream) {
+    $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    $Stream = [IO.File]::Open($ResolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  }
+  $OriginalPosition = if ($Stream.CanSeek) { $Stream.Position } else { 0L }
   try {
-    return , (Read-Install4jFileByteRange -Stream $Stream -Offset $Entry.Offset -Count ([int]$Entry.Length))
+    return , (Read-BinaryBytes -Stream $Stream -Offset $Entry.Offset -Count ([int]$Entry.Length))
   } finally {
-    $Stream.Dispose()
+    if ($OwnsStream) { $Stream.Dispose() } elseif ($Stream.CanSeek) { $Stream.Position = $OriginalPosition }
   }
 }
 
-function Resolve-Install4jExtractionPath {
+function Expand-Install4jInlineContentArchive {
   <#
   .SYNOPSIS
-    Resolve an install4j payload path while preventing extraction outside the destination
+    Decode and selectively extract a generation-3 inline content.zip startup file.
+  .PARAMETER Path
+    Path to the install4j setup executable.
+  .PARAMETER Entry
+    Validated XOR-transformed content.zip startup-file entry.
+  .PARAMETER DestinationPath
+    Validated extraction root.
+  .PARAMETER Name
+    Wildcard selector applied to archive entry paths.
+  .PARAMETER CollisionAction
+    Output collision policy.
+  .PARAMETER MaximumExpandedBytes
+    Aggregate archive output limit in bytes.
   #>
-  [OutputType([string])]
+  [OutputType([IO.FileInfo[]])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The extraction destination directory')]
-    [string]$DestinationPath,
-
-    [Parameter(Mandatory, HelpMessage = 'The relative payload path')]
-    [string]$RelativePath
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][psobject]$Entry,
+    [Parameter(Mandatory)][string]$DestinationPath,
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction,
+    [Parameter(Mandatory)][long]$MaximumExpandedBytes
   )
 
-  return Resolve-SafeExtractionPath -DestinationPath $DestinationPath -RelativePath $RelativePath
+  if ($Entry.Length -gt $MaximumExpandedBytes) {
+    throw "The inline install4j content archive exceeds the $MaximumExpandedBytes-byte limit"
+  }
+  $DecodedArchivePath = New-TempFile
+  $Source = [IO.File]::Open((Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf), 'Open', 'Read', 'ReadWrite')
+  $Destination = [IO.File]::Open($DecodedArchivePath, 'Create', 'Write', 'Read')
+  try {
+    $Source.Position = $Entry.Offset
+    $null = Copy-BinaryXorStream -Source $Source -Destination $Destination -Key ([byte]$Entry.TransformKey) -ExpectedBytes $Entry.Length
+  } finally {
+    $Destination.Dispose()
+    $Source.Dispose()
+  }
+  try {
+    $Archive = Get-InstallerArchive -Path $DecodedArchivePath
+    try {
+      $Result = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $DestinationPath -Name $Name `
+        -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes -MaximumEntries $Script:Install4jMaximumArchiveEntries
+      return $Result.Files
+    } finally {
+      $Archive.Dispose()
+    }
+  } finally {
+    Remove-Item -LiteralPath $DecodedArchivePath -Force -ErrorAction SilentlyContinue
+  }
 }
 
-function Test-Install4jExtractionMatch {
+function Expand-Install4jLzmaArchiveEntry {
   <#
   .SYNOPSIS
-    Test a payload path against an install4j extraction selector
-  #>
-  [OutputType([bool])]
-  param (
-    [Parameter(Mandatory, HelpMessage = 'The payload path')]
-    [string]$Path,
-
-    [Parameter(Mandatory, HelpMessage = 'The file name or wildcard pattern')]
-    [string]$Name
-  )
-
-  return Test-ExtractionPattern -Path $Path -Pattern $Name
-}
-
-function Expand-Install4jLzmaZipEntry {
-  <#
-  .SYNOPSIS
-    Decode and extract an install4j LZMA-alone ZIP content entry
+    Decode and extract an install4j LZMA-alone ZIP content entry.
   #>
   [OutputType([System.IO.FileInfo[]])]
   param (
     [Parameter(Mandatory, HelpMessage = 'The path to the install4j installer')]
     [string]$Path,
 
-    [Parameter(Mandatory, HelpMessage = 'The 0.dat embedded-file table entry')]
+    [Parameter(Mandatory, HelpMessage = 'The 0.dat or generation-4 .000 embedded-file table entry')]
     [psobject]$Entry,
 
     [Parameter(Mandatory, HelpMessage = 'The extraction destination directory')]
@@ -859,7 +1162,7 @@ function Expand-Install4jLzmaZipEntry {
     [long]$MaximumExpandedBytes
   )
 
-  Import-Install4jSharpCompress
+  Import-InstallerArchiveDependency
 
   if ($Entry.Length -lt 14) { throw 'The install4j LZMA-alone content stream is truncated' }
   $SourceStream = [System.IO.File]::Open((Get-Item -Path $Path -Force).FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
@@ -984,21 +1287,26 @@ function Get-Install4jArchitecture {
     [string]$Path
   )
 
+  # ARM64 setup launchers can still encode generic 64-bit configuration data, so a native ARM64
+  # PE machine is decisive before interpreting the configuration's less-specific bitness value.
+  $Layout = if ((Get-Command -Name Get-PELayout -ErrorAction SilentlyContinue)) {
+    try { Get-PELayout -Path $Path } catch { $null }
+  }
+  if ($Layout.MachineName -eq 'ARM64') { return 'arm64' }
+
   if ($Config -and $Config.Bitness) {
     switch ([string]$Config.Bitness) {
       '32' { return 'x86' }
       '64' { return 'x64' }
+      'arm64' { return 'arm64' }
+      'aarch64' { return 'arm64' }
     }
   }
 
-  if ((Get-Command -Name Get-PELayout -ErrorAction SilentlyContinue)) {
-    $Layout = try { Get-PELayout -Path $Path } catch { $null }
-    if ($Layout) {
-      switch ($Layout.MachineName) {
-        'I386' { return 'x86' }
-        'AMD64' { return 'x64' }
-        'ARM64' { return 'arm64' }
-      }
+  if ($Layout) {
+    switch ($Layout.MachineName) {
+      'I386' { return 'x86' }
+      'AMD64' { return 'x64' }
     }
   }
 }
@@ -1045,6 +1353,28 @@ function Get-Install4jScopeInfo {
 
   $Evidence = [System.Collections.Generic.List[string]]::new()
   $Evidence.Add('RegisterAddRemoveAction creates the uninstall key under HKLM when writable, otherwise HKCU.')
+
+  if ($Config.ConfigRoute -eq 'Legacy3Xml') {
+    $Evidence.Add("Legacy general configuration: adminRequired=$($Config.General.AdminRequired).")
+    if ($Config.General.AdminRequired -eq $true) {
+      return [pscustomobject]@{
+        Scope             = 'machine'
+        DefaultScope      = 'machine'
+        SupportedScopes   = @('machine')
+        SupportsDualScope = $false
+        Confidence        = 'medium'
+        Evidence          = @($Evidence)
+      }
+    }
+    return [pscustomobject]@{
+      Scope             = $null
+      DefaultScope      = $null
+      SupportedScopes   = @('user', 'machine')
+      SupportsDualScope = $true
+      Confidence        = 'medium'
+      Evidence          = @($Evidence)
+    }
+  }
 
   if ($Config.HasRequestPrivilegesAction) {
     # These action flags model elevation attempts and failure behavior. They can prove machine-only
@@ -1132,6 +1462,291 @@ function Get-Install4jRegistryWrite {
   }
 }
 
+function Get-Install4jExplicitVersion {
+  <#
+  .SYNOPSIS
+    Normalize a builder version or build explicitly encoded in configuration XML.
+  .PARAMETER Value
+    Raw install4jVersion or install4jBuild attribute value.
+  #>
+  [OutputType([string])]
+  param ([AllowNull()][object]$Value)
+
+  $Text = [string]$Value
+  if ([string]::IsNullOrWhiteSpace($Text) -or $Text -match '^@.+@$') { return }
+  if ($Text -notmatch '^\d+(?:\.\d+)*$') { return }
+  return $Text
+}
+
+function Get-Install4jDescriptorFromConfig {
+  <#
+  .SYNOPSIS
+    Resolve a catalog descriptor from explicit i4jparams.conf structure.
+  .PARAMETER Config
+    Parsed install4j configuration object.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][psobject]$Config)
+
+  $Generation = if ($Config.ConfigRoute -eq 'Legacy3Xml') {
+    3
+  } else {
+    $Version = Get-Install4jExplicitVersion -Value $Config.Install4jVersion
+    if ($Version) { [int]($Version -split '\.')[0] }
+  }
+  if (-not $Generation) { return }
+  $CatalogEntry = $Script:Install4jFormats | Where-Object Generation -EQ $Generation | Select-Object -First 1
+  if (-not $CatalogEntry) { return }
+  $Descriptor = $CatalogEntry.PSObject.Copy()
+  $Descriptor | Add-Member -NotePropertyName IsFallback -NotePropertyValue $false
+  return $Descriptor
+}
+
+function Get-Install4jAnalysisContext {
+  <#
+  .SYNOPSIS
+    Parse one install4j source once and retain all route, table, and configuration evidence.
+  .PARAMETER Path
+    Path to a native Windows setup executable or extracted i4jparams.conf.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][string]$Path)
+
+  $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+  $File = Get-Item -LiteralPath $ResolvedPath -Force
+  $Warnings = [Collections.Generic.List[string]]::new()
+  $Evidence = [Collections.Generic.List[string]]::new()
+  $VersionInfo = Get-Install4jVersionInfo -File $File
+  $Launcher = $null
+  $Descriptor = $null
+  $Config = $null
+  $ScanText = $null
+  $EmbeddedFileTables = @()
+  $EmbeddedFiles = [Collections.Generic.List[string]]::new()
+  $MediaType = 'Unknown'
+
+  $Stream = [IO.File]::Open($ResolvedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    # A standalone configuration file is accepted through XML structure, not its filename.
+    if ($Stream.Length -le $Script:Install4jMaximumConfigBytes) {
+      $Bytes = Read-BinaryBytes -Stream $Stream -Offset 0 -Count ([int]$Stream.Length)
+      $CandidateText = [Text.Encoding]::UTF8.GetString($Bytes).TrimStart([char]0xFEFF, [char]0x0000, [char]0x0020, [char]0x0009, [char]0x000D, [char]0x000A)
+      if ($CandidateText.StartsWith('<?xml', [StringComparison]::OrdinalIgnoreCase) -or
+        $CandidateText.StartsWith('<config', [StringComparison]::OrdinalIgnoreCase)) {
+        try {
+          $Config = ConvertFrom-Install4jConfigXml -Content $CandidateText -Source 'ConfigurationFile'
+          $Descriptor = Get-Install4jDescriptorFromConfig -Config $Config
+          $MediaType = 'Configuration'
+          $Evidence.Add('A complete install4j configuration XML document was parsed.')
+        } catch {
+          $Config = $null
+        }
+      }
+    }
+
+    if (-not $Config) {
+      $Probe = Get-Install4jLauncherProbe -Stream $Stream
+      if ($Probe) {
+        $Launcher = $Probe.Launcher
+        $Descriptor = $Probe.Descriptor
+        $MediaType = 'WindowsSetupExecutable'
+        $Evidence.Add("A complete '$($Launcher.Route)' launcher record was parsed from the PE overlay.")
+      }
+
+      if ($Descriptor) {
+        $TableHandler = $Script:Install4jContentTableHandlers[$Descriptor.ContentTableRoute]
+        if (-not $TableHandler) { throw "The install4j content-table route '$($Descriptor.ContentTableRoute)' has no handler" }
+        $EmbeddedFileTables = @(& $TableHandler -Stream $Stream)
+      } else {
+        # Structurally valid but uncatalogued media remains identifiable. A generic table scan is
+        # evidence only and does not make its payload route supported.
+        $EmbeddedFileTables = @(Get-Install4jEmbeddedFileTable -Stream $Stream)
+      }
+      if (-not $Launcher -and $EmbeddedFileTables.Count -gt 0) {
+        $MediaType = 'WindowsSetupExecutable'
+        $Evidence.Add('A complete install4j ContentCollector table was parsed.')
+      }
+
+      foreach ($Entry in @($Launcher.Entries)) {
+        if ($Entry -and -not $EmbeddedFiles.Contains([string]$Entry.Name)) { $EmbeddedFiles.Add([string]$Entry.Name) }
+      }
+      foreach ($EntryName in @($EmbeddedFileTables.Entries | Select-Object -ExpandProperty Name -ErrorAction SilentlyContinue)) {
+        if (-not $EmbeddedFiles.Contains([string]$EntryName)) { $EmbeddedFiles.Add([string]$EntryName) }
+      }
+
+      if ($Launcher) {
+        foreach ($Entry in @($Launcher.Entries | Where-Object Name -IEQ 'i4jparams.conf')) {
+          try {
+            $ConfigBytes = Read-Install4jLauncherFile -Stream $Stream -Entry $Entry
+            $ConfigArguments = @{
+              Content = [Text.Encoding]::UTF8.GetString($ConfigBytes)
+              Source  = 'LauncherStartupFile'
+            }
+            if ($Descriptor) { $ConfigArguments.ConfigRoute = $Descriptor.ConfigRoute }
+            $Config = ConvertFrom-Install4jConfigXml @ConfigArguments
+
+            if (-not $Descriptor) {
+              $ConfigurationDescriptor = Get-Install4jDescriptorFromConfig -Config $Config
+              if ($ConfigurationDescriptor) {
+                if ($ConfigurationDescriptor.LauncherRoute -ne $Launcher.Route) {
+                  throw "The install4j configuration selects '$($ConfigurationDescriptor.LauncherRoute)' but the launcher uses '$($Launcher.Route)'"
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$Launcher.Marker) -and
+                  $Launcher.Marker -notmatch $ConfigurationDescriptor.MarkerPattern) {
+                  $Warnings.Add("The launcher marker '$($Launcher.Marker)' conflicts with install4j $($Config.Install4jVersion) encoded by i4jparams.conf; no supported descriptor was selected.")
+                } else {
+                  $Descriptor = $ConfigurationDescriptor
+                  $Evidence.Add("The launcher omitted a catalog marker; validated i4jparams.conf selected install4j generation $($Descriptor.Generation).")
+                }
+              }
+            }
+            break
+          } catch {
+            $Warnings.Add("Failed to parse launcher i4jparams.conf: $($_.Exception.Message)")
+          }
+        }
+      }
+      if (-not $Config) {
+        foreach ($Entry in @($EmbeddedFileTables.Entries | Where-Object Name -IEQ 'i4jparams.conf')) {
+          try {
+            $ConfigBytes = Read-Install4jEmbeddedFile -Stream $Stream -Entry $Entry
+            $ConfigArguments = @{ Content = [Text.Encoding]::UTF8.GetString($ConfigBytes); Source = 'EmbeddedFileTable' }
+            if ($Descriptor) { $ConfigArguments.ConfigRoute = $Descriptor.ConfigRoute }
+            $Config = ConvertFrom-Install4jConfigXml @ConfigArguments
+            if (-not $Descriptor) { $Descriptor = Get-Install4jDescriptorFromConfig -Config $Config }
+            break
+          } catch {
+            $Warnings.Add("Failed to parse direct embedded i4jparams.conf: $($_.Exception.Message)")
+          }
+        }
+      }
+
+      if (-not $Launcher -and $EmbeddedFileTables.Count -eq 0) {
+        $ScanText = Get-Install4jScanText -File $File -Stream $Stream
+        if ($ScanText.IndexOf('install4j', [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+          ($ScanText.IndexOf('i4jparams.conf', [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+          $ScanText.IndexOf('i4jruntime.jar', [StringComparison]::OrdinalIgnoreCase) -lt 0)) {
+          throw 'The file does not contain structurally valid install4j media'
+        }
+        foreach ($EntryName in Get-Install4jEmbeddedFilesFromText -Text $ScanText) {
+          if (-not $EmbeddedFiles.Contains([string]$EntryName)) { $EmbeddedFiles.Add([string]$EntryName) }
+        }
+
+        # Some old or partially recovered launchers expose a complete configuration document in
+        # the bounded text windows even when their outer record layout is unavailable. Parse that
+        # complete XML document for metadata, but retain the low-confidence structural warning.
+        $ConfigText = Get-Install4jConfigXmlText -Text $ScanText
+        if ($ConfigText) {
+          try {
+            $Config = ConvertFrom-Install4jConfigXml -Content $ConfigText -Source 'BoundedTextEvidence'
+            $Descriptor = Get-Install4jDescriptorFromConfig -Config $Config
+            $Evidence.Add('A complete embedded install4j configuration XML document was recovered from bounded launcher text.')
+          } catch {
+            $Warnings.Add("Failed to parse bounded embedded i4jparams.conf: $($_.Exception.Message)")
+          }
+        }
+        $Warnings.Add('Only bounded install4j string evidence was found; this media generation is not structurally supported.')
+      }
+    }
+  } finally {
+    $Stream.Dispose()
+  }
+
+  if ($Descriptor -and $Descriptor.IsFallback) {
+    if (-not $Launcher.IsCrc32Valid -or $Launcher.RemainingDataBytes -ne 0) {
+      throw 'The future install4j launcher did not satisfy the complete modern-record fallback invariants'
+    }
+    $Warnings.Add("Future install4j generation $($Descriptor.Generation) reuses the generation 13 routes after full CRC and boundary validation.")
+  }
+  if ($Config -and $Descriptor) {
+    $EncodedVersion = Get-Install4jExplicitVersion -Value $Config.Install4jVersion
+    if ($EncodedVersion -and [int]($EncodedVersion -split '\.')[0] -ne $Descriptor.Generation) {
+      $Warnings.Add("The configuration encodes install4j $EncodedVersion but the launcher selects generation $($Descriptor.Generation).")
+    }
+  }
+  if (-not $Descriptor -and $MediaType -eq 'WindowsSetupExecutable') {
+    $Warnings.Add('The install4j media is structurally identifiable, but no supported format descriptor could be selected from its launcher or configuration evidence.')
+  }
+
+  [pscustomobject]@{
+    Path               = $ResolvedPath
+    File               = $File
+    VersionInfo        = $VersionInfo
+    MediaType          = $MediaType
+    Descriptor         = $Descriptor
+    Launcher           = $Launcher
+    EmbeddedFileTables = @($EmbeddedFileTables)
+    EmbeddedFiles      = @($EmbeddedFiles)
+    Config             = $Config
+    ScanText           = $ScanText
+    Evidence           = @($Evidence)
+    Warnings           = @($Warnings)
+  }
+}
+
+function Get-Install4jFormatInfo {
+  <#
+  .SYNOPSIS
+    Identify the install4j Windows media generation and catalog-selected routes.
+  .PARAMETER Path
+    Path to a native setup executable or extracted i4jparams.conf.
+  .OUTPUTS
+    A structured format result. IsInstall4j can be true while IsSupported is false.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path
+  )
+
+  process {
+    try {
+      $Context = Get-Install4jAnalysisContext -Path $Path
+    } catch {
+      return [pscustomobject][ordered]@{
+        IsInstall4j       = $false
+        IsSupported       = $false
+        FormatGeneration  = $null
+        BuilderVersion    = $null
+        BuilderBuild      = $null
+        MediaType         = $null
+        Architecture      = $null
+        Marker            = $null
+        LauncherRoute     = $null
+        StartupFileRoute  = $null
+        ContentTableRoute = $null
+        PayloadRoute      = $null
+        ConfigRoute       = $null
+        RuntimePacking    = $null
+        IsFallback        = $false
+        Evidence          = @()
+        Warnings          = @($_.Exception.Message)
+      }
+    }
+
+    $Descriptor = $Context.Descriptor
+    $Config = $Context.Config
+    [pscustomobject][ordered]@{
+      IsInstall4j       = $true
+      IsSupported       = [bool]$Descriptor
+      FormatGeneration  = $Descriptor.Generation
+      BuilderVersion    = Get-Install4jExplicitVersion -Value $Config.Install4jVersion
+      BuilderBuild      = Get-Install4jExplicitVersion -Value $Config.Install4jBuild
+      MediaType         = $Context.MediaType
+      Architecture      = Get-Install4jArchitecture -Config $Config -Path $Context.Path
+      Marker            = $Context.Launcher.Marker
+      LauncherRoute     = $Descriptor.LauncherRoute
+      StartupFileRoute  = $Descriptor.StartupFileRoute
+      ContentTableRoute = $Descriptor.ContentTableRoute
+      PayloadRoute      = $Descriptor.PayloadRoute
+      ConfigRoute       = if ($Descriptor) { $Descriptor.ConfigRoute } else { $Config.ConfigRoute }
+      RuntimePacking    = $Descriptor.RuntimePacking
+      IsFallback        = [bool]$Descriptor.IsFallback
+      Evidence          = @($Context.Evidence)
+      Warnings          = @($Context.Warnings)
+    }
+  }
+}
+
 function Get-Install4jInfo {
   <#
   .SYNOPSIS
@@ -1146,78 +1761,23 @@ function Get-Install4jInfo {
   )
 
   process {
-    $File = Get-Item -LiteralPath $Path -Force
-    $Warnings = [System.Collections.Generic.List[string]]::new()
-    $VersionInfo = Get-Install4jVersionInfo -File $File
-    # Prefer structured launcher tables and parse i4jparams.conf once. Bounded text scanning is used
-    # only when neither current nor legacy table exposes the config directly.
-    $EmbeddedFileTables = @(Get-Install4jEmbeddedFileTable -Path $File.FullName)
-    $LauncherConfiguration = try { Get-Install4jLauncherConfiguration -Path $File.FullName } catch { $null }
-    $EmbeddedFiles = @()
-    foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $null -ne $_ })) {
-      if ($EmbeddedFiles -notcontains $Entry.Name) { $EmbeddedFiles += $Entry.Name }
-    }
-    foreach ($Entry in @($EmbeddedFileTables.Entries | Select-Object -ExpandProperty Name -ErrorAction SilentlyContinue)) {
-      if ($EmbeddedFiles -notcontains $Entry) { $EmbeddedFiles += $Entry }
-    }
-
-    $Config = $null
-    # Current launchers carry startup files in the CRC-protected XOR-transformed block.
-    foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $_.Name -ieq 'i4jparams.conf' })) {
-      try {
-        $Bytes = Read-Install4jLauncherFile -Path $File.FullName -Entry $Entry
-        $EmbeddedConfigText = [System.Text.Encoding]::UTF8.GetString($Bytes)
-        $Config = ConvertFrom-Install4jConfigXml -Content $EmbeddedConfigText -Source 'LauncherStartupFile'
-        break
-      } catch {
-        $Warnings.Add("Failed to parse launcher i4jparams.conf: $($_.Exception.Message)")
-      }
-    }
-    if (-not $Config) {
-      # Older content collectors expose the config through the direct BE embedded-file table.
-      foreach ($Entry in @($EmbeddedFileTables.Entries | Where-Object { $_.Name -ieq 'i4jparams.conf' })) {
-        try {
-          $Bytes = Read-Install4jEmbeddedFile -Path $File.FullName -Entry $Entry
-          $EmbeddedConfigText = [System.Text.Encoding]::UTF8.GetString($Bytes)
-          $Config = ConvertFrom-Install4jConfigXml -Content $EmbeddedConfigText -Source 'EmbeddedFileTable'
-          break
-        } catch {
-          $Warnings.Add("Failed to parse direct embedded i4jparams.conf: $($_.Exception.Message)")
-        }
-      }
-    }
-
-    # Large launcher scans are a fallback only. Current install4j launchers
-    # expose i4jparams.conf through one of the structured file tables above.
-    $ScanText = $null
-    if (-not $Config) {
-      $ScanText = Get-Install4jScanText -File $File
-      foreach ($Entry in @(Get-Install4jEmbeddedFilesFromText -Text $ScanText)) {
-        if ($EmbeddedFiles -notcontains $Entry) { $EmbeddedFiles += $Entry }
-      }
-      $ConfigXml = Get-Install4jConfigXmlText -Text $ScanText
-      if (-not $ConfigXml -and $File.Length -le $Script:Install4jMaximumConfigBytes) {
-        $Content = Get-Content -LiteralPath $File.FullName -Raw -ErrorAction SilentlyContinue
-        if ($Content) { $ConfigXml = Get-Install4jConfigXmlText -Text $Content }
-      }
-      if ($ConfigXml) { $Config = ConvertFrom-Install4jConfigXml -Content $ConfigXml -Source 'PlainXml' }
-    }
-
-    $HasInstall4jMarkers = if ($ScanText) {
-      $ScanText.IndexOf('install4j', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-      ($ScanText.IndexOf('i4jparams.conf', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $ScanText.IndexOf('i4jruntime.jar', [StringComparison]::OrdinalIgnoreCase) -ge 0)
-    } else { $true }
-    $ApplicationId = if ($Config) { $Config.General.ApplicationId } else { Get-Install4jApplicationIdFromText -Text $ScanText }
-    if (-not $Config -and ($EmbeddedFiles -contains '0.dat')) {
-      $Warnings.Add('The install4j content archive is packed as 0.dat, commonly LZMA-compressed; the pure PowerShell parser used launcher metadata and could not confirm XML-only action fields.')
-    }
-
-    if (-not $Config -and -not $HasInstall4jMarkers -and [string]::IsNullOrWhiteSpace($ApplicationId)) {
-      throw 'The file does not contain install4j installer markers'
+    $Context = Get-Install4jAnalysisContext -Path $Path
+    $File = $Context.File
+    $Config = $Context.Config
+    $Descriptor = $Context.Descriptor
+    $VersionInfo = $Context.VersionInfo
+    $Warnings = [Collections.Generic.List[string]]::new()
+    foreach ($Warning in @($Context.Warnings)) { $Warnings.Add([string]$Warning) }
+    $ApplicationId = if ($Config) {
+      $Config.General.ApplicationId
+    } elseif (-not [string]::IsNullOrWhiteSpace($Context.ScanText)) {
+      Get-Install4jApplicationIdFromText -Text $Context.ScanText
+    } else {
+      $null
     }
 
     $ScopeInfo = Get-Install4jScopeInfo -Config $Config
-    if (-not $Config -and $HasInstall4jMarkers) {
+    if (-not $Config) {
       $ScopeInfo = [pscustomobject]@{
         Scope             = $null
         DefaultScope      = $null
@@ -1228,14 +1788,28 @@ function Get-Install4jInfo {
       }
     }
 
-    $DisplayName = Get-Install4jFirstValue -Value @($Config.RegisterAddRemoveItemName, $Config.General.ApplicationName, $VersionInfo.ProductName, $VersionInfo.FileDescription)
-    $DisplayVersion = Get-Install4jFirstValue -Value @($Config.General.ApplicationVersion, $VersionInfo.ProductVersion, $VersionInfo.FileVersion)
-    $Publisher = Get-Install4jFirstValue -Value @($Config.General.PublisherName, $VersionInfo.CompanyName)
+    $DisplayName = Get-Install4jFirstValue -Value @(
+      $(if ($Config) { $Config.RegisterAddRemoveItemName }),
+      $(if ($Config) { $Config.General.ApplicationName }),
+      $VersionInfo.ProductName,
+      $VersionInfo.FileDescription
+    )
+    $DisplayVersion = Get-Install4jFirstValue -Value @($(if ($Config) { $Config.General.ApplicationVersion }), $VersionInfo.ProductVersion, $VersionInfo.FileVersion)
+    $Publisher = Get-Install4jFirstValue -Value @($(if ($Config) { $Config.General.PublisherName }), $VersionInfo.CompanyName)
     $DefaultInstallationDirectory = if ($Config) { $Config.DefaultInstallationDirectory } else { $null }
     $WritesAppsAndFeaturesEntry = if ($Config) { [bool]$Config.HasRegisterAddRemoveAction } else { $null }
     $Architecture = Get-Install4jArchitecture -Config $Config -Path $File.FullName
     $AssociationInfo = Get-Install4jAssociationInfo -Config $Config
     foreach ($Warning in @($AssociationInfo.Warnings)) { $Warnings.Add($Warning) }
+    $RuntimeInfo = Get-Install4jRuntimeInfo -Config $Config -EmbeddedFiles @($Context.EmbeddedFiles) -HasMediaCatalog ([bool]($Context.Launcher -or $Context.EmbeddedFileTables.Count -gt 0))
+    foreach ($Warning in @($RuntimeInfo.Warnings)) { $Warnings.Add($Warning) }
+
+    $UnresolvedFields = [Collections.Generic.List[string]]::new()
+    if (-not $Config) {
+      foreach ($Field in 'ProductCode', 'WritesAppsAndFeaturesEntry', 'Scope', 'DefaultInstallLocation') {
+        $UnresolvedFields.Add($Field)
+      }
+    }
 
     $Info = [pscustomobject][ordered]@{
       Path                         = $File.FullName
@@ -1251,24 +1825,44 @@ function Get-Install4jInfo {
       AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ApplicationId : $null
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
       Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-      UnresolvedFields             = [string[]]@()
+      UnresolvedFields             = [string[]]@($UnresolvedFields)
       Family                       = 'install4j'
+      IsSupported                  = [bool]$Descriptor
+      FormatGeneration             = $Descriptor.Generation
+      BuilderVersion               = Get-Install4jExplicitVersion -Value $Config.Install4jVersion
+      BuilderBuild                 = Get-Install4jExplicitVersion -Value $Config.Install4jBuild
+      MediaType                    = $Context.MediaType
+      Marker                       = $Context.Launcher.Marker
+      LauncherRoute                = $Descriptor.LauncherRoute
+      StartupFileRoute             = $Descriptor.StartupFileRoute
+      ContentTableRoute            = $Descriptor.ContentTableRoute
+      PayloadRoute                 = $Descriptor.PayloadRoute
+      ConfigRoute                  = if ($Descriptor) { $Descriptor.ConfigRoute } elseif ($Config) { $Config.ConfigRoute } else { $null }
+      RuntimePacking               = $Descriptor.RuntimePacking
+      HasBundledRuntime            = $RuntimeInfo.HasBundledRuntime
+      BundledRuntimeVersion        = $RuntimeInfo.BundledRuntimeVersion
+      MinimumJavaVersion           = $RuntimeInfo.MinimumJavaVersion
+      BundledRuntimeArchive        = $RuntimeInfo.RuntimeArchive
+      RuntimeConfidence            = $RuntimeInfo.Confidence
+      RuntimeEvidence              = $RuntimeInfo.Evidence
+      IsFallback                   = [bool]$Descriptor.IsFallback
+      FormatEvidence               = @($Context.Evidence)
       ApplicationId                = $ApplicationId
-      PackageName                  = $Config.General.ApplicationName
-      PublisherUrl                 = $Config.General.PublisherUrl
+      PackageName                  = if ($Config) { $Config.General.ApplicationName } else { $null }
+      PublisherUrl                 = if ($Config) { $Config.General.PublisherUrl } else { $null }
       Architecture                 = $Architecture
       DefaultScope                 = $ScopeInfo.DefaultScope
       SupportedScopes              = $ScopeInfo.SupportedScopes
       SupportsDualScope            = $ScopeInfo.SupportsDualScope
       ScopeConfidence              = $ScopeInfo.Confidence
       ScopeEvidence                = $ScopeInfo.Evidence
-      UninstallerFilename          = $Config.General.UninstallerFilename
-      UninstallerDirectory         = $Config.General.UninstallerDirectory
-      MsiProductId                 = $Config.MsiProductId
-      EmbeddedFiles                = @($EmbeddedFiles)
-      EmbeddedFileTables           = @($EmbeddedFileTables)
-      LauncherConfiguration        = $LauncherConfiguration
-      CanExpand                    = [bool]($LauncherConfiguration -or $EmbeddedFileTables.Count -gt 0)
+      UninstallerFilename          = if ($Config) { $Config.General.UninstallerFilename } else { $null }
+      UninstallerDirectory         = if ($Config) { $Config.General.UninstallerDirectory } else { $null }
+      MsiProductId                 = if ($Config) { $Config.MsiProductId } else { $null }
+      EmbeddedFiles                = @($Context.EmbeddedFiles)
+      EmbeddedFileTables           = @($Context.EmbeddedFileTables)
+      LauncherConfiguration        = $Context.Launcher
+      CanExpand                    = [bool]($Descriptor -and ($Context.Launcher -or $Context.EmbeddedFileTables.Count -gt 0))
       RegistryWrites               = @()
       RegistryAssociationInfo      = $AssociationInfo
       Protocols                    = $AssociationInfo.Protocols
@@ -1276,9 +1870,17 @@ function Get-Install4jInfo {
       VersionInfo                  = $VersionInfo
       Config                       = $Config
       ParserVersionInfo            = [pscustomobject]@{
-        Parser      = 'Dumplings.PackageModule.Install4j'
-        ParserMajor = 2
-        Sources     = @('install4j launcher parameter block and startup-file table', 'install4j i4jparams.conf XML', 'install4j ContentCollector unextracted-file table', 'PE version resource')
+        Parser            = 'Dumplings.PackageModule.Install4j'
+        ParserMajor       = 3
+        CatalogVersion    = $Script:Install4jCatalog.CatalogVersion
+        FormatGeneration  = $Descriptor.Generation
+        LauncherRoute     = $Descriptor.LauncherRoute
+        StartupFileRoute  = $Descriptor.StartupFileRoute
+        ContentTableRoute = $Descriptor.ContentTableRoute
+        PayloadRoute      = $Descriptor.PayloadRoute
+        ConfigRoute       = if ($Descriptor) { $Descriptor.ConfigRoute } elseif ($Config) { $Config.ConfigRoute } else { $null }
+        IsFallback        = [bool]$Descriptor.IsFallback
+        Sources           = @('install4j launcher parameter block and startup-file table', 'install4j i4jparams.conf XML', 'install4j ContentCollector unextracted-file table', 'PE version resource')
       }
     }
     # Build expected uninstall writes only after all identity and scope evidence is assembled.
@@ -1322,11 +1924,13 @@ function Expand-Install4jInstaller {
   )
 
   process {
-    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
-    $EmbeddedFileTables = @(Get-Install4jEmbeddedFileTable -Path $InstallerPath)
-    $LauncherConfiguration = try { Get-Install4jLauncherConfiguration -Path $InstallerPath } catch { $null }
-    if (-not $EmbeddedFileTables -and -not $LauncherConfiguration) {
-      throw 'The install4j installer does not contain a supported launcher or embedded-file table'
+    $Context = Get-Install4jAnalysisContext -Path $Path
+    $InstallerPath = $Context.Path
+    $Descriptor = $Context.Descriptor
+    $EmbeddedFileTables = @($Context.EmbeddedFileTables)
+    $LauncherConfiguration = $Context.Launcher
+    if (-not $Descriptor -and $EmbeddedFileTables.Count -eq 0) {
+      throw 'The install4j media is structurally identifiable but its payload route is unsupported'
     }
 
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = New-TempFolder }
@@ -1337,7 +1941,18 @@ function Expand-Install4jInstaller {
     $ReservedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     # Startup entries require the launcher's XOR transform; direct embedded entries do not.
     foreach ($Entry in @($LauncherConfiguration.Entries | Where-Object { $null -ne $_ })) {
-      if (-not (Test-Install4jExtractionMatch -Path $Entry.Name -Name $Name)) { continue }
+      if ([string]::IsNullOrWhiteSpace([string]$Entry.Name)) { continue }
+      if ($Descriptor.PayloadRoute -eq 'InlineContentZip' -and $Entry.Name -ieq 'content.zip') {
+        $PayloadHandler = $Script:Install4jPayloadHandlers[$Descriptor.PayloadRoute]
+        foreach ($ExtractedFile in & $PayloadHandler -Path $InstallerPath -Entry $Entry -DestinationPath $DestinationPath `
+            -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes) {
+          $null = $ReservedPaths.Add($ExtractedFile.FullName)
+          $ExtractedFiles.Add($ExtractedFile)
+        }
+        continue
+      }
+
+      if (-not (Test-ExtractionPattern -Path $Entry.Name -Pattern $Name)) { continue }
       if ($Entry.Length -gt $MaximumExpandedBytes) {
         throw "The install4j startup file '$($Entry.Name)' exceeds the $MaximumExpandedBytes-byte limit"
       }
@@ -1360,9 +1975,12 @@ function Expand-Install4jInstaller {
     }
 
     foreach ($Entry in @($EmbeddedFileTables.Entries)) {
-      if ($Entry.Name -ieq '0.dat') {
-        # 0.dat contains the application archive rather than one directly exportable file.
-        foreach ($ExtractedFile in Expand-Install4jLzmaZipEntry -Path $InstallerPath -Entry $Entry -DestinationPath $DestinationPath `
+      if ($null -eq $Entry -or [string]::IsNullOrWhiteSpace([string]$Entry.Name)) { continue }
+      $IsPayloadEntry = ($Descriptor.PayloadRoute -eq 'LzmaZipContent' -and $Entry.Name -ieq '0.dat') -or
+      ($Descriptor.PayloadRoute -eq 'SplitLzmaArchive' -and $Entry.Name -like '*.000')
+      if ($IsPayloadEntry) {
+        $PayloadHandler = $Script:Install4jPayloadHandlers[$Descriptor.PayloadRoute]
+        foreach ($ExtractedFile in & $PayloadHandler -Path $InstallerPath -Entry $Entry -DestinationPath $DestinationPath `
             -Name $Name -CollisionAction $CollisionAction -MaximumExpandedBytes $MaximumExpandedBytes) {
           $null = $ReservedPaths.Add($ExtractedFile.FullName)
           $ExtractedFiles.Add($ExtractedFile)
@@ -1370,7 +1988,7 @@ function Expand-Install4jInstaller {
         continue
       }
 
-      if (-not (Test-Install4jExtractionMatch -Path $Entry.Name -Name $Name)) { continue }
+      if (-not (Test-ExtractionPattern -Path $Entry.Name -Pattern $Name)) { continue }
       if ($Entry.Length -gt $MaximumExpandedBytes) {
         throw "The install4j embedded file '$($Entry.Name)' exceeds the $MaximumExpandedBytes-byte limit"
       }
@@ -1586,4 +2204,4 @@ function Test-Install4jDualScope {
   }
 }
 
-Export-ModuleMember -Function Get-Install4jInfo, Expand-Install4jInstaller, Test-Install4jInstaller, Read-ProtocolsFromInstall4j, Read-FileExtensionsFromInstall4j, Read-ProductCodeFromInstall4j, Read-ProductVersionFromInstall4j, Read-ProductNameFromInstall4j, Read-PublisherFromInstall4j, Read-ScopeFromInstall4j, Read-SupportedScopesFromInstall4j, Test-Install4jDualScope
+Export-ModuleMember -Function Get-Install4jFormatInfo, Get-Install4jInfo, Expand-Install4jInstaller, Test-Install4jInstaller, Read-ProtocolsFromInstall4j, Read-FileExtensionsFromInstall4j, Read-ProductCodeFromInstall4j, Read-ProductVersionFromInstall4j, Read-ProductNameFromInstall4j, Read-PublisherFromInstall4j, Read-ScopeFromInstall4j, Read-SupportedScopesFromInstall4j, Test-Install4jDualScope

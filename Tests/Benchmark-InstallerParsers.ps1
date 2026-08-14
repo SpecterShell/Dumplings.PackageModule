@@ -30,7 +30,8 @@ function Invoke-InstallerParserBenchmark {
   param (
     [Parameter(Mandatory)][string]$Name,
     [Parameter(Mandatory)][string]$Path,
-    [Parameter(Mandatory)][string]$Expression
+    [Parameter(Mandatory)][string]$Expression,
+    [string]$InitializationExpression
   )
 
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
@@ -39,6 +40,7 @@ function Invoke-InstallerParserBenchmark {
 `$ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath '$($RepositoryRoot.Replace("'", "''"))'
 `$InstallerPath = '$($ResolvedPath.Replace("'", "''"))'
+$InitializationExpression
 [GC]::Collect()
 [GC]::WaitForPendingFinalizers()
 [GC]::Collect()
@@ -118,7 +120,7 @@ $Results = @(
     Invoke-InstallerParserBenchmark -Name QtInstallerFramework -Path $QtInstallerFrameworkPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\FileSystem.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\InstallerEvidence.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Installers\QtInstallerFramework.psm1 -Force; Get-QtInstallerFrameworkInfo -Path `$InstallerPath"
   }
   if ($Install4jPath) {
-    Invoke-InstallerParserBenchmark -Name Install4j -Path $Install4jPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-Install4jInfo -Path `$InstallerPath"
+    Invoke-InstallerParserBenchmark -Name Install4j -Path $Install4jPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression 'Get-Install4jInfo -Path $InstallerPath'
   }
   if ($InstallBuilderPath) {
     Invoke-InstallerParserBenchmark -Name InstallBuilder -Path $InstallBuilderPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-InstallBuilderInfo -Path `$InstallerPath"

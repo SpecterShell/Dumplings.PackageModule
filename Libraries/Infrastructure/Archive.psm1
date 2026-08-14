@@ -292,6 +292,7 @@ function Export-InstallerArchiveSelection {
   $ExpandedBytes = 0L
   $EntryCount = 0
   foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
+    if ([string]::IsNullOrWhiteSpace($Entry.FullName)) { continue }
     if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
     if (++$EntryCount -gt $MaximumEntries) { throw "The archive selection exceeds the $MaximumEntries-entry limit." }
     if (-not [string]::IsNullOrWhiteSpace($Entry.LinkTarget)) { throw "Archive links are not extracted: $($Entry.FullName)" }

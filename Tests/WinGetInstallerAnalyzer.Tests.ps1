@@ -9,6 +9,7 @@ BeforeAll {
   $Script:FixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallerAnalyzer'
   $Script:DeclaredTypeFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'ManifestUpdateDeclaredTypes'
   $Script:InstallShieldFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\InstallShield'
+  $Script:Install4jFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'PackageModule\Install4j'
   $ProgressPreference = 'SilentlyContinue'
 
   function Get-AnalyzerInstallerFixture {
@@ -260,6 +261,25 @@ Describe 'WinGet installer analyzer content detection' {
     $Result.Result.ProductVersion | Should -Be '1.2.3'
     $Result.Result.Publisher | Should -Be 'Contoso Ltd.'
     $Result.Result.Metadata.EmbeddedFiles | Should -Contain 'i4jparams.conf'
+  }
+
+  It 'Should project markerless install4j application media through the WinGet analyzer' {
+    $Installer = Join-Path $Script:Install4jFixtureDirectory 'generated-install4j-11-nojre.exe'
+    if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-generated install4j 11 runtime-independent fixture is not cached.'
+      return
+    }
+
+    $Analysis = Get-WinGetInstallerAnalysis -Path $Installer
+    $Result = $Analysis.ParserResults | Where-Object -FilterScript { $_.Name -eq 'install4j' } | Select-Object -First 1
+
+    $Result.Success | Should -BeTrue
+    $Result.Result.ProductCode | Should -Be '0804-2950-8354-4050'
+    $Result.Result.ProductVersion | Should -Be '11.0'
+    $Result.Result.Scope | Should -Be 'machine'
+    $Result.Result.Metadata.FormatGeneration | Should -Be 11
+    $Result.Result.Metadata.BuilderVersion | Should -Be '11.0.5'
+    $Result.Result.Warnings | Should -BeNullOrEmpty
   }
 
   It 'Should expose localized NSIS ARP entries and parser notices' {
