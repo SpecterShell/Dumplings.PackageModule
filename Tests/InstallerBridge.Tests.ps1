@@ -54,6 +54,7 @@ BeforeAll {
     $FixturePath = Join-Path $Script:FixtureDirectory $Name
     $Bytes = [System.Collections.Generic.List[byte]]::new()
     $Bytes.AddRange([byte[]](0x4d, 0x5a))
+    $Bytes.AddRange([System.Text.Encoding]::ASCII.GetBytes("IFW Version: 4.11.0, built with Qt 6.8.0.`0"))
     $Bytes.AddRange([System.Text.Encoding]::ASCII.GetBytes("accept-licenses`0default-answer`0confirm-command`0check-updates`0create-offline`0clear-cache`0"))
     while ($Bytes.Count -lt 512) { $Bytes.Add(0) }
 
@@ -517,8 +518,15 @@ stagingPercentage: 25
 </Installer>
 '@
     $Info = Get-QtInstallerFrameworkInfo -Path $Fixture
+    $FormatInfo = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
 
     $Info.InstallerType | Should -Be 'Qt Installer Framework'
+    $FormatInfo.IsQtInstallerFramework | Should -BeTrue
+    $FormatInfo.IsSupported | Should -BeTrue
+    $FormatInfo.FormatGeneration | Should -Be 'BinaryContent'
+    $FormatInfo.PackageIndexRoute | Should -Be 'resource-collection-v1'
+    $FormatInfo.CatalogVersion | Should -Be 1
+    $FormatInfo.SupportsProductUuid | Should -BeTrue
     $Info.PackageName | Should -Be 'Bridge.QtIFW'
     $Info.DisplayVersion | Should -Be '2.0.0'
     $Info.Publisher | Should -Be 'Bridge Publisher'

@@ -587,4 +587,21 @@ Describe 'WinGet installer analyzer content detection' {
     $Result.Result.SuggestedManifestFields.InstallerSwitches.Count | Should -Be 0
     $Result.Result.SuggestedManifestFields.UpgradeBehavior | Should -Be 'uninstallPrevious'
   }
+
+  It 'Should reject a Qt IFW marker candidate whose catalog structure does not validate' {
+    InModuleScope InstallerAnalyzer {
+      Mock Get-QtInstallerFrameworkFormatInfo {
+        [pscustomobject]@{ IsQtInstallerFramework = $true; IsSupported = $false; MediaRole = 'Installer' }
+      }
+      Mock Get-QtInstallerFrameworkInfo { throw 'metadata parsing must not run for an unsupported format profile' }
+
+      $Candidate = [pscustomobject]@{ Family = 'Qt Installer Framework'; Confidence = 'high' }
+      $Results = @(Invoke-InstallerExeParser -InstallerPath 'synthetic-cookie-only.exe' -FamilyCandidates @($Candidate) -ExtractEmbeddedMsi:$false)
+      $QtResult = $Results | Where-Object Name -EQ 'Qt Installer Framework' | Select-Object -First 1
+
+      $QtResult.Success | Should -BeFalse
+      $QtResult.Error | Should -BeLike '*structurally supported*'
+      Should -Invoke -CommandName Get-QtInstallerFrameworkInfo -Times 0 -Exactly
+    }
+  }
 }

@@ -2,11 +2,11 @@
 # This module only bridges to the independently licensed InstallerParsers CLI.
 # Process boundary:
 #
-#   Qt IFW installer path -> InstallerBridge -> QtInstallerFramework.GetInfo/Expand
+#   Qt IFW installer path -> InstallerBridge -> QtInstallerFramework.GetFormatInfo/GetInfo/Expand
 #                           <- trailer ranges, RCC metadata, archives, scope evidence
 #
 # The GPL parser owns the F8/F9 cookie, int64 segment table, RCC, and archive
-# layouts. This MIT bridge only transports path/arguments/results. See
+# layouts. This Apache-2.0 bridge only transports path/arguments/results. See
 # Modules/InstallerParsers/Libraries/Installers/QtInstallerFramework.psm1.
 
 # Apply default function parameters
@@ -32,6 +32,26 @@ function Get-QtInstallerFrameworkInfo {
     $InstallerPath = (Get-Item -Path $Path -Force).FullName
     $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'QtInstallerFramework.GetInfo' -Argument @{ Path = $InstallerPath }
     return $Info
+  }
+}
+
+function Get-QtInstallerFrameworkFormatInfo {
+  <#
+  .SYNOPSIS
+    Identify the Qt IFW format generation, framework version, media role, and parser routes.
+  .PARAMETER Path
+    Path to the Qt IFW executable or DAT binary.
+  .OUTPUTS
+    A format diagnostic containing the framework version or range, media role, selected routes, capabilities, evidence, and warnings.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)]
+    [string]$Path
+  )
+  process {
+    $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'QtInstallerFramework.GetFormatInfo' -Argument @{ Path = $InstallerPath }
   }
 }
 
@@ -248,7 +268,7 @@ function Read-ProductCodeFromQtInstallerFramework {
 
   process {
     $Info = Get-QtInstallerFrameworkInfo -Path $Path
-    if ([string]::IsNullOrWhiteSpace($Info.ProductCode)) { throw 'The Qt Installer Framework installer does not expose a deterministic ProductUUID value' }
+    if ([string]::IsNullOrWhiteSpace($Info.ProductCode)) { throw 'The Qt Installer Framework installer does not expose a deterministic ProductUUID or legacy ProductName uninstall key' }
     return $Info.ProductCode
   }
 }
@@ -307,4 +327,4 @@ function Test-QtInstallerFrameworkDualScope {
   }
 }
 
-Export-ModuleMember -Function Get-QtInstallerFrameworkInfo, Expand-QtInstallerFramework, Test-QtInstallerFrameworkCLI, Test-QtInstallerFrameworkSilentInstallation, Test-QtInstallerFrameworkRequiresInstallLocation, Test-QtInstallerFrameworkSupportsExistingInstallationOverride, Read-UpgradeBehaviorFromQtInstallerFramework, Read-ProductVersionFromQtInstallerFramework, Read-ProductNameFromQtInstallerFramework, Read-PublisherFromQtInstallerFramework, Read-ProductCodeFromQtInstallerFramework, Read-ScopeFromQtInstallerFramework, Read-SupportedScopesFromQtInstallerFramework, Test-QtInstallerFrameworkDualScope
+Export-ModuleMember -Function Get-QtInstallerFrameworkFormatInfo, Get-QtInstallerFrameworkInfo, Expand-QtInstallerFramework, Test-QtInstallerFrameworkCLI, Test-QtInstallerFrameworkSilentInstallation, Test-QtInstallerFrameworkRequiresInstallLocation, Test-QtInstallerFrameworkSupportsExistingInstallationOverride, Read-UpgradeBehaviorFromQtInstallerFramework, Read-ProductVersionFromQtInstallerFramework, Read-ProductNameFromQtInstallerFramework, Read-PublisherFromQtInstallerFramework, Read-ProductCodeFromQtInstallerFramework, Read-ScopeFromQtInstallerFramework, Read-SupportedScopesFromQtInstallerFramework, Test-QtInstallerFrameworkDualScope

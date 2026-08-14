@@ -1899,6 +1899,13 @@ function Invoke-InstallerExeParser {
 
   if (Test-InstallerCandidateFamily -Family 'Qt Installer Framework') {
     $KnownResult = Invoke-InstallerDetector -Name 'Qt Installer Framework' -ScriptBlock {
+      $FormatInfo = Get-QtInstallerFrameworkFormatInfo -Path $AnalyzerInstallerPath
+      if (-not $FormatInfo.IsQtInstallerFramework -or -not $FormatInfo.IsSupported) {
+        throw 'The file does not contain a structurally supported Qt Installer Framework format.'
+      }
+      if ($FormatInfo.MediaRole -ne 'Installer') {
+        throw "The Qt Installer Framework media role is '$($FormatInfo.MediaRole)', not Installer."
+      }
       $Info = Get-QtInstallerFrameworkInfo -Path $AnalyzerInstallerPath
       $SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Qt Installer Framework'
       if (-not $Info.SupportsSilentInstallation) {
@@ -1926,6 +1933,7 @@ function Invoke-InstallerExeParser {
         Confidence                           = 'high'
         InstallerType                        = 'exe # Qt Installer Framework'
         Metadata                             = $Info
+        FormatInfo                           = $FormatInfo
         ProductVersion                       = $Info.DisplayVersion
         ProductName                          = $Info.DisplayName
         Publisher                            = $Info.Publisher
