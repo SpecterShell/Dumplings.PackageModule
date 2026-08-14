@@ -658,8 +658,19 @@ function Get-InstallerStructuralExeFamilyCandidate {
   }
 
   $AdvancedInstallerMagic = [Text.Encoding]::ASCII.GetBytes('ADVINSTSFX')
-  if ((Find-BinaryPattern -Path $File.FullName -Pattern $AdvancedInstallerMagic -Maximum 1 -Reverse).Count -gt 0 -and $Seen.Add('Advanced Installer')) {
-    [pscustomobject]@{ Family = 'Advanced Installer'; Confidence = 'high'; MatchedMarkers = @('ADVINSTSFX footer'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Advanced Installer' }
+  if ((Find-BinaryPattern -Path $File.FullName -Pattern $AdvancedInstallerMagic -Maximum 1 -Reverse).Count -gt 0) {
+    # ADVINSTSFX can occur in unrelated payload bytes. Classification requires the GPL parser to
+    # validate the complete footer, catalog records, payload ranges, and selected format profile.
+    $FormatInfo = Get-AdvancedInstallerFormatInfo -Path $File.FullName -ErrorAction SilentlyContinue
+    if ($FormatInfo.IsAdvancedInstaller -and $FormatInfo.IsSupported -and $Seen.Add('Advanced Installer')) {
+      [pscustomobject]@{
+        Family                  = 'Advanced Installer'
+        Confidence              = 'high'
+        MatchedMarkers          = @("$($FormatInfo.FormatProfileId): $($FormatInfo.FooterRoute) + $($FormatInfo.CatalogRoute)")
+        FormatInfo              = $FormatInfo
+        SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Advanced Installer'
+      }
+    }
   }
 
   $InstallBuilderProjectMarker = [Text.Encoding]::ASCII.GetBytes('project.xml')
@@ -1389,26 +1400,26 @@ function Invoke-InstallerExeParser {
     if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue @($Info.SupportedScopes) -Force }
     if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
     [pscustomobject]@{
-      Family                  = $Family
-      Confidence              = $Confidence
-      InstallerType           = "exe # $Family"
-      Metadata                = $Info
-      ProductVersion          = $Info.DisplayVersion
-      ProductName             = $Info.DisplayName
-      Publisher               = $Info.Publisher
-      ProductCode             = $Info.ProductCode
-      Scope                   = $Info.Scope
-      SupportedScopes         = @($Info.SupportedScopes)
+      Family                      = $Family
+      Confidence                  = $Confidence
+      InstallerType               = "exe # $Family"
+      Metadata                    = $Info
+      ProductVersion              = $Info.DisplayVersion
+      ProductName                 = $Info.DisplayName
+      Publisher                   = $Info.Publisher
+      ProductCode                 = $Info.ProductCode
+      Scope                       = $Info.Scope
+      SupportedScopes             = @($Info.SupportedScopes)
       DefaultScopeIsAuthoritative = [bool]($Info.PSObject.Properties['DefaultScopeIsAuthoritative'] -and $Info.DefaultScopeIsAuthoritative)
-      AppsAndFeaturesEntries  = if ($Info.PSObject.Properties['AppsAndFeaturesEntries']) { @($Info.AppsAndFeaturesEntries) } else { @() }
-      Protocols               = @($Info.Protocols)
-      FileExtensions          = @($Info.FileExtensions)
-      RegistryAssociationInfo = $Info.RegistryAssociationInfo
-      NestedInstallerFiles    = @($Info.ExtractedFiles)
-      CanExpand               = $Info.CanExpand
-      Notices                 = if ($Info.PSObject.Properties['Notices']) { @($Info.Notices) } else { @() }
-      Warnings                = @($Info.Warnings)
-      SuggestedManifestFields = $SuggestedManifestFields
+      AppsAndFeaturesEntries      = if ($Info.PSObject.Properties['AppsAndFeaturesEntries']) { @($Info.AppsAndFeaturesEntries) } else { @() }
+      Protocols                   = @($Info.Protocols)
+      FileExtensions              = @($Info.FileExtensions)
+      RegistryAssociationInfo     = $Info.RegistryAssociationInfo
+      NestedInstallerFiles        = @($Info.ExtractedFiles)
+      CanExpand                   = $Info.CanExpand
+      Notices                     = if ($Info.PSObject.Properties['Notices']) { @($Info.Notices) } else { @() }
+      Warnings                    = @($Info.Warnings)
+      SuggestedManifestFields     = $SuggestedManifestFields
     }
   }
 

@@ -121,6 +121,26 @@ Describe 'InstallShield structural analyzer routing' {
   }
 }
 
+Describe 'Advanced Installer structural analyzer routing' {
+  It 'Should reject a bare ADVINSTSFX marker when no footer/catalog profile validates' {
+    $Fixture = Join-Path $Script:FixtureDirectory 'advanced-installer-bare-marker.exe'
+    [IO.File]::WriteAllBytes($Fixture, [byte[]]([Text.Encoding]::ASCII.GetBytes("MZ`0`0ADVINSTSFX")))
+
+    InModuleScope InstallerAnalyzer -Parameters @{ Fixture = $Fixture } {
+      param ($Fixture)
+
+      Mock Get-AdvancedInstallerFormatInfo {
+        [pscustomobject]@{ IsAdvancedInstaller = $false; IsSupported = $false }
+      }
+
+      $Candidates = @(Get-InstallerStructuralExeFamilyCandidate -File (Get-Item -LiteralPath $Fixture))
+
+      $Candidates.Family | Should -Not -Contain 'Advanced Installer'
+      Should -Invoke Get-AdvancedInstallerFormatInfo -Exactly 1
+    }
+  }
+}
+
 Describe 'Installer manifest behavior defaults' {
   It 'Should mirror documented Advanced Installer modes and return codes' {
     InModuleScope WinGetAnalysis {

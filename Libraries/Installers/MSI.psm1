@@ -2,6 +2,7 @@
 # Format sources: https://github.com/wixtoolset/wix
 # MSI Word Count elevation bit: https://learn.microsoft.com/windows/win32/msi/word-count-summary
 # MSI runtime elevation properties: https://learn.microsoft.com/windows/win32/msi/msirunningelevated-
+# MSI condition grammar: https://learn.microsoft.com/windows/win32/msi/conditional-statement-syntax
 # InstallShield ISSetAllUsers behavior: https://docs.revenera.com/installshield27helplib/helplibrary/IHelpISSetAllUsers.htm
 # Chromium enterprise MSI product tag: https://chromium.googlesource.com/chromium/src/+/main/chrome/updater/win/signing/enterprise_standalone_installer.wxs.xml
 # Binary structure consumed here; MSI/MSP/MST are CFB containers:
@@ -31,6 +32,13 @@ function Import-Assembly {
 }
 
 Import-Assembly
+
+# MSI conditions are parsed by an independent bounded grammar. Do not translate
+# database-authored text into PowerShell scriptblocks: the grammars differ and
+# PowerShell redirection operators can create files while evaluating malformed
+# or only partially translated input.
+$MsiConditionSource = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets', 'Source', 'MSI', 'MsiConditionEvaluator.cs'
+$null = Import-InstallerManagedSource -Path $MsiConditionSource -TypeName 'Dumplings.WindowsInstaller.Conditions.MsiConditionEvaluator'
 
 # Load family-specific MSI interpretation without keeping those rules in this module.
 if (-not (Get-Command Get-MsiInstallShieldProjectTypeFromStaticTableInfo -ErrorAction SilentlyContinue)) {
@@ -544,6 +552,133 @@ function Convert-MsiTemplatePlatformToPackageArchitecture {
   }
 }
 
+function Resolve-MsiConditionExpression {
+  <#
+  .SYNOPSIS
+    Parse and statically evaluate a Windows Installer conditional expression.
+  .DESCRIPTION
+    Evaluates the documented MSI condition grammar against an explicit virtual
+    installer session. Unprovided runtime symbols are unresolved by default,
+    producing Unknown rather than borrowing state from the parser host.
+  .PARAMETER Condition
+    MSI conditional expression from LaunchCondition, Condition, or a sequence table.
+  .PARAMETER Property
+    Case-sensitive MSI property values known in the virtual session.
+  .PARAMETER KnownPresentProperty
+    Properties known to be nonempty whose exact values are unavailable. Their
+    Boolean truth is known, while comparisons involving their values remain Unknown.
+  .PARAMETER KnownAbsentProperty
+    Properties known to be absent. Windows Installer evaluates them as empty strings.
+  .PARAMETER EnvironmentVariable
+    Case-insensitive process environment-variable values used by %Name symbols.
+  .PARAMETER ComponentActionState
+    Numeric action states used by $Component symbols.
+  .PARAMETER ComponentInstalledState
+    Numeric installed states used by ?Component symbols.
+  .PARAMETER FeatureActionState
+    Numeric action states used by &Feature symbols.
+  .PARAMETER FeatureInstalledState
+    Numeric installed states used by !Feature symbols.
+  .PARAMETER UnspecifiedSymbolState
+    Unknown preserves incomplete static evidence. Absent models a complete MSI
+    session where missing properties and environment values are empty and missing
+    feature or component states are INSTALLSTATE_UNKNOWN (-1).
+  .PARAMETER MaximumTokenCount
+    Maximum non-EOF tokens accepted from one condition.
+  .PARAMETER MaximumDepth
+    Maximum nested parentheses and unary NOT depth.
+  .OUTPUTS
+    A structured result with State, Value, referenced and unresolved symbols,
+    token count, and deterministic syntax diagnostics.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, Position = 0, ValueFromPipeline, HelpMessage = 'The MSI conditional expression')]
+    [AllowEmptyString()]
+    [string]$Condition,
+
+    [Parameter()]
+    [AllowNull()]
+    [Collections.IDictionary]$Property,
+
+    [Parameter()]
+    [string[]]$KnownPresentProperty = @(),
+
+    [Parameter()]
+    [string[]]$KnownAbsentProperty = @(),
+
+    [Parameter()]
+    [AllowNull()]
+    [Collections.IDictionary]$EnvironmentVariable,
+
+    [Parameter()]
+    [AllowNull()]
+    [Collections.IDictionary]$ComponentActionState,
+
+    [Parameter()]
+    [AllowNull()]
+    [Collections.IDictionary]$ComponentInstalledState,
+
+    [Parameter()]
+    [AllowNull()]
+    [Collections.IDictionary]$FeatureActionState,
+
+    [Parameter()]
+    [AllowNull()]
+    [Collections.IDictionary]$FeatureInstalledState,
+
+    [Parameter()]
+    [ValidateSet('Unknown', 'Absent')]
+    [string]$UnspecifiedSymbolState = 'Unknown',
+
+    [Parameter()]
+    [ValidateRange(1, 65536)]
+    [int]$MaximumTokenCount = 1024,
+
+    [Parameter()]
+    [ValidateRange(1, 1024)]
+    [int]$MaximumDepth = 64
+  )
+
+  process {
+    $Context = [Dumplings.WindowsInstaller.Conditions.MsiConditionEvaluationContext]::new()
+    $Context.UnspecifiedSymbolsAreAbsent = $UnspecifiedSymbolState -eq 'Absent'
+
+    # Populate each MSI namespace independently because only environment names
+    # are case-insensitive in the Windows Installer condition language.
+    if ($Property) { foreach ($Entry in $Property.GetEnumerator()) { $Context.SetProperty([string]$Entry.Key, [string]$Entry.Value) } }
+    foreach ($Name in $KnownPresentProperty) { if (-not [string]::IsNullOrEmpty($Name)) { $Context.MarkPropertyPresent($Name) } }
+    foreach ($Name in $KnownAbsentProperty) { if (-not [string]::IsNullOrEmpty($Name)) { $Context.MarkPropertyAbsent($Name) } }
+    if ($EnvironmentVariable) { foreach ($Entry in $EnvironmentVariable.GetEnumerator()) { $Context.SetEnvironmentVariable([string]$Entry.Key, [string]$Entry.Value) } }
+    if ($ComponentActionState) { foreach ($Entry in $ComponentActionState.GetEnumerator()) { $Context.SetComponentActionState([string]$Entry.Key, [long]$Entry.Value) } }
+    if ($ComponentInstalledState) { foreach ($Entry in $ComponentInstalledState.GetEnumerator()) { $Context.SetComponentInstalledState([string]$Entry.Key, [long]$Entry.Value) } }
+    if ($FeatureActionState) { foreach ($Entry in $FeatureActionState.GetEnumerator()) { $Context.SetFeatureActionState([string]$Entry.Key, [long]$Entry.Value) } }
+    if ($FeatureInstalledState) { foreach ($Entry in $FeatureInstalledState.GetEnumerator()) { $Context.SetFeatureInstalledState([string]$Entry.Key, [long]$Entry.Value) } }
+
+    $Evaluation = [Dumplings.WindowsInstaller.Conditions.MsiConditionEvaluator]::Evaluate($Condition, $Context, $MaximumTokenCount, $MaximumDepth)
+    [pscustomobject][ordered]@{
+      Expression        = [string]$Evaluation.Expression
+      State             = [string]$Evaluation.State
+      Value             = $Evaluation.Value
+      IsValid           = [bool]$Evaluation.IsValid
+      IsComplete        = [bool]$Evaluation.IsComplete
+      ReferencedSymbols = [object[]]@($Evaluation.Symbols | ForEach-Object {
+          [pscustomobject][ordered]@{
+            Kind      = [string]$_.Kind
+            Name      = [string]$_.Name
+            IsKnown   = [bool]$_.IsKnown
+            IsPresent = $_.IsPresent
+            Value     = $_.Value
+          }
+        })
+      UnknownSymbols    = [string[]]@($Evaluation.UnknownSymbols)
+      TokenCount        = [int]$Evaluation.TokenCount
+      ErrorMessage      = [string]$Evaluation.ErrorMessage
+      ErrorPosition     = [int]$Evaluation.ErrorPosition
+    }
+  }
+}
+
 function Test-MsiArchitectureCondition {
   <#
   .SYNOPSIS
@@ -563,37 +698,33 @@ function Test-MsiArchitectureCondition {
     [string]$Architecture
   )
 
-  $Values = @{
-    VersionNT64 = $Architecture -in @('x64', 'arm64')
-    Msix64      = $Architecture -eq 'x64'
-    Arm64       = $Architecture -eq 'arm64'
-    Intel       = $Architecture -in @('x86', 'x64', 'arm64')
-  }
-
   # Launch conditions unrelated to processor architecture must not narrow the package platform.
-  # They can contain version comparisons and product state that this bounded evaluator does not model.
+  # They can contain product, feature, component, or runtime state that this projection does not model.
   if ($Condition -notmatch '(?i)\b(?:VersionNT64|Msix64|Arm64|Intel)\b') { return $true }
 
-  $Expression = $Condition
-  $Expression = [regex]::Replace($Expression, '(?i)\b(NOT|AND|OR)\b', { param($Match) $Match.Value.ToLowerInvariant() })
-  foreach ($Name in $Values.Keys) {
-    $Expression = [regex]::Replace($Expression, "(?i)\b$([regex]::Escape($Name))\b", [string]$Values[$Name])
+  $Properties = [ordered]@{ Intel = '1' }
+  $PresentProperties = [Collections.Generic.List[string]]::new()
+  $AbsentProperties = [Collections.Generic.List[string]]::new()
+  switch ($Architecture) {
+    'x86' {
+      foreach ($Name in 'VersionNT64', 'Msix64', 'Arm64') { $AbsentProperties.Add($Name) }
+    }
+    'x64' {
+      $PresentProperties.Add('VersionNT64')
+      $Properties['Msix64'] = '1'
+      $AbsentProperties.Add('Arm64')
+    }
+    'arm64' {
+      $PresentProperties.Add('VersionNT64')
+      $Properties['Arm64'] = '1'
+      $AbsentProperties.Add('Msix64')
+    }
   }
 
-  # Evaluate only the simple boolean subset used by architecture guards. Unknown
-  # identifiers are treated as true so optional product checks do not create
-  # false unsupported results.
-  $Expression = [regex]::Replace($Expression, '(?i)\b[A-Z_][A-Z0-9_]*\b', 'True')
-  $Expression = $Expression -replace '<>|=', '-eq'
-  $Expression = $Expression -replace '(?i)\bnot\b', '-not'
-  $Expression = $Expression -replace '(?i)\band\b', '-and'
-  $Expression = $Expression -replace '(?i)\bor\b', '-or'
-
-  try {
-    return [bool]([scriptblock]::Create($Expression).Invoke())
-  } catch {
-    return $true
-  }
+  $Result = Resolve-MsiConditionExpression -Condition $Condition -Property $Properties -KnownPresentProperty $PresentProperties.ToArray() -KnownAbsentProperty $AbsentProperties.ToArray()
+  # Unknown runtime properties or malformed package-authored expressions cannot
+  # prove that an architecture is unsupported. Narrow only on a conclusive false.
+  return $Result.State -ne 'False'
 }
 
 function Get-MsiArchitectureInfoFromStaticTableInfo {
@@ -860,6 +991,41 @@ function Get-MsiBuilderFromStaticTableInfo {
   if ($SummaryInfoText -match '(?i)\b(WiX|Windows Installer XML)\b') { return 'WiX' }
 
   return 'Unknown'
+}
+
+function Get-MsiInstallerBuilderVersionInfo {
+  <#
+  .SYNOPSIS
+    Read an explicitly recorded installer-builder version from MSI Summary Information.
+  .PARAMETER StaticTableInfo
+    Immutable table projection returned by Get-MsiStaticTableInfo.
+  .PARAMETER InstallerBuilder
+    Builder family already classified from structured MSI evidence.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$StaticTableInfo,
+    [Parameter(Mandatory)][string]$InstallerBuilder
+  )
+
+  # PID_APPNAME is an authored database field. Restrict exact version extraction to this source;
+  # ProductVersion and outer EXE version resources identify the packaged application instead.
+  $CreatingApplication = [string]$StaticTableInfo.SummaryInfo.CreatingApp
+  $Pattern = switch ($InstallerBuilder) {
+    'AdvancedInstaller' { '(?i)\bAdvanced Installer(?:\s+|/)(?<Version>\d+(?:\.\d+){1,3})\b' }
+    default { $null }
+  }
+  if ($Pattern -and $CreatingApplication -match $Pattern) {
+    return [pscustomobject][ordered]@{
+      Version = $Matches.Version
+      Source  = 'SummaryInformation.CreatingApp'
+    }
+  }
+
+  return [pscustomobject][ordered]@{
+    Version = $null
+    Source  = $null
+  }
 }
 
 
@@ -1262,6 +1428,7 @@ function Get-MsiInstallerInfo {
       }
       $ChromiumEnterpriseInfo = Get-MsiChromiumEnterpriseInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo -Database $Database
       $ElevationInfo = Get-MsiElevationInfoFromStaticTableInfo -StaticTableInfo $StaticTableInfo -ChromiumEnterpriseInfo $ChromiumEnterpriseInfo
+      $InstallerBuilderVersionInfo = Get-MsiInstallerBuilderVersionInfo -StaticTableInfo $StaticTableInfo -InstallerBuilder $AppsAndFeaturesInfo.InstallerBuilder
 
       [pscustomobject][ordered]@{
         Path                                = $PSCmdlet.ParameterSetName -eq 'Path' ? $Path : $null
@@ -1280,6 +1447,8 @@ function Get-MsiInstallerInfo {
         UnresolvedFields                    = [string[]]@()
         AllUsers                            = $Properties['ALLUSERS']
         InstallerBuilder                    = $AppsAndFeaturesInfo.InstallerBuilder
+        InstallerBuilderVersion             = $InstallerBuilderVersionInfo.Version
+        InstallerBuilderVersionSource       = $InstallerBuilderVersionInfo.Source
         SummaryCreatingApplication          = [string]$StaticTableInfo.SummaryInfo.CreatingApp
         SummaryComments                     = [string]$StaticTableInfo.SummaryInfo.Comments
         InstallShieldProjectType            = $InstallShieldProjectInfo.ProjectType

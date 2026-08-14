@@ -453,6 +453,12 @@ function Get-WinGetGenericInstallerManifestInfo {
         $Logger.Invoke("Advanced Installer selects the online MSI from MainAppURL '$($Selection.MainAppUrl)'; the embedded files do not represent the installer payload", 'Warning')
         return $null
       }
+      $PlatformSelectionProperty = $Metadata.PSObject.Properties['PlatformPayloadSelection']
+      $PlatformSelection = $null -eq $PlatformSelectionProperty ? $null : $PlatformSelectionProperty.Value
+      if ($PlatformSelection -and $PlatformSelection.LegacyMsiSelection) {
+        $Logger.Invoke('Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems. Existing installed-state fields are preserved until both nested packages are analyzed.', 'Warning')
+        return $null
+      }
       $MsiInfoArguments = @{ Installer = $Metadata }
       if ($Architecture -cin @('x86', 'x64', 'arm64')) { $MsiInfoArguments.Architecture = $Architecture }
       $MsiInfo = Get-AdvancedInstallerMsiInfo @MsiInfoArguments

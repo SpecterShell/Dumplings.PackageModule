@@ -681,6 +681,321 @@ function Get-InstallShieldElevationInfo {
   }
 }
 
+function ConvertFrom-InstallShieldPrerequisiteCondition {
+  <#
+  .SYNOPSIS
+    Decode one numeric InstallShield .prq condition into typed evidence.
+  .PARAMETER Node
+    A condition element from SetupPrereq/conditions.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][Xml.XmlNode]$Node)
+
+  process {
+    $Structured = ConvertFrom-InstallShieldSuiteCondition -Node $Node
+    $TypeCode = 0
+    $ComparisonCode = 0
+    $HasType = [int]::TryParse([string]$Structured.Attributes['Type'], [ref]$TypeCode)
+    $HasComparison = [int]::TryParse([string]$Structured.Attributes['Comparison'], [ref]$ComparisonCode)
+    $PredicateKind = if (-not $HasType) {
+      'Unknown'
+    } else {
+      switch ($TypeCode) {
+        1 { 'RegistryKey' }
+        2 { 'RegistryValue' }
+        4 { 'File' }
+        8 { 'FileDate' }
+        16 { 'FileVersion' }
+        32 { 'RegistryVersion' }
+        64 { 'AppPackage' }
+        default { 'Unknown' }
+      }
+    }
+    $Comparison = switch ("$TypeCode/$ComparisonCode") {
+      '1/1' { 'Exists' }
+      '1/2' { 'DoesNotExist' }
+      '2/1' { 'Equals' }
+      '4/1' { 'Exists' }
+      '4/2' { 'DoesNotExist' }
+      '8/1' { 'EqualDate' }
+      '8/2' { 'EarlierOrMissing' }
+      '8/3' { 'Later' }
+      '16/1' { 'EqualVersion' }
+      '16/2' { 'LessThanOrMissing' }
+      '16/3' { 'GreaterThan' }
+      '32/1' { 'EqualVersion' }
+      '32/2' { 'LessThan' }
+      '32/3' { 'GreaterThan' }
+      '64/0' { 'MissingOrVersionLess' }
+      default { 'Unknown' }
+    }
+    $Path = [string]$Structured.Attributes['Path']
+    $Name = [string]$Structured.Attributes['FileName']
+    $Bits = [string]$Structured.Attributes['Bits']
+    $QualifiedName = if ([string]::IsNullOrEmpty($Name) -or $Path.EndsWith('\', [StringComparison]::Ordinal)) { "$Path$Name" } else { "$Path\$Name" }
+    $EvidenceKey = switch ($PredicateKind) {
+      'RegistryKey' { "RegistryKey:$Path|$Bits" }
+      { $_ -in @('RegistryValue', 'RegistryVersion') } { "RegistryValue:$QualifiedName|$Bits" }
+      { $_ -in @('File', 'FileDate', 'FileVersion') } { "File:$QualifiedName" }
+      'AppPackage' { "AppPackage:$Name|$Path" }
+      default { "Unknown:$TypeCode/$ComparisonCode" }
+    }
+
+    [pscustomobject][ordered]@{
+      Type           = $Structured.Type
+      Attributes     = $Structured.Attributes
+      Value          = $Structured.Value
+      Children       = $Structured.Children
+      TypeCode       = $HasType ? $TypeCode : $null
+      PredicateKind  = $PredicateKind
+      ComparisonCode = $HasComparison ? $ComparisonCode : $null
+      Comparison     = $Comparison
+      EvidenceKey    = $EvidenceKey
+      ExpectedValue  = [string]$Structured.Attributes['ReturnValue']
+      RegistryView   = switch ($Bits) { '1' { 'Registry32' } '2' { 'Registry64' } default { 'Default32' } }
+    }
+  }
+}
+
+function Get-InstallShieldPrerequisiteEvidenceValue {
+  <#
+  .SYNOPSIS
+    Resolve one case-insensitive prerequisite evidence key without host access.
+  .PARAMETER Evidence
+    Caller-provided target-state dictionary.
+  .PARAMETER Key
+    Canonical EvidenceKey emitted by the condition decoder.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][Collections.IDictionary]$Evidence,
+    [Parameter(Mandatory)][string]$Key
+  )
+
+  $MatchedKey = @($Evidence.Keys | Where-Object { [string]$_ -ieq $Key } | Select-Object -First 1)
+  if ($MatchedKey.Count -eq 0) {
+    return [pscustomobject]@{ IsKnown = $false; Exists = $null; Value = $null }
+  }
+  $Item = $Evidence[$MatchedKey[0]]
+  if ($Item -is [bool]) {
+    return [pscustomobject]@{ IsKnown = $true; Exists = [bool]$Item; Value = $null }
+  }
+  if ($null -eq $Item) {
+    return [pscustomobject]@{ IsKnown = $true; Exists = $false; Value = $null }
+  }
+  if ($Item -is [Collections.IDictionary]) {
+    $ExistsKey = @($Item.Keys | Where-Object { [string]$_ -ieq 'Exists' } | Select-Object -First 1)
+    $ValueKey = @($Item.Keys | Where-Object { [string]$_ -in @('Value', 'Version', 'Date') } | Select-Object -First 1)
+    return [pscustomobject]@{
+      IsKnown = $true
+      Exists  = $ExistsKey.Count -eq 0 ? $true : [bool]$Item[$ExistsKey[0]]
+      Value   = $ValueKey.Count -eq 0 ? $Item : $Item[$ValueKey[0]]
+    }
+  }
+  $ExistsProperty = $Item.PSObject.Properties['Exists']
+  $ValueProperty = @('Value', 'Version', 'Date') | ForEach-Object { $Item.PSObject.Properties[$_] } | Where-Object { $null -ne $_ } | Select-Object -First 1
+  [pscustomobject]@{
+    IsKnown = $true
+    Exists  = $null -eq $ExistsProperty ? $true : [bool]$ExistsProperty.Value
+    Value   = $null -eq $ValueProperty ? $Item : $ValueProperty.Value
+  }
+}
+
+function Compare-InstallShieldPrerequisiteVersion {
+  <#
+  .SYNOPSIS
+    Compare two prerequisite version strings without using host state.
+  .PARAMETER Actual
+    Version observed in caller-supplied target evidence.
+  .PARAMETER Expected
+    Version serialized in the .prq condition.
+  #>
+  [OutputType([Nullable[int]])]
+  param ([string]$Actual, [string]$Expected)
+
+  try {
+    return ([version]$Actual).CompareTo([version]$Expected)
+  } catch {
+    return $null
+  }
+}
+
+function Resolve-InstallShieldPrerequisiteCondition {
+  <#
+  .SYNOPSIS
+    Evaluate one typed .prq install condition against explicit target evidence.
+  .DESCRIPTION
+    A True result means that this condition asks InstallShield to run the
+    prerequisite. Unsupported comparison codes and absent evidence remain
+    Unknown instead of being evaluated against the analysis host.
+  .PARAMETER Condition
+    Result from ConvertFrom-InstallShieldPrerequisiteCondition.
+  .PARAMETER Evidence
+    Target-state dictionary keyed by Condition.EvidenceKey.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][object]$Condition,
+    [Collections.IDictionary]$Evidence = @{}
+  )
+
+  process {
+    $Observed = Get-InstallShieldPrerequisiteEvidenceValue -Evidence $Evidence -Key ([string]$Condition.EvidenceKey)
+    if ($Condition.PredicateKind -eq 'Unknown' -or $Condition.Comparison -eq 'Unknown') {
+      return ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType "Prerequisite.$($Condition.PredicateKind)" -UnknownPredicates $Condition.EvidenceKey -Reasons "InstallShield prerequisite condition type/comparison '$($Condition.TypeCode)/$($Condition.ComparisonCode)' is not structurally supported."
+    }
+    if (-not $Observed.IsKnown) {
+      return ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType "Prerequisite.$($Condition.PredicateKind)" -UnknownPredicates $Condition.EvidenceKey -Reasons "No target-state evidence was supplied for '$($Condition.EvidenceKey)'."
+    }
+
+    $ConditionMatches = switch ($Condition.Comparison) {
+      'Exists' { [bool]$Observed.Exists }
+      'DoesNotExist' { -not [bool]$Observed.Exists }
+      'Equals' { [bool]$Observed.Exists -and [string]$Observed.Value -ceq [string]$Condition.ExpectedValue }
+      'EqualDate' {
+        if (-not $Observed.Exists) { $false } else {
+          try { [datetime]$Observed.Value -eq [datetime]$Condition.ExpectedValue } catch { $null }
+        }
+      }
+      'EarlierOrMissing' {
+        if (-not $Observed.Exists) { $true } else {
+          try { [datetime]$Observed.Value -le [datetime]$Condition.ExpectedValue } catch { $null }
+        }
+      }
+      'Later' {
+        if (-not $Observed.Exists) { $false } else {
+          try { [datetime]$Observed.Value -gt [datetime]$Condition.ExpectedValue } catch { $null }
+        }
+      }
+      'EqualVersion' {
+        if (-not $Observed.Exists) { $false } else {
+          $Comparison = Compare-InstallShieldPrerequisiteVersion -Actual ([string]$Observed.Value) -Expected ([string]$Condition.ExpectedValue)
+          $null -eq $Comparison ? $null : $Comparison -eq 0
+        }
+      }
+      'LessThan' {
+        if (-not $Observed.Exists) { $false } else {
+          $Comparison = Compare-InstallShieldPrerequisiteVersion -Actual ([string]$Observed.Value) -Expected ([string]$Condition.ExpectedValue)
+          $null -eq $Comparison ? $null : $Comparison -lt 0
+        }
+      }
+      'LessThanOrMissing' {
+        if (-not $Observed.Exists) { $true } else {
+          $Comparison = Compare-InstallShieldPrerequisiteVersion -Actual ([string]$Observed.Value) -Expected ([string]$Condition.ExpectedValue)
+          $null -eq $Comparison ? $null : $Comparison -lt 0
+        }
+      }
+      'GreaterThan' {
+        if (-not $Observed.Exists) { $false } else {
+          $Comparison = Compare-InstallShieldPrerequisiteVersion -Actual ([string]$Observed.Value) -Expected ([string]$Condition.ExpectedValue)
+          $null -eq $Comparison ? $null : $Comparison -gt 0
+        }
+      }
+      'MissingOrVersionLess' {
+        if (-not $Observed.Exists) { $true } else {
+          $Comparison = Compare-InstallShieldPrerequisiteVersion -Actual ([string]$Observed.Value) -Expected ([string]$Condition.ExpectedValue)
+          $null -eq $Comparison ? $null : $Comparison -lt 0
+        }
+      }
+      default { $null }
+    }
+    if ($null -eq $ConditionMatches) {
+      return ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType "Prerequisite.$($Condition.PredicateKind)" -UnknownPredicates $Condition.EvidenceKey -Reasons "The supplied value could not be compared using '$($Condition.Comparison)'."
+    }
+    ConvertTo-InstallShieldSuiteConditionResult -State ($ConditionMatches ? 'True' : 'False') -ConditionType "Prerequisite.$($Condition.PredicateKind)" -Reasons "Target evidence '$($Condition.EvidenceKey)' $($ConditionMatches ? 'meets' : 'does not meet') the '$($Condition.Comparison)' install condition."
+  }
+}
+
+function Resolve-InstallShieldPrerequisiteOperatingSystemCondition {
+  <#
+  .SYNOPSIS
+    Evaluate one .prq operating-system condition from caller-supplied facts.
+  .PARAMETER Condition
+    Structured operatingsystemcondition XML evidence.
+  .PARAMETER Architecture
+    Optional target architecture.
+  .PARAMETER OSVersion
+    Optional target Windows major/minor version.
+  .PARAMETER BuildNumber
+    Optional target build number.
+  .PARAMETER ServicePack
+    Optional target service-pack major version.
+  .PARAMETER ProductType
+    Optional target Windows product type.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][object]$Condition,
+    [ValidateSet('x86', 'x64', 'arm', 'arm64', 'ia64')][string]$Architecture,
+    [string]$OSVersion,
+    [Nullable[int]]$BuildNumber,
+    [Nullable[int]]$ServicePack,
+    [ValidateScript({ [string]::IsNullOrEmpty($_) -or $_ -in @('Workstation', 'Server', 'DomainController') })][string]$ProductType
+  )
+
+  process {
+    $Attributes = $Condition.Attributes
+    $Checks = [Collections.Generic.List[object]]::new()
+    if ($Attributes['PlatformId'] -and [string]$Attributes['PlatformId'] -ne '2') {
+      $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State False -ConditionType PrerequisiteOS -Reasons "PlatformId '$($Attributes['PlatformId'])' is not Windows NT (2)."))
+    }
+    if ($Attributes['MajorVersion'] -or $Attributes['MinorVersion']) {
+      if (-not $OSVersion) {
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType PrerequisiteOS -UnknownPredicates OSVersion -Reasons 'No target OS version was supplied.'))
+      } else {
+        $ExpectedVersion = "$($Attributes['MajorVersion']).$($Attributes['MinorVersion'])"
+        $ConditionMatches = [version]$OSVersion -eq [version]$ExpectedVersion
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State ($ConditionMatches ? 'True' : 'False') -ConditionType PrerequisiteOS -Reasons "Target OS version '$OSVersion' was compared with '$ExpectedVersion'."))
+      }
+    }
+    if ($Attributes['BuildNumber']) {
+      if ($null -eq $BuildNumber) {
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType PrerequisiteOS -UnknownPredicates BuildNumber -Reasons 'No target build number was supplied.'))
+      } else {
+        $Minimum = [int]$Attributes['BuildNumber']
+        $ConditionMatches = $BuildNumber -ge $Minimum
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State ($ConditionMatches ? 'True' : 'False') -ConditionType PrerequisiteOS -Reasons "Target build '$BuildNumber' was compared with minimum '$Minimum'."))
+      }
+    }
+    if ($Attributes['ServicePackMajorMin'] -or $Attributes['ServicePackMajorMax']) {
+      if ($null -eq $ServicePack) {
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType PrerequisiteOS -UnknownPredicates ServicePack -Reasons 'No target service-pack number was supplied.'))
+      } else {
+        $Minimum = [string]::IsNullOrWhiteSpace([string]$Attributes['ServicePackMajorMin']) ? 0 : [int]$Attributes['ServicePackMajorMin']
+        $Maximum = [string]::IsNullOrWhiteSpace([string]$Attributes['ServicePackMajorMax']) ? [int]::MaxValue : [int]$Attributes['ServicePackMajorMax']
+        $ConditionMatches = $ServicePack -ge $Minimum -and $ServicePack -le $Maximum
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State ($ConditionMatches ? 'True' : 'False') -ConditionType PrerequisiteOS -Reasons "Target service pack '$ServicePack' was compared with '$Minimum-$Maximum'."))
+      }
+    }
+    if ($Attributes['ProductType']) {
+      if (-not $ProductType) {
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType PrerequisiteOS -UnknownPredicates ProductType -Reasons 'No target product type was supplied.'))
+      } else {
+        $ProductTypeCode = @{ Workstation = '1'; DomainController = '2'; Server = '3' }[$ProductType]
+        $ConditionMatches = $ProductTypeCode -in @([string]$Attributes['ProductType'] -split '\|')
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State ($ConditionMatches ? 'True' : 'False') -ConditionType PrerequisiteOS -Reasons "Target product type '$ProductType' was compared with '$($Attributes['ProductType'])'."))
+      }
+    }
+    if ($Attributes['Bits']) {
+      if (-not $Architecture) {
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType PrerequisiteOS -UnknownPredicates Architecture -Reasons 'No target architecture was supplied.'))
+      } else {
+        $Bits = [int]$Attributes['Bits']
+        $ArchitectureMask = switch ($Architecture) { 'x86' { 1 } 'x64' { 2 -bor 4 } 'ia64' { 2 -bor 8 } 'arm' { 16 } 'arm64' { 2 -bor 32 } }
+        $ConditionMatches = ($Bits -band $ArchitectureMask) -ne 0
+        $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State ($ConditionMatches ? 'True' : 'False') -ConditionType PrerequisiteOS -Reasons "Target architecture '$Architecture' was compared with prerequisite Bits '$Bits'."))
+      }
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Attributes['CSDVersion'])) {
+      $Checks.Add((ConvertTo-InstallShieldSuiteConditionResult -State Unknown -ConditionType PrerequisiteOS -UnknownPredicates CSDVersion -Reasons 'CSDVersion ordering is locale-sensitive and requires VM evidence.'))
+    }
+    if ($Checks.Count -eq 0) {
+      return ConvertTo-InstallShieldSuiteConditionResult -State True -ConditionType PrerequisiteOS -Reasons 'The operating-system condition contains no restrictions.'
+    }
+    Merge-InstallShieldSuiteConditionResult -Type All -Result ([object[]]$Checks)
+  }
+}
+
 function Get-InstallShieldPrerequisiteInfo {
   <#
   .SYNOPSIS
@@ -692,9 +1007,31 @@ function Get-InstallShieldPrerequisiteInfo {
     selects it; correlate the Id/name with MSI or suite package evidence.
   .PARAMETER Path
     Path to an extracted or official InstallShield .prq XML definition.
+  .PARAMETER ConditionEvidence
+    Target-state evidence keyed by the EvidenceKey returned for each condition.
+    Boolean values represent existence; scalar values represent an existing
+    registry, file-version, or package-version value. The host is never read.
+  .PARAMETER Architecture
+    Optional target architecture used to evaluate operating-system conditions.
+  .PARAMETER OSVersion
+    Optional target Windows major/minor version.
+  .PARAMETER BuildNumber
+    Optional target Windows build number.
+  .PARAMETER ServicePack
+    Optional target service-pack major version.
+  .PARAMETER ProductType
+    Optional target Windows product type.
   #>
   [OutputType([pscustomobject])]
-  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
+    [Collections.IDictionary]$ConditionEvidence = @{},
+    [ValidateSet('x86', 'x64', 'arm', 'arm64', 'ia64')][string]$Architecture,
+    [string]$OSVersion,
+    [Nullable[int]]$BuildNumber,
+    [Nullable[int]]$ServicePack,
+    [ValidateScript({ [string]::IsNullOrEmpty($_) -or $_ -in @('Workstation', 'Server', 'DomainController') })][string]$ProductType
+  )
 
   process {
     $PrerequisitePath = (Get-Item -LiteralPath $Path -Force).FullName
@@ -717,7 +1054,7 @@ function Get-InstallShieldPrerequisiteInfo {
       }
     }
     $DetectionConditions = foreach ($Node in @($Root.SelectNodes('./conditions/condition'))) {
-      ConvertFrom-InstallShieldSuiteCondition -Node $Node
+      ConvertFrom-InstallShieldPrerequisiteCondition -Node $Node
     }
     $OperatingSystemConditions = foreach ($Node in @($Root.SelectNodes('./operatingsystemconditions/operatingsystemcondition'))) {
       ConvertFrom-InstallShieldSuiteCondition -Node $Node
@@ -732,6 +1069,31 @@ function Get-InstallShieldPrerequisiteInfo {
       $DependencyFile = $DependencyNode.GetAttribute('File')
       if (-not [string]::IsNullOrWhiteSpace($DependencyFile)) { $DependencyFile }
     }
+    $DetectionConditionAnalyses = foreach ($Condition in @($DetectionConditions)) {
+      Resolve-InstallShieldPrerequisiteCondition -Condition $Condition -Evidence $ConditionEvidence
+    }
+    $OperatingSystemParameters = @{}
+    if ($Architecture) { $OperatingSystemParameters.Architecture = $Architecture }
+    if ($OSVersion) { $OperatingSystemParameters.OSVersion = $OSVersion }
+    if ($null -ne $BuildNumber) { $OperatingSystemParameters.BuildNumber = $BuildNumber }
+    if ($null -ne $ServicePack) { $OperatingSystemParameters.ServicePack = $ServicePack }
+    if ($ProductType) { $OperatingSystemParameters.ProductType = $ProductType }
+    $OperatingSystemConditionAnalyses = foreach ($Condition in @($OperatingSystemConditions)) {
+      Resolve-InstallShieldPrerequisiteOperatingSystemCondition -Condition $Condition @OperatingSystemParameters
+    }
+    # InstallShield runs a prerequisite when every normal condition and any
+    # authored OS condition are true. Empty groups impose no restriction.
+    $DetectionSet = if (@($DetectionConditionAnalyses).Count) {
+      Merge-InstallShieldSuiteConditionResult -Type All -Result ([object[]]@($DetectionConditionAnalyses))
+    } else {
+      ConvertTo-InstallShieldSuiteConditionResult -State True -ConditionType PrerequisiteConditions -Reasons 'The prerequisite has no normal conditions and therefore always passes this condition group.'
+    }
+    $OperatingSystemSet = if (@($OperatingSystemConditionAnalyses).Count) {
+      Merge-InstallShieldSuiteConditionResult -Type Any -Result ([object[]]@($OperatingSystemConditionAnalyses))
+    } else {
+      ConvertTo-InstallShieldSuiteConditionResult -State True -ConditionType OperatingSystemConditions -Reasons 'The prerequisite has no operating-system restrictions.'
+    }
+    $InstallationConditionAnalysis = Merge-InstallShieldSuiteConditionResult -Type All -Result ([object[]]@($DetectionSet, $OperatingSystemSet))
 
     [pscustomobject][ordered]@{
       Path                             = $PrerequisitePath
@@ -741,6 +1103,10 @@ function Get-InstallShieldPrerequisiteInfo {
       Files                            = [object[]]@($Files)
       DetectionConditions              = [object[]]@($DetectionConditions)
       OperatingSystemConditions        = [object[]]@($OperatingSystemConditions)
+      DetectionConditionAnalyses       = [object[]]@($DetectionConditionAnalyses)
+      OperatingSystemConditionAnalyses = [object[]]@($OperatingSystemConditionAnalyses)
+      InstallationConditionAnalysis    = $InstallationConditionAnalysis
+      ShouldInstallState               = $InstallationConditionAnalysis.State
       Executable                       = $ExecuteNode ? $ExecuteNode.GetAttribute('file') : $null
       CommandLine                      = $ExecuteNode ? $ExecuteNode.GetAttribute('cmdline') : $null
       SilentCommandLine                = $ExecuteNode ? $ExecuteNode.GetAttribute('cmdlinesilent') : $null

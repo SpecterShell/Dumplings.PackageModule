@@ -787,9 +787,20 @@ Describe 'InstallShield parser' {
       $Info.ReturnCodesToReboot | Should -Be @(3010, 1641)
       $Info.InvalidReturnCodesToReboot | Should -Be 'invalid'
       $Info.DetectionConditions[0].Attributes.FileName | Should -Be 'PresentationFramework.dll'
+      $Info.DetectionConditions[0].PredicateKind | Should -Be 'File'
+      $Info.DetectionConditions[0].Comparison | Should -Be 'DoesNotExist'
+      $Info.DetectionConditions[0].EvidenceKey | Should -Be 'File:[ProgramFiles64Folder]\dotnet\shared\Microsoft.WindowsDesktop.App\10.0.5\PresentationFramework.dll'
+      $Info.ShouldInstallState | Should -Be 'Unknown'
       $Info.LimitedUserCompatible | Should -BeFalse
       $Info.RequiresAdministrativePrivileges | Should -BeTrue
       $Info.HasSilentCommandLine | Should -BeTrue
+
+      $TargetInfo = Get-InstallShieldPrerequisiteInfo -Path $PrerequisitePath -ConditionEvidence @{
+        'File:[ProgramFiles64Folder]\dotnet\shared\Microsoft.WindowsDesktop.App\10.0.5\PresentationFramework.dll' = $false
+      } -Architecture x64 -OSVersion 10.0
+      $TargetInfo.DetectionConditionAnalyses[0].State | Should -Be 'True'
+      $TargetInfo.OperatingSystemConditionAnalyses[0].State | Should -Be 'True'
+      $TargetInfo.ShouldInstallState | Should -Be 'True'
     } finally {
       Remove-Item -LiteralPath $PrerequisitePath -Force -ErrorAction SilentlyContinue
     }
@@ -810,6 +821,19 @@ Describe 'InstallShield parser' {
     $Info.LimitedUserCompatible | Should -BeTrue
     $Info.RequiresAdministrativePrivileges | Should -BeFalse
     $Info.HasSilentCommandLine | Should -BeTrue
+  }
+
+  It 'Should evaluate typed InstallShield prerequisite comparisons only from supplied evidence' {
+    [xml]$Xml = '<conditions><condition Type="32" Comparison="2" Path="HKEY_LOCAL_MACHINE\Software\Vendor\Runtime" FileName="Version" ReturnValue="2.0.0" Bits="2" /></conditions>'
+    $Condition = ConvertFrom-InstallShieldPrerequisiteCondition -Node $Xml.DocumentElement.FirstChild
+
+    $Condition.PredicateKind | Should -Be 'RegistryVersion'
+    $Condition.Comparison | Should -Be 'LessThan'
+    $Condition.RegistryView | Should -Be 'Registry64'
+    (Resolve-InstallShieldPrerequisiteCondition -Condition $Condition).State | Should -Be 'Unknown'
+    (Resolve-InstallShieldPrerequisiteCondition -Condition $Condition -Evidence @{ $Condition.EvidenceKey = @{ Exists = $true; Version = '1.5.0' } }).State | Should -Be 'True'
+    (Resolve-InstallShieldPrerequisiteCondition -Condition $Condition -Evidence @{ $Condition.EvidenceKey = @{ Exists = $true; Version = '2.1.0' } }).State | Should -Be 'False'
+    (Resolve-InstallShieldPrerequisiteCondition -Condition $Condition -Evidence @{ $Condition.EvidenceKey = $false }).State | Should -Be 'False'
   }
 
   It 'Should read ordered setup prerequisite references from Setup.ini' {

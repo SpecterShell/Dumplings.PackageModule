@@ -361,10 +361,105 @@ stagingPercentage: 25
 
   It 'Should read MSI metadata through the InstallerParsers Advanced Installer bridge' {
     $Fixture = Get-InstallerFixture -Name 'TINspireComputerLink-3.9.0.455.exe' -Url 'https://education.ti.com/download/en/ed-tech/82035809F7E6474099944056CCB01C20/AC3AAE51297B4902B6B6CA005B8391F0/TINspireComputerLink-3.9.0.455.exe'
+    $FormatInfo = Get-AdvancedInstallerFormatInfo -Path $Fixture
     $MsiInfo = Get-AdvancedInstallerMsiInfo -Path $Fixture -Name 'ComputerLink.msi'
 
+    $FormatInfo.IsAdvancedInstaller | Should -BeTrue
+    $FormatInfo.FormatProfileId | Should -Be 'classic-unicode-v1'
     $MsiInfo.DisplayVersion | Should -Be '3.9.0.455'
     $MsiInfo.ProductCode | Should -Be '{6C5AC088-3136-4043-8985-8B0772A9580E}'
+    $MsiInfo.InstallerBuilderVersion | Should -Be '10.3'
+  }
+
+  It 'Should preserve Advanced Installer external-resource evidence through the parser bridge' {
+    $AdvancedInstallerFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\AdvancedInstaller'
+    $Fixture = Join-Path $AdvancedInstallerFixtureDirectory 'Generated\6.3\diehard-external-63.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 6.3 external-media fixture is not present in the persistent cache.'
+      return
+    }
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info
+
+    $Info.FormatProfileId | Should -Be 'classic-ansi-v0'
+    $Info.ExternalResourceCount | Should -Be 3
+    $Info.MsiPayloadSelection.SourceKind | Should -Be 'ExternalArchive'
+    $MsiInfo.InstallerBuilderVersion | Should -Be '6.3'
+    $MsiInfo.SelectedMsiPath | Should -Be 'diehard-external-63.msi'
+  }
+
+  It 'Should preserve Advanced Installer MSI/MSIX platform-selection evidence through the parser bridge' {
+    $AdvancedInstallerFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\AdvancedInstaller'
+    $Fixture = Join-Path $AdvancedInstallerFixtureDirectory 'Generated\23.9\mixed-controlled-Msi.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 23.9 mixed MSI/MSIX fixture is not present in the persistent cache.'
+      return
+    }
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info
+
+    $Info.MediaType | Should -Be 'MsiMsixPlatformSelection'
+    $Info.PlatformPayloadSelection.PackageFamilyName | Should -Be 'Caphyon.SparsePackage_pm3gqw982fx6e'
+    $Info.PlatformPayloadSelection.ModernPayloads[0].Name | Should -Be 'Sparse Package-x64.msix'
+    $MsiInfo.SelectedMsiPath | Should -Be 'mixed-controlled-Msi.msi'
+    $Info.BuilderVersion | Should -BeNullOrEmpty
+    $Info.BuilderVersionRange | Should -Be '8.6-23.9'
+  }
+
+  It 'Should project Advanced Installer prerequisite execution and detection evidence' {
+    $AdvancedInstallerFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\AdvancedInstaller'
+    $Fixture = Join-Path $AdvancedInstallerFixtureDirectory 'Generated\8.6\prereq-lzma-86.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 8.6 prerequisite fixture is not present in the persistent cache.'
+      return
+    }
+
+    $Info = Get-AdvancedInstallerInfo -Path $Fixture
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Installer $Info
+
+    $Info.HasPrerequisitePayloads | Should -BeTrue
+    $MsiInfo.HasPrerequisites | Should -BeTrue
+    $MsiInfo.Prerequisites | Should -HaveCount 1
+    $MsiInfo.Prerequisites[0].DisplayName | Should -Be 'Controlled Lzma prerequisite'
+    $MsiInfo.Prerequisites[0].Location | Should -Be 'EmbeddedFile'
+    $MsiInfo.Prerequisites[0].SilentCommandLine | Should -Be '/lzma-controlled'
+    $MsiInfo.Prerequisites[0].MissingConditionState | Should -Be 'Unknown'
+    $MsiInfo.Prerequisites[0].MissingConditionAnalysis.IsValid | Should -BeTrue
+    $MsiInfo.Prerequisites[0].MissingConditionAnalysis.UnknownSymbols | Should -Contain 'PREREQSEARCH'
+    $MsiInfo.Prerequisites[0].CompressPayload | Should -BeTrue
+    $MsiInfo.Prerequisites[0].ForceInstall | Should -BeFalse
+    $MsiInfo.Prerequisites[0].Searches[0].SearchString | Should -Be 'HKLM\Software\Dumplings\AdvancedInstallerPrereq\Version'
+    $MsiInfo.Prerequisites[0].Payload.Compression | Should -Be 'Lzma'
+
+    $MissingInfo = Get-AdvancedInstallerMsiInfo -Installer $Info -KnownPresentPrerequisiteProperty Version9X -KnownAbsentPrerequisiteProperty @('VersionNT', 'VersionNT64', 'PREREQSEARCH')
+    $PresentInfo = Get-AdvancedInstallerMsiInfo -Installer $Info -KnownPresentPrerequisiteProperty @('Version9X', 'PREREQSEARCH') -KnownAbsentPrerequisiteProperty @('VersionNT', 'VersionNT64')
+    $MissingInfo.Prerequisites[0].MissingConditionState | Should -Be 'True'
+    $PresentInfo.Prerequisites[0].MissingConditionState | Should -Be 'False'
+  }
+
+  It 'Should distinguish force-install and downloadable Advanced Installer prerequisites' {
+    $AdvancedInstallerFixtureDirectory = Get-DumplingsTestFixtureDirectory -Name 'InstallerParsers\AdvancedInstaller'
+    $ForceFixture = Join-Path $AdvancedInstallerFixtureDirectory 'Generated\8.6\prereq-force-86.exe'
+    $UrlFixture = Join-Path $AdvancedInstallerFixtureDirectory 'Generated\8.6\prereq-url-86.exe'
+    if (-not (Test-Path -LiteralPath $ForceFixture -PathType Leaf) -or -not (Test-Path -LiteralPath $UrlFixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The VM-built Advanced Installer 8.6 prerequisite variants are not present in the persistent cache.'
+      return
+    }
+
+    $ForceInfo = Get-AdvancedInstallerMsiInfo -Path $ForceFixture
+    $UrlInfo = Get-AdvancedInstallerMsiInfo -Path $UrlFixture
+
+    $ForceInfo.Prerequisites[0].ForceInstall | Should -BeTrue
+    $ForceInfo.Prerequisites[0].CompressPayload | Should -BeFalse
+    $ForceInfo.Prerequisites[0].Payload.Compression | Should -Be 'None'
+    $UrlInfo.Prerequisites[0].Location | Should -Be 'DownloadUrl'
+    $UrlInfo.Prerequisites[0].Source | Should -Be 'https://example.invalid/prerequisite.exe'
+    $UrlInfo.Prerequisites[0].ExpectedSize | Should -Be 17560
+    $UrlInfo.Prerequisites[0].HashAlgorithm | Should -Be 'MD5'
+    $UrlInfo.Prerequisites[0].Hash | Should -Be '0123456789ABCDEF0123456789ABCDEF'
+    $UrlInfo.Prerequisites[0].Payload | Should -BeNullOrEmpty
   }
 
   It 'Should reproduce Advanced Installer mixed-platform payload selection' {

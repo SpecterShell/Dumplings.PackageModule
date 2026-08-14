@@ -1436,6 +1436,42 @@ Describe 'WinGet installer manifest metadata updates' {
       Should -Invoke Get-AdvancedInstallerMsiInfo -Exactly 0
     }
 
+    It 'Preserves metadata for an Advanced Installer MSI/MSIX platform wrapper' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
+              Name    = 'Advanced Installer'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Metadata = [pscustomobject]@{
+                  InstallerType            = 'AdvancedInstaller'
+                  MsiPayloadSelection      = [pscustomobject]@{ SourceKind = 'EmbeddedMsi' }
+                  PlatformPayloadSelection = [pscustomobject]@{
+                    SelectionMethod    = 'OperatingSystemVersion'
+                    LegacyMsiSelection = [pscustomobject]@{ SourceKind = 'EmbeddedMsi' }
+                    ModernPayloads     = @([pscustomobject]@{ Name = 'product-x64.msix' })
+                  }
+                }
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      Mock Get-AdvancedInstallerMsiInfo { throw 'The legacy MSI parser should not update mixed platform metadata automatically' }
+      $Installer = [ordered]@{
+        Architecture  = 'x64'
+        InstallerType = 'exe'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Existing.Advanced.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'Existing.Advanced.Product'
+      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Contain 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems. Existing installed-state fields are preserved until both nested packages are analyzed.'
+      Should -Invoke Get-AdvancedInstallerMsiInfo -Exactly 0
+    }
+
     It 'Updates generic EXE metadata from a detected Squirrel parser result' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{

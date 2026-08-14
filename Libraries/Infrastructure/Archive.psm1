@@ -181,6 +181,7 @@ function Get-InstallerArchiveEntry {
       Length         = [long]$Entry.Size
       Size           = [long]$Entry.Size
       CompressedSize = [long]$Entry.CompressedSize
+      IsEncrypted    = if ($Entry.PSObject.Properties.Name -contains 'IsEncrypted') { [bool]$Entry.IsEncrypted } else { $false }
       LinkTarget     = if ($Entry.PSObject.Properties.Name -contains 'LinkTarget') { [string]$Entry.LinkTarget } else { $null }
       NativeEntry    = $Entry
     }

@@ -183,10 +183,10 @@ Describe 'MSI builder and install-location parser' {
     It 'Should distinguish the InstallScript MSI Setup.exe contract from compiled-script evidence' {
       $ProjectType = [pscustomobject]@{ ProjectType = 'InstallScript MSI' }
       $Actions = @([pscustomobject]@{
-          Action = 'ISVerifyScriptingRuntime'
+          Action    = 'ISVerifyScriptingRuntime'
           Sequences = @([pscustomobject]@{
-              Table = 'InstallUISequence'
-              Sequence = 100
+              Table     = 'InstallUISequence'
+              Sequence  = 100
               Condition = 'NOT AFTERREBOOT AND NOT ISSETUPDRIVEN'
             })
         })
@@ -231,6 +231,32 @@ Describe 'MSI builder and install-location parser' {
       }
 
       Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'
+    }
+
+    It 'Should read an exact Advanced Installer builder version only from Summary Information' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties          = @{ ProductVersion = '99.1.2' }
+        Tables              = @('Property', 'AI_ThemeStyle')
+        CustomActionRows    = @()
+        UpgradeRows         = @()
+        LaunchConditionRows = @()
+        SummaryInfo         = [pscustomobject]@{
+          CreatingApp = 'Advanced Installer 10.3'
+          Comments    = $null
+        }
+      }
+
+      $Builder = Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $VersionInfo = Get-MsiInstallerBuilderVersionInfo -StaticTableInfo $StaticTableInfo -InstallerBuilder $Builder
+
+      $Builder | Should -Be 'AdvancedInstaller'
+      $VersionInfo.Version | Should -Be '10.3'
+      $VersionInfo.Source | Should -Be 'SummaryInformation.CreatingApp'
+
+      $StaticTableInfo.SummaryInfo.CreatingApp = 'A publisher-customized creating application'
+      $VersionInfo = Get-MsiInstallerBuilderVersionInfo -StaticTableInfo $StaticTableInfo -InstallerBuilder $Builder
+      $VersionInfo.Version | Should -BeNullOrEmpty
+      $VersionInfo.Source | Should -BeNullOrEmpty
     }
 
     It 'Should not treat the ordinary IsLight property as InstallShield before WixSharp evidence' {
@@ -297,6 +323,42 @@ Describe 'MSI builder and install-location parser' {
     $Info.ElevationRequirement | Should -BeNullOrEmpty
     $Info.ElevationRequirementEvidence | Should -BeNullOrEmpty
     Read-AppsAndFeaturesInstallerTypeFromMsi -Path $Fixture | Should -Be 'msi'
+  }
+
+  It 'Should read the exact builder version from the current official Advanced Installer MSI' -Tag 'LargeFixture' {
+    $Name = 'AdvancedInstaller-23.9.msi'
+    $Url = 'https://storage.advancedupdater.cloud/downloads/23.9/advinst.msi'
+    $Sha256 = '07526888339024CA944CF5053AB57D9454DD9470DA5AAAB91766DCFCAA5E16C8'
+    $Fixture = Join-Path $Script:FixtureDirectory $Name
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $Fixture -Sha256 $Sha256)) {
+      if ($env:DUMPLINGS_DOWNLOAD_LARGE_TEST_FIXTURES -eq '1') {
+        $Fixture = Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri $Url -Sha256 $Sha256
+      } else {
+        Set-ItResult -Skipped -Because 'Set DUMPLINGS_DOWNLOAD_LARGE_TEST_FIXTURES=1 to cache the 312 MiB official Advanced Installer MSI.'
+        return
+      }
+    }
+
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.InstallerBuilder | Should -Be 'AdvancedInstaller'
+    $Info.InstallerBuilderVersion | Should -Be '23.9'
+    $Info.InstallerBuilderVersionSource | Should -Be 'SummaryInformation.CreatingApp'
+    $Info.SummaryCreatingApplication | Should -Be 'Advanced Installer 23.9'
+  }
+
+  It 'Should read explicit builder provenance at the Advanced Installer <Version> boundary' -ForEach @(
+    @{ Version = '6.4'; Sha256 = '72A5D349F6E97AF59EECE121BA12E5F69E333FEBE06381D072022B241F0E7028' }
+    @{ Version = '8.6'; Sha256 = '0A99BE66E6C08DC6E48BFE94958F0A998BEB5BF5E9CE6F52B17092123A1B5336' }
+  ) {
+    $Name = "AdvancedInstaller-$Version.msi"
+    $Fixture = Get-DumplingsTestFixture -Directory $Script:FixtureDirectory -Name $Name -Uri "https://storage.advancedupdater.cloud/downloads/$Version/advinst.msi" -Sha256 $Sha256
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.InstallerBuilder | Should -Be 'AdvancedInstaller'
+    $Info.InstallerBuilderVersion | Should -Be $Version
+    $Info.InstallerBuilderVersionSource | Should -Be 'SummaryInformation.CreatingApp'
+    $Info.SummaryCreatingApplication | Should -Be "Advanced Installer $Version"
   }
 
   It 'Should classify an InstallShield-authored MSI and read INSTALLDIR' {
@@ -533,7 +595,101 @@ Describe 'MSI elevation requirement parser' {
   }
 }
 
+Describe 'MSI condition evaluator' {
+  InModuleScope MSI {
+    It 'Should apply the documented logical precedence' {
+      (Resolve-MsiConditionExpression -Condition '1 OR 0 AND 0').State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition '(1 OR 0) AND 0').State | Should -Be 'False'
+      (Resolve-MsiConditionExpression -Condition '1 XOR 1').State | Should -Be 'False'
+      (Resolve-MsiConditionExpression -Condition '1 EQV 1').State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition '1 IMP 0').State | Should -Be 'False'
+      (Resolve-MsiConditionExpression -Condition '0 IMP MISSING').State | Should -Be 'True'
+    }
+
+    It 'Should preserve unknown runtime state through three-valued logic' {
+      $Unknown = Resolve-MsiConditionExpression -Condition 'MISSING AND 1'
+      $Unknown.State | Should -Be 'Unknown'
+      $Unknown.IsComplete | Should -BeFalse
+      $Unknown.UnknownSymbols | Should -Be 'MISSING'
+
+      (Resolve-MsiConditionExpression -Condition 'MISSING AND 0').State | Should -Be 'False'
+      (Resolve-MsiConditionExpression -Condition 'MISSING OR 1').State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition 'MISSING' -UnspecifiedSymbolState Absent).State | Should -Be 'False'
+      (Resolve-MsiConditionExpression -Condition '' -UnspecifiedSymbolState Absent).State | Should -Be 'None'
+    }
+
+    It 'Should distinguish known property presence from a known property value' {
+      $Present = Resolve-MsiConditionExpression -Condition 'VersionNT64 AND VersionNT64 >= 601' -KnownPresentProperty VersionNT64
+      $Present.State | Should -Be 'Unknown'
+      $Present.ReferencedSymbols[0].IsPresent | Should -BeTrue
+      $Present.ReferencedSymbols[0].IsKnown | Should -BeFalse
+
+      (Resolve-MsiConditionExpression -Condition 'NOT VersionNT64' -KnownAbsentProperty VersionNT64).State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition 'VALUE >= 10' -Property @{ VALUE = '11' }).State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition 'VALUE = 10' -Property @{ VALUE = 'not-a-number' }).State | Should -Be 'False'
+      (Resolve-MsiConditionExpression -Condition 'VALUE <> 10' -Property @{ VALUE = 'not-a-number' }).State | Should -Be 'True'
+    }
+
+    It 'Should implement case-sensitive and tilde-prefixed string comparisons' {
+      $Properties = @{ NAME = 'AlphaBeta'; PATCH = 'base.msp;update.msp' }
+      (Resolve-MsiConditionExpression -Condition 'NAME = "alphabeta"' -Property $Properties).State | Should -Be 'False'
+      (Resolve-MsiConditionExpression -Condition 'NAME ~= "alphabeta"' -Property $Properties).State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition 'NAME << "Alpha"' -Property $Properties).State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition 'NAME >> "Beta"' -Property $Properties).State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition 'PATCH >< "update.msp"' -Property $Properties).State | Should -Be 'True'
+    }
+
+    It 'Should implement numeric bitwise condition operators' {
+      $Properties = @{ FLAGS = '6'; VERSION = '131077' }
+      (Resolve-MsiConditionExpression -Condition 'FLAGS >< 4' -Property $Properties).State | Should -Be 'True'
+      (Resolve-MsiConditionExpression -Condition 'VERSION << 2 AND VERSION >> 5' -Property $Properties).State | Should -Be 'True'
+    }
+
+    It 'Should resolve each MSI symbol namespace with its required casing rules' {
+      $Result = Resolve-MsiConditionExpression -Condition '(%Path ~= "C:\Tools") AND ($Core=3) AND (?Core=2) AND (&Main=3) AND (!Main=2)' `
+        -EnvironmentVariable @{ PATH = 'c:\tools' } -ComponentActionState @{ Core = 3 } -ComponentInstalledState @{ Core = 2 } `
+        -FeatureActionState @{ Main = 3 } -FeatureInstalledState @{ Main = 2 }
+
+      $Result.State | Should -Be 'True'
+      $Result.ReferencedSymbols.Kind | Should -Be @(
+        'EnvironmentVariable', 'ComponentActionState', 'ComponentInstalledState', 'FeatureActionState', 'FeatureInstalledState'
+      )
+    }
+
+    It 'Should return deterministic invalid results for malformed or over-complex conditions' {
+      $UnexpectedPath = Join-Path $PWD '-eq'
+      [IO.File]::Delete($UnexpectedPath)
+
+      $Malformed = Resolve-MsiConditionExpression -Condition 'VersionNT64 >= '
+      $Malformed.State | Should -Be 'Invalid'
+      $Malformed.IsValid | Should -BeFalse
+      $Malformed.ErrorPosition | Should -BeGreaterOrEqual 0
+      Test-Path -LiteralPath $UnexpectedPath | Should -BeFalse
+
+      (Resolve-MsiConditionExpression -Condition '1 AND 1' -MaximumTokenCount 2).State | Should -Be 'Invalid'
+      (Resolve-MsiConditionExpression -Condition '(((1)))' -MaximumDepth 2).State | Should -Be 'Invalid'
+    }
+  }
+}
+
 Describe 'MSI unsupported architecture parser' {
+  InModuleScope MSI {
+    It 'Should evaluate the supported Boolean architecture-condition subset' {
+      Test-MsiArchitectureCondition -Condition 'VersionNT64 AND NOT Arm64' -Architecture x64 | Should -BeTrue
+      Test-MsiArchitectureCondition -Condition 'VersionNT64 AND NOT Arm64' -Architecture arm64 | Should -BeFalse
+      Test-MsiArchitectureCondition -Condition 'Msix64 = 1' -Architecture x64 | Should -BeTrue
+      Test-MsiArchitectureCondition -Condition 'Msix64 <> 1' -Architecture x86 | Should -BeTrue
+    }
+
+    It 'Should decline relational MSI conditions without creating redirection files' {
+      $UnexpectedPath = Join-Path $PWD '-eq'
+      [IO.File]::Delete($UnexpectedPath)
+
+      Test-MsiArchitectureCondition -Condition 'VersionNT64 >= 601' -Architecture x64 | Should -BeTrue
+      Test-Path -LiteralPath $UnexpectedPath | Should -BeFalse
+    }
+  }
+
   It 'Should detect x64 MSI packages that do not support x86' {
     $Fixture = Get-InstallerFixture -Name 'Talkdesk-3.1.0.msi' -Url 'https://td-infra-prd-us-east-1-s3-atlaselectron.s3.amazonaws.com/talkdesk-3.1.0.msi'
     $Info = Get-MsiInstallerInfo -Path $Fixture
