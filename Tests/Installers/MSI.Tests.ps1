@@ -236,6 +236,25 @@ Describe 'MSI builder and install-location parser' {
       Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'
     }
 
+    It 'Should prioritize an explicit WiX Program Name over application-authored IS-prefixed properties' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties          = @{
+          ISUIMODE  = 'Full'
+          ISUPGRADE = '0'
+        }
+        Tables              = @('Property')
+        CustomActionRows    = @()
+        UpgradeRows         = @()
+        LaunchConditionRows = @()
+        SummaryInfo         = [pscustomobject]@{
+          CreatingApp = 'Windows Installer XML Toolset (3.14.1.8722)'
+          Comments    = $null
+        }
+      }
+
+      Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'
+    }
+
     It 'Should read an exact Advanced Installer builder version only from Summary Information' {
       $StaticTableInfo = [pscustomobject]@{
         Properties          = @{ ProductVersion = '99.1.2' }

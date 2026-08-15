@@ -944,6 +944,7 @@ function Get-MsiBuilderFromStaticTableInfo {
   $Properties = $StaticTableInfo.Properties
   $Tables = @($StaticTableInfo.Tables)
   $CustomActionNames = @($StaticTableInfo.CustomActionRows.Action)
+  $CreatingApplication = [string]$StaticTableInfo.SummaryInfo.CreatingApp
   $SummaryInfoText = @(
     # DTF maps Summary Information PID_APPNAME (shown as "Program Name" by the Windows shell) to
     # CreatingApp. CreatingApplication is not a DTF property and previously discarded Bytello's
@@ -969,11 +970,19 @@ function Get-MsiBuilderFromStaticTableInfo {
   if ($CustomActionNames | Where-Object { $_ -clike 'Wise*' }) { return 'Wise' }
 
   # InstallShield-owned identifiers conventionally use an uppercase IS prefix.
-  # Match that prefix case-sensitively so ordinary properties such as IsLight
-  # do not outrank explicit WiX/WixSharp authoring evidence.
+  # Match that prefix case-sensitively so ordinary identifiers such as IsLight do not become
+  # InstallShield evidence. Tool-owned tables, custom actions, and PID_APPNAME remain stronger
+  # than another tool's explicit creator marker.
   if ($Tables | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
-  if ($Properties.Keys | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
   if ($CustomActionNames | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
+  if ($CreatingApplication -match '(?i)\bInstallShield\b') { return 'InstallShield' }
+
+  # WiX writes its compiler identity to Summary Information PID_APPNAME. Treat that explicit
+  # source-defined marker as stronger evidence than generic IS-prefixed properties, which an
+  # application can author independently (for example ISUIMODE and ISUPGRADE).
+  if ($CreatingApplication -match '(?i)\b(WiX|Windows Installer XML)\b') { return 'WiX' }
+
+  if ($Properties.Keys | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
   if ($SummaryInfoText -match '(?i)\bInstallShield\b') { return 'InstallShield' }
 
   # Chromium enterprise MSIs are compiled from WiX source but do not retain
