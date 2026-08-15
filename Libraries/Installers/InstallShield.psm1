@@ -65,6 +65,12 @@ function ConvertTo-InstallShieldReleaseEvidence {
     [Parameter(Mandatory)][string]$Detail
   )
 
+  $Specificity = if ($Candidate -is [Collections.IDictionary] -and $Candidate.Contains('Specificity')) {
+    [int]$Candidate.Specificity
+  } elseif ($Candidate -and $Candidate.PSObject.Properties['Specificity']) {
+    [int]$Candidate.Specificity
+  } else { 0 }
+
   [pscustomobject][ordered]@{
     Source         = $Source
     Value          = $Value
@@ -72,6 +78,7 @@ function ConvertTo-InstallShieldReleaseEvidence {
     ProductVersion = $Candidate ? [string]$Candidate.ProductVersion : $null
     SchemaVersion  = $Source -eq 'ProjectSchema' ? [int]$Value : $null
     Year           = $Candidate -and $Candidate.Year ? [int]$Candidate.Year : $null
+    Specificity    = $Specificity
     ServicePack    = $null
     Build          = $null
     Confidence     = $Confidence
@@ -99,24 +106,49 @@ function Get-InstallShieldProductReleaseCandidate {
   .SYNOPSIS
     Resolve release candidates for an InstallShield product/runtime major version.
   .PARAMETER ProductVersion
-    Product or media version. Only its leading numeric major is used for lookup.
+    Product or media version. Its leading numeric major selects the release
+    family; a source-backed full version can narrow a point release.
+  .PARAMETER ProductName
+    Trusted InstallShield product identity. Point-release names can narrow a
+    broad product major when the numeric resource version remains ambiguous.
   #>
   [OutputType([object[]])]
-  param ([Parameter(Mandatory)][string]$ProductVersion)
+  param (
+    [Parameter(Mandatory)][string]$ProductVersion,
+    [AllowEmptyString()][string]$ProductName
+  )
 
   $Match = [regex]::Match($ProductVersion, '^\s*(?<Major>\d+)')
   if (-not $Match.Success) { return [object[]]@() }
   $Catalog = Get-InstallShieldReleaseCatalog
-  $Candidates = [object[]]@($Catalog.Products[$Match.Groups['Major'].Value])
-  # A bare major from ISc( media cannot distinguish point releases. Exact PE
-  # or MSI versions may select a source-backed candidate pattern.
+  $Candidates = [object[]]@($Catalog.Products[$Match.Groups['Major'].Value] | Where-Object { $null -ne $_ })
+  if (-not $Candidates) { return [object[]]@() }
+  $BroadCandidates = [object[]]@($Candidates | Where-Object { -not $_.Contains('Specificity') -or [int]$_.Specificity -eq 0 })
+  $VersionMatches = [object[]]@()
   if ($ProductVersion.Trim() -notmatch '^\d+$') {
-    $Exact = [object[]]@($Candidates | Where-Object {
-        $_.VersionPattern -and $ProductVersion.Trim() -match [string]$_.VersionPattern
+    $VersionMatches = [object[]]@($Candidates | Where-Object {
+        $_.Contains('VersionPattern') -and $ProductVersion.Trim() -match [string]$_.VersionPattern
       })
-    if ($Exact) { return $Exact }
   }
-  return $Candidates
+  $NameMatches = if ([string]::IsNullOrWhiteSpace($ProductName)) { [object[]]@() } else {
+    [object[]]@($Candidates | Where-Object {
+        $_.Contains('ProductNamePattern') -and $ProductName -match [string]$_.ProductNamePattern
+      })
+  }
+
+  # Product name and product version are independent PE fields. Prefer their
+  # intersection; if they disagree, preserve both alternatives so the release
+  # resolver can report ambiguity instead of silently trusting one field.
+  if ($NameMatches -and $VersionMatches) {
+    $CommonNames = [string[]]@($NameMatches.Name | Where-Object { $VersionMatches.Name -contains $_ } | Sort-Object -Unique)
+    if ($CommonNames) { return [object[]]@($NameMatches | Where-Object { $CommonNames -contains $_.Name }) }
+    return [object[]]@(@($NameMatches) + @($VersionMatches) | Sort-Object Name -Unique)
+  }
+  if ($NameMatches) { return $NameMatches }
+  if ($VersionMatches) { return $VersionMatches }
+  # A bare major from ISc( media or an unqualified runtime identifies only the
+  # release family. Do not manufacture every later point-release candidate.
+  return $BroadCandidates ? $BroadCandidates : $Candidates
 }
 
 function Resolve-InstallShieldRelease {
@@ -146,6 +178,7 @@ function Resolve-InstallShieldRelease {
           ProductVersion = $Item.ProductVersion
           SchemaVersion  = $Item.SchemaVersion
           Year           = $Item.Year
+          Specificity    = $Item.Specificity
           Source         = $Item.Source
           Confidence     = $Item.Confidence
         })
@@ -170,8 +203,29 @@ function Resolve-InstallShieldRelease {
   $EligibleEvidence = if (-not $HasConflict -and $CommonIdentityKeys.Count -gt 0) {
     [object[]]@($MappedEvidence | Where-Object { $CommonIdentityKeys -contains "$($_.ProductVersion)|$($_.Year)" })
   } else { $MappedEvidence }
-  $HighestRank = ($EligibleEvidence | Measure-Object -Property Rank -Maximum).Maximum
-  $TopEvidence = [object[]]@($EligibleEvidence | Where-Object Rank -EQ $HighestRank)
+
+  # A year or major is deliberately broad evidence. Once a structured schema or
+  # trusted runtime names an exact point release, specificity refines compatible
+  # broad evidence even when the broad suite namespace has a higher source rank.
+  $HighestSpecificity = ($EligibleEvidence | Measure-Object -Property Specificity -Maximum).Maximum
+  $MostSpecificEvidence = [object[]]@($EligibleEvidence | Where-Object Specificity -EQ $HighestSpecificity)
+  if (-not $HasConflict -and $HighestSpecificity -gt 0) {
+    $SpecificGroups = [object[]]@($MostSpecificEvidence | Group-Object { "$($_.Source)|$($_.Value)|$($_.Rank)" })
+    $CommonReleaseNames = [string[]]@()
+    foreach ($Group in $SpecificGroups) {
+      $GroupReleaseNames = [string[]]@($Group.Group.ReleaseName | Sort-Object -Unique)
+      if ($CommonReleaseNames.Count -eq 0) { $CommonReleaseNames = $GroupReleaseNames } else {
+        $CommonReleaseNames = [string[]]@($CommonReleaseNames | Where-Object { $GroupReleaseNames -contains $_ })
+      }
+    }
+    if ($SpecificGroups.Count -gt 1 -and $CommonReleaseNames.Count -eq 0) {
+      $HasConflict = $true
+    } elseif ($CommonReleaseNames.Count -gt 0) {
+      $MostSpecificEvidence = [object[]]@($MostSpecificEvidence | Where-Object { $CommonReleaseNames -contains $_.ReleaseName })
+    }
+  }
+  $HighestRank = ($MostSpecificEvidence | Measure-Object -Property Rank -Maximum).Maximum
+  $TopEvidence = [object[]]@($MostSpecificEvidence | Where-Object Rank -EQ $HighestRank)
   $Selected = $TopEvidence | Select-Object -First 1
   $DistinctReleaseNames = [string[]]@($MappedEvidence.ReleaseName | Where-Object { $_ } | Sort-Object -Unique)
   $TopReleaseNames = [string[]]@($TopEvidence.ReleaseName | Where-Object { $_ } | Sort-Object -Unique)
@@ -189,7 +243,8 @@ function Resolve-InstallShieldRelease {
   # selected release with an unrelated build number.
   $CompatibleEvidence = if ($Selected) {
     @($Evidence | Where-Object {
-        $_.ProductVersion -eq $Selected.ProductVersion -and $_.Year -eq $Selected.Year
+        $_.ProductVersion -eq $Selected.ProductVersion -and $_.Year -eq $Selected.Year -and
+        ($_.Specificity -eq 0 -or $_.ReleaseName -eq $Selected.ReleaseName)
       } | Sort-Object Rank -Descending)
   } else { @() }
   $ServicePack = @($CompatibleEvidence.ServicePack | Where-Object { $_ }) | Select-Object -First 1
@@ -379,7 +434,7 @@ function Get-InstallShieldRuntimeReleaseEvidence {
   if (-not $Version) { return [object[]]@() }
   $FileVersion = @($VersionInfo.FileVersion, $VersionInfo.ProductVersion) | Where-Object { $_ -match '^\s*\d+' } | Select-Object -First 1
   $Detail = "Trusted InstallShield PE identity: $Identity; ProductVersion='$($VersionInfo.ProductVersion)'; FileVersion='$($VersionInfo.FileVersion)'"
-  $Candidates = Get-InstallShieldProductReleaseCandidate -ProductVersion $Version
+  $Candidates = Get-InstallShieldProductReleaseCandidate -ProductVersion $Version -ProductName ([string]$VersionInfo.ProductName)
   if (-not $Candidates) {
     return , (ConvertTo-InstallShieldReleaseEvidence -Source RuntimePE -Value $Version -Candidate $null -Confidence TrustedRuntimeVersion -Rank 50 `
         -Detail $Detail)
@@ -388,7 +443,7 @@ function Get-InstallShieldRuntimeReleaseEvidence {
   return [object[]]@($Candidates | ForEach-Object {
       $Item = ConvertTo-InstallShieldReleaseEvidence -Source RuntimePE -Value $Version -Candidate $_ -Confidence TrustedRuntimeVersion -Rank 50 `
         -Detail $Detail
-      $ServicePackMatch = [regex]::Match("$Version $FileVersion", '(?i)\bSP\s*(?<ServicePack>\d+)')
+      $ServicePackMatch = [regex]::Match("$Identity $Version $FileVersion", '(?i)\bSP\s*(?<ServicePack>\d+)')
       if ($ServicePackMatch.Success) { $Item.ServicePack = $ServicePackMatch.Groups['ServicePack'].Value }
       $Parts = [Collections.Generic.List[string]]::new()
       foreach ($Part in [regex]::Matches([string]$FileVersion, '\d+')) { $Parts.Add($Part.Value) }
@@ -461,7 +516,9 @@ function Get-InstallShieldReleaseEvidenceFromContext {
   if ($Context.AdvancedUiInfo -and $Context.AdvancedUiInfo.Namespace -match '^installshield/(?<Year>\d{4})(?:\.\d+)?/bootstrap$') {
     $Year = [int]$Matches.Year
     $Catalog = Get-InstallShieldReleaseCatalog
-    $Candidates = @($Catalog.Products.Values | ForEach-Object { $_ } | Where-Object { $_.Year -eq $Year })
+    $Candidates = @($Catalog.Products.Values | ForEach-Object { $_ } | Where-Object {
+        $_.Year -eq $Year -and (-not $_.Contains('Specificity') -or [int]$_.Specificity -eq 0)
+      })
     if (-not $Candidates) {
       $Evidence.Add((ConvertTo-InstallShieldReleaseEvidence -Source AdvancedUI -Value $Year -Candidate $null -Confidence ExactSuiteNamespace -Rank 100 `
             -Detail "Advanced UI namespace '$($Context.AdvancedUiInfo.Namespace)'"))

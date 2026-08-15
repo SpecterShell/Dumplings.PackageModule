@@ -196,7 +196,7 @@ PackageModule/
 +-- Hooks/             # Core lifecycle integration
 +-- Libraries/         # categorized PowerShell modules
 +-- Models/            # task classes
-+-- Tests/              # Pester suites
++-- Tests/              # domain Pester suites plus non-discoverable Support helpers
 `-- Utilities/          # standalone maintenance and validation scripts
 ```
 
@@ -222,8 +222,8 @@ Invoke-Pester .\Modules\PackageModule\Tests
 Run a focused suite while developing:
 
 ```powershell
-Invoke-Pester .\Modules\PackageModule\Tests\WinGetManifestValidation.Tests.ps1
-Invoke-Pester .\Modules\PackageModule\Tests\ChromiumSetup.Tests.ps1
+Invoke-Pester .\Modules\PackageModule\Tests\WinGet\WinGetManifestValidation.Tests.ps1
+Invoke-Pester .\Modules\PackageModule\Tests\Installers\ChromiumSetup.Tests.ps1
 ```
 
 Run ScriptAnalyzer on modified PowerShell modules and use the repository's accepted exclusion rules where documented:
@@ -232,7 +232,7 @@ Run ScriptAnalyzer on modified PowerShell modules and use the repository's accep
 Invoke-ScriptAnalyzer .\Modules\PackageModule\Libraries\WinGet\WinGetManifestValidation.psm1
 ```
 
-Tests use generated fixtures or the shared persistent installer fixture cache. They must not execute installers or depend on user `Downloads` and temporary folders.
+Tests are grouped under `Infrastructure`, `Installers`, `Services`, `Tasks`, and `WinGet`; shared setup and synthetic builders live under non-discoverable `Tests/Support`. Downloaded fixtures use canonical paths below `../Dumplings-TestFixtures/Installers`, curated media uses `Builders`, and synthetic or extracted output uses `$TestDrive`. Tests must not execute installers or depend on user `Downloads` and temporary folders.
 
 ## Third-Party Components
 
@@ -246,7 +246,7 @@ The following components retain file-level licenses instead of Apache-2.0:
 
 | Components | License and reason |
 | --- | --- |
-| `Libraries/Infrastructure/{Runtime,Binary,Archive,PE,InstallerEvidence}.psm1`, `Assets/Source/InstallerInfrastructure/{BinaryIO,PatternSearch,PEImageReader}.cs`, and `Tests/TestFixture.ps1` | MIT; mirrored byte-for-byte into InstallerParsers and usable by its GPL-2.0 parser. |
+| `Libraries/Infrastructure/{Runtime,Binary,Archive,PE,InstallerEvidence}.psm1`, `Assets/Source/InstallerInfrastructure/{BinaryIO,PatternSearch,PEImageReader}.cs`, and `Tests/Support/{TestFixture,TestBootstrap}.ps1` | MIT; mirrored byte-for-byte into InstallerParsers and usable by its GPL-2.0 parser. |
 | `Libraries/Installers/MSI.psm1` | MIT; imported by the GPL-2.0 Advanced Installer parser to inspect nested MSI databases. |
 | `Assets/Source/CreateInstall/GenteeLzgeDecoder.cs` | MIT; adaptation of the Gentee decoder. |
 | `Assets/Source/WinGet/WinGetDownloadProbe.cs` | MIT; independent implementation grounded in winget-cli's MIT source. |
