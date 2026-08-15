@@ -48,10 +48,23 @@ BeforeAll {
     $Bytes.AddRange([System.BitConverter]::GetBytes($Value))
   }
 
+  function Add-TestQtByteArray {
+    param(
+      [System.Collections.Generic.List[byte]]$Bytes,
+      [string]$Value
+    )
+
+    $Data = [Text.Encoding]::UTF8.GetBytes($Value)
+    Add-TestInt64LE -Bytes $Bytes -Value $Data.Length
+    $Bytes.AddRange($Data)
+  }
+
   function New-TestQtInstallerFrameworkFixture {
     param(
       [string]$Name,
-      [string]$InstallerXml
+      [string]$InstallerXml,
+      [string]$ScriptText,
+      [object[]]$Operation = @()
     )
 
     $FixturePath = Join-Path $Script:FixtureDirectory $Name
@@ -65,10 +78,22 @@ BeforeAll {
     $MetaStart = $Bytes.Count
     $MetaBytes = [System.Text.Encoding]::UTF8.GetBytes($InstallerXml)
     $Bytes.AddRange($MetaBytes)
+    $MetaSegments = [System.Collections.Generic.List[object]]::new()
+    $MetaSegments.Add([pscustomobject]@{ Start = $MetaStart; Length = $MetaBytes.Length })
+    if ($PSBoundParameters.ContainsKey('ScriptText')) {
+      $ScriptStart = $Bytes.Count
+      $ScriptBytes = [System.Text.Encoding]::UTF8.GetBytes($ScriptText)
+      $Bytes.AddRange($ScriptBytes)
+      $MetaSegments.Add([pscustomobject]@{ Start = $ScriptStart; Length = $ScriptBytes.Length })
+    }
 
     $OperationsStart = $Bytes.Count
-    Add-TestInt64LE -Bytes $Bytes -Value 0
-    Add-TestInt64LE -Bytes $Bytes -Value 0
+    Add-TestInt64LE -Bytes $Bytes -Value $Operation.Count
+    foreach ($OperationItem in $Operation) {
+      Add-TestQtByteArray -Bytes $Bytes -Value $OperationItem.Name
+      Add-TestQtByteArray -Bytes $Bytes -Value $OperationItem.Data
+    }
+    Add-TestInt64LE -Bytes $Bytes -Value $Operation.Count
     $OperationsLength = $Bytes.Count - $OperationsStart
 
     Add-TestInt64LE -Bytes $Bytes -Value 0
@@ -79,11 +104,13 @@ BeforeAll {
 
     Add-TestInt64LE -Bytes $Bytes -Value ($CollectionIndexStart - $EndOfExecutable)
     Add-TestInt64LE -Bytes $Bytes -Value $CollectionIndexLength
-    Add-TestInt64LE -Bytes $Bytes -Value ($MetaStart - $EndOfExecutable)
-    Add-TestInt64LE -Bytes $Bytes -Value $MetaBytes.Length
+    foreach ($MetaSegment in $MetaSegments) {
+      Add-TestInt64LE -Bytes $Bytes -Value ($MetaSegment.Start - $EndOfExecutable)
+      Add-TestInt64LE -Bytes $Bytes -Value $MetaSegment.Length
+    }
     Add-TestInt64LE -Bytes $Bytes -Value ($OperationsStart - $EndOfExecutable)
     Add-TestInt64LE -Bytes $Bytes -Value $OperationsLength
-    Add-TestInt64LE -Bytes $Bytes -Value 1
+    Add-TestInt64LE -Bytes $Bytes -Value $MetaSegments.Count
 
     $BinaryContentSize = ($Bytes.Count + 24) - $EndOfExecutable
     Add-TestInt64LE -Bytes $Bytes -Value $BinaryContentSize

@@ -414,11 +414,20 @@ stagingPercentage: 25
   }
 
   It 'Should call the InstallerParsers Qt Installer Framework parser through the Apache-2.0 wrapper' {
-    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-bridge.exe' -InstallerXml @'
+    $ScriptText = @'
+function Controller() {
+  const mode = "bridge";
+  var configured = installer.value("Name");
+  var dynamic = installer.environmentVariable("TEMP");
+}
+'@
+    $Operation = [pscustomobject]@{ Name = 'CreateShortcut'; Data = '<operation><arguments><argument>@TargetDir@\bridge.exe</argument><argument>@StartMenuDir@\Bridge.lnk</argument></arguments></operation>' }
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-bridge.exe' -ScriptText $ScriptText -Operation $Operation -InstallerXml @'
 <Installer>
   <Name>Bridge.QtIFW</Name>
   <Version>2.0.0</Version>
   <Publisher>Bridge Publisher</Publisher>
+  <ProductUUID>{BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF}</ProductUUID>
 </Installer>
 '@
     $Info = Get-QtInstallerFrameworkInfo -Path $Fixture
@@ -442,6 +451,22 @@ stagingPercentage: 25
     $Info.Scope | Should -Be 'user'
     $Info.SupportedScopes | Should -Be @('user', 'machine')
     $Info.SupportsDualScope | Should -BeTrue
+    $Info.JavaScriptCount | Should -Be 1
+    $Info.JavaScriptResources[0].RawJavaScript | Should -BeExactly $ScriptText
+    $Info.JavaScriptResources[0].Role | Should -Be 'Controller'
+    ($Info.JavaScriptResources[0].VariableAssignments | Where-Object Name -EQ 'mode').Value | Should -Be 'bridge'
+    ($Info.JavaScriptResources[0].VariableAssignments | Where-Object Name -EQ 'configured').Value | Should -Be 'Bridge.QtIFW'
+    ($Info.JavaScriptResources[0].VariableAssignments | Where-Object Name -EQ 'dynamic').IsResolved | Should -BeFalse
+    $Info.KnownInstallerValues.Name | Should -Be 'Bridge.QtIFW'
+    $Info.JavaScriptAnalysisInstructions.Count | Should -BeGreaterThan 4
+    $Info.AppsAndFeaturesEntries[0].ProductCode | Should -Be '{BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF}'
+    $Info.AppsAndFeaturesEffects[0].Source | Should -Be 'PackageManagerCorePrivate::registerMaintenanceTool'
+    @($Info.RegistryWrites | Where-Object { $_.Name -eq 'DisplayName' -and $_.Value -eq 'Bridge.QtIFW' }) | Should -HaveCount 1
+    $Info.OperationEffects | Should -HaveCount 2
+    $Info.ShortcutEffects[0].ShortcutPath | Should -Be '@StartMenuDir@\Bridge.lnk'
+    $Info.FileSystemEffects.Action | Should -Contain 'CreateShortcut'
+    $Info.Protocols | Should -HaveCount 0
+    $Info.FileExtensions | Should -HaveCount 0
     Read-ScopeFromQtInstallerFramework -Path $Fixture | Should -Be 'user'
     Read-SupportedScopesFromQtInstallerFramework -Path $Fixture | Should -Be @('user', 'machine')
     Test-QtInstallerFrameworkDualScope -Path $Fixture | Should -BeTrue
@@ -472,6 +497,29 @@ stagingPercentage: 25
     } finally {
       Remove-Item -Path $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
+  }
+
+  It 'Should pass local Qt IFW repository package sources through the GPL bridge' {
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-repository-bridge.exe' -InstallerXml '<Installer><Name>Bridge.QtIFW.Repository</Name><Version>1.0.0</Version></Installer>'
+    $Repository = Join-Path $Script:FixtureDirectory 'synthetic-ifw-repository'
+    $ComponentDirectory = Join-Path $Repository 'Bridge.Component'
+    $null = New-Item -Path $ComponentDirectory -ItemType Directory -Force
+    [IO.File]::WriteAllText((Join-Path $Repository 'Updates.xml'), '<Updates><PackageUpdate><Name>Bridge.Component</Name><Version>1.0.0</Version><DownloadableArchives>content.zip</DownloadableArchives></PackageUpdate></Updates>')
+    $ArchivePath = Join-Path $ComponentDirectory '1.0.0content.zip'
+    $ArchiveStream = [IO.File]::Open($ArchivePath, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    $Archive = [IO.Compression.ZipArchive]::new($ArchiveStream, [IO.Compression.ZipArchiveMode]::Create, $true)
+    try {
+      $Entry = $Archive.CreateEntry('payload.txt')
+      $Writer = [IO.StreamWriter]::new($Entry.Open(), [Text.UTF8Encoding]::new($false))
+      try { $Writer.Write('bridge repository payload') } finally { $Writer.Dispose() }
+    } finally {
+      $Archive.Dispose()
+      $ArchiveStream.Dispose()
+    }
+
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'synthetic-ifw-repository-expanded'
+    $Result = Expand-QtInstallerFramework -Path $Fixture -RepositoryPath $Repository -DestinationPath $ExpandedPath -Name 'payload.txt' -CollisionAction Rename
+    Get-Content -LiteralPath (Join-Path $Result 'packages\Bridge.Component\content\payload.txt') -Raw | Should -Be 'bridge repository payload'
   }
 
   It 'Should detect a user-only electron-builder NSIS installer through the Apache-2.0 wrapper' {
