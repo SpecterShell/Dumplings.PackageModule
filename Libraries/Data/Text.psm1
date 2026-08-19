@@ -173,7 +173,8 @@ function ConvertFrom-Base64 {
   .PARAMETER AsByteStream
     Decode the Base64 string to a byte array
   #>
-  [OutputType([string])]
+  [OutputType([string], ParameterSetName = 'String')]
+  [OutputType([byte[]], ParameterSetName = 'Bytes')]
   [CmdletBinding(DefaultParameterSetName = 'String')]
   param (
     [Parameter(Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName, Mandatory, HelpMessage = 'The Base64 string')]
@@ -189,12 +190,23 @@ function ConvertFrom-Base64 {
   )
 
   process {
+    # Base64 payloads embedded in HTML, XML, and MIME documents are commonly
+    # line-wrapped. Calculate optional padding from the encoded characters only;
+    # counting line endings can append padding to an already complete payload.
+    $NormalizedContent = [regex]::Replace($Content, '\s', '')
+    if (-not $NormalizedContent.Contains('=')) {
+      $Remainder = $NormalizedContent.Length % 4
+      if ($Remainder -eq 1) {
+        throw [FormatException]::new('The Base64 payload has an invalid encoded length.')
+      }
+      if ($Remainder -gt 1) { $NormalizedContent += '=' * (4 - $Remainder) }
+    }
+
+    $Bytes = [System.Convert]::FromBase64String($NormalizedContent)
     if ($AsByteStream) {
-      [System.Convert]::FromBase64String($Content)
+      $Bytes
     } else {
-      # Add padding if the length of the string length is not a multiple of 4
-      if ($Content.Length % 4 -ne 0) { $Content += '=' * (4 - ($Content.Length % 4)) }
-      [System.Text.Encoding]::GetEncoding($Encoding).GetString([System.Convert]::FromBase64String($Content))
+      [System.Text.Encoding]::GetEncoding($Encoding).GetString($Bytes)
     }
   }
 }
