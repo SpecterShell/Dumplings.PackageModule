@@ -135,6 +135,8 @@ function Get-WinGetKnownInstallerManifestInfo {
     The target architecture from the effective WinGet installer entry
   .PARAMETER Scope
     The target scope from the effective WinGet installer entry
+  .PARAMETER CommandLine
+    Virtual NSIS command line assembled from authored silent and custom switches
   #>
   [OutputType([pscustomobject])]
   param (
@@ -151,7 +153,11 @@ function Get-WinGetKnownInstallerManifestInfo {
 
     [Parameter(HelpMessage = 'The target scope from the effective WinGet installer entry')]
     [ValidateSet('user', 'machine')]
-    [string]$Scope
+    [string]$Scope,
+
+    [AllowEmptyString()]
+    [Parameter(HelpMessage = 'The virtual NSIS command line used for static branch selection')]
+    [string]$CommandLine
   )
 
   try {
@@ -189,6 +195,7 @@ function Get-WinGetKnownInstallerManifestInfo {
         $Arguments = @{ Path = $Path }
         if ($Architecture -in @('x86', 'x64', 'arm64')) { $Arguments.Architecture = $Architecture }
         if ($Scope -in @('user', 'machine')) { $Arguments.Scope = $Scope }
+        if ($PSBoundParameters.ContainsKey('CommandLine')) { $Arguments.CommandLine = $CommandLine }
         $Info = Get-NSISInfo @Arguments
         return [pscustomobject]@{ ParserName = 'NSIS'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
       }
@@ -956,6 +963,19 @@ function Update-WinGetInstallerManifestInstallerMetadata {
         # Avoid reading an absent dictionary key under strict mode.
         if ($Installer.Contains('Scope') -and $Installer.Scope -in @('user', 'machine')) {
           $KnownParserArguments.Scope = $Installer.Scope
+        }
+        if ($EffectiveInstallerType -ceq 'nullsoft' -and $Installer.Contains('InstallerSwitches') -and
+          $Installer.InstallerSwitches -is [Collections.IDictionary]) {
+          $Switches = $Installer.InstallerSwitches
+          $HasSilentSwitch = $Switches.Contains('Silent') -and -not [string]::IsNullOrWhiteSpace([string]$Switches.Silent)
+          $HasCustomSwitch = $Switches.Contains('Custom') -and -not [string]::IsNullOrWhiteSpace([string]$Switches.Custom)
+          if ($HasSilentSwitch -or $HasCustomSwitch) {
+            # Model the command WinGet uses for silent installation. NSIS /S
+            # is implicit when the manifest only supplies a Custom switch.
+            $SilentSwitch = $HasSilentSwitch ? [string]$Switches.Silent : '/S'
+            $CustomSwitch = $HasCustomSwitch ? [string]$Switches.Custom : ''
+            $KnownParserArguments.CommandLine = ('"' + $EffectiveInstallerPath + '" ' + $SilentSwitch + ' ' + $CustomSwitch).Trim()
+          }
         }
         $ParserInfo = Get-WinGetKnownInstallerManifestInfo @KnownParserArguments
       } catch {

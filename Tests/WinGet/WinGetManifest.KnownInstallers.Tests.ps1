@@ -224,6 +224,39 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Scope -eq 'machine' }
     }
 
+    It 'Passes authored NSIS custom switches through the virtual silent command line' {
+      Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
+      Mock Get-NSISInfo {
+        param($Path, $Architecture, $Scope, $CommandLine)
+        [pscustomobject]@{
+          InstallerType              = 'Nullsoft'
+          ProductCode                = 'MultiCommander x64'
+          DisplayName                = 'MultiCommander (x64)'
+          DisplayVersion             = '16.2.0.3205'
+          Publisher                  = 'Mathias Svensson'
+          Scope                      = $Scope
+          WritesAppsAndFeaturesEntry = $true
+          Warnings                   = @()
+          Notices                    = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture      = 'x64'
+        InstallerType     = 'nullsoft'
+        Scope             = 'user'
+        InstallerSwitches = [ordered]@{ Custom = '/InstallMode=User' }
+        InstallerUrl      = $Script:InstallerUrl
+        ProductCode       = 'MultiCommander x64'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'MultiCommander x64'
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter {
+        $Scope -eq 'user' -and $CommandLine -match '^".+" /S /InstallMode=User$'
+      }
+    }
+
     It 'Does not reuse same-URL NSIS metadata across different scopes' {
       Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
       Mock Get-NSISInfo {

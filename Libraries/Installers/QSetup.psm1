@@ -6,10 +6,19 @@
 #   PE overlay: Version:u32 LE, Format:u8, PreambleLength:u32 LE,
 #               UTF-8 |...exe| preamble
 #   records:    [CompressedLength:u32 LE][zlib -> |Name[*]?|Stamp| + bytes]*
+#   footer:     Version:u32 LE, OverlayOffset:u32 LE, RecordCount:u32 LE,
+#               Magic:0x4A3B2C1D, Marker:1234, fields, FooterLength:u32 LE
+#   signature:  optional zero alignment followed by the PE certificate table
 #
 # Every record advances by exactly 4 + CompressedLength. Setup.txt is interpreted
-# only from a complete framed record. Preamble, count, header, input/output, next
-# offset, and extraction path limits reject malformed packages.
+# only from a complete framed record. The footer identifies the record boundary,
+# so its bytes and an Authenticode certificate are never offered to zlib. Preamble,
+# count, header, input/output, next offset, and extraction path limits reject
+# malformed packages.
+#
+# Format references:
+# - https://www.pantaray.com/execute.html
+# - https://www.pantaray.com/execution_cmd.html
 
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -17,6 +26,9 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 $Script:QSetupMaximumRecordBytes = 2147483648
 $Script:QSetupMaximumConfigurationBytes = 16777216
 $Script:QSetupMaximumRecords = 100000
+$Script:QSetupMaximumFooterBytes = 1048576
+$Script:QSetupFooterMagic = [uint32]0x4A3B2C1D
+$Script:QSetupFooterMarker = [uint32]1234
 
 function Get-QSetupRecordStartOffset {
   <#
@@ -65,23 +77,28 @@ function Read-QSetupRecord {
     Controls whether bounded entry content is decoded in addition to catalog metadata.
   .PARAMETER MaximumContentBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
+  .PARAMETER EndOffset
+    Exclusive absolute boundary of the record table. The default uses the physical file length for compatibility with direct calls.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][string]$Path,
     [Parameter(Mandatory)][long]$Offset,
     [switch]$ReadContent,
-    [ValidateRange(1, [long]::MaxValue)][long]$MaximumContentBytes = $Script:QSetupMaximumConfigurationBytes
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumContentBytes = $Script:QSetupMaximumConfigurationBytes,
+    [ValidateRange(-1, [long]::MaxValue)][long]$EndOffset = -1
   )
 
   $File = Get-Item -LiteralPath $Path -Force
   $Source = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
   try {
-    if ($Offset -lt 0 -or $Offset + 4 -gt $Source.Length) { throw 'The QSetup record length is truncated' }
+    $RecordTableEnd = if ($EndOffset -ge 0) { $EndOffset } else { $Source.Length }
+    if ($RecordTableEnd -gt $Source.Length) { throw 'The QSetup record boundary exceeds the file length' }
+    if ($Offset -lt 0 -or $Offset + 4 -gt $RecordTableEnd) { throw 'The QSetup record length is truncated' }
     # Each record is independently framed by a compressed length, so malformed
     # data cannot make the decoder consume the next record.
     $CompressedLength = [uint32](Read-BinaryInteger -Stream $Source -Offset $Offset -Size 4)
-    if ($CompressedLength -eq 0 -or $CompressedLength -gt $Source.Length - $Offset - 4) { throw 'The QSetup record data is truncated' }
+    if ($CompressedLength -eq 0 -or $CompressedLength -gt $RecordTableEnd - $Offset - 4) { throw 'The QSetup record data is truncated' }
     $CompressedRange = New-BoundedReadStream -Stream $Source -Offset ($Offset + 4) -Length $CompressedLength -LeaveOpen
     $Decoder = New-InstallerDecompressionStream -Algorithm Zlib -Stream $CompressedRange -LeaveOpen
     try {
@@ -131,6 +148,100 @@ function Read-QSetupRecord {
   } finally { $Source.Dispose() }
 }
 
+function Get-QSetupPackageBoundary {
+  <#
+  .SYNOPSIS
+    Locate the exclusive QSetup record-table boundary and optional footer.
+  .PARAMETER Path
+    Path to the QSetup executable.
+  .PARAMETER Preamble
+    Validated overlay preamble returned by Get-QSetupRecordStartOffset.
+  .PARAMETER MaximumRecords
+    Maximum accepted record count encoded by the footer.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][psobject]$Preamble,
+    [Parameter(Mandatory)][ValidateRange(1, 100000)][int]$MaximumRecords
+  )
+
+  $File = Get-Item -LiteralPath $Path -Force
+  $CertificateOffset = 0L
+  $CertificateSize = 0L
+  try {
+    $PeLayout = Get-PELayout -Path $File.FullName
+    $Certificate = $PeLayout.DataDirectories['Certificate']
+    if ($Certificate -and $Certificate.Offset -gt 0 -and $Certificate.Size -gt 0 -and
+      $Certificate.Offset -le $File.Length -and $Certificate.Size -le $File.Length - $Certificate.Offset) {
+      $CertificateOffset = [long]$Certificate.Offset
+      $CertificateSize = [long]$Certificate.Size
+    }
+  } catch {
+    # Synthetic fixtures and old launchers can lack a complete PE directory.
+    # Their record table remains bounded by the physical file length.
+  }
+
+  $UnsignedEndOffset = $CertificateOffset -gt 0 ? $CertificateOffset : $File.Length
+  $Source = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    # WIN_CERTIFICATE is eight-byte aligned. QSetup writes its footer before up
+    # to seven zero alignment bytes, so probe only those source-defined padding
+    # positions rather than scanning arbitrary data for a magic value.
+    for ($PaddingLength = 0; $PaddingLength -le 7; $PaddingLength++) {
+      $FooterEndOffset = $UnsignedEndOffset - $PaddingLength
+      if ($FooterEndOffset - 24 -lt $Preamble.RecordStartOffset) { continue }
+
+      $PaddingIsZero = $true
+      if ($PaddingLength -gt 0) {
+        $Padding = Read-BinaryBytes -Stream $Source -Offset $FooterEndOffset -Count $PaddingLength
+        $PaddingIsZero = -not ($Padding | Where-Object { $_ -ne 0 })
+      }
+      if (-not $PaddingIsZero) { continue }
+
+      $FooterLength = [uint32](Read-BinaryInteger -Stream $Source -Offset ($FooterEndOffset - 4) -Size 4)
+      if ($FooterLength -lt 24 -or $FooterLength -gt $Script:QSetupMaximumFooterBytes -or $FooterLength -gt $FooterEndOffset - $Preamble.RecordStartOffset) { continue }
+      $FooterOffset = $FooterEndOffset - $FooterLength
+      $FooterVersion = [uint32](Read-BinaryInteger -Stream $Source -Offset $FooterOffset -Size 4)
+      $RecordedOverlayOffset = [uint32](Read-BinaryInteger -Stream $Source -Offset ($FooterOffset + 4) -Size 4)
+      $DeclaredRecordCount = [uint32](Read-BinaryInteger -Stream $Source -Offset ($FooterOffset + 8) -Size 4)
+      $Magic = [uint32](Read-BinaryInteger -Stream $Source -Offset ($FooterOffset + 12) -Size 4)
+      $Marker = [uint32](Read-BinaryInteger -Stream $Source -Offset ($FooterOffset + 16) -Size 4)
+      if ($FooterVersion -eq 0 -or $RecordedOverlayOffset -ne $Preamble.OverlayOffset -or
+        $DeclaredRecordCount -gt $MaximumRecords -or $Magic -ne $Script:QSetupFooterMagic -or $Marker -ne $Script:QSetupFooterMarker) { continue }
+
+      return [pscustomobject][ordered]@{
+        DataEndOffset     = [long]$FooterOffset
+        UnsignedEndOffset = [long]$UnsignedEndOffset
+        CertificateOffset = [long]$CertificateOffset
+        CertificateSize   = [long]$CertificateSize
+        AlignmentPadding  = [int]$PaddingLength
+        Footer            = [pscustomobject][ordered]@{
+          Offset              = [long]$FooterOffset
+          Length              = [long]$FooterLength
+          Version             = [uint32]$FooterVersion
+          OverlayOffset       = [long]$RecordedOverlayOffset
+          DeclaredRecordCount = [int]$DeclaredRecordCount
+          Magic               = ('0x{0:X8}' -f $Magic)
+          Marker              = [uint32]$Marker
+        }
+      }
+    }
+  } finally { $Source.Dispose() }
+
+  # Footerless media exists in old and generated fixtures. Exclude a validated
+  # certificate table even when no known footer route is present; subsequent
+  # record validation will reject any unknown bytes before that boundary.
+  return [pscustomobject][ordered]@{
+    DataEndOffset     = [long]$UnsignedEndOffset
+    UnsignedEndOffset = [long]$UnsignedEndOffset
+    CertificateOffset = [long]$CertificateOffset
+    CertificateSize   = [long]$CertificateSize
+    AlignmentPadding  = 0
+    Footer            = $null
+  }
+}
+
 function Get-QSetupLayout {
   <#
   .SYNOPSIS
@@ -148,23 +259,31 @@ function Get-QSetupLayout {
 
   $File = Get-Item -LiteralPath $Path -Force
   $Preamble = Get-QSetupRecordStartOffset -Path $File.FullName
+  $Boundary = Get-QSetupPackageBoundary -Path $File.FullName -Preamble $Preamble -MaximumRecords $MaximumRecords
   $Records = [System.Collections.Generic.List[object]]::new()
   $Warnings = [System.Collections.Generic.List[string]]::new()
   $Offset = $Preamble.RecordStartOffset
   # Records are physically adjacent; advance by the declared compressed extent
   # and stop at the first malformed or non-advancing frame.
-  while ($Offset + 4 -le $File.Length -and $Records.Count -lt $MaximumRecords) {
-    try { $Record = Read-QSetupRecord -Path $File.FullName -Offset $Offset } catch { $Warnings.Add($_.Exception.Message); break }
+  while ($Offset + 4 -le $Boundary.DataEndOffset -and $Records.Count -lt $MaximumRecords) {
+    try { $Record = Read-QSetupRecord -Path $File.FullName -Offset $Offset -EndOffset $Boundary.DataEndOffset } catch { $Warnings.Add($_.Exception.Message); break }
     $Records.Add($Record)
     if ($Record.NextOffset -le $Offset) { $Warnings.Add('The QSetup record table does not advance.'); break }
     $Offset = $Record.NextOffset
   }
-  if ($Records.Count -eq $MaximumRecords -and $Offset -lt $File.Length) { $Warnings.Add("The QSetup record count exceeds the $MaximumRecords-record limit.") }
+  if ($Records.Count -eq $MaximumRecords -and $Offset -lt $Boundary.DataEndOffset) { $Warnings.Add("The QSetup record count exceeds the $MaximumRecords-record limit.") }
+  if ($Boundary.Footer -and $Records.Count -ne $Boundary.Footer.DeclaredRecordCount) {
+    $Warnings.Add("The QSetup footer declares $($Boundary.Footer.DeclaredRecordCount) record(s), but $($Records.Count) structurally valid record(s) were found.")
+  }
+  $Complete = $Offset -eq $Boundary.DataEndOffset -and (-not $Boundary.Footer -or $Records.Count -eq $Boundary.Footer.DeclaredRecordCount)
   [pscustomobject]@{
     Preamble        = $Preamble
     Records         = $Records.ToArray()
-    Complete        = $Offset -eq $File.Length
+    Complete        = $Complete
     ParsedEndOffset = [long]$Offset
+    DataEndOffset   = [long]$Boundary.DataEndOffset
+    Footer          = $Boundary.Footer
+    Certificate     = if ($Boundary.CertificateOffset -gt 0) { [pscustomobject]@{ Offset = $Boundary.CertificateOffset; Size = $Boundary.CertificateSize; AlignmentPadding = $Boundary.AlignmentPadding } } else { $null }
     Warnings        = @($Warnings)
   }
 }
@@ -207,6 +326,97 @@ function Get-QSetupDirectiveValue {
   param ([Parameter(Mandatory)][hashtable]$Directive, [Parameter(Mandatory)][string]$Name)
   if (-not $Directive.ContainsKey($Name)) { return $null }
   return @($Directive[$Name])[0]
+}
+
+function ConvertFrom-QSetupExecutionAction {
+  <#
+  .SYNOPSIS
+    Decode one fixed-slot QSetup Execution Engine directive.
+  .PARAMETER Content
+    Literal SET_PERFORM_EXECUTE_OP value from Setup.txt.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][AllowEmptyString()][string]$Content)
+
+  $Fields = [regex]::Split($Content, '\|')
+  # QSetup serializes three condition argument slots and six execution command
+  # slots. Retain condition fields verbatim because their runtime predicates can
+  # depend on the target system, while command names and arguments are static.
+  if ($Fields.Count -ne 73 -or $Fields[0] -notin @('*', '^') -or $Fields[39] -ne '*' -or $Fields[72] -ne '*') {
+    throw 'The QSetup execution-action record does not use the supported fixed-slot layout.'
+  }
+
+  $Commands = [Collections.Generic.List[object]]::new()
+  for ($Index = 0; $Index -lt 6; $Index++) {
+    $DescriptorOffset = 20 + ($Index * 3)
+    $ArgumentOffset = 53 + ($Index * 3)
+    if ($Fields[$DescriptorOffset] -ne '1' -or [string]::IsNullOrWhiteSpace($Fields[$DescriptorOffset + 1])) { continue }
+    $Commands.Add([pscustomobject][ordered]@{
+        Slot      = $Index + 1
+        Name      = $Fields[$DescriptorOffset + 1]
+        Argument1 = $Fields[$ArgumentOffset]
+        Argument2 = $Fields[$ArgumentOffset + 1]
+        Argument3 = $Fields[$ArgumentOffset + 2]
+      })
+  }
+
+  return [pscustomobject][ordered]@{
+    Name                 = $Fields[2]
+    Stage                = $Fields[3]
+    Sequence             = $Fields[4]
+    ConditionMode        = $Fields[5]
+    AppliesDuring        = $Fields[0] -eq '*' ? 'Setup' : 'Uninstall'
+    IsConditional        = $Fields[5] -ne 'UnConditional'
+    ConditionDescriptors = [string[]]$Fields[6..19]
+    ConditionArguments   = [string[]]$Fields[41..52]
+    Commands             = [object[]]$Commands.ToArray()
+    RawValue             = $Content
+  }
+}
+
+function Get-QSetupExecutionActionInfo {
+  <#
+  .SYNOPSIS
+    Project QSetup Execution Engine records and nested process launches.
+  .PARAMETER Directive
+    Parsed Setup.txt directive dictionary.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][hashtable]$Directive)
+
+  $Actions = [Collections.Generic.List[object]]::new()
+  $ExecutedPayloads = [Collections.Generic.List[object]]::new()
+  $Warnings = [Collections.Generic.List[string]]::new()
+  $Values = $Directive.ContainsKey('SET_PERFORM_EXECUTE_OP') ? @($Directive['SET_PERFORM_EXECUTE_OP']) : @()
+  foreach ($Value in $Values) {
+    try {
+      $Action = ConvertFrom-QSetupExecutionAction -Content ([string]$Value)
+      $Actions.Add($Action)
+      foreach ($Command in $Action.Commands) {
+        if ($Command.Name -notmatch '^(?:Run (?:Application|Executable|Batch File|MSI File)(?: and Wait)?|Shell Execute(?: and Wait)?|Run DLL(?: No Wait)?)$') { continue }
+        $ExecutedPayloads.Add([pscustomobject][ordered]@{
+            Command       = $Command.Argument1
+            Parameters    = $Command.Argument2
+            ShowCommand   = $Command.Argument3
+            Operation     = $Command.Name
+            Wait          = $Command.Name -match ' and Wait$|^Run DLL$'
+            ActionName    = $Action.Name
+            Stage         = $Action.Stage
+            AppliesDuring = $Action.AppliesDuring
+            Conditional   = $Action.IsConditional
+            Source        = 'SET_PERFORM_EXECUTE_OP'
+          })
+      }
+    } catch {
+      $Warnings.Add("A QSetup execution-action record is malformed or unsupported: $($_.Exception.Message)")
+    }
+  }
+
+  return [pscustomobject][ordered]@{
+    Actions          = [object[]]$Actions.ToArray()
+    ExecutedPayloads = [object[]]$ExecutedPayloads.ToArray()
+    Warnings         = [string[]]$Warnings.ToArray()
+  }
 }
 
 function ConvertTo-QSetupRegistryEvidence {
@@ -274,10 +484,11 @@ function Get-QSetupInfo {
     # strings never participate in identity, scope, or ARP inference.
     $SetupRecord = $Layout.Records | Where-Object Name -ieq 'Setup.txt' | Select-Object -First 1
     if (-not $SetupRecord) { throw 'The QSetup package does not contain Setup.txt in its parsed records' }
-    $SetupData = Read-QSetupRecord -Path $File.FullName -Offset $SetupRecord.Offset -ReadContent -MaximumContentBytes $Script:QSetupMaximumConfigurationBytes
+    $SetupData = Read-QSetupRecord -Path $File.FullName -Offset $SetupRecord.Offset -ReadContent -MaximumContentBytes $Script:QSetupMaximumConfigurationBytes -EndOffset $Layout.DataEndOffset
     $SetupText = [Text.Encoding]::UTF8.GetString($SetupData.Content).TrimStart([char]0, [char]0xFEFF)
     $Directive = ConvertFrom-QSetupDirectiveText -Content $SetupText
     if (-not $Directive.ContainsKey('SET_COMPOSER_BUILD')) { throw 'The Setup.txt record does not contain QSetup composer evidence' }
+    $ExecutionActionInfo = Get-QSetupExecutionActionInfo -Directive $Directive
 
     # Scope and ARP behavior come from explicit composer directives; unresolved
     # behavior is returned as null for VM review rather than guessed from paths.
@@ -293,10 +504,12 @@ function Get-QSetupInfo {
     $AllowedOs = [string](Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_ALLOWED_OS')
     $SupportedArchitectures = if ($AllowedOs -match '(?i)\.64' -and $AllowedOs -notmatch '(?i)(?:^|,)(?:XP|Vista|7|8|10|11)(?:,|$)') { @('x64') } else { @() }
     $Warnings = [System.Collections.Generic.List[string]]::new()
+    $Notices = [System.Collections.Generic.List[string]]::new()
     foreach ($Warning in $Layout.Warnings) { $Warnings.Add($Warning) }
+    foreach ($Warning in $ExecutionActionInfo.Warnings) { $Warnings.Add($Warning) }
     if (-not $Layout.Complete) { $Warnings.Add('The QSetup record table is incomplete or has trailing data; metadata from the explicit Setup.txt record remains available, but full extraction requires the complete installer.') }
     if (-not $Scope) { $Warnings.Add('QSetup scope is not explicit in Setup.txt and requires VM validation.') }
-    if ($Directive.ContainsKey('SET_PERFORM_EXECUTE_OP')) { $Warnings.Add('QSetup defines custom execution actions. Inspect nested executables and action arguments before finalizing dependencies or switches.') }
+    if ($ExecutionActionInfo.Actions.Count -gt 0) { $Notices.Add("QSetup defines $($ExecutionActionInfo.Actions.Count) structured execution action(s); review ExecutionActions and ExecutedPayloads when validating prerequisites and runtime side effects.") }
 
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
@@ -312,6 +525,7 @@ function Get-QSetupInfo {
       AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
       Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Notices                      = [string[]]@($Notices)
       UnresolvedFields             = [string[]]@()
       PublisherUrl                 = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_URL'
       ProjectName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROJECT_NAME'
@@ -327,8 +541,13 @@ function Get-QSetupInfo {
       FileExtensions               = $RegistryAssociationInfo.FileExtensions
       Records                      = @($Layout.Records | Select-Object Name, Required, Stamp, Offset, CompressedLength)
       ExtractedFiles               = @($Layout.Records.Name)
+      CanExpand                    = [bool]$Layout.Complete
+      ExecutionActions             = [object[]]$ExecutionActionInfo.Actions
+      ExecutedPayloads             = [object[]]$ExecutionActionInfo.ExecutedPayloads
+      PackageFooter                = $Layout.Footer
+      Certificate                  = $Layout.Certificate
       SetupDirectives              = $Directive
-      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.QSetup'; ParserMajor = 1; Sources = @('validated QSetup zlib record table', 'Setup.txt directives') }
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.QSetup'; ParserMajor = 2; Sources = @('validated QSetup zlib record table and self-describing footer', 'Setup.txt directives and fixed-slot Execution Engine records') }
     }
   }
 }

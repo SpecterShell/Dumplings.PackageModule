@@ -559,7 +559,8 @@ Describe 'WinGet installer analyzer content detection' {
           DisplayName = 'Analyzer QSetup Product'; DisplayVersion = '1.2.3'; Publisher = 'Contoso'
           ProductCode = 'Analyzer QSetup Product'; Scope = 'machine'; SupportedScopes = @('machine')
           Protocols = @(); FileExtensions = @('example'); RegistryAssociationInfo = $null
-          ExtractedFiles = @('Setup.txt'); CanExpand = $true; Warnings = @()
+          ExtractedFiles = @('Setup.txt'); CanExpand = $true; Warnings = @(); Notices = @('Execution action evidence')
+          ExecutedPayloads = @([pscustomobject]@{ Command = 'runtime.exe'; Parameters = '/quiet' })
         }
       }
       Mock Get-DeployMasterInfo { throw 'not DeployMaster' }
@@ -574,6 +575,8 @@ Describe 'WinGet installer analyzer content detection' {
       $QSetup.Result.ProductName | Should -Be 'Analyzer QSetup Product'
       $QSetup.Result.ProductVersion | Should -Be '1.2.3'
       $QSetup.Result.SuggestedManifestFields.Scope | Should -Be 'machine'
+      $QSetup.Result.Notices | Should -Be @('Execution action evidence')
+      $QSetup.Result.ExecutedPayloads[0].Command | Should -Be 'runtime.exe'
       (& (Get-Module WinGetAnalysis) { Get-WinGetInstallerExeFamilyDefault -Family 'QSetup' }).InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
       Should -Invoke -CommandName Get-SevenZipSfxInfo -Times 0 -Exactly
     }

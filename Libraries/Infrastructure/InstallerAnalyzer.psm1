@@ -1419,6 +1419,7 @@ function Invoke-InstallerExeParser {
       FileExtensions              = @($Info.FileExtensions)
       RegistryAssociationInfo     = $Info.RegistryAssociationInfo
       NestedInstallerFiles        = @($Info.ExtractedFiles)
+      ExecutedPayloads            = if ($Info.PSObject.Properties['ExecutedPayloads']) { @($Info.ExecutedPayloads) } else { @() }
       CanExpand                   = $Info.CanExpand
       Notices                     = if ($Info.PSObject.Properties['Notices']) { @($Info.Notices) } else { @() }
       Warnings                    = @($Info.Warnings)
