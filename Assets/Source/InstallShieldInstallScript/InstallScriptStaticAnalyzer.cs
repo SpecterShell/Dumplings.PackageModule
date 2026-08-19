@@ -211,6 +211,7 @@ namespace Dumplings.InstallShield.InstallScript
             internal int MaximumInstructions;
             internal int MaximumCallDepth;
             internal int MaximumEffects;
+            internal HashSet<string> NoticeSet;
             internal HashSet<string> WarningSet;
             internal HashSet<string> EffectSet;
             internal Dictionary<int, int> FunctionInvocations;
@@ -244,6 +245,7 @@ namespace Dumplings.InstallShield.InstallScript
                 MaximumInstructions = maximumInstructions,
                 MaximumCallDepth = maximumCallDepth,
                 MaximumEffects = maximumEffects,
+                NoticeSet = new HashSet<string>(StringComparer.Ordinal),
                 WarningSet = new HashSet<string>(StringComparer.Ordinal),
                 EffectSet = new HashSet<string>(StringComparer.Ordinal),
                 FunctionInvocations = new Dictionary<int, int>(),
@@ -610,7 +612,7 @@ namespace Dumplings.InstallShield.InstallScript
                     work.Visits.TryGetValue(work.InstructionIndex, out visits);
                     if (visits >= 2)
                     {
-                        AddWarning(context, "InstallScript loop was bounded in " + function.Name + ".");
+                        AddNotice(context, "InstallScript loop was bounded in " + function.Name + ".");
                         break;
                     }
                     work.Visits[work.InstructionIndex] = visits + 1;
@@ -647,7 +649,7 @@ namespace Dumplings.InstallShield.InstallScript
                         // entry points are analyzed independently, while an
                         // unresolved condition is reported instead of causing
                         // exponential path multiplication.
-                        AddWarning(context, "InstallScript unknown conditions were evaluated through their false branch for bounded static evidence.");
+                        AddNotice(context, "InstallScript unknown conditions were evaluated through their false branch for bounded static evidence.");
                         if (!TryJump(labels, branchBaseLabels[work.InstructionIndex], instruction.BranchTarget, work))
                             work.InstructionIndex++;
                         continue;
@@ -672,7 +674,7 @@ namespace Dumplings.InstallShield.InstallScript
                             // Catch bodies execute only after a runtime exception.
                             // Imported code is never invoked by this emulator, so
                             // keep exception-only effects out of normal ARP evidence.
-                            AddWarning(context, "InstallScript catch-only effects were excluded from normal-path metadata.");
+                            AddNotice(context, "InstallScript catch-only effects were excluded from normal-path metadata.");
                             work.InstructionIndex = endIndex + 1;
                         }
                         else
@@ -1721,6 +1723,11 @@ namespace Dumplings.InstallShield.InstallScript
         private static void AddWarning(Context context, string warning)
         {
             if (context.WarningSet.Add(warning)) context.Result.Warnings.Add(warning);
+        }
+
+        private static void AddNotice(Context context, string notice)
+        {
+            if (context.NoticeSet.Add(notice)) context.Result.Notices.Add(notice);
         }
     }
 

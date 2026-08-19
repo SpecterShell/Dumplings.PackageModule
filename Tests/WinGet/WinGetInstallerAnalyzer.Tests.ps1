@@ -215,6 +215,9 @@ Describe 'WinGet installer analyzer content detection' {
     $Analysis.DetectedFileType.Type | Should -Be 'MSI'
     $Analysis.DetectedFileType.Evidence.ClassId | Should -Be '{000C1084-0000-0000-C000-000000000046}'
     $Analysis.ParserResults[0].Success | Should -BeTrue
+    $Analysis.ParserResults[0].Result.InstallerBuilderSource | Should -Be 'SummaryInformation.CreatingApp'
+    $Analysis.ParserResults[0].Result.Warnings.GetType() | Should -Be ([string[]])
+    $Analysis.ParserResults[0].Result.Notices.GetType() | Should -Be ([string[]])
   }
 
   It 'Should classify MSP by CFB root CLSID rather than extension' {

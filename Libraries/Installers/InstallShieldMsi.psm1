@@ -194,6 +194,7 @@ function Get-MsiInstallShieldEmbeddedScriptInfo {
     # stable Binary-table and relative-file identities in public evidence.
     $Analysis.Path = $null
     foreach ($Warning in @($Analysis.Warnings)) { if ($Warning) { $Warnings.Add([string]$Warning) } }
+    $Notices = [string[]]@($Analysis.Notices | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
 
     return [pscustomobject][ordered]@{
       BinaryName        = 'ISSetup.dll'
@@ -203,6 +204,7 @@ function Get-MsiInstallShieldEmbeddedScriptInfo {
       Analysis          = $Analysis
       ExtractedFiles    = [string[]]@($Files | ForEach-Object { [IO.Path]::GetRelativePath($ExtractedPath, $_.FullName) })
       Warnings          = [string[]]$Warnings.ToArray()
+      Notices           = $Notices
     }
   } catch {
     $Warnings.Add("Embedded InstallScript custom-action analysis failed: $($_.Exception.Message)")
@@ -214,6 +216,7 @@ function Get-MsiInstallShieldEmbeddedScriptInfo {
       Analysis          = $null
       ExtractedFiles    = [string[]]@()
       Warnings          = [string[]]$Warnings.ToArray()
+      Notices           = [string[]]@()
     }
   } finally {
     if ($TemporaryPath) { Remove-Item -LiteralPath $TemporaryPath -Recurse -Force -ErrorAction SilentlyContinue }

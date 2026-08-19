@@ -975,6 +975,7 @@ function Invoke-InstallerMsiAnalysis {
     Confidence                   = 'high'
     InstallerType                = $ManifestInstallerType
     InstallerBuilder             = $MsiInfo.InstallerBuilder
+    InstallerBuilderSource       = $MsiInfo.InstallerBuilderSource
     ProductVersion               = $MsiInfo.DisplayVersion
     ProductName                  = $MsiInfo.DisplayName
     Publisher                    = $MsiInfo.Publisher
@@ -993,6 +994,8 @@ function Invoke-InstallerMsiAnalysis {
     AllUsers                     = $AllUsers
     Scope                        = $ScopeRecommendation.Scope
     ScopeRecommendation          = $ScopeRecommendation
+    Warnings                     = [string[]]@($MsiInfo.Warnings)
+    Notices                      = [string[]]@($MsiInfo.Notices)
     SuggestedManifestFields      = [pscustomobject]@{ InstallerType = $ManifestInstallerType; Scope = $ScopeRecommendation.Scope }
   }
 }

@@ -834,6 +834,7 @@ function Invoke-InstallShieldInstallScriptAnalysis {
   $Program = $null
   $DialogTraces = @()
   $StaticAnalysis = $null
+  $IrNotices = [Collections.Generic.List[string]]::new()
   $IrWarnings = [Collections.Generic.List[string]]::new()
   try {
     # Parse the already-decoded bytes once. Passing the array directly avoids a
@@ -861,6 +862,7 @@ function Invoke-InstallShieldInstallScriptAnalysis {
       50000
     )
     foreach ($Warning in $Program.Warnings) { $IrWarnings.Add([string]$Warning) }
+    foreach ($Notice in $StaticAnalysis.Notices) { $IrNotices.Add([string]$Notice) }
     foreach ($Warning in $StaticAnalysis.Warnings) { $IrWarnings.Add([string]$Warning) }
   } catch {
     $IrWarnings.Add("Structured bytecode analysis was unavailable: $($_.Exception.Message)")
@@ -882,10 +884,8 @@ function Invoke-InstallShieldInstallScriptAnalysis {
       $_ -like "$($Script:InstallScriptUninstallRegistryPath)*"
     } | Sort-Object -Unique)
   $Warnings = [Collections.Generic.List[string]]::new()
-  if ($IrWarnings.Count -eq 1 -and $IrWarnings[0].StartsWith('Structured bytecode analysis was unavailable:', [StringComparison]::Ordinal)) {
-    $Warnings.Add($IrWarnings[0])
-  } elseif ($IrWarnings.Count) {
-    $Warnings.Add("Structured bytecode analysis reported $($IrWarnings.Count) bounded, conservative, or malformed path condition(s); affected evidence may be incomplete.")
+  foreach ($Warning in $IrWarnings) {
+    $Warnings.Add([string]$Warning)
   }
   foreach ($Warning in @($DialogTraces.Warnings)) { if ($Warning) { $Warnings.Add([string]$Warning) } }
   $AssociationInfo = if ($StaticAnalysis -and (Get-Command Get-InstallerRegistryAssociationInfo -ErrorAction SilentlyContinue)) {
@@ -993,6 +993,7 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     EmbeddedResponseFile       = $ResponseInfo
     EmbeddedResponseValidation = $ResponseValidation
     Warnings                   = [string[]]$Warnings.ToArray()
+    Notices                    = [string[]]$IrNotices.ToArray()
     ParserVersionInfo          = [pscustomobject][ordered]@{
       Parser                   = 'Dumplings.PackageModule.InstallShieldInstallScript'
       ParserMajor              = 11
@@ -1569,6 +1570,7 @@ function Get-InstallShieldInstallScriptInfo {
       Get-InstallShieldInstallScriptArpInfo -Installer $Installer -Analysis $Analysis
     }
     $Warnings = [string[]]@((@($Analysis.Warnings) + @($ArpInfo.Warnings)) | Select-Object -Unique)
+    $Notices = [string[]]@($Analysis.Notices | Select-Object -Unique)
     # Select-Object -Unique compares custom objects as their type name and can
     # collapse unrelated values. Deduplicate registry evidence by its stable
     # registry identity while retaining the first, most direct source.
@@ -1608,6 +1610,7 @@ function Get-InstallShieldInstallScriptInfo {
       AppsAndFeaturesInstallerType       = $ArpInfo.AppsAndFeaturesInstallerType
       Warnings                           = $Warnings
       UnresolvedFields                   = [string[]]$ArpInfo.UnresolvedFields
+      Notices                            = $Notices
       AppsAndFeaturesEntries             = [object[]]$ArpInfo.AppsAndFeaturesEntries
       RegistryWrites                     = [object[]]$RegistryWrites.ToArray()
       RegistryItems                      = [object[]]$Analysis.RegistryItems

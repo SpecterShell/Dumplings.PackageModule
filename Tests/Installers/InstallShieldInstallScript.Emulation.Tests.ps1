@@ -120,6 +120,8 @@ Result=1
 
     $Analysis.RegistryWrites.Name | Should -Contain 'NormalPath'
     $Analysis.RegistryWrites.Name | Should -Not -Contain 'CatchPath'
+    $Analysis.Notices | Should -Contain 'InstallScript catch-only effects were excluded from normal-path metadata.'
+    $Analysis.Warnings | Should -Not -Contain 'InstallScript catch-only effects were excluded from normal-path metadata.'
     foreach ($Opcode in 0x0036, 0x0037, 0x0038) {
       $Analysis.OpcodeCoverage | Where-Object Opcode -EQ $Opcode | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
     }
