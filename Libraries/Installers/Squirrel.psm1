@@ -312,7 +312,7 @@ function New-SquirrelInfo {
     WritesAppsAndFeaturesEntry   = $true
     AppsAndFeaturesProductCode   = $Nuspec.Id
     AppsAndFeaturesInstallerType = 'exe'
-    Warnings                     = [string[]]@()
+    Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'Squirrel' -Kind Incomplete -Areas Metadata)
     UnresolvedFields             = [string[]]@()
     Family                       = $Family
     Confidence                   = $Confidence

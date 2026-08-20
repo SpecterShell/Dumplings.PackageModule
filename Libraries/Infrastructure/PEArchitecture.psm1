@@ -218,7 +218,7 @@ function Get-PEArchitectureInfo {
           RecommendedWinGetArchitecture  = $null
           RecommendedWinGetArchitectures = @()
           SupportedArchitectures         = @()
-          Warnings                       = @($_.Exception.Message)
+          Diagnostics                    = @(ConvertTo-InstallerDiagnostic -InputObject @($_.Exception.Message) -Source 'PEArchitecture' -Kind Incomplete -Areas Metadata -AffectedFields Architecture)
         }
       }
     }
@@ -272,7 +272,7 @@ function Get-PEArchitectureInfo {
       RecommendedWinGetArchitecture  = $RecommendedWinGetArchitecture
       RecommendedWinGetArchitectures = $SupportedArchitectures
       RelatedArchitectureInfo        = $RelatedArchitectureInfo
-      Warnings                       = @($Warnings)
+      Diagnostics                    = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'PEArchitecture' -Kind Incomplete -Areas Metadata -AffectedFields Architecture)
     }
   }
 }

@@ -844,7 +844,7 @@ function Get-CreateInstallInfo {
       WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
       AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
-      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'CreateInstall' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
       ProductCodeEvidence          = if ($ProductCode) { 'Compiled Gentee addremoveext uninstall-key argument' } else { $null }
       FileDescription              = ([string]$VersionInfo.FileDescription).Trim()

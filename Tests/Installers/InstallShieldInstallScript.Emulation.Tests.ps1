@@ -51,7 +51,7 @@ Result=1
     $Info.ResponseFileRequirement | Should -Be 'None'
     $Info.SilentSwitches | Should -BeNullOrEmpty
     $Info.ParserVersionInfo.AnalysisScope | Should -Be 'EmbeddedAction'
-    $Info.Warnings | Should -Not -Contain 'The compiled script uses InstallShield response-backed dialog support but the media does not ship a valid default setup.iss.'
+    $Info.Diagnostics.Message | Should -Not -Contain 'The compiled script uses InstallShield response-backed dialog support but the media does not ship a valid default setup.iss.'
   }
 
   It 'preserves InstallScript 11.5 structure references across function frames' {
@@ -120,8 +120,8 @@ Result=1
 
     $Analysis.RegistryWrites.Name | Should -Contain 'NormalPath'
     $Analysis.RegistryWrites.Name | Should -Not -Contain 'CatchPath'
-    $Analysis.Notices | Should -Contain 'InstallScript catch-only effects were excluded from normal-path metadata.'
-    $Analysis.Warnings | Should -Not -Contain 'InstallScript catch-only effects were excluded from normal-path metadata.'
+    $Analysis.Diagnostics.Message | Should -Contain 'InstallScript catch-only effects were excluded from normal-path metadata.'
+    @($Analysis.Diagnostics | Where-Object Kind -NE Information).Message | Should -Not -Contain 'InstallScript catch-only effects were excluded from normal-path metadata.'
     foreach ($Opcode in 0x0036, 0x0037, 0x0038) {
       $Analysis.OpcodeCoverage | Where-Object Opcode -EQ $Opcode | Select-Object -ExpandProperty Emulation | Should -Be 'Evaluated'
     }

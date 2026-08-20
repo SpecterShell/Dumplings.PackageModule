@@ -533,7 +533,7 @@ function Get-InstallShieldAdvancedUiNestedPackageInfo {
         Parser             = $Parser
         Success            = $Success
         Info               = $NestedInfo
-        Warnings           = [string[]]$Warnings
+        Diagnostics        = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallShieldAdvancedUI' -Kind Incomplete -Areas Metadata)
       }
     }
   }
@@ -641,7 +641,7 @@ function Get-InstallShieldElevationInfo {
   )
 
   $Reasons = [Collections.Generic.List[string]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $AdministrativePrerequisites = [Collections.Generic.List[object]]::new()
   $SeenDefinitionPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
@@ -665,7 +665,7 @@ function Get-InstallShieldElevationInfo {
     # Elevation can make the prerequisite runnable, but it cannot manufacture
     # an unattended command line that the prerequisite author did not provide.
     if ([string]::IsNullOrWhiteSpace([string]$Evidence.Definition.SilentCommandLine)) {
-      $Warnings.Add("Selected prerequisite '$PrerequisiteName' requires administrative privileges but does not define a silent command line; elevation does not prove unattended installation support.")
+      $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.Prerequisite.SilentCommandMissing' -Source 'InstallShieldAdvancedUI' -Message "Selected prerequisite '$PrerequisiteName' requires administrative privileges but does not define a silent command line; elevation does not prove unattended installation support." -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes, ElevationRequirement -Evidence ([ordered]@{ Name = $PrerequisiteName; Path = $DefinitionPath })))
     }
   }
 
@@ -677,7 +677,7 @@ function Get-InstallShieldElevationInfo {
     Confidence                          = $HasDirectLauncherEvidence ? 'DirectPEManifest' : ($HasPrerequisiteEvidence ? 'SelectedPrerequisiteDefinition' : 'Unknown')
     SelectedAdministrativePrerequisites = [object[]]$AdministrativePrerequisites
     Reasons                             = [string[]]$Reasons
-    Warnings                            = [string[]]$Warnings
+    Diagnostics                         = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallShieldAdvancedUI' -Kind Incomplete -Areas Metadata))
   }
 }
 
@@ -1432,7 +1432,7 @@ function Get-InstallShieldAdvancedUiInfo {
       WritesAppsAndFeaturesEntry   = $WritesArp
       AppsAndFeaturesProductCode   = $WritesArp ? $SuiteId : $null
       AppsAndFeaturesInstallerType = $WritesArp ? 'exe' : $null
-      Warnings                     = [string[]]$Warnings
+      Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallShieldAdvancedUI' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
       Variant                      = 'Advanced UI'
       SuiteId                      = $SuiteId

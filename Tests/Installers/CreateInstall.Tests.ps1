@@ -129,7 +129,7 @@ Describe 'CreateInstall static parser' {
     $Info.UninstallRegistrations.UninstallKeyName | Should -Be @('Balabolka')
     $Info.GEA.UnsupportedCompressionMethods | Should -Not -Contain 'PPMd'
     $Info.CanExpand | Should -BeTrue
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should expand source-backed PPMd and solid-continuation payloads from Balabolka' {
@@ -203,6 +203,6 @@ Describe 'CreateInstall static parser' {
     $Info.ProductCode | Should -Be 'CreateInstall'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $Info.UninstallRegistrations.Count | Should -Be 1
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 }

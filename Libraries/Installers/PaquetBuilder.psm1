@@ -110,7 +110,7 @@ function Get-PaquetBuilderInfo {
       WritesAppsAndFeaturesEntry   = $null
       AppsAndFeaturesProductCode   = $null
       AppsAndFeaturesInstallerType = $null
-      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'PaquetBuilder' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
       FileDescription              = ([string]$VersionInfo.FileDescription).Trim()
       SupportedScopes              = if ($Scope) { @($Scope) } else { @() }

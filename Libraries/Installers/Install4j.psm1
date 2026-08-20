@@ -451,7 +451,7 @@ function Get-Install4jAssociationInfo {
   [OutputType([pscustomobject])]
   param ([AllowNull()][psobject]$Config)
 
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
   $Associations = [System.Collections.Generic.List[object]]::new()
   $SeenExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   foreach ($Action in @($Config.FileAssociationActions)) {
@@ -478,7 +478,7 @@ function Get-Install4jAssociationInfo {
     FileExtensions            = @($Associations | Select-Object -ExpandProperty FileExtension -Unique | Sort-Object)
     ProtocolAssociations      = @()
     FileExtensionAssociations = @($Associations)
-    Warnings                  = @($Warnings | Select-Object -Unique)
+    Diagnostics               = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'Install4j' -Kind Incomplete -Areas Metadata))
   }
 }
 
@@ -505,7 +505,7 @@ function Get-Install4jRuntimeInfo {
   )
 
   $Evidence = [Collections.Generic.List[string]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $BundledVersion = if ($Config) { [string]$Config.General.JreVersion } else { $null }
   $MinimumVersion = if ($Config) { [string]$Config.General.MinimumJavaVersion } else { $null }
   $RuntimeArchive = @($EmbeddedFiles | Where-Object { $_ -in 'jre.tar.gz', 'jre.tar', 'jre.zip' }) | Select-Object -First 1
@@ -540,7 +540,7 @@ function Get-Install4jRuntimeInfo {
     RuntimeArchive        = $RuntimeArchive
     Confidence            = if ($Config -and ($RuntimeArchive -or $HasBundledRuntime -eq $false)) { 'high' } elseif ($Config -or $RuntimeArchive) { 'medium' } else { 'unknown' }
     Evidence              = [string[]]@($Evidence)
-    Warnings              = [string[]]@($Warnings)
+    Diagnostics           = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@($Warnings)) -Source 'Install4j' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1514,7 +1514,7 @@ function Get-Install4jAnalysisContext {
 
   $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
   $File = Get-Item -LiteralPath $ResolvedPath -Force
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $Evidence = [Collections.Generic.List[string]]::new()
   $VersionInfo = Get-Install4jVersionInfo -File $File
   $Launcher = $null
@@ -1680,7 +1680,7 @@ function Get-Install4jAnalysisContext {
     Config             = $Config
     ScanText           = $ScanText
     Evidence           = @($Evidence)
-    Warnings           = @($Warnings)
+    Diagnostics        = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Warnings)) -Source 'Install4j' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1719,7 +1719,7 @@ function Get-Install4jFormatInfo {
         RuntimePacking    = $null
         IsFallback        = $false
         Evidence          = @()
-        Warnings          = @($_.Exception.Message)
+        Diagnostics       = @(ConvertTo-InstallerDiagnostic -InputObject @(@($_.Exception.Message)) -Source 'Install4j' -Kind Incomplete -Areas Metadata)
       }
     }
 
@@ -1742,7 +1742,7 @@ function Get-Install4jFormatInfo {
       RuntimePacking    = $Descriptor.RuntimePacking
       IsFallback        = [bool]$Descriptor.IsFallback
       Evidence          = @($Context.Evidence)
-      Warnings          = @($Context.Warnings)
+      Diagnostics       = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Context.Diagnostics)) -Source 'Install4j' -Kind Incomplete -Areas Metadata)
     }
   }
 }
@@ -1766,8 +1766,8 @@ function Get-Install4jInfo {
     $Config = $Context.Config
     $Descriptor = $Context.Descriptor
     $VersionInfo = $Context.VersionInfo
-    $Warnings = [Collections.Generic.List[string]]::new()
-    foreach ($Warning in @($Context.Warnings)) { $Warnings.Add([string]$Warning) }
+    $Warnings = [Collections.Generic.List[object]]::new()
+    foreach ($Diagnostic in @($Context.Diagnostics)) { $Warnings.Add($Diagnostic) }
     $ApplicationId = if ($Config) {
       $Config.General.ApplicationId
     } elseif (-not [string]::IsNullOrWhiteSpace($Context.ScanText)) {
@@ -1800,9 +1800,9 @@ function Get-Install4jInfo {
     $WritesAppsAndFeaturesEntry = if ($Config) { [bool]$Config.HasRegisterAddRemoveAction } else { $null }
     $Architecture = Get-Install4jArchitecture -Config $Config -Path $File.FullName
     $AssociationInfo = Get-Install4jAssociationInfo -Config $Config
-    foreach ($Warning in @($AssociationInfo.Warnings)) { $Warnings.Add($Warning) }
+    foreach ($Warning in @($AssociationInfo.Diagnostics)) { $Warnings.Add($Warning) }
     $RuntimeInfo = Get-Install4jRuntimeInfo -Config $Config -EmbeddedFiles @($Context.EmbeddedFiles) -HasMediaCatalog ([bool]($Context.Launcher -or $Context.EmbeddedFileTables.Count -gt 0))
-    foreach ($Warning in @($RuntimeInfo.Warnings)) { $Warnings.Add($Warning) }
+    foreach ($Warning in @($RuntimeInfo.Diagnostics)) { $Warnings.Add($Warning) }
 
     $UnresolvedFields = [Collections.Generic.List[string]]::new()
     if (-not $Config) {
@@ -1824,7 +1824,7 @@ function Get-Install4jInfo {
       WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
       AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ApplicationId : $null
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
-      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'Install4j' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@($UnresolvedFields)
       Family                       = 'install4j'
       IsSupported                  = [bool]$Descriptor

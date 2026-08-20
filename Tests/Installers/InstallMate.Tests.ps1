@@ -113,7 +113,7 @@ Describe 'InstallMate static parser' {
       $Info.SupportsDualScope | Should -BeTrue
       $Info.ScopeConfidence | Should -Be 'conditional'
       $Info.CanExpand | Should -BeFalse
-      @($Info.Warnings | Where-Object { $_ -like '*setup database could not be decoded*' }).Count | Should -Be 1
+      @($Info.Diagnostics.Message | Where-Object { $_ -like '*setup database could not be decoded*' }).Count | Should -Be 1
       { Expand-InstallMateInstaller -Path $FixturePath -CollisionAction Rename } | Should -Throw
     }
   }

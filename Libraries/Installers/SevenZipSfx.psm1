@@ -198,11 +198,11 @@ function Get-SevenZipSfxInfo {
       WritesAppsAndFeaturesEntry   = $false
       AppsAndFeaturesProductCode   = $null
       AppsAndFeaturesInstallerType = $null
-      Warnings                     = [string[]]@(
-        foreach ($Command in $Config.Commands) {
-          if (-not $Command.Detail.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded archive entry: $($Command.Detail.Command.CommandLine)" }
-        }
-      )
+      Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@(
+            foreach ($Command in $Config.Commands) {
+              if (-not $Command.Detail.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded archive entry: $($Command.Detail.Command.CommandLine)" }
+            }
+          )) -Source 'SevenZipSfx' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
       Format                       = '7z SFX'
       ConfigOffset                 = $ConfigStart

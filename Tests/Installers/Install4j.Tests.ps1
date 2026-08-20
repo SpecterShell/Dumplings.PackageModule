@@ -338,7 +338,7 @@ Describe 'install4j parser' {
       $Format.IsSupported | Should -BeFalse
       $Format.Marker | Should -Be 'S-M2-CONTOSO#1000-'
       $Format.FormatGeneration | Should -BeNullOrEmpty
-      $Format.Warnings | Should -Contain "The launcher marker 'S-M2-CONTOSO#1000-' conflicts with install4j 9.0.7 encoded by i4jparams.conf; no supported descriptor was selected."
+      $Format.Diagnostics.Message | Should -Contain "The launcher marker 'S-M2-CONTOSO#1000-' conflicts with install4j 9.0.7 encoded by i4jparams.conf; no supported descriptor was selected."
     }
   }
 
@@ -350,8 +350,8 @@ Describe 'install4j parser' {
 
     $Format.IsInstall4j | Should -BeTrue
     $Format.IsSupported | Should -BeFalse
-    $Format.Warnings | Should -Contain 'The install4j media is structurally identifiable, but no supported format descriptor could be selected from its launcher or configuration evidence.'
-    $Info.Warnings | Should -Contain 'The install4j media is structurally identifiable, but no supported format descriptor could be selected from its launcher or configuration evidence.'
+    $Format.Diagnostics.Message | Should -Contain 'The install4j media is structurally identifiable, but no supported format descriptor could be selected from its launcher or configuration evidence.'
+    $Info.Diagnostics.Message | Should -Contain 'The install4j media is structurally identifiable, but no supported format descriptor could be selected from its launcher or configuration evidence.'
     $Info.UnresolvedFields | Should -Contain 'ProductCode'
     $Info.UnresolvedFields | Should -Contain 'WritesAppsAndFeaturesEntry'
     $Info.UnresolvedFields | Should -Contain 'Scope'
@@ -455,7 +455,7 @@ Describe 'install4j parser' {
     $Bundled.BundledRuntimeArchive | Should -Be 'jre.tar.gz'
     $Bundled.RuntimeEvidence | Should -Contain "i4jparams.conf declares bundled Java runtime version '21.0.12'."
     $Bundled.RuntimeEvidence | Should -Contain "The installer startup-file catalog contains 'jre.tar.gz'."
-    $Bundled.Warnings | Should -BeNullOrEmpty
+    $Bundled.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should distinguish controlled install4j 11 x86, x64, and ARM64 media' {
@@ -475,7 +475,7 @@ Describe 'install4j parser' {
       $Info.FormatGeneration | Should -Be 11
       $Info.BuilderVersion | Should -Be '11.0.5'
       $Info.ProductCode | Should -Be '0804-2950-8354-4050'
-      $Info.Warnings | Should -BeNullOrEmpty
+      $Info.Diagnostics | Should -BeNullOrEmpty
     }
 
     # install4j records ARM64 as 64-bit in config XML; the PE machine distinguishes it from x64.
@@ -497,7 +497,7 @@ Describe 'install4j parser' {
     $Info.FileExtensions | Should -Be @('i4jtest')
     $Info.RegistryAssociationInfo.FileExtensionAssociations[0].Description | Should -Be 'Synthetic install4j document'
     $Info.RegistryAssociationInfo.FileExtensionAssociations[0].IsSelectedByDefault | Should -BeTrue
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should identify a privilege action that fails without elevation as machine-only' {
@@ -598,7 +598,7 @@ Describe 'install4j parser' {
     $Info.LauncherConfiguration.Entries.Name | Should -Contain 'i4jparams.conf'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $Info.SupportedScopes | Should -Be @('user', 'machine')
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should route markerless install4j 11 application media from validated configuration evidence' {
@@ -625,7 +625,7 @@ Describe 'install4j parser' {
     $Info.Scope | Should -Be 'machine'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
     $Info.CanExpand | Should -BeTrue
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
     $Info.UnresolvedFields | Should -BeNullOrEmpty
   }
 
@@ -670,7 +670,7 @@ Describe 'install4j parser' {
     $Format.IsSupported | Should -BeTrue
     $Format.FormatGeneration | Should -Be $Generation
     $Format.IsFallback | Should -BeFalse
-    $Format.Warnings | Should -BeNullOrEmpty
+    $Format.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should parse behaviorally distinct package media from <Package>' -ForEach @(
@@ -697,7 +697,7 @@ Describe 'install4j parser' {
     $Info.ProductCode | Should -Be $ProductCode
     $Info.Scope | Should -Be $Scope
     $Info.Config.Source | Should -Be 'LauncherStartupFile'
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should extract generation 3 inline and generation 4 split application archives' {

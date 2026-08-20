@@ -39,15 +39,19 @@ function Invoke-InstallerDetector {
 
   try {
     [pscustomobject]@{
-      Name    = $Name
-      Success = $true
-      Result  = & $ScriptBlock
+      Name        = $Name
+      Success     = $true
+      Result      = & $ScriptBlock
+      Diagnostics = [object[]]@()
     }
   } catch {
     [pscustomobject]@{
-      Name    = $Name
-      Success = $false
-      Error   = $_.Exception.Message
+      Name        = $Name
+      Success     = $false
+      Result      = $null
+      Diagnostics = [object[]]@(
+        New-InstallerDiagnostic -Id "InstallerDetection.$(($Name -replace '[^A-Za-z0-9]+', '.').Trim('.')).ParserRejected" -Source $Name -Message $_.Exception.Message -Kind Fallback -Areas Detection
+      )
     }
   }
 }
@@ -307,9 +311,9 @@ function Get-InstallerPortableEvidence {
       break
     }
   }
-  $Warnings = [Collections.Generic.List[string]]::new()
-  foreach ($Warning in @($ArchitectureInfo.Warnings) + @($DependencyInfo.Warnings) + @($TauriExecutableInfo.Warnings)) {
-    if (-not [string]::IsNullOrWhiteSpace($Warning)) { $Warnings.Add($Warning) }
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  foreach ($Diagnostic in @($ArchitectureInfo.Diagnostics) + @($DependencyInfo.Diagnostics) + @($TauriExecutableInfo.Diagnostics)) {
+    if ($null -ne $Diagnostic) { $Diagnostics.Add($Diagnostic) }
   }
   [pscustomobject]@{
     ArchitectureInfo                = $ArchitectureInfo
@@ -319,7 +323,7 @@ function Get-InstallerPortableEvidence {
     RecommendedWinGetArchitectures  = $ArchitectureInfo.RecommendedWinGetArchitectures
     RecommendedPackageDependencies  = $DependencyInfo.RecommendedPackageDependencies
     RecommendedPackageDependencyIds = $DependencyInfo.RecommendedPackageDependencyIds
-    Warnings                        = $Warnings.ToArray()
+    Diagnostics                     = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
   }
 }
 
@@ -783,8 +787,29 @@ function Resolve-InstallerFamilyEvidence {
       $Detected.Add($Candidate)
     }
 
-    $FailedRun = $MatchingRuns | Where-Object { $_.Success -eq $false -and $_.Error } | Select-Object -First 1
+    $FailedRun = $MatchingRuns | Where-Object { $_.Success -eq $false -and @($_.Diagnostics).Count } | Select-Object -First 1
     if ($FailedRun) {
+      $FailureDiagnostics = if ($Candidate.IsOuterContainer) {
+        foreach ($Diagnostic in @($FailedRun.Diagnostics)) {
+          $OriginalId = [string]$Diagnostic.Id
+          New-InstallerDiagnostic `
+            -Id "InstallerDetection.$(($Candidate.Family -replace '[^A-Za-z0-9]+', '.').Trim('.')).ConfirmedParserFailure" `
+            -Source $ParserName `
+            -Message ([string]$Diagnostic.Message) `
+            -Kind Incomplete `
+            -Areas Detection, Metadata `
+            -AffectedFields InstallerType `
+            -Evidence ([ordered]@{
+              Family               = [string]$Candidate.Family
+              Confidence           = [string]$Candidate.Confidence
+              EvidenceKind         = [string]$Candidate.EvidenceKind
+              MatchedMarkers       = [string[]]@($Candidate.MatchedMarkers)
+              OriginalDiagnosticId = $OriginalId
+            })
+        }
+      } else {
+        [object[]]@($FailedRun.Diagnostics)
+      }
       $Rejected.Add([pscustomobject][ordered]@{
           Family                  = [string]$Candidate.Family
           Confidence              = [string]$Candidate.Confidence
@@ -794,7 +819,7 @@ function Resolve-InstallerFamilyEvidence {
           ParserName              = $ParserName
           MatchedMarkers          = @($Candidate.MatchedMarkers)
           SuggestedManifestFields = $Candidate.SuggestedManifestFields
-          Error                   = [string]$FailedRun.Error
+          Diagnostics             = [object[]]@($FailureDiagnostics)
         })
     }
   }
@@ -836,7 +861,7 @@ function Resolve-InstallerFamilyEvidence {
   }
 }
 
-function Get-InstallerWrapperWarning {
+function Get-InstallerWrapperDiagnostic {
   <#
   .SYNOPSIS
     Detect NSIS/Inno wrapper evidence from bounded string windows
@@ -906,7 +931,7 @@ function Get-InstallerWrapperWarning {
     if ($Metadata) {
       if ($Metadata.PSObject.Properties.Name -contains 'ExtractedFiles') { $ParserExtractedFiles = @($Metadata.ExtractedFiles) }
       if ($Metadata.PSObject.Properties.Name -contains 'ExecutedPayloads') { $ParserExecutedPayloads = @($Metadata.ExecutedPayloads) }
-      if ($Metadata.PSObject.Properties.Name -contains 'Warnings') { $ParserWarnings = @($Metadata.Warnings) }
+      if ($Metadata.PSObject.Properties.Name -contains 'Diagnostics') { $ParserWarnings = @($Metadata.Diagnostics) }
       if ($Metadata.PSObject.Properties.Name -contains 'WritesAppsAndFeaturesEntry') { $ParserWritesAppsAndFeaturesEntry = [bool]$Metadata.WritesAppsAndFeaturesEntry }
     }
 
@@ -922,23 +947,23 @@ function Get-InstallerWrapperWarning {
     if (($MsiPayloadMarkers.Count + $NestedExeMarkers.Count + $ParserMsiPayloadMarkers.Count + $ParserNestedExeMarkers.Count) -eq 0 -and -not ($ParserWritesAppsAndFeaturesEntry -eq $false -and $HasParserWrapperEvidence)) { continue }
 
     $Confidence = if ($ParserWarnings.Count -gt 0 -or $ParserWritesAppsAndFeaturesEntry -eq $false -or $ParserLaunchMarkers.Count -gt 0 -or $LaunchMarkers.Count -gt 0 -or ($MsiPayloadMarkers.Count + $ParserMsiPayloadMarkers.Count) -gt 1) { 'medium' } else { 'low' }
-    [pscustomobject]@{
+    $Evidence = [pscustomobject][ordered]@{
       AppliesTo                 = $OuterInstaller.Name
       Confidence                = $Confidence
-      MsiOrWindowsInstallerTags = $MsiPayloadMarkers
-      NestedExeTags             = $NestedExeMarkers
-      LaunchTags                = $LaunchMarkers
-      ParserEvidence            = [pscustomobject]@{
+      MsiOrWindowsInstallerTags = [string[]]$MsiPayloadMarkers
+      NestedExeTags             = [string[]]$NestedExeMarkers
+      LaunchTags                = [string[]]$LaunchMarkers
+      ParserEvidence            = [pscustomobject][ordered]@{
         WritesAppsAndFeaturesEntry = $ParserWritesAppsAndFeaturesEntry
         ExtractedPayloads          = @($ParserExtractedFiles)
         ExecutedPayloads           = @($ParserExecutedPayloads)
         MsiOrWindowsInstallerTags  = @($ParserMsiPayloadMarkers)
         NestedExeTags              = @($ParserNestedExeMarkers)
-        Warnings                   = @($ParserWarnings)
+        Diagnostics                = [object[]]@($ParserWarnings)
       }
-      Warning                   = 'This NSIS/Inno installer may be a wrapper around a nested installer. Do not assume the outer installer writes the visible ARP entry.'
       RequiredAction            = 'Inspect the nested payload or install in a VM and compare visible ARP entries excluding SystemComponent=1. Use the nested MSI/WiX/custom installer metadata when that payload writes Apps & Features.'
     }
+    New-InstallerDiagnostic -Id "InstallerWrapper.$($OuterInstaller.Name -replace '[^A-Za-z0-9]+', '.').NestedPayload" -Source 'InstallerAnalyzer' -Message 'This NSIS/Inno installer may be a wrapper around a nested installer. Do not assume the outer installer writes the visible ARP entry.' -Kind Risk -Areas Metadata, Installability -AffectedFields ProductCode, AppsAndFeaturesEntries -Evidence $Evidence
   }
 }
 
@@ -994,8 +1019,8 @@ function Invoke-InstallerMsiAnalysis {
     AllUsers                     = $AllUsers
     Scope                        = $ScopeRecommendation.Scope
     ScopeRecommendation          = $ScopeRecommendation
-    Warnings                     = [string[]]@($MsiInfo.Warnings)
-    Notices                      = [string[]]@($MsiInfo.Notices)
+    Diagnostics                  = [object[]]@($MsiInfo.Diagnostics)
+
     SuggestedManifestFields      = [pscustomobject]@{ InstallerType = $ManifestInstallerType; Scope = $ScopeRecommendation.Scope }
   }
 }
@@ -1063,7 +1088,7 @@ function Invoke-InstallerMsixAnalysis {
     RestrictedCapabilities     = @($RestrictedCapabilities | Sort-Object -Unique)
     Dependencies               = $DependencyInfo.Dependencies
     UnknownPackageDependencies = $DependencyInfo.UnknownPackageDependencies
-    Warnings                   = @($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings)
+    Diagnostics                = @(ConvertTo-InstallerDiagnostic -InputObject @(@($PackageTypeInfo.Diagnostics + $DependencyInfo.Diagnostics + $AssociationInfo.Diagnostics)) -Source 'InstallerAnalyzer' -Kind Incomplete -Areas Metadata)
     Protocols                  = $AssociationInfo.Protocols
     FileExtensions             = $AssociationInfo.FileExtensions
     RegistryAssociationInfo    = $AssociationInfo
@@ -1421,8 +1446,8 @@ function Invoke-InstallerExeParser {
       NestedInstallerFiles        = @($Info.ExtractedFiles)
       ExecutedPayloads            = if ($Info.PSObject.Properties['ExecutedPayloads']) { @($Info.ExecutedPayloads) } else { @() }
       CanExpand                   = $Info.CanExpand
-      Notices                     = if ($Info.PSObject.Properties['Notices']) { @($Info.Notices) } else { @() }
-      Warnings                    = @($Info.Warnings)
+
+      Diagnostics                 = [object[]]@($Info.Diagnostics)
       SuggestedManifestFields     = $SuggestedManifestFields
     }
   }
@@ -1520,7 +1545,7 @@ function Invoke-InstallerExeParser {
           SetupResourceName       = $Info.SetupResourceName
           ExecutedPayloads        = $Info.ExecutedPayloads
           NestedInstallerFiles    = $Info.NestedFiles
-          Warnings                = $Info.Warnings
+          Diagnostics             = @(ConvertTo-InstallerDiagnostic -InputObject @($Info.Diagnostics) -Source 'InstallerAnalyzer' -Kind Incomplete -Areas Metadata)
           SuggestedManifestFields = $SuggestedManifestFields
         }
       }
@@ -1551,7 +1576,7 @@ function Invoke-InstallerExeParser {
           RegistryAssociationInfo = $Info.RegistryAssociationInfo
           NestedInstallerFiles    = $Info.ExtractedFiles
           CanExpand               = $Info.CanExpand
-          Warnings                = $Info.Warnings
+          Diagnostics             = @(ConvertTo-InstallerDiagnostic -InputObject @($Info.Diagnostics) -Source 'InstallerAnalyzer' -Kind Incomplete -Areas Metadata)
           SuggestedManifestFields = $SuggestedManifestFields
         }
       }
@@ -1869,8 +1894,8 @@ function Invoke-InstallerExeParser {
         AppsAndFeaturesEntries             = @($Info.AppsAndFeaturesEntries)
         AppsAndFeaturesEvidence            = @($Info.AppsAndFeaturesEntryEvidence)
         HasLocalizedAppsAndFeaturesEntries = [bool]$Info.HasLocalizedAppsAndFeaturesEntries
-        Notices                            = $Info.Notices
-        Warnings                           = $Info.Warnings
+
+        Diagnostics                        = [object[]]@($Info.Diagnostics)
         Protocols                          = $Info.Protocols
         FileExtensions                     = $Info.FileExtensions
         RegistryAssociationInfo            = $Info.RegistryAssociationInfo
@@ -2044,25 +2069,27 @@ function Invoke-InstallerAnalysisCore {
     $Extension = $Installer.Extension.ToLowerInvariant()
     $FileType = Get-InstallerFileTypeEvidence -File $Installer
     $Analysis = [ordered]@{
-      Path               = $Installer.FullName
-      FileName           = $Installer.Name
-      Length             = $Installer.Length
-      Sha256             = (Get-FileHash -LiteralPath $Installer.FullName -Algorithm SHA256).Hash
-      Extension          = $Extension
-      DetectedFileType   = $FileType
-      AuthenticodeSigner = (Get-AuthenticodeSignature -LiteralPath $Installer.FullName -ErrorAction SilentlyContinue).SignerCertificate.Subject
-      VersionInfo        = Get-InstallerFileVersionEvidence -File $Installer -ErrorAction SilentlyContinue
-      ParserResults      = @()
-      DetectedFamilies   = @()
-      RoutingHints       = @()
-      RejectedCandidates = @()
+      Path                   = $Installer.FullName
+      FileName               = $Installer.Name
+      Length                 = $Installer.Length
+      Sha256                 = (Get-FileHash -LiteralPath $Installer.FullName -Algorithm SHA256).Hash
+      Extension              = $Extension
+      DetectedFileType       = $FileType
+      AuthenticodeSigner     = (Get-AuthenticodeSignature -LiteralPath $Installer.FullName -ErrorAction SilentlyContinue).SignerCertificate.Subject
+      VersionInfo            = Get-InstallerFileVersionEvidence -File $Installer -ErrorAction SilentlyContinue
+      ParserResults          = @()
+      DetectedFamilies       = @()
+      RoutingHints           = @()
+      RejectedCandidates     = @()
       # Compatibility projection retained for callers written before evidence
       # separation. It contains confirmed families only.
-      FamilyCandidates   = @()
-      PortableEvidence   = $null
-      WrapperWarnings    = @()
-      BlockingIssues     = @()
-      SuggestedNextSteps = @()
+      FamilyCandidates       = @()
+      PortableEvidence       = $null
+      Diagnostics            = @()
+      HasWarningDiagnostics  = $false
+      HasErrorDiagnostics    = $false
+      HasBlockingDiagnostics = $false
+      SuggestedNextSteps     = @()
     }
 
     switch ($FileType.Type) {
@@ -2085,7 +2112,7 @@ function Invoke-InstallerAnalysisCore {
         $Analysis.SuggestedNextSteps += 'This file is a Windows Installer patch package by CFB root storage CLSID. Verify patch-package behavior before authoring.'
       }
       'MST' {
-        $Analysis.BlockingIssues += 'Windows Installer transform files are not standalone installer entries.'
+        $Analysis.Diagnostics += New-InstallerDiagnostic -Id 'InstallerArtifact.MstNotStandalone' -Source 'InstallerAnalyzer' -Message 'Windows Installer transform files are not standalone installer entries.' -Kind Invalid -Areas Detection, Installability
         $Analysis.SuggestedNextSteps += 'Use the base MSI/MSP package instead of the MST transform.'
       }
       'WindowsInstallerDatabase' {
@@ -2100,11 +2127,8 @@ function Invoke-InstallerAnalysisCore {
         }
         $Analysis.ParserResults += $MsixResult
         if ($MsixResult.Success -and $MsixResult.Result.Rejected) {
-          $Analysis.BlockingIssues += $MsixResult.Result.RejectionReason
+          $Analysis.Diagnostics += New-InstallerDiagnostic -Id 'MSIX.RejectedInstaller' -Source 'MSIX/AppX' -Message $MsixResult.Result.RejectionReason -Kind Invalid -Areas Detection, Installability -Evidence $MsixResult.Result
           $Analysis.SuggestedNextSteps += $MsixResult.Result.RejectionReason
-        }
-        if ($MsixResult.Success -and $MsixResult.Result.Warnings) {
-          $Analysis.SuggestedNextSteps += @($MsixResult.Result.Warnings)
         }
       }
       'ZipArchive' {
@@ -2139,17 +2163,14 @@ function Invoke-InstallerAnalysisCore {
         $Analysis.RoutingHints += @($ResolvedFamilies.RoutingHints)
         $Analysis.RejectedCandidates += @($ResolvedFamilies.RejectedCandidates)
         $Analysis.FamilyCandidates += @($ResolvedFamilies.DetectedFamilies)
-        $Analysis.WrapperWarnings += @(Get-InstallerWrapperWarning -File $Installer -Budget $ScanBytes -ParserRuns $ParserRuns -Text $ScanText)
+        $Analysis.Diagnostics += @(Get-InstallerWrapperDiagnostic -File $Installer -Budget $ScanBytes -ParserRuns $ParserRuns -Text $ScanText)
         if (-not ($ParserRuns.Success -contains $true)) {
           $Analysis.PortableEvidence = try { Get-InstallerPortableEvidence -Path $Installer.FullName } catch { $null }
         }
         if ($Analysis.PortableEvidence -and $Analysis.PortableEvidence.RecommendedPackageDependencyIds.Count -gt 0) {
           $Analysis.SuggestedNextSteps += "Portable evidence: static dependency evidence maps to package dependencies: $($Analysis.PortableEvidence.RecommendedPackageDependencyIds -join ', ')."
         }
-        if ($Analysis.PortableEvidence -and $Analysis.PortableEvidence.Warnings.Count -gt 0) {
-          $Analysis.SuggestedNextSteps += @($Analysis.PortableEvidence.Warnings)
-        }
-        if ($Analysis.WrapperWarnings.Count -gt 0) {
+        if (@($Analysis.Diagnostics | Where-Object Id -Like 'InstallerWrapper.*').Count -gt 0) {
           $Analysis.SuggestedNextSteps += 'Wrapper warning: the NSIS/Inno outer installer appears to contain nested installer payloads. Inspect the nested payload or use VM ARP-delta validation before setting AppsAndFeaturesEntries.'
         }
         $Analysis.SuggestedNextSteps += 'Use high-confidence parser results first. Use heuristic candidates only to choose which family-specific static or VM validation to run next.'
@@ -2159,7 +2180,7 @@ function Invoke-InstallerAnalysisCore {
         $Analysis.SuggestedNextSteps += '.appinstaller is not accepted by winget-pkgs manifests. Parse its XML and analyze the referenced MSIX/AppX package instead.'
       }
       'HTMLDocument' {
-        $Analysis.BlockingIssues += 'The downloaded response is an HTML document, not an installer.'
+        $Analysis.Diagnostics += New-InstallerDiagnostic -Id 'InstallerArtifact.HtmlResponse' -Source 'InstallerAnalyzer' -Message 'The downloaded response is an HTML document, not an installer.' -Kind Invalid -Areas Detection, Installability
         $Analysis.SuggestedNextSteps += 'Retry the official installer URL or inspect its redirect, authentication, and rate-limit behavior.'
       }
       default {
@@ -2187,6 +2208,37 @@ function Invoke-InstallerAnalysisCore {
       $Analysis.DetectedFamilies = @($Analysis.DetectedFamilies | Group-Object Family | ForEach-Object { $_.Group | Select-Object -First 1 })
       $Analysis.FamilyCandidates = @($Analysis.DetectedFamilies)
     }
+
+    # Parser results remain context-neutral. The analyzer is the first concrete
+    # workflow boundary, so it resolves all nested and detector diagnostics for
+    # a complete static-analysis report only after every family has run.
+    $RawDiagnostics = [Collections.Generic.List[object]]::new()
+    foreach ($Diagnostic in @($Analysis.Diagnostics)) { if ($Diagnostic) { $RawDiagnostics.Add($Diagnostic) } }
+    foreach ($ParserResult in @($Analysis.ParserResults)) {
+      if (($FileType.Type -cne 'PE' -or $ParserResult.Success) -and $ParserResult.PSObject.Properties['Diagnostics']) {
+        foreach ($Diagnostic in @($ParserResult.Diagnostics)) { if ($Diagnostic) { $RawDiagnostics.Add($Diagnostic) } }
+      }
+      if ($ParserResult.Success -and $ParserResult.Result) {
+        if ($ParserResult.Result.PSObject.Properties['Diagnostics']) {
+          foreach ($Diagnostic in @($ParserResult.Result.Diagnostics)) { if ($Diagnostic) { $RawDiagnostics.Add($Diagnostic) } }
+        }
+        if ($ParserResult.Result.PSObject.Properties['Metadata']) {
+          if ($ParserResult.Result.Metadata -and $ParserResult.Result.Metadata.PSObject.Properties['Diagnostics']) {
+            foreach ($Diagnostic in @($ParserResult.Result.Metadata.Diagnostics)) { if ($Diagnostic) { $RawDiagnostics.Add($Diagnostic) } }
+          }
+        }
+      }
+    }
+    foreach ($RejectedCandidate in @($Analysis.RejectedCandidates)) {
+      foreach ($Diagnostic in @($RejectedCandidate.Diagnostics)) { if ($Diagnostic) { $RawDiagnostics.Add($Diagnostic) } }
+    }
+    if ($Analysis.PortableEvidence -and $Analysis.PortableEvidence.PSObject.Properties['Diagnostics']) {
+      foreach ($Diagnostic in @($Analysis.PortableEvidence.Diagnostics)) { if ($Diagnostic) { $RawDiagnostics.Add($Diagnostic) } }
+    }
+    $Analysis.Diagnostics = @(Resolve-InstallerDiagnostics -Diagnostic $RawDiagnostics.ToArray() -Scenario FullAnalysis)
+    $Analysis.HasWarningDiagnostics = @($Analysis.Diagnostics | Where-Object Level -EQ Warning).Count -gt 0
+    $Analysis.HasErrorDiagnostics = @($Analysis.Diagnostics | Where-Object Level -EQ Error).Count -gt 0
+    $Analysis.HasBlockingDiagnostics = @($Analysis.Diagnostics | Where-Object IsBlocking).Count -gt 0
 
     [pscustomobject]$Analysis
   }

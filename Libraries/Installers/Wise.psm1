@@ -180,10 +180,10 @@ function Get-WiseInfo {
         WritesAppsAndFeaturesEntry   = $true
         AppsAndFeaturesProductCode   = $MsiInfo.AppsAndFeaturesProductCode
         AppsAndFeaturesInstallerType = $MsiInfo.AppsAndFeaturesInstallerType
-        Warnings                     = [string[]]@(
-          'Wise is the outer bootstrapper; the embedded MSI is authoritative for ProductCode, UpgradeCode, associations, and visible Windows Installer ARP behavior.'
-          if (-not $Scope) { 'The nested MSI does not explicitly set ALLUSERS=1. Omit Scope unless VM validation proves the final installation scope.' }
-        )
+        Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@(
+              'Wise is the outer bootstrapper; the embedded MSI is authoritative for ProductCode, UpgradeCode, associations, and visible Windows Installer ARP behavior.'
+              if (-not $Scope) { 'The nested MSI does not explicitly set ALLUSERS=1. Omit Scope unless VM validation proves the final installation scope.' }
+            )) -Source 'Wise' -Kind Incomplete -Areas Metadata)
         UnresolvedFields             = [string[]]@()
         WiseVariant                  = 'Wise for Windows Installer'
         SupportedScopes              = if ($Scope) { @($Scope) } else { @() }

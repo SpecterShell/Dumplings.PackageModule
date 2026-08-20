@@ -275,7 +275,7 @@ Describe 'PE architecture helpers' {
     $Info = Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-arm.dll' -Machine 0x01C4 -Dll)
 
     $Info.RecommendedWinGetArchitectures | Should -BeNullOrEmpty
-    $Info.Warnings[0] | Should -BeLike '*ARM32*excluded*'
+    $Info.Diagnostics.Message | Should -BeLike '*ARM32*excluded*'
   }
 
   It 'Should report .NET Framework AnyCPU below 4.8.1 as x86 and x64 only' {
@@ -295,7 +295,7 @@ Describe 'PE architecture helpers' {
     $Info.RecommendedWinGetArchitectures | Should -Contain 'x86'
     $Info.RecommendedWinGetArchitectures | Should -Contain 'x64'
     $Info.RecommendedWinGetArchitectures | Should -Not -Contain 'arm64'
-    $Info.Warnings | Should -Contain 'Managed AnyCPU target framework metadata was not found; reporting x86 and x64 only and requiring manual review before adding arm64.'
+    $Info.Diagnostics.Message | Should -Contain 'Managed AnyCPU target framework metadata was not found; reporting x86 and x64 only and requiring manual review before adding arm64.'
   }
 
   It 'Should map 32BitRequired managed executables to x86' {
@@ -320,7 +320,7 @@ Describe 'PE architecture helpers' {
     $Info = Get-PEArchitectureInfo -Path $Main -RelatedFile $NativeDll
 
     $Info.RecommendedWinGetArchitecture | Should -Be 'x64'
-    $Info.Warnings | Should -Contain 'Related PE files narrow this portable executable to x64.'
+    $Info.Diagnostics.Message | Should -Contain 'Related PE files narrow this portable executable to x64.'
   }
 
   It 'Should warn when related native DLLs contain multiple architectures' {
@@ -330,7 +330,7 @@ Describe 'PE architecture helpers' {
 
     $Info = Get-PEArchitectureInfo -Path $Main -RelatedFile @($X86Dll, $X64Dll)
 
-    $Info.Warnings | Should -Contain 'Related PE files contain multiple concrete architectures: x64, x86. Inspect package layout manually before authoring WinGet installers.'
+    $Info.Diagnostics.Message | Should -Contain 'Related PE files contain multiple concrete architectures: x64, x86. Inspect package layout manually before authoring WinGet installers.'
   }
 
   It 'Should not export superseded portable architecture wrapper names' {
@@ -563,8 +563,8 @@ Describe 'PE dependency helpers' {
     $Info = Get-PEDependencyInfo -Path $Dll -RelatedFile $RuntimeConfig
 
     $Info.RecommendedPackageDependencyIds | Should -BeNullOrEmpty
-    $Info.Warnings | Should -Contain "Unknown .NET runtimeconfig framework 'Contoso.Runtime' was found; dependency mapping requires manual review."
-    $Info.Warnings | Should -Contain "Runtimeconfig framework 'Microsoft.NETCore.App' version '11.0.0' is outside the supported Microsoft.DotNet dependency majors 5-10."
+    $Info.Diagnostics.Message | Should -Contain "Unknown .NET runtimeconfig framework 'Contoso.Runtime' was found; dependency mapping requires manual review."
+    $Info.Diagnostics.Message | Should -Contain "Runtimeconfig framework 'Microsoft.NETCore.App' version '11.0.0' is outside the supported Microsoft.DotNet dependency majors 5-10."
   }
 
   It 'Should warn when a managed .NET 5+ DLL has no runtimeconfig sidecar' {
@@ -572,7 +572,7 @@ Describe 'PE dependency helpers' {
 
     $Info = Get-PEDependencyInfo -Path $Dll
 
-    $Info.Warnings[0] | Should -BeLike '*has no runtimeconfig sidecar*'
+    @($Info.Diagnostics | Where-Object Message -Like '*has no runtimeconfig sidecar*') | Should -Not -BeNullOrEmpty
   }
 
   It 'Should not export superseded VCRedist wrapper names' {

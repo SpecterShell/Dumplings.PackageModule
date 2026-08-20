@@ -254,16 +254,16 @@ function Get-DotNetInstallerInfo {
       WritesAppsAndFeaturesEntry   = $false
       AppsAndFeaturesProductCode   = $null
       AppsAndFeaturesInstallerType = $null
-      Warnings                     = [string[]]@(
-        if ($Config.Components.Count -eq 0) { 'No install components were found in the dotNetInstaller configuration.' }
-        foreach ($Component in $Config.Components) {
-          foreach ($Command in $Component.Commands) {
-            if (-not $Command.Command.IsResolved -and $Command.Command.PayloadReference -match '(?i)\.(exe|msi|msp|msu)$') {
-              "The $($Component.Id) $($Command.Mode) command references a payload that was not found in embedded cabinets: $($Command.Command.PayloadReference)"
+      Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@(
+            if ($Config.Components.Count -eq 0) { 'No install components were found in the dotNetInstaller configuration.' }
+            foreach ($Component in $Config.Components) {
+              foreach ($Command in $Component.Commands) {
+                if (-not $Command.Command.IsResolved -and $Command.Command.PayloadReference -match '(?i)\.(exe|msi|msp|msu)$') {
+                  "The $($Component.Id) $($Command.Mode) command references a payload that was not found in embedded cabinets: $($Command.Command.PayloadReference)"
+                }
+              }
             }
-          }
-        }
-      )
+          )) -Source 'DotNetInstaller' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
       Format                       = 'dotNetInstaller'
       FileVersion                  = $Config.FileVersion

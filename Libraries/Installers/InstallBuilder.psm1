@@ -615,7 +615,7 @@ function Get-InstallBuilderInfo {
     $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
     $AppsAndFeaturesWrites = @($RegistryWrites | Where-Object { $_.Key -match '(^|\\)Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall(\\|$)' })
     $HasBuiltInUninstaller = [bool]($Xml.SelectSingleNode('/project/postUninstallerCreationActionList') -or $Xml.SelectSingleNode('/project/preUninstallationActionList'))
-    $Warnings = [System.Collections.Generic.List[string]]::new()
+    $Warnings = [System.Collections.Generic.List[object]]::new()
     $Cookfs = $null
     try {
       $Cookfs = Get-InstallBuilderCookfsInfo -Path $File.FullName
@@ -629,7 +629,7 @@ function Get-InstallBuilderInfo {
       }
     }
     if (-not $AppsAndFeaturesWrites -and $HasBuiltInUninstaller) { $Warnings.Add('InstallBuilder built-in uninstaller configuration is present, but its visible ARP key is not an explicit registrySet action. Validate ARP details in a VM.') }
-    foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add($Warning) }
+    foreach ($Warning in @($RegistryAssociationInfo.Diagnostics)) { $Warnings.Add($Warning) }
     if ($Project.Content -match 'MI_oJ|tcltwofish|installbuilder\.payloadinfo') { $Warnings.Add('The installer contains encrypted-payload markers. Project metadata was recovered, but CookFS payload extraction is unsupported without the project password.') }
     if ($Cookfs -and $Cookfs.HasUnsupportedCompression) { $Warnings.Add('The CookFS payload uses unsupported custom or encrypted compression and cannot be extracted without the project password.') }
     $PayloadFiles = if ($Cookfs) { @(Get-InstallBuilderCookfsLogicalEntry -Entry $Cookfs.Entries) } else { @() }
@@ -660,7 +660,7 @@ function Get-InstallBuilderInfo {
       WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
       AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
-      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallBuilder' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
       ProductCodeEvidence          = if ($ProductCode) { 'InstallBuilder candidate uninstaller-key convention: <shortName-or-fullName> <version>; validate visible ARP key in a VM.' } else { $null }
       SupportedScopes              = $ScopeInfo.SupportedScopes

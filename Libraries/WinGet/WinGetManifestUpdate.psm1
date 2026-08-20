@@ -161,15 +161,10 @@ function Get-WinGetKnownInstallerManifestInfo {
   )
 
   try {
-    $WarningsFor = {
+    $DiagnosticsFor = {
       param($Info)
-      $WarningsProperty = $Info.PSObject.Properties['Warnings']
-      return $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
-    }
-    $NoticesFor = {
-      param($Info)
-      $NoticesProperty = $Info.PSObject.Properties['Notices']
-      return $null -eq $NoticesProperty ? @() : @($NoticesProperty.Value)
+      $DiagnosticsProperty = $Info.PSObject.Properties['Diagnostics']
+      return $null -eq $DiagnosticsProperty ? @() : @($DiagnosticsProperty.Value)
     }
     $InstallerTypeFor = {
       param($Info)
@@ -183,13 +178,12 @@ function Get-WinGetKnownInstallerManifestInfo {
           ParserName            = 'Windows Installer'
           DetectedInstallerType = (& $InstallerTypeFor $Info)
           InputObject           = @($Info)
-          Warnings              = (& $WarningsFor $Info)
-          Notices               = (& $NoticesFor $Info)
+          Diagnostics           = (& $DiagnosticsFor $Info)
         }
       }
       'burn' {
         $Info = Get-BurnInfo -Path $Path
-        return [pscustomobject]@{ ParserName = 'Burn'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
+        return [pscustomobject]@{ ParserName = 'Burn'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Diagnostics = (& $DiagnosticsFor $Info) }
       }
       'nullsoft' {
         $Arguments = @{ Path = $Path }
@@ -197,15 +191,15 @@ function Get-WinGetKnownInstallerManifestInfo {
         if ($Scope -in @('user', 'machine')) { $Arguments.Scope = $Scope }
         if ($PSBoundParameters.ContainsKey('CommandLine')) { $Arguments.CommandLine = $CommandLine }
         $Info = Get-NSISInfo @Arguments
-        return [pscustomobject]@{ ParserName = 'NSIS'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
+        return [pscustomobject]@{ ParserName = 'NSIS'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Diagnostics = (& $DiagnosticsFor $Info) }
       }
       'inno' {
         $Info = Get-InnoInfo -Path $Path
-        return [pscustomobject]@{ ParserName = 'Inno Setup'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
+        return [pscustomobject]@{ ParserName = 'Inno Setup'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Diagnostics = (& $DiagnosticsFor $Info) }
       }
       { $_ -cin @('msix', 'appx') } {
         $Info = Get-MSIXInfo -Path $Path -InstallerTypeHint $InstallerType
-        return [pscustomobject]@{ ParserName = 'MSIX/AppX'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Warnings = (& $WarningsFor $Info); Notices = (& $NoticesFor $Info) }
+        return [pscustomobject]@{ ParserName = 'MSIX/AppX'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Diagnostics = (& $DiagnosticsFor $Info) }
       }
     }
   } catch {
@@ -405,7 +399,7 @@ function Get-WinGetGenericInstallerManifestInfo {
   .PARAMETER Analysis
     A previously computed installer analysis to reuse instead of re-analyzing the file
   .PARAMETER Logger
-    The scriptblock or method used for warnings
+    Logger used for immediate progress messages. Parser diagnostics are returned to the caller.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -423,13 +417,18 @@ function Get-WinGetGenericInstallerManifestInfo {
     $Logger
   )
 
+  $Diagnostics = [System.Collections.Generic.List[object]]::new()
   if (-not $Analysis) {
     try {
       $Analysis = Get-WinGetInstallerAnalysis -Path $Path
     } catch {
-      $Logger.Invoke("Failed to detect the generic EXE installer family: $($_.Exception.Message)", 'Warning')
-      return $null
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.DetectionFailed' -Source 'WinGetManifestUpdate' -Message "Failed to detect the generic EXE installer family: $($_.Exception.Message)" -Kind Incomplete -Areas Detection, Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries, DefaultInstallLocation))
+      return [pscustomobject]@{ ParserName = 'Generic EXE'; InputObject = @(); Diagnostics = $Diagnostics.ToArray() }
     }
+  }
+  $AnalysisDiagnosticProperty = $Analysis.PSObject.Properties['Diagnostics']
+  if ($AnalysisDiagnosticProperty) {
+    foreach ($Diagnostic in @($AnalysisDiagnosticProperty.Value)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } }
   }
 
   $SuccessfulParsers = @($Analysis.ParserResults | Where-Object { $_.Success -and $_.Result })
@@ -442,8 +441,8 @@ function Get-WinGetGenericInstallerManifestInfo {
       }
     } | Sort-Object -Unique)
   if ($SuccessfulFamilies.Count -gt 1) {
-    $Logger.Invoke("Multiple generic EXE parsers produced conflicting installer families: $($SuccessfulFamilies -join ', '). Existing installer fields are preserved.", 'Warning')
-    return $null
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.ConflictingFamilies' -Source 'WinGetManifestUpdate' -Message "Multiple generic EXE parsers produced conflicting installer families: $($SuccessfulFamilies -join ', '). Existing installer fields are preserved." -Kind Mismatch -Areas Detection, Metadata, Installability -AffectedFields InstallerType -Evidence $SuccessfulFamilies))
+    return [pscustomobject]@{ ParserName = 'Generic EXE'; InputObject = @(); Diagnostics = $Diagnostics.ToArray() }
   }
   $SuccessfulParser = $SuccessfulParsers | Select-Object -First 1
   if ($SuccessfulParser) {
@@ -451,20 +450,20 @@ function Get-WinGetGenericInstallerManifestInfo {
     $Metadata = $SuccessfulParser.Result.PSObject.Properties.Name -contains 'Metadata' ? $SuccessfulParser.Result.Metadata : $null
     if ($SuccessfulParser.Name -ceq 'Advanced Installer') {
       if (-not $Metadata) {
-        $Logger.Invoke('Advanced Installer detection did not return parser metadata', 'Warning')
-        return $null
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'AdvancedInstaller.MetadataUnavailable' -Source 'Advanced Installer' -Message 'Advanced Installer detection did not return parser metadata.' -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries, DefaultInstallLocation))
+        return [pscustomobject]@{ ParserName = 'Advanced Installer'; InputObject = @(); Diagnostics = $Diagnostics.ToArray() }
       }
       $SelectionProperty = $Metadata.PSObject.Properties['MsiPayloadSelection']
       $Selection = $null -eq $SelectionProperty ? $null : $SelectionProperty.Value
       if ($Selection -and $Selection.SourceKind -ceq 'Download') {
-        $Logger.Invoke("Advanced Installer selects the online MSI from MainAppURL '$($Selection.MainAppUrl)'; the embedded files do not represent the installer payload", 'Warning')
-        return $null
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'AdvancedInstaller.OnlinePayloadSelected' -Source 'Advanced Installer' -Message "Advanced Installer selects the online MSI from MainAppURL '$($Selection.MainAppUrl)'; the embedded files do not represent the installer payload." -Kind Unsupported -Areas Extraction, Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries -Evidence $Selection))
+        return [pscustomobject]@{ ParserName = 'Advanced Installer'; InputObject = @(); Diagnostics = $Diagnostics.ToArray() }
       }
       $PlatformSelectionProperty = $Metadata.PSObject.Properties['PlatformPayloadSelection']
       $PlatformSelection = $null -eq $PlatformSelectionProperty ? $null : $PlatformSelectionProperty.Value
       if ($PlatformSelection -and $PlatformSelection.LegacyMsiSelection) {
-        $Logger.Invoke('Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems. Existing installed-state fields are preserved until both nested packages are analyzed.', 'Warning')
-        return $null
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'AdvancedInstaller.PlatformPayloadAmbiguous' -Source 'Advanced Installer' -Message 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems. Existing installed-state fields are preserved until both nested packages are analyzed.' -Kind Ambiguous -Areas Metadata, Installability -AffectedFields ProductCode, PackageFamilyName, AppsAndFeaturesEntries -Evidence $PlatformSelection))
+        return [pscustomobject]@{ ParserName = 'Advanced Installer'; InputObject = @(); Diagnostics = $Diagnostics.ToArray() }
       }
       $MsiInfoArguments = @{ Installer = $Metadata }
       if ($Architecture -cin @('x86', 'x64', 'arm64')) { $MsiInfoArguments.Architecture = $Architecture }
@@ -475,13 +474,16 @@ function Get-WinGetGenericInstallerManifestInfo {
       $MsiInfo = $SuccessfulParser.Result.PSObject.Properties.Name -contains 'MsiInfo' ? $SuccessfulParser.Result.MsiInfo : $null
     }
     $ParserOutputs = @($MsiInfo, $Metadata, $SuccessfulParser.Result) | Where-Object { $null -ne $_ }
-    $WarningsProperty = $null -eq $Metadata ? $null : $Metadata.PSObject.Properties['Warnings']
+    foreach ($Source in $ParserOutputs) {
+      $Property = $Source.PSObject.Properties['Diagnostics']
+      if ($Property) { foreach ($Diagnostic in @($Property.Value)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } } }
+    }
     return [pscustomobject]@{
       ParserName      = $SuccessfulParser.Name
       InputObject     = @($ParserOutputs)
       SelectedMsiPath = $null -eq $MsiInfo ? $null : $MsiInfo.SelectedMsiPath
       SelectionMethod = $null -eq $MsiInfo ? $null : $MsiInfo.SelectionMethod
-      Warnings        = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
+      Diagnostics     = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
     }
   }
 
@@ -507,7 +509,7 @@ function Get-WinGetGenericInstallerManifestInfo {
           InputObject     = @($Info.AdvancedUiInfo, $Info)
           SelectedMsiPath = $null
           SelectionMethod = 'AdvancedUiSuiteCatalog'
-          Warnings        = @($Info.Warnings)
+          Diagnostics     = @(Merge-InstallerDiagnostics -Diagnostic @($Diagnostics, $Info.Diagnostics))
         }
       }
 
@@ -518,7 +520,7 @@ function Get-WinGetGenericInstallerManifestInfo {
           InputObject     = @($MsiInfo, $Info)
           SelectedMsiPath = $MsiInfo.SelectedMsiPath
           SelectionMethod = $MsiInfo.SelectionMethod
-          Warnings        = @($Info.Warnings)
+          Diagnostics     = @(Merge-InstallerDiagnostics -Diagnostic @($Diagnostics, $Info.Diagnostics, $MsiInfo.Diagnostics))
         }
       }
 
@@ -528,13 +530,13 @@ function Get-WinGetGenericInstallerManifestInfo {
           InputObject     = @($Info.InstallScriptInfo, $Info)
           SelectedMsiPath = $null
           SelectionMethod = 'InstallScriptMaintenanceStart'
-          Warnings        = @($Info.Warnings)
+          Diagnostics     = @(Merge-InstallerDiagnostics -Diagnostic @($Diagnostics, $Info.Diagnostics, $Info.InstallScriptInfo.Diagnostics))
         }
       }
       throw "The InstallShield '$($Info.Variant)' payload has neither a selected MSI nor supported InstallScript metadata"
     } catch {
-      $Logger.Invoke("InstallShield routing evidence was rejected by its metadata parser: $($_.Exception.Message)", 'Verbose')
-      return $null
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallShield.RoutingRejected' -Source 'InstallShield' -Message "InstallShield structural evidence was confirmed, but its metadata parser could not complete: $($_.Exception.Message)" -Kind Incomplete -Areas Detection, Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries, DefaultInstallLocation))
+      return [pscustomobject]@{ ParserName = 'InstallShield'; InputObject = @(); Diagnostics = $Diagnostics.ToArray() }
     } finally {
       Remove-Item -LiteralPath $TemporaryPath -Recurse -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
     }
@@ -546,18 +548,18 @@ function Get-WinGetGenericInstallerManifestInfo {
   $StrongFailures = @($Rejected | Where-Object { $_.EvidenceKind -ceq 'Structural' -and $_.IsOuterContainer })
   if ($StrongFailures.Count -gt 0 -or $Confirmed.Count -gt 0) {
     $Names = @(@($Confirmed | ForEach-Object Family) + @($StrongFailures | ForEach-Object Family) | Where-Object { $_ } | Sort-Object -Unique)
-    $Errors = @($StrongFailures | ForEach-Object { "$($_.ParserName): $($_.Error)" })
+    $Errors = @($StrongFailures | ForEach-Object { @($_.Diagnostics).Message } | Where-Object { $_ })
     $Detail = $(if ($Errors.Count) { " Parser errors: $($Errors -join '; ')" } else { '' })
-    $Logger.Invoke("A confirmed generic EXE family did not produce usable installer metadata. Families: $($Names -join ',').$Detail", 'Warning')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.ConfirmedFamilyIncomplete' -Source 'WinGetManifestUpdate' -Message "A confirmed generic EXE family did not produce usable installer metadata. Families: $($Names -join ',').$Detail" -Kind Incomplete -Areas Detection, Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries, DefaultInstallLocation -Evidence $Names))
   } elseif ($Rejected.Count -gt 0) {
-    $Details = @($Rejected | ForEach-Object { "$($_.Family): $($_.Error)" })
-    $Logger.Invoke("Generic EXE routing hints were rejected by their parsers: $($Details -join '; ')", 'Verbose')
+    $Details = @($Rejected | ForEach-Object { "$($_.Family): $(@($_.Diagnostics).Message -join '; ')" })
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.RoutingHintsRejected' -Source 'WinGetManifestUpdate' -Message "Generic EXE routing hints were rejected by their parsers: $($Details -join '; ')" -Kind Fallback -Areas Detection -Evidence $Rejected))
   } else {
     $HintNames = $null -eq $RoutingProperty ? @() : @($RoutingProperty.Value | Select-Object -ExpandProperty Family -Unique)
     $Detail = $HintNames.Count ? " Remaining routing hints: $($HintNames -join ',')." : ''
-    $Logger.Invoke("No supported generic EXE parser produced installer metadata.$Detail", 'Verbose')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.NoParserMetadata' -Source 'WinGetManifestUpdate' -Message "No supported generic EXE parser produced installer metadata.$Detail" -Kind Fallback -Areas Detection))
   }
-  return $null
+  return [pscustomobject]@{ ParserName = 'Generic EXE'; InputObject = @(); Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray()) }
 }
 
 function Set-WinGetInstallerManifestMetadata {
@@ -574,8 +576,10 @@ function Set-WinGetInstallerManifestMetadata {
     Normalized parser metadata
   .PARAMETER ParserName
     The parser name used in diagnostics
-  .PARAMETER Logger
-    The scriptblock or method used for warnings
+  .PARAMETER DiagnosticCollection
+    Manifest-wide buffer that receives resolved diagnostics after each field update attempt.
+  .PARAMETER ConfirmedFamily
+    Indicates that structural evidence confirmed the parser family.
   #>
   param (
     [Parameter(Mandatory)][System.Collections.IDictionary]$Installer,
@@ -583,13 +587,15 @@ function Set-WinGetInstallerManifestMetadata {
     [Parameter(Mandatory)][System.Collections.IDictionary]$InstallerEntry,
     [Parameter(Mandatory)][System.Collections.IDictionary]$Metadata,
     [Parameter(Mandatory)][string]$ParserName,
-    [Parameter(Mandatory)]$Logger
+    [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$DiagnosticCollection,
+    [switch]$ConfirmedFamily
   )
 
   $ReportFailure = {
     param([string]$Field)
     $Message = "$ParserName did not return a value for existing installer field '$Field'"
-    $Logger.Invoke($Message, 'Warning')
+    $Diagnostic = New-InstallerDiagnostic -Id "$($ParserName -replace '[^A-Za-z0-9]+', '.').Missing.$(($Field -replace '[^A-Za-z0-9]+', '.').Trim('.'))" -Source $ParserName -Message $Message -Kind Incomplete -Areas Metadata -AffectedFields $Field
+    Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily:$ConfirmedFamily
   }
   $HasScalarValue = { param($Value) $null -ne $Value -and -not ($Value -is [string] -and [string]::IsNullOrWhiteSpace($Value)) }
   $UnresolvedFields = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -604,7 +610,8 @@ function Set-WinGetInstallerManifestMetadata {
     # authoritatively replace ARP metadata owned by a nested payload or custom
     # registration. Preserve the existing fields and report the unresolved
     # evidence as a warning instead of failing the update.
-    $Logger.Invoke($Message, 'Warning')
+    $Diagnostic = New-InstallerDiagnostic -Id "$($ParserName -replace '[^A-Za-z0-9]+', '.').VisibleArpUnavailable" -Source $ParserName -Message $Message -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries
+    Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily:$ConfirmedFamily
     return
   }
 
@@ -667,7 +674,8 @@ function Set-WinGetInstallerManifestMetadata {
     })
   if ($MatchingEntries.Count -eq 0) {
     $Message = "$ParserName metadata did not match any existing AppsAndFeaturesEntries item"
-    $Logger.Invoke($Message, 'Warning')
+    $Diagnostic = New-InstallerDiagnostic -Id "$($ParserName -replace '[^A-Za-z0-9]+', '.').AppsAndFeaturesEntryUnmatched" -Source $ParserName -Message $Message -Kind Mismatch -Areas Metadata -AffectedFields AppsAndFeaturesEntries
+    Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily:$ConfirmedFamily
     return
   }
 
@@ -814,42 +822,67 @@ function Get-WinGetInstallerReleaseDate {
   return $Parsed.ToUniversalTime().ToString('yyyy-MM-dd')
 }
 
-function New-WinGetInstallerDiagnosticLogger {
+function Get-WinGetManifestUpdateAffectedField {
   <#
   .SYNOPSIS
-    Create a manifest-update logger that suppresses duplicate installer diagnostics.
-  .DESCRIPTION
-    One physical installer may back several effective WinGet entries, such as
-    user/machine scopes or architecture variants. Those entries still require
-    independent parsing, but identical parser warnings and notices should be
-    recorded only once in the task message. Verbose progress remains unfiltered
-    so each installer entry can still be diagnosed from the automation log.
-  .PARAMETER Logger
-    The original task logger whose Invoke method accepts message and level.
-  .OUTPUTS
-    A closure with the same two-argument logger contract.
+    Determine which parser-managed fields are relevant to one partial manifest update.
+  .PARAMETER Installer
+    Effective installer entry being refreshed.
+  .PARAMETER InstallerEntry
+    Task-provided overrides that take precedence over parser evidence.
   #>
-  [OutputType([scriptblock])]
+  [OutputType([string[]])]
   param (
-    [Parameter(Mandatory, HelpMessage = 'The original task logger')]
-    [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
-    $Logger
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Installer,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$InstallerEntry
   )
 
-  $ReportedDiagnostics = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-  $OriginalLogger = $Logger
-  return {
-    param($Message, $Level)
-
-    $LevelName = [string]$Level
-    if ($LevelName -cin @('Warning', 'Info')) {
-      # Include severity in the identity so an informational notice promoted to
-      # a warning is not hidden by an earlier lower-severity occurrence.
-      $Identity = "${LevelName}`0${Message}"
-      if (-not $ReportedDiagnostics.Add($Identity)) { return }
+  $Fields = [System.Collections.Generic.List[string]]::new()
+  foreach ($Field in @('ProductCode', 'SignatureSha256', 'PackageFamilyName', 'MinimumOSVersion', 'Platform', 'Capabilities', 'RestrictedCapabilities', 'AppsAndFeaturesEntries')) {
+    if ($Installer.Contains($Field) -and -not $InstallerEntry.Contains($Field)) { $Fields.Add($Field) }
+  }
+  if ($Installer.Contains('AppsAndFeaturesEntries') -and -not $InstallerEntry.Contains('AppsAndFeaturesEntries')) {
+    foreach ($Field in @('DisplayName', 'DisplayVersion', 'Publisher', 'UpgradeCode', 'AppsAndFeaturesInstallerType')) { $Fields.Add($Field) }
+  }
+  if ($Installer.Contains('InstallationMetadata') -and $Installer.InstallationMetadata -is [System.Collections.IDictionary] -and
+    $Installer.InstallationMetadata.Contains('DefaultInstallLocation')) {
+    $OverridesLocation = $InstallerEntry.Contains('InstallationMetadata') -and $InstallerEntry.InstallationMetadata -is [System.Collections.IDictionary] -and
+    $InstallerEntry.InstallationMetadata.Contains('DefaultInstallLocation')
+    if (-not $OverridesLocation) {
+      $Fields.Add('DefaultInstallLocation')
+      $Fields.Add('InstallationMetadata.DefaultInstallLocation')
     }
-    $OriginalLogger.Invoke($Message, $Level)
-  }.GetNewClosure()
+  }
+  return [string[]]@($Fields | Sort-Object -Unique)
+}
+
+function Add-WinGetManifestUpdateDiagnostic {
+  <#
+  .SYNOPSIS
+    Resolve diagnostics for one installer entry and append them to a manifest-wide buffer.
+  .PARAMETER Collection
+    Shared collection flushed after all installer entries are processed.
+  .PARAMETER Diagnostic
+    Context-neutral or previously resolved diagnostics.
+  .PARAMETER Installer
+    Effective installer entry being refreshed.
+  .PARAMETER InstallerEntry
+    Task-provided overrides that take precedence over parser evidence.
+  .PARAMETER ConfirmedFamily
+    Indicates that the declared installer family was structurally confirmed.
+  #>
+  param (
+    [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Collection,
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Diagnostic,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Installer,
+    [Parameter(Mandatory)][System.Collections.IDictionary]$InstallerEntry,
+    [switch]$ConfirmedFamily
+  )
+
+  $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
+  foreach ($Item in @(Resolve-InstallerDiagnostics -Diagnostic $Diagnostic -Scenario ManifestUpdate -AffectedField $AffectedFields -ConfirmedFamily:$ConfirmedFamily)) {
+    $Collection.Add($Item)
+  }
 }
 
 function Update-WinGetInstallerManifestInstallerMetadata {
@@ -868,6 +901,8 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     The installers that have updated for reference (e.g., hashes)
   .PARAMETER SkipInstallerAnalysis
     Skip nested payload extraction, installer-family detection, and static metadata parsers
+  .PARAMETER DiagnosticCollection
+    Manifest-wide resolved installer diagnostic buffer.
   #>
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The installer to update')]
@@ -882,10 +917,14 @@ function Update-WinGetInstallerManifestInstallerMetadata {
     [System.Collections.IDictionary]$InstallerFiles,
     [Parameter(HelpMessage = 'Skip nested payload extraction, installer-family detection, and static metadata parsers')]
     [switch]$SkipInstallerAnalysis,
+    [Parameter(DontShow)]
+    [System.Collections.Generic.List[object]]$DiagnosticCollection = [System.Collections.Generic.List[object]]::new(),
     [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
+
+  $OwnDiagnosticCollection = -not $PSBoundParameters.ContainsKey('DiagnosticCollection')
 
   # Replace the whitespace in the installer URL with %20 to make it clickable
   # Keep the original URL for reference in downloading
@@ -983,9 +1022,15 @@ function Update-WinGetInstallerManifestInstallerMetadata {
         $Analysis = try { Get-WinGetInstallerAnalysis -Path $EffectiveInstallerPath } catch { $null }
         $FormatEvidence = Get-WinGetDeclaredInstallerFormatEvidence -InstallerType $EffectiveInstallerType -Analysis $Analysis
         if ($FormatEvidence.Status -ceq 'NotMatched') {
-          throw "The manifest-declared '$EffectiveInstallerType' installer was detected as '$($FormatEvidence.DetectedInstallerType)'. $($FormatEvidence.Evidence) Parser error: $($ParserFailure.Exception.Message)"
+          $Message = "The manifest-declared '$EffectiveInstallerType' installer was detected as '$($FormatEvidence.DetectedInstallerType)'. $($FormatEvidence.Evidence) Parser error: $($ParserFailure.Exception.Message)"
+          $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.DeclaredFamilyMismatch' -Source 'WinGetManifestUpdate' -Message $Message -Kind Mismatch -Areas Detection -AffectedFields InstallerType -Evidence $FormatEvidence
+          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
+          $null = Write-InstallerDiagnostics -Diagnostic @($DiagnosticCollection | Where-Object Id -CEQ $Diagnostic.Id) -Scenario ManifestUpdate -Logger $Logger
+          throw $Message
         }
-        $Logger.Invoke("$($ParserFailure.Exception.Message) $($FormatEvidence.Evidence) Existing installer fields are preserved.", 'Warning')
+        $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
+        $Diagnostic = New-InstallerDiagnostic -Id "$($EffectiveInstallerType).ParserIncomplete" -Source 'WinGetManifestUpdate' -Message "$($ParserFailure.Exception.Message) $($FormatEvidence.Evidence) Existing installer fields are preserved." -Kind Incomplete -Areas Detection, Metadata -AffectedFields $AffectedFields
+        Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily:($FormatEvidence.Status -ceq 'Matched')
       }
 
       if ($ParserInfo) {
@@ -994,23 +1039,19 @@ function Update-WinGetInstallerManifestInstallerMetadata {
           $Compatible = Test-WinGetInstallerTypeCompatibility -DeclaredInstallerType $EffectiveInstallerType -DetectedInstallerType $DetectedType
           $ExactPackageTypeRequired = $EffectiveInstallerType -cin @('msix', 'appx')
           if (-not $Compatible -or ($ExactPackageTypeRequired -and $DetectedType -cne $EffectiveInstallerType)) {
-            throw "The manifest-declared '$EffectiveInstallerType' installer was detected as '$DetectedType'"
+            $Message = "The manifest-declared '$EffectiveInstallerType' installer was detected as '$DetectedType'"
+            $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.DeclaredFamilyMismatch' -Source $ParserInfo.ParserName -Message $Message -Kind Mismatch -Areas Detection -AffectedFields InstallerType -Evidence ([ordered]@{ Declared = $EffectiveInstallerType; Detected = $DetectedType })
+            Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
+            $null = Write-InstallerDiagnostics -Diagnostic @($DiagnosticCollection | Where-Object Id -CEQ $Diagnostic.Id) -Scenario ManifestUpdate -Logger $Logger
+            throw $Message
           }
           if ($DetectedType -cne $EffectiveInstallerType -and $EffectiveInstallerType -cin @('msi', 'wix')) {
-            $Logger.Invoke("The Windows Installer parser identified '$DetectedType' while the manifest declares '$EffectiveInstallerType'; the declared type is retained", 'Warning')
+            $Diagnostic = New-InstallerDiagnostic -Id 'WindowsInstaller.DeclaredBuilderRetained' -Source 'Windows Installer' -Message "The Windows Installer parser identified '$DetectedType' while the manifest declares '$EffectiveInstallerType'; the declared type is retained." -Kind Mismatch -Areas Metadata -AffectedFields InstallerType -Evidence ([ordered]@{ Declared = $EffectiveInstallerType; Detected = $DetectedType })
+            Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
           }
         }
 
-        $WarningsProperty = $ParserInfo.PSObject.Properties['Warnings']
-        $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
-        foreach ($Warning in @($ParserWarnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
-          $Logger.Invoke("$($ParserInfo.ParserName): $Warning", 'Warning')
-        }
-        $NoticesProperty = $ParserInfo.PSObject.Properties['Notices']
-        $ParserNotices = $null -eq $NoticesProperty ? @() : @($NoticesProperty.Value)
-        foreach ($Notice in @($ParserNotices | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
-          $Logger.Invoke("$($ParserInfo.ParserName): $Notice", 'Info')
-        }
+        Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($ParserInfo.Diagnostics) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
 
         # Apply each resolved value independently. Missing or explicitly
         # unresolved parser fields warn and retain their existing manifest
@@ -1018,7 +1059,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
         $InstallerBackup = $Installer | Copy-Object
         try {
           $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
-          Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -Logger $Logger
+          Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -DiagnosticCollection $DiagnosticCollection -ConfirmedFamily
         } catch {
           foreach ($Key in @($Installer.Keys)) {
             if ($Key -ceq 'InstallerSha256') { continue }
@@ -1028,7 +1069,9 @@ function Update-WinGetInstallerManifestInstallerMetadata {
             if ($Key -ceq 'InstallerSha256' -or $Installer.Contains($Key)) { continue }
             $Installer[$Key] = $InstallerBackup[$Key]
           }
-          $Logger.Invoke("Failed to apply $($ParserInfo.ParserName) metadata: $($_.Exception.Message); existing fields are preserved", 'Warning')
+          $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
+          $Diagnostic = New-InstallerDiagnostic -Id "$($ParserInfo.ParserName -replace '[^A-Za-z0-9]+', '.').MetadataApplicationFailed" -Source $ParserInfo.ParserName -Message "Failed to apply $($ParserInfo.ParserName) metadata: $($_.Exception.Message); existing fields are preserved." -Kind Incomplete -Areas Metadata -AffectedFields $AffectedFields
+          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry -ConfirmedFamily
         }
       }
     } elseif ($EffectiveInstallerType -ceq 'exe' -and -not $SkipInstallerAnalysis) {
@@ -1042,19 +1085,19 @@ function Update-WinGetInstallerManifestInstallerMetadata {
         }
         $ParserInfo = Get-WinGetGenericInstallerManifestInfo @ParserInfoArguments
         if ($ParserInfo) {
-          $WarningsProperty = $ParserInfo.PSObject.Properties['Warnings']
-          $ParserWarnings = $null -eq $WarningsProperty ? @() : @($WarningsProperty.Value)
-          foreach ($Warning in @($ParserWarnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)) {
-            $Logger.Invoke("$($ParserInfo.ParserName): $Warning", 'Warning')
-          }
-          if (-not [string]::IsNullOrWhiteSpace([string]$ParserInfo.SelectedMsiPath)) {
+          Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($ParserInfo.Diagnostics) -Installer $Installer -InstallerEntry $InstallerEntry
+          if (@($ParserInfo.InputObject).Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$ParserInfo.SelectedMsiPath)) {
             $Logger.Invoke("$($ParserInfo.ParserName) selected MSI '$($ParserInfo.SelectedMsiPath)' using '$($ParserInfo.SelectionMethod)'", 'Verbose')
           }
-          $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
-          Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -Logger $Logger
+          if (@($ParserInfo.InputObject).Count -gt 0) {
+            $Metadata = ConvertTo-WinGetInstallerManifestMetadata -InputObject $ParserInfo.InputObject -InstallerType $EffectiveInstallerType -OldInstaller $OldInstaller
+            Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $InstallerEntry -Metadata $Metadata -ParserName $ParserInfo.ParserName -DiagnosticCollection $DiagnosticCollection
+          }
         }
       } catch {
-        $Logger.Invoke("Failed to update generic EXE metadata: $($_.Exception.Message)", 'Warning')
+        $AffectedFields = Get-WinGetManifestUpdateAffectedField -Installer $Installer -InstallerEntry $InstallerEntry
+        $Diagnostic = New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.MetadataUpdateFailed' -Source 'WinGetManifestUpdate' -Message "Failed to update generic EXE metadata: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata -AffectedFields $AffectedFields
+        Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($Diagnostic) -Installer $Installer -InstallerEntry $InstallerEntry
       }
     }
   }
@@ -1078,6 +1121,10 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   if ($Installer.Contains('Commands')) { $Installer.Commands = @($Installer.Commands | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
   if ($Installer.Contains('Protocols')) { $Installer.Protocols = @($Installer.Protocols | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
   if ($Installer.Contains('FileExtensions')) { $Installer.FileExtensions = @($Installer.FileExtensions | ToLower | NoWhitespace | UniqueItems | Sort-Object -Culture $Script:Culture) }
+
+  if ($OwnDiagnosticCollection) {
+    $null = Write-InstallerDiagnostics -Diagnostic $DiagnosticCollection.ToArray() -Scenario ManifestUpdate -Logger $Logger
+  }
 
   return $Installer
 }
@@ -1109,9 +1156,10 @@ function Update-WinGetInstallerManifestInstallers {
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
-  # Scope and architecture entries can repeat source-backed parser warnings.
-  # Share one diagnostic set across this complete manifest update.
-  $InstallerLogger = New-WinGetInstallerDiagnosticLogger -Logger $Logger
+  # Parser diagnostics are resolved per effective entry, then deduplicated and
+  # rendered once after the complete manifest update.
+  $InstallerLogger = $Logger
+  $InstallerDiagnostics = [System.Collections.Generic.List[object]]::new()
   $iteration = 0
   $Installers = @()
   foreach ($OldInstaller in $OldInstallers) {
@@ -1195,7 +1243,7 @@ function Update-WinGetInstallerManifestInstallers {
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $InstallerLogger
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -DiagnosticCollection $InstallerDiagnostics -Logger $InstallerLogger
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -1206,6 +1254,8 @@ function Update-WinGetInstallerManifestInstallers {
     Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
   $Script:WinGetTempInstallerFiles.Clear()
+
+  $null = Write-InstallerDiagnostics -Diagnostic $InstallerDiagnostics.ToArray() -Scenario ManifestUpdate -Logger $Logger
 
   return $Installers
 }
@@ -1237,9 +1287,8 @@ function Set-WinGetInstallerManifestInstallers {
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
 
-  # Replacement mode has the same duplicate-diagnostic behavior as matching
-  # mode when multiple authored entries point to equivalent parser evidence.
-  $InstallerLogger = New-WinGetInstallerDiagnosticLogger -Logger $Logger
+  $InstallerLogger = $Logger
+  $InstallerDiagnostics = [System.Collections.Generic.List[object]]::new()
   $iteration = 0
   $Installers = @()
   foreach ($InstallerEntry in $InstallerEntries) {
@@ -1310,7 +1359,7 @@ function Set-WinGetInstallerManifestInstallers {
       }
     }
 
-    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $InstallerLogger
+    $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Installers $Installers -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -DiagnosticCollection $InstallerDiagnostics -Logger $InstallerLogger
 
     # Add the updated installer to the new installers array
     $Installers += $Installer
@@ -1321,6 +1370,8 @@ function Set-WinGetInstallerManifestInstallers {
     Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
   }
   $Script:WinGetTempInstallerFiles.Clear()
+
+  $null = Write-InstallerDiagnostics -Diagnostic $InstallerDiagnostics.ToArray() -Scenario ManifestUpdate -Logger $Logger
 
   return $Installers
 }

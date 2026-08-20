@@ -46,7 +46,7 @@ $Script:TauriBundleMarkerPrefix = '__TAURI_BUNDLE_TYPE_VAR_'
 
 # Compile the bounded record scanner once. Installer infrastructure has already
 # been loaded by PackageModule's deterministic module order.
-  $TauriScannerSource = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets', 'Source', 'Tauri', 'TauriExecutableScanner.cs'
+$TauriScannerSource = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets', 'Source', 'Tauri', 'TauriExecutableScanner.cs'
 $null = Import-InstallerManagedSource -Path $TauriScannerSource -TypeName 'Dumplings.Tauri.TauriExecutableScanner'
 
 function ConvertTo-TauriPeSectionArray {
@@ -322,7 +322,7 @@ function Get-TauriAssetCatalog {
   $Maps = [Collections.Generic.List[object]]::new()
   $AuxiliaryMaps = [Collections.Generic.List[object]]::new()
   $Assets = [Collections.Generic.List[object]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $MeasuredExpandedBytes = 0L
 
   foreach ($Run in $Runs) {
@@ -434,7 +434,7 @@ function Get-TauriAssetCatalog {
     TotalExpandedBytes   = if ($Assets.Count -gt 0 -and -not ($Assets.ExpandedSize -contains $null)) { [long](($Assets | Measure-Object ExpandedSize -Sum).Sum ?? 0) } else { $null }
     CanExpand            = $CanExpand
     CandidateRecordCount = $CandidateRecords.Count
-    Warnings             = $Warnings.ToArray()
+    Diagnostics          = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'Tauri' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -486,9 +486,9 @@ function Get-TauriExecutableInfoInternal {
     throw 'The PE does not contain a supported generated Tauri asset map or sufficient framework marker evidence.'
   }
 
-  $Warnings = [Collections.Generic.List[string]]::new()
-  $Notices = [Collections.Generic.List[string]]::new()
-  foreach ($Warning in $Catalog.Warnings) { $Warnings.Add($Warning) }
+  $Warnings = [Collections.Generic.List[object]]::new()
+  $InformationMessages = [Collections.Generic.List[string]]::new()
+  foreach ($Warning in $Catalog.Diagnostics) { $Warnings.Add($Warning) }
   if ($Catalog.Maps.Count -eq 0) {
     $Warnings.Add('Tauri framework markers were found, but no standard generated embedded asset map was recovered. The application may use a custom or URL-backed asset provider.')
   }
@@ -507,7 +507,7 @@ function Get-TauriExecutableInfoInternal {
   } else { $null }
   $DistinctBundleValues = @($BundleMarkers.Value | Select-Object -Unique)
   if ($DistinctBundleValues.Count -gt 1) {
-    $Notices.Add("Additional Tauri bundle tokens differ from the earliest patched token at 0x$($BundleMarker.Offset.ToString('X')); the earliest token is authoritative for this evidence.")
+    $InformationMessages.Add("Additional Tauri bundle tokens differ from the earliest patched token at 0x$($BundleMarker.Offset.ToString('X')); the earliest token is authoritative for this evidence.")
   }
 
   $CandidateData = @([Dumplings.Tauri.TauriExecutableScanner]::FindIdentifierCandidates(
@@ -519,7 +519,7 @@ function Get-TauriExecutableInfoInternal {
       [pscustomobject]@{ Value = $_.Value; Offset = [long]$_.Offset; Confidence = 'low'; Reason = 'Tauri ACL-shaped string in read-only PE data; inclusion does not prove that the permission is granted.' }
     })
   if ($PackageIdentifierCandidates.Count -gt 0 -or $AclPermissionCandidates.Count -gt 0) {
-    $Notices.Add('Identifier and ACL strings are non-authoritative candidates because optimized Rust binaries do not preserve their original configuration context.')
+    $InformationMessages.Add('Identifier and ACL strings are non-authoritative candidates because optimized Rust binaries do not preserve their original configuration context.')
   }
 
   # VERSIONINFO is the authoritative source for the application identity strings
@@ -560,8 +560,8 @@ function Get-TauriExecutableInfoInternal {
     TauriMarkerEvidence         = $Markers
     PackageIdentifierCandidates = $PackageIdentifierCandidates
     AclPermissionCandidates     = $AclPermissionCandidates
-    Notices                     = $Notices.ToArray()
-    Warnings                    = $Warnings.ToArray()
+
+    Diagnostics                 = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'Tauri' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @($InformationMessages.ToArray()) -Source 'Tauri' -Kind Information -Areas Metadata)))
     UnresolvedFields            = $UnresolvedFields.ToArray()
     ParserVersionInfo           = [pscustomobject]@{
       Format       = 'Tauri generated EmbeddedAssets PHF map'

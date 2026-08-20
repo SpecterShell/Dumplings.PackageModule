@@ -645,7 +645,10 @@ function Export-InstallShieldDecodedFile {
   $Succeeded = $false
   try {
     if ($HasType2Or4) {
-      Import-InstallerInfrastructure
+      # The GPL parser submodule can load the mirrored common infrastructure first. Compile the
+      # PackageModule-only transform by its own sentinel instead of relying on BinaryIO's sentinel.
+      $TransformSource = Join-Path $PSScriptRoot '..\..\Assets\Source\InstallerInfrastructure\InstallShieldTransform.cs'
+      $null = Import-InstallerManagedSource -Path $TransformSource -TypeName 'Dumplings.InstallerInfrastructure.InstallShieldDecodedStream'
       # Type 4 uses 1024-byte encoded blocks. Type 2 applies one transform over
       # the complete payload, matching the reference extractor's second pass.
       $BlockSize = $HasType4 ? 1024L : [long]$Attribute.FileLength
@@ -1504,7 +1507,7 @@ function Expand-InstallShieldCabinetSupport {
     Shortcuts         = [object[]]$Shortcuts.ToArray()
     ExtractedFiles    = [string[]]$ExtractedFiles.ToArray()
     ExpandedBytes     = $ExpandedBytes
-    Warnings          = [string[]]$Warnings.ToArray()
+    Diagnostics          = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1851,7 +1854,7 @@ function Get-InstallShieldMsiPayloadSelection {
     SelectedMsiPath         = $null -eq $Selected ? $null : $Selected.RelativePath
     SelectedMsiResolvedPath = $null -eq $Selected ? $null : $Selected.File.FullName
     Configuration           = $Configuration
-    Warnings                = @($Warnings)
+    Diagnostics                = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Warnings)) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1907,7 +1910,12 @@ function Get-InstallShieldExternalMediaSelection {
   } catch {
     $Selection = Get-InstallShieldMsiPayloadSelection -ExtractedPath $ExtractedPath -MsiFile ([IO.FileInfo[]]@()) `
       -SetupIniFile $SetupIniFile -SelectionRoot $MediaRoot
-    $Selection.Warnings = [string[]]@($Selection.Warnings + "Setup.ini selected an unsafe external package path '$ConfiguredPath': $($_.Exception.Message)")
+    $Selection.Diagnostics = @(
+      Merge-InstallerDiagnostics -Diagnostic @(
+        $Selection.Diagnostics
+        New-InstallerDiagnostic -Id 'InstallShield.MsiPayload.UnsafeConfiguredPath' -Source 'InstallShield' -Message "Setup.ini selected an unsafe external package path '$ConfiguredPath': $($_.Exception.Message)" -Kind Invalid -Areas Extraction -AffectedFields NestedInstallerFiles
+      )
+    )
     return $Selection
   }
 
@@ -2084,7 +2092,7 @@ function Get-InstallShieldMsiInfo {
         WritesAppsAndFeaturesEntry          = $MsiInfo.WritesAppsAndFeaturesEntry
         AppsAndFeaturesProductCode          = $MsiInfo.AppsAndFeaturesProductCode
         AppsAndFeaturesInstallerType        = $MsiInfo.AppsAndFeaturesInstallerType
-        Warnings                            = [string[]]@($MsiInfo.Warnings)
+        Diagnostics                            = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@($MsiInfo.Diagnostics)) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
         UnresolvedFields                    = [string[]]@($MsiInfo.UnresolvedFields)
         Name                                = $MsiFile.Name
         SelectedMsiPath                     = $Installer.MsiPayloadSelection.SelectedMsiPath ?? [System.IO.Path]::GetRelativePath($Installer.ExtractedPath, $MsiFile.FullName)

@@ -272,7 +272,7 @@ Describe 'Kachina real indexed payload' {
     $Info.SystemEffects.CreatesUpdater | Should -BeTrue
     $Info.SystemEffects.CreatesUninstaller | Should -BeTrue
     ($Info.RegistryWrites | Where-Object Name -EQ 'EstimatedSize').Value | Should -BeGreaterThan 0
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
   It 'catalogues appended runtime installers that are omitted from the payload index' {
@@ -359,7 +359,7 @@ Describe 'Kachina analyzer integration' {
 
   It 'provides complete conservative authoring suggestions' {
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/AkashaNavigator.Install.1.4.0.exe' -InstallerPath $Script:Akasha -Architecture x64
-    $Suggestion.BlockingIssues | Should -BeNullOrEmpty
+    $Suggestion.HasBlockingDiagnostics | Should -BeFalse
     $Suggestion.Installers[0].ProductCode | Should -Be 'Akasha Navigator'
     $Suggestion.Installers[0].Scope | Should -Be 'machine'
     $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe # Kachina'

@@ -35,9 +35,9 @@ Describe 'Inno bridge' {
     $Info.PSObject.Properties.Name[0..13] | Should -Be @(
       'Path', 'InstallerType', 'ProductCode', 'UpgradeCode', 'DisplayName', 'DisplayVersion',
       'Publisher', 'Scope', 'DefaultInstallLocation', 'WritesAppsAndFeaturesEntry',
-      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Warnings', 'UnresolvedFields'
+      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Diagnostics', 'UnresolvedFields'
     )
-    $Info.Warnings.GetType() | Should -Be ([string[]])
+    $Info.Diagnostics.GetType() | Should -Be ([object[]])
     $Info.UnresolvedFields.GetType() | Should -Be ([string[]])
     $Info.ProductCode | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
     $Info.AppId | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}'

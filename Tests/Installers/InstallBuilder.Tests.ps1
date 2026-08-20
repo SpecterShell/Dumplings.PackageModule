@@ -199,7 +199,7 @@ Describe 'InstallBuilder static parser' {
     try {
       $Info = Get-InstallBuilderInfo -Path $Fixture
       $Info.CookfsInfo.HasUnsupportedCompression | Should -BeTrue
-      $Info.Warnings | Should -Contain 'The CookFS payload uses unsupported custom or encrypted compression and cannot be extracted without the project password.'
+      $Info.Diagnostics.Message | Should -Contain 'The CookFS payload uses unsupported custom or encrypted compression and cannot be extracted without the project password.'
       { Expand-InstallBuilderInstaller -Path $Fixture -DestinationPath $Destination -Name 'app.exe' -CollisionAction Rename } | Should -Throw '*unsupported custom or encrypted compression*'
       Test-Path -LiteralPath (Join-Path $Destination 'app.exe') | Should -BeFalse
     } finally {

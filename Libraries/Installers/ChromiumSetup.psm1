@@ -153,10 +153,10 @@ function Get-ChromiumSetupInfoFromContext {
   foreach ($Resource in $Resources) {
     $ResourceInfo.Add([pscustomobject]@{ Type = $Resource.Type; Name = $Resource.Name; Id = $Resource.Id; Offset = $Resource.Offset; Size = $Resource.Size })
   }
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   if ($OfflineManifestError) { $Warnings.Add("The tagged Chromium payload could not be checked for an offline manifest: $OfflineManifestError") }
   if ($NestedSetupError) { $Warnings.Add("The nested Chromium setup.exe could not be inspected: $NestedSetupError") }
-  if ($NestedSetupInfo) { foreach ($Warning in $NestedSetupInfo.Warnings) { $Warnings.Add($Warning) } }
+  if ($NestedSetupInfo) { foreach ($Warning in $NestedSetupInfo.Diagnostics) { $Warnings.Add($Warning) } }
   if ($IsOnlineBootstrapper) { $Warnings.Add("This setup is a tagged online bootstrapper. Outer version '$($VersionInfo.ProductVersion)' belongs to the updater and is not target-application version evidence; final version, ARP, and switch behavior require target-package evidence.") }
   if ($Variant -eq 'Omaha' -and -not $OfflineManifest) { $Warnings.Add('Omaha executes the first EXE in its decoded TAR payload. Expand and analyze that file before composing nested installer switches.') }
   if ($Variant -eq 'Omaha' -and -not $Tag.IsTagged) { $Warnings.Add('This is an untagged Omaha runtime installer. Its /install runtime tag controls user versus machine scope; do not substitute Chromium Updater --system switches.') }
@@ -176,7 +176,7 @@ function Get-ChromiumSetupInfoFromContext {
     WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
     AppsAndFeaturesProductCode   = $null
     AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
-    Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+    Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'ChromiumSetup' -Kind Incomplete -Areas Metadata))
     # Chromium setup variants do not expose one stable source-backed ARP identity contract across
     # vendors and channels. Keep an authored ProductCode unresolved so update processing preserves it.
     UnresolvedFields             = [string[]]@(

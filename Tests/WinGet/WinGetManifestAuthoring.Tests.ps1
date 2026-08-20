@@ -53,8 +53,7 @@ BeforeAll {
       RoutingHints       = @()
       RejectedCandidates = @()
       PortableEvidence   = $null
-      WrapperWarnings    = @()
-      BlockingIssues     = @()
+      Diagnostics        = @()
       SuggestedNextSteps = @()
     }
   }
@@ -218,7 +217,7 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     }
 
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath
-    $Suggestion.BlockingIssues | Should -BeNullOrEmpty
+    $Suggestion.HasBlockingDiagnostics | Should -BeFalse
     $Suggestion.Installers[0]['InstallerType'] | Should -Be $Expected
     $Suggestion.Installers[0].Contains('InstallerSwitches') | Should -BeFalse
     $Suggestion.Installers[0].Contains('InstallModes') | Should -BeFalse
@@ -253,7 +252,8 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
       -Override ([ordered]@{ ProductCode = 'Override.Product'; UnsupportedOSArchitectures = @('arm64') })
     $Suggestion.Installers[0]['ProductCode'] | Should -Be 'Override.Product'
     $Suggestion.Installers[0].Contains('UnsupportedOSArchitectures') | Should -BeFalse
-    $Suggestion.BlockingIssues -join "`n" | Should -Match 'UnsupportedOSArchitectures'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.UnsupportedOSArchitecturesProhibited').Message | Should -Match 'UnsupportedOSArchitectures'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'requires explicit architecture when evidence is ambiguous' {
@@ -261,7 +261,8 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
       New-AuthoringAnalyzerResult -Architecture $null -Extra @{ SupportedArchitectures = @('x86', 'x64') }
     }
     $Blocked = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath
-    $Blocked.BlockingIssues -join "`n" | Should -Match 'concrete.*architecture'
+    ($Blocked.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.ArchitectureRequired').Message | Should -Match 'concrete.*architecture'
+    $Blocked.HasBlockingDiagnostics | Should -BeTrue
 
     $Resolved = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath -Architecture x86, x64
     @($Resolved.Installers.Architecture) | Should -Be @('x86', 'x64')
@@ -288,14 +289,17 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     $Entry['Dependencies']['PackageDependencies'][0]['PackageIdentifier'] | Should -Be 'Microsoft.WindowsAppRuntime.1.7'
   }
 
-  It 'preserves analyzer hard blocking issues' {
+  It 'preserves analyzer blocking diagnostics' {
     Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
       $Result = New-AuthoringAnalyzerResult -FileType MSIXAppX -InstallerType msix
-      $Result.BlockingIssues = @('Reject: package signature is not trusted.')
+      $Result.Diagnostics = @(
+        New-InstallerDiagnostic -Id 'MSIX.Signature.Untrusted' -Source MSIX -Message 'Reject: package signature is not trusted.' -Kind Invalid -Areas Security, Installability
+      )
       $Result
     }
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/app.msix' -InstallerPath $Script:InstallerPath
-    $Suggestion.BlockingIssues | Should -Contain 'Reject: package signature is not trusted.'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'MSIX.Signature.Untrusted').Message | Should -Be 'Reject: package signature is not trusted.'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'requires a nested file when a ZIP has multiple installer candidates' {
@@ -313,14 +317,16 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
               NestedInstallerFiles = @([pscustomobject]@{ FullName = 'x86.exe' }, [pscustomobject]@{ FullName = 'x64.exe' })
               PortableCandidates   = @()
               InstallerType        = 'zip'
+              Diagnostics          = @()
             }
           })
         DetectedFamilies = @(); FamilyCandidates = @(); RoutingHints = @(); RejectedCandidates = @()
-        PortableEvidence = $null; WrapperWarnings = @(); BlockingIssues = @(); SuggestedNextSteps = @()
+        PortableEvidence = $null; Diagnostics = @(); SuggestedNextSteps = @()
       }
     }
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/multiple.zip' -InstallerPath $ZipPath
-    $Suggestion.BlockingIssues -join "`n" | Should -Match 'specify NestedInstallerFile'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.Zip.CandidateAmbiguous').Message | Should -Match 'specify NestedInstallerFile'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'consumes the real ZIP analyzer envelope without StrictMode property failures' {
@@ -335,7 +341,8 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     $Suggestion.Analysis.ParserResults[0].Name | Should -Be 'ZIP/archive'
     $Suggestion.Analysis.ParserResults[0].Success | Should -BeTrue
     $Suggestion.Analysis.ParserResults[0].Result.Family | Should -Be 'ZIP/archive'
-    $Suggestion.BlockingIssues -join "`n" | Should -Match 'no supported nested installer or portable PE candidate'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.Zip.NoSupportedCandidate').Message | Should -Match 'no supported nested installer or portable PE candidate'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'turns a legacy raw ZIP parser result into a blocking issue' {
@@ -344,13 +351,14 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
         DetectedFileType = [pscustomobject]@{ Type = 'ZipArchive' }
         ParserResults = @([pscustomobject]@{ Family = 'ZIP/archive'; NestedInstallerFiles = @(); PortableCandidates = @() })
         DetectedFamilies = @(); FamilyCandidates = @(); RoutingHints = @(); RejectedCandidates = @()
-        PortableEvidence = $null; WrapperWarnings = @(); BlockingIssues = @(); SuggestedNextSteps = @()
+        PortableEvidence = $null; Diagnostics = @(); SuggestedNextSteps = @()
       }
     }
 
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/legacy.zip' -InstallerPath $Script:InstallerPath
 
-    $Suggestion.BlockingIssues -join "`n" | Should -Match 'catalog could not be parsed'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.Zip.CatalogUnavailable').Message | Should -Match 'catalog could not be parsed'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'downloads, hashes, analyzes once, and cleans its temporary file' {
@@ -389,10 +397,11 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
                 Family               = 'ZIP/archive'
                 NestedInstallerFiles = @([pscustomobject]@{ FullName = 'setup.exe' })
                 PortableCandidates   = @()
+                Diagnostics          = @()
               }
             })
           DetectedFamilies = @(); FamilyCandidates = @(); RoutingHints = @(); RejectedCandidates = @()
-          PortableEvidence = $null; WrapperWarnings = @(); BlockingIssues = @(); SuggestedNextSteps = @()
+          PortableEvidence = $null; Diagnostics = @(); SuggestedNextSteps = @()
         }
       } else {
         New-AuthoringAnalyzerResult -InstallerType inno
@@ -400,7 +409,7 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     }
 
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/package.zip' -InstallerPath $ZipPath
-    $Suggestion.BlockingIssues | Should -BeNullOrEmpty
+    $Suggestion.HasBlockingDiagnostics | Should -BeFalse
     $Suggestion.Installers[0]['InstallerType'] | Should -Be 'zip'
     $Suggestion.Installers[0]['NestedInstallerType'] | Should -Be 'inno'
     $Suggestion.Installers[0]['NestedInstallerFiles'][0]['RelativeFilePath'] | Should -Be 'setup.exe'

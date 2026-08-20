@@ -126,7 +126,7 @@ function Get-ActualInstallerInfo {
         WritesAppsAndFeaturesEntry     = $WritesAppsAndFeaturesEntry
         AppsAndFeaturesProductCode     = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
         AppsAndFeaturesInstallerType   = $WritesAppsAndFeaturesEntry ? 'exe' : $null
-        Warnings                       = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+        Diagnostics                    = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'ActualInstaller' -Kind Incomplete -Areas Metadata))
         UnresolvedFields               = [string[]]@()
         PublisherUrl                   = $Setup['WebSite']
         AlternateInstallationDirectory = $Setup['AltInstallDir']

@@ -261,7 +261,7 @@ function Get-QSetupLayout {
   $Preamble = Get-QSetupRecordStartOffset -Path $File.FullName
   $Boundary = Get-QSetupPackageBoundary -Path $File.FullName -Preamble $Preamble -MaximumRecords $MaximumRecords
   $Records = [System.Collections.Generic.List[object]]::new()
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
   $Offset = $Preamble.RecordStartOffset
   # Records are physically adjacent; advance by the declared compressed extent
   # and stop at the first malformed or non-advancing frame.
@@ -284,7 +284,7 @@ function Get-QSetupLayout {
     DataEndOffset   = [long]$Boundary.DataEndOffset
     Footer          = $Boundary.Footer
     Certificate     = if ($Boundary.CertificateOffset -gt 0) { [pscustomobject]@{ Offset = $Boundary.CertificateOffset; Size = $Boundary.CertificateSize; AlignmentPadding = $Boundary.AlignmentPadding } } else { $null }
-    Warnings        = @($Warnings)
+    Diagnostics     = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Warnings)) -Source 'QSetup' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -386,7 +386,7 @@ function Get-QSetupExecutionActionInfo {
 
   $Actions = [Collections.Generic.List[object]]::new()
   $ExecutedPayloads = [Collections.Generic.List[object]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $Values = $Directive.ContainsKey('SET_PERFORM_EXECUTE_OP') ? @($Directive['SET_PERFORM_EXECUTE_OP']) : @()
   foreach ($Value in $Values) {
     try {
@@ -415,7 +415,7 @@ function Get-QSetupExecutionActionInfo {
   return [pscustomobject][ordered]@{
     Actions          = [object[]]$Actions.ToArray()
     ExecutedPayloads = [object[]]$ExecutedPayloads.ToArray()
-    Warnings         = [string[]]$Warnings.ToArray()
+    Diagnostics      = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'QSetup' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -503,13 +503,13 @@ function Get-QSetupInfo {
     # 64-bit OS list proves x64 support in this metadata vocabulary.
     $AllowedOs = [string](Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_ALLOWED_OS')
     $SupportedArchitectures = if ($AllowedOs -match '(?i)\.64' -and $AllowedOs -notmatch '(?i)(?:^|,)(?:XP|Vista|7|8|10|11)(?:,|$)') { @('x64') } else { @() }
-    $Warnings = [System.Collections.Generic.List[string]]::new()
-    $Notices = [System.Collections.Generic.List[string]]::new()
-    foreach ($Warning in $Layout.Warnings) { $Warnings.Add($Warning) }
-    foreach ($Warning in $ExecutionActionInfo.Warnings) { $Warnings.Add($Warning) }
+    $Warnings = [System.Collections.Generic.List[object]]::new()
+    $InformationMessages = [System.Collections.Generic.List[string]]::new()
+    foreach ($Warning in $Layout.Diagnostics) { $Warnings.Add($Warning) }
+    foreach ($Warning in $ExecutionActionInfo.Diagnostics) { $Warnings.Add($Warning) }
     if (-not $Layout.Complete) { $Warnings.Add('The QSetup record table is incomplete or has trailing data; metadata from the explicit Setup.txt record remains available, but full extraction requires the complete installer.') }
     if (-not $Scope) { $Warnings.Add('QSetup scope is not explicit in Setup.txt and requires VM validation.') }
-    if ($ExecutionActionInfo.Actions.Count -gt 0) { $Notices.Add("QSetup defines $($ExecutionActionInfo.Actions.Count) structured execution action(s); review ExecutionActions and ExecutedPayloads when validating prerequisites and runtime side effects.") }
+    if ($ExecutionActionInfo.Actions.Count -gt 0) { $InformationMessages.Add("QSetup defines $($ExecutionActionInfo.Actions.Count) structured execution action(s); review ExecutionActions and ExecutedPayloads when validating prerequisites and runtime side effects.") }
 
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
@@ -524,8 +524,8 @@ function Get-QSetupInfo {
       WritesAppsAndFeaturesEntry   = [bool]$WritesAppsAndFeaturesEntry
       AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
-      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-      Notices                      = [string[]]@($Notices)
+      Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'QSetup' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$InformationMessages) -Source 'QSetup' -Kind Information -Areas Metadata)))
+
       UnresolvedFields             = [string[]]@()
       PublisherUrl                 = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_URL'
       ProjectName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROJECT_NAME'
@@ -626,7 +626,7 @@ function Expand-QSetupInstaller {
 
   process {
     $Layout = Get-QSetupLayout -Path $Path
-    if (-not $Layout.Complete) { throw "The QSetup record table is incomplete: $($Layout.Warnings -join '; ')" }
+    if (-not $Layout.Complete) { throw "The QSetup record table is incomplete: $(@($Layout.Diagnostics).Message -join '; ')" }
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-QSetup-$([guid]::NewGuid().ToString('N'))") }
     $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $null = New-Item -Path $DestinationPath -ItemType Directory -Force

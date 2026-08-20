@@ -251,9 +251,10 @@ function Get-InstallForgeInfo {
       try { $PayloadData = Get-InstallForgePayloadArchiveData -Path $File.FullName } catch { $PayloadData = $null }
 
       $Warnings = [System.Collections.Generic.List[string]]::new()
+      $Diagnostics = [System.Collections.Generic.List[object]]::new()
       $Scope = Resolve-InstallForgeScope -InstallDirectory $Setup['InstallDir']
       if (-not $Scope) { $Warnings.Add('InstallForge scope could not be resolved from the configured installation directory; validate it in a VM.') }
-      $Warnings.Add('InstallForge does not provide a WinGet-compatible silent installation mode; use this parser for analysis and rejection, not to invent silent switches.')
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.Installability.SilentUnsupported' -Source 'InstallForge' -Message 'InstallForge does not provide a WinGet-compatible silent installation mode; use this parser for analysis and rejection, not to invent silent switches.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
       $Warnings.Add('The InstallForge project name is display metadata, not sufficient evidence for ProductCode. Validate the visible uninstall key in a VM when ProductCode is required.')
       if (-not $PayloadData) { $Warnings.Add('The InstallForge payload archive could not be opened; metadata was read from the configuration resource only.') }
 
@@ -273,7 +274,7 @@ function Get-InstallForgeInfo {
         WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
         AppsAndFeaturesProductCode   = $null
         AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
-        Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+        Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @($Diagnostics, @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallForge' -Kind Incomplete -Areas Metadata)))
         UnresolvedFields             = [string[]]@()
         PublisherUrl                 = $Setup['Website1']
         MainExecutable               = $Setup['ProgramRun']

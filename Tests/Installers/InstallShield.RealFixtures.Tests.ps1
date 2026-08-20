@@ -232,7 +232,7 @@ Location=payload\Missing.msi
       $Selection.SelectionMethod | Should -Be 'SetupIniUnresolved'
       $Selection.SourceKind | Should -Be 'ExternalOrMissing'
       $Selection.SelectedMsiPath | Should -BeNullOrEmpty
-      $Selection.Warnings | Should -Contain "Setup.ini selects 'Missing.msi', but that MSI path was not extracted."
+      $Selection.Diagnostics.Message | Should -Contain "Setup.ini selects 'Missing.msi', but that MSI path was not extracted."
     }
   }
 

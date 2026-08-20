@@ -422,7 +422,7 @@ function Get-InstallMateInfo {
       WritesAppsAndFeaturesEntry   = $null
       AppsAndFeaturesProductCode   = $null
       AppsAndFeaturesInstallerType = $null
-      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallMate' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
       ProductCodeEvidence          = if ($ProductCode) { 'Named StringFileInfo.ProductCode value in the PE version resource' } else { $null }
       PackageCode                  = $PackageCode

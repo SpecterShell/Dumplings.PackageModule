@@ -230,7 +230,7 @@ function Get-MicaSetupPayloadEvidence {
   param (
     [Parameter(Mandatory)]$Archive,
     [string]$ExeName,
-    [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
+    [AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
   )
 
   $Catalog = [Collections.Generic.List[object]]::new()
@@ -313,7 +313,8 @@ function Get-MicaSetupInfo {
   process {
     $File = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force -ErrorAction Stop
     $Warnings = [Collections.Generic.List[string]]::new()
-    $Notices = [Collections.Generic.List[string]]::new()
+    $Diagnostics = [Collections.Generic.List[object]]::new()
+    $InformationMessages = [Collections.Generic.List[string]]::new()
     $UnresolvedFields = [Collections.Generic.List[string]]::new()
     $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
@@ -329,7 +330,7 @@ function Get-MicaSetupInfo {
           [pscustomobject]@{ Name = $_.Name; Expression = $_.Expression; Method = $_.Method; IlOffset = $_.IlOffset }
         })
       if ($UnresolvedExpressions.Count -gt 0) {
-        $Notices.Add("MicaSetup contains $($UnresolvedExpressions.Count) unresolved compiled configuration expression(s); affected effects require source inspection or VM validation.")
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Configuration.ExpressionsUnresolved' -Source 'MicaSetup' -Message "MicaSetup contains $($UnresolvedExpressions.Count) unresolved compiled configuration expression(s); affected effects require source inspection or VM validation." -Kind Incomplete -Areas Metadata -Evidence $UnresolvedExpressions))
       }
       $Generation = $Managed.BuilderGeneration
       $ConfigurationModel = $Managed.ConfigurationModel
@@ -361,9 +362,9 @@ function Get-MicaSetupInfo {
 
       $WritesArp = $Scope -eq 'machine' -and $CreateRegistry -and -not [string]::IsNullOrWhiteSpace($KeyName)
       $VisibleArp = $WritesArp -and -not $SystemComponent
-      if ($Scope -eq 'user' -and $CreateRegistry) { $Notices.Add('MicaSetup v2 user-mode installations write Uninst.dat instead of a Windows uninstall registry entry.') }
-      if ($WritesArp -and $SystemComponent) { $Notices.Add('MicaSetup writes a hidden uninstall entry because SystemComponent is enabled.') }
-      if (-not $CreateRegistry) { $Notices.Add('MicaSetup registry/uninstall entry creation is disabled by IsCreateRegistryKeys.') }
+      if ($Scope -eq 'user' -and $CreateRegistry) { $InformationMessages.Add('MicaSetup v2 user-mode installations write Uninst.dat instead of a Windows uninstall registry entry.') }
+      if ($WritesArp -and $SystemComponent) { $InformationMessages.Add('MicaSetup writes a hidden uninstall entry because SystemComponent is enabled.') }
+      if (-not $CreateRegistry) { $InformationMessages.Add('MicaSetup registry/uninstall entry creation is disabled by IsCreateRegistryKeys.') }
 
       # Project the built-in uninstall entry as individual registry values so it has the same shape
       # as explicit custom writes and can be consumed by shared registry-evidence helpers.
@@ -395,13 +396,13 @@ function Get-MicaSetupInfo {
           })
       }
       $AssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite @($RegistryWrites)
-      foreach ($Warning in $AssociationInfo.Warnings) { $Warnings.Add("MicaSetup association analysis: $Warning") }
+      foreach ($Diagnostic in $AssociationInfo.Diagnostics) { $Diagnostics.Add($Diagnostic) }
 
       $PasswordEvidence = $Options.Internal['UnpackingPassword']
       $PayloadEncrypted = $PasswordEvidence -and $PasswordEvidence.IsResolved -and -not [string]::IsNullOrEmpty([string]$PasswordEvidence.Value)
       $Password = if ($PayloadEncrypted) { [string]$PasswordEvidence.Value } else { $null }
       if ($PasswordEvidence -and -not $PasswordEvidence.IsResolved) {
-        $Warnings.Add('The MicaSetup payload password expression is not constant; static extraction is unavailable without manual evidence.')
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Extraction.PasswordUnresolved' -Source 'MicaSetup' -Message 'The MicaSetup payload password expression is not constant; static extraction is unavailable without manual evidence.' -Kind Unsupported -Areas Extraction -AffectedFields PayloadPassword))
         $UnresolvedFields.Add('PayloadPassword')
       }
 
@@ -428,6 +429,12 @@ function Get-MicaSetupInfo {
           if ($ArchiveContext) { Close-MicaSetupPayloadArchive -Context $ArchiveContext }
         }
       }
+      if ($PayloadEvidence.ArchitectureInfo) {
+        foreach ($Diagnostic in @($PayloadEvidence.ArchitectureInfo.Diagnostics)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } }
+      }
+      if ($PayloadEvidence.DependencyInfo) {
+        foreach ($Diagnostic in @($PayloadEvidence.DependencyInfo.Diagnostics)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } }
+      }
 
       $HasModernOptions = $ConfigurationModel -ne 'Pack'
       $Shortcuts = @(
@@ -443,13 +450,13 @@ function Get-MicaSetupInfo {
       $Certificates = if ([bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsInstallCertificate' -DefaultValue $false)) { @($Managed.Resources | Where-Object Name -Like 'resources/setups/*.cer' | ForEach-Object { [pscustomobject]@{ Resource = $_.Name; ConditionalOnElevation = $true } }) } else { @() }
       $CloseApplicationsEvidence = $Options.Internal['CloseApplications']
       $CloseApplications = if ($CloseApplicationsEvidence -and $CloseApplicationsEvidence.ArrayLength -ge 0) { [pscustomobject]@{ Count = $CloseApplicationsEvidence.ArrayLength; DetailsResolved = $CloseApplicationsEvidence.IsResolved } } else { $null }
-      if ($CloseApplications -and $CloseApplications.Count -gt 0 -and -not $CloseApplications.DetailsResolved) { $Notices.Add("MicaSetup configures $($CloseApplications.Count) application-close record(s); detailed object initializers require VM validation.") }
+      if ($CloseApplications -and $CloseApplications.Count -gt 0 -and -not $CloseApplications.DetailsResolved) { $InformationMessages.Add("MicaSetup configures $($CloseApplications.Count) application-close record(s); detailed object initializers require VM validation.") }
 
       $AppsAndFeaturesEntries = if ($VisibleArp) { @([ordered]@{ ProductCode = $KeyName; DisplayName = $DisplayName; DisplayVersion = $DisplayVersion; Publisher = $Publisher; InstallerType = 'exe' }) } else { @() }
       $RequestedExecutionLevel = if ($Scope -eq 'machine') { 'requireAdministrator' } elseif ($Scope -eq 'user') { 'asInvoker' } else { $null }
       if ($Managed.RequestExecutionLevel) { $RequestedExecutionLevel = if ($Managed.RequestExecutionLevel -ieq 'admin') { 'requireAdministrator' } elseif ($Managed.RequestExecutionLevel -ieq 'user') { 'asInvoker' } else { $Managed.RequestExecutionLevel } }
-      if ($Generation -eq 'v1') { $Notices.Add('MicaSetup v1 calls UseElevated unconditionally and is treated as a machine-scope installer.') }
-      $Notices.Add('Upstream MicaSetup documents /q and /a as unfinished; no silent switch is returned without compiled command-line evidence.')
+      if ($Generation -eq 'v1') { $InformationMessages.Add('MicaSetup v1 calls UseElevated unconditionally and is treated as a machine-scope installer.') }
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Installability.SilentUnsupported' -Source 'MicaSetup' -Message 'Upstream MicaSetup documents /q and /a as unfinished; no silent switch is returned without compiled command-line evidence.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
 
       return [pscustomobject]@{
         Path                           = $File.FullName
@@ -509,8 +516,14 @@ function Get-MicaSetupInfo {
         InstallerSwitches              = [ordered]@{}
         SupportedCommandLineSwitches   = @()
         RecommendedPackageDependencies = if ($PayloadEvidence.DependencyInfo) { @($PayloadEvidence.DependencyInfo.RecommendedPackageDependencies) } else { @() }
-        Notices                        = @($Notices)
-        Warnings                       = @($Warnings)
+
+        Diagnostics                    = @(
+          Merge-InstallerDiagnostics -Diagnostic @(
+            $Diagnostics
+            @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'MicaSetup' -Kind Incomplete -Areas Metadata -AffectedFields $UnresolvedFields)
+            @(ConvertTo-InstallerDiagnostic -InputObject @($InformationMessages) -Source 'MicaSetup' -Kind Information -Areas Metadata)
+          )
+        )
         UnresolvedFields               = @($UnresolvedFields | Sort-Object -Unique)
         ParserVersionInfo              = [pscustomobject]@{ Name = 'Dumplings MicaSetup parser'; Version = 1; Generation = $Generation; Evidence = @($Managed.Evidence) }
       }

@@ -740,8 +740,10 @@ function Expand-BurnInstaller {
       }
 
       if ($ManifestInfo.ExternalPayloadCount -gt 0 -or $ManifestInfo.DetachedContainerCount -gt 0) {
-        Write-Warning ('Burn extraction omitted {0} external payload(s) and {1} detached container(s) because their bytes are not embedded.' -f `
-            $ManifestInfo.ExternalPayloadCount, $ManifestInfo.DetachedContainerCount)
+        $Diagnostic = New-InstallerDiagnostic -Id 'Burn.Extraction.ExternalPayloadOmitted' -Source 'Burn' `
+          -Message ('Burn extraction omitted {0} external payload(s) and {1} detached container(s) because their bytes are not embedded.' -f $ManifestInfo.ExternalPayloadCount, $ManifestInfo.DetachedContainerCount) `
+          -Kind Unsupported -Areas Extraction -Evidence ([ordered]@{ ExternalPayloadCount = $ManifestInfo.ExternalPayloadCount; DetachedContainerCount = $ManifestInfo.DetachedContainerCount })
+        Write-InstallerDiagnostics -Diagnostic @($Diagnostic) -Scenario Extraction
       }
       $Results = [Collections.Generic.List[IO.FileInfo]]::new($Selected.Count)
       foreach ($Item in $Selected) { $Results.Add((Get-Item -LiteralPath $Item.DestinationPath -Force)) }
@@ -1325,7 +1327,7 @@ function Get-BurnInfo {
       WritesAppsAndFeaturesEntry   = $true
       AppsAndFeaturesProductCode   = $ProductCode
       AppsAndFeaturesInstallerType = 'burn'
-      Warnings                     = [string[]]@()
+      Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'Burn' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
     }
     if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { $Info.DisplayName = Read-ProductNameFromBurn -Path $Path }

@@ -47,7 +47,7 @@ It 'Should parse Advanced UI SuiteId and its exact nested package catalog' {
       $ExeInstallOperation.RebootRequest | Should -Be 'DetectReboot'
       $ExeInstallOperation.RebootCodes | Should -Be @(1641, 3010)
       ($Info.SuitePackages | Where-Object Type -EQ 'Exe').Files.SourceUrl | Should -Match '^http://download\.visualstudio\.microsoft\.com/'
-      $Info.Warnings | Should -Not -Contain 'Setup.ini did not identify the MSI; the only extracted MSI is used as a bounded fallback.'
+      $Info.Diagnostics.Message | Should -Not -Contain 'Setup.ini did not identify the MSI; the only extracted MSI is used as a bounded fallback.'
 
       $NestedPackages = Get-InstallShieldAdvancedUiNestedPackageInfo -Info $Info.AdvancedUiInfo -Architecture x64 -OSVersion 10.0 -BuildNumber 19045 -ProductType Workstation
       $NestedMsi = $NestedPackages | Where-Object PackageType -EQ 'Msi'
@@ -62,7 +62,7 @@ It 'Should parse Advanced UI SuiteId and its exact nested package catalog' {
         $NestedExe.Parser | Should -Be 'WinGet installer analyzer'
       } else {
         $NestedExe.Success | Should -BeFalse
-        $NestedExe.Warnings | Should -Match 'Get-WinGetInstallerAnalysis is not loaded'
+        $NestedExe.Diagnostics.Message | Should -Match 'Get-WinGetInstallerAnalysis is not loaded'
       }
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -284,7 +284,7 @@ It 'Should route the archived 2012 Spring builder through its suite catalog' {
       $Info.ProductCode | Should -Be '{D6E404DB-1F4D-4C22-9417-D5785DDCB365}'
       $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Overlay/ISSetupStream'
       $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Suite/AdvancedUI'
-      $Info.Warnings | Should -Not -Contain 'Multiple MSI files were extracted, but Setup.ini did not identify which package the bootstrapper launches.'
+      $Info.Diagnostics.Message | Should -Not -Contain 'Multiple MSI files were extracted, but Setup.ini did not identify which package the bootstrapper launches.'
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -308,7 +308,7 @@ It 'Should route the archived 2013 builder through the unversioned-year suite na
       $Info.ProductCode | Should -Be '{EE4F090B-501A-40AB-82F2-4A4F6F79DC49}'
       $Info.SuitePackages.Count | Should -Be 10
       $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Suite/AdvancedUI'
-      $Info.Warnings | Should -BeNullOrEmpty
+      $Info.Diagnostics | Should -BeNullOrEmpty
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }

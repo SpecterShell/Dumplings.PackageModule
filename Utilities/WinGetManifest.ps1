@@ -156,7 +156,10 @@ switch ($Command) {
     }
     if ($OverridePayload) { $SuggestionArguments.Override = $OverridePayload }
     $Suggestion = Get-WinGetInstallerManifestSuggestion @SuggestionArguments
-    if (@($Suggestion.BlockingIssues).Count -gt 0) { throw "Installer analysis is blocked:`n$(@($Suggestion.BlockingIssues) -join "`n")" }
+    if ($Suggestion.HasBlockingDiagnostics) {
+      throw "Installer analysis is blocked:`n$(@($Suggestion.Diagnostics | Where-Object IsBlocking | ForEach-Object { "[$($_.Id)] $($_.Message)" }) -join "`n")"
+    }
+    $null = Write-InstallerDiagnostics -Diagnostic @($Suggestion.Diagnostics) -Scenario ManifestAuthoring
     $Manifest = New-WinGetManifest -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -DefaultLocalization $Payload -Installer ([System.Collections.IDictionary[]]$Suggestion.Installers)
     Save-WinGetManifestCliModel -Manifest $Manifest
   }

@@ -112,12 +112,12 @@ function Get-IExpressInfo {
       WritesAppsAndFeaturesEntry   = $false
       AppsAndFeaturesProductCode   = $null
       AppsAndFeaturesInstallerType = $null
-      Warnings                     = [string[]]@(
-        if ($Commands.Count -eq 0) { 'No IExpress execution command resource was found.' }
-        foreach ($Command in $Commands) {
-          if (-not $Command.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded cabinet entry: $($Command.Command.CommandLine)" }
-        }
-      )
+      Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@(
+            if ($Commands.Count -eq 0) { 'No IExpress execution command resource was found.' }
+            foreach ($Command in $Commands) {
+              if (-not $Command.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded cabinet entry: $($Command.Command.CommandLine)" }
+            }
+          )) -Source 'IExpress' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
       Format                       = 'IExpress'
       OriginalFilename             = $OriginalName

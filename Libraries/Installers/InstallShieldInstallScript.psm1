@@ -333,7 +333,9 @@ function New-InstallShieldResponseFileTemplate {
   )
 
   process {
-    $Warnings = [Collections.Generic.List[string]]::new()
+    $Warnings = [Collections.Generic.List[object]]::new()
+    # Dialog traces are produced by the managed InstallScript analyzer. Convert
+    # its private string warnings only at this PowerShell result boundary.
     foreach ($Warning in @($Trace.Warnings)) {
       if (-not [string]::IsNullOrWhiteSpace([string]$Warning)) { $Warnings.Add([string]$Warning) }
     }
@@ -388,11 +390,11 @@ function New-InstallShieldResponseFileTemplate {
       else { $Warnings.Add('The incomplete template was not written. Use -AllowIncomplete after reviewing its TODO entries.') }
     }
     [pscustomobject][ordered]@{
-      Content    = $Content
-      IsComplete = $IsComplete
-      Dialogs    = [string[]]$Dialogs.ToArray()
-      Warnings   = [string[]]$Warnings.ToArray()
-      Path       = ($ResolvedPath -and (Test-Path -LiteralPath $ResolvedPath)) ? $ResolvedPath : $null
+      Content     = $Content
+      IsComplete  = $IsComplete
+      Dialogs     = [string[]]$Dialogs.ToArray()
+      Diagnostics = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'InstallShieldInstallScript' -Kind Incomplete -Areas Metadata)
+      Path        = ($ResolvedPath -and (Test-Path -LiteralPath $ResolvedPath)) ? $ResolvedPath : $null
     }
   }
 }
@@ -558,7 +560,7 @@ function Get-InstallShieldInstallScriptLibraryInfo {
       CatalogLength     = $Library.CatalogLength
       MemberCount       = $Library.Members.Count
       Members           = [object[]]$Library.Members
-      Warnings          = [string[]]$Library.Warnings
+      Diagnostics       = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Library.Warnings) -Source 'InstallShieldInstallScript' -Kind Incomplete -Areas Metadata)
       ParserVersionInfo = [pscustomobject][ordered]@{
         Parser        = 'Dumplings.PackageModule.InstallShieldInstallScript'
         ParserMajor   = 11
@@ -883,7 +885,7 @@ function Invoke-InstallShieldInstallScriptAnalysis {
       $_ -cin @('MaintenanceStart', 'DeinstallStart', 'OnMoveData', 'OnCustomizeUninstInfo', 'ProductGuid', 'DisplayName', 'DisplayVersion', 'Publisher', 'UninstallKey') -or
       $_ -like "$($Script:InstallScriptUninstallRegistryPath)*"
     } | Sort-Object -Unique)
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   foreach ($Warning in $IrWarnings) {
     $Warnings.Add([string]$Warning)
   }
@@ -891,25 +893,25 @@ function Invoke-InstallShieldInstallScriptAnalysis {
   $AssociationInfo = if ($StaticAnalysis -and (Get-Command Get-InstallerRegistryAssociationInfo -ErrorAction SilentlyContinue)) {
     Get-InstallerRegistryAssociationInfo -RegistryWrite ([object[]]$StaticAnalysis.RegistryWrites)
   } else {
-    [pscustomobject]@{ Protocols = @(); FileExtensions = @(); ProtocolAssociations = @(); FileExtensionAssociations = @(); Warnings = @() }
+    [pscustomobject]@{ Protocols = @(); FileExtensions = @(); ProtocolAssociations = @(); FileExtensionAssociations = @(); Diagnostics = @(ConvertTo-InstallerDiagnostic -InputObject @(@()) -Source 'InstallShieldInstallScript' -Kind Incomplete -Areas Metadata) }
   }
-  foreach ($Warning in @($AssociationInfo.Warnings)) { if ($Warning) { $Warnings.Add("InstallScript: $Warning") } }
+  foreach ($Diagnostic in @($AssociationInfo.Diagnostics)) { if ($Diagnostic) { $Warnings.Add($Diagnostic) } }
   if (@($StaticAnalysis.DllOperations).Count) {
-    $Warnings.Add('The compiled InstallScript loads an external DLL; its exported-function side effects remain opaque and require static inspection or VM validation.')
+    $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.ExternalDllEffectsOpaque' -Source 'InstallShieldInstallScript' -Message 'The compiled InstallScript loads an external DLL; its exported-function side effects remain opaque and require static inspection or VM validation.' -Kind ManualValidation -Areas Metadata, Installability, Security))
   }
   $ResponseInfo = $null
   $ResponseValidation = $null
 
   if ($EmbeddedResponseFile) {
     try { $ResponseInfo = Read-InstallShieldResponseFile -Path $EmbeddedResponseFile }
-    catch { $Warnings.Add("The embedded response-file candidate is invalid: $($_.Exception.Message)") }
+    catch { $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.ResponseFileInvalid' -Source 'InstallShieldInstallScript' -Message "The embedded response-file candidate is invalid: $($_.Exception.Message)" -Kind Invalid -Areas Installability -AffectedFields InstallerSwitches, InstallModes)) }
   }
   if ($ResponseInfo -and $DialogTraces) {
     $FreshTrace = $DialogTraces | Where-Object Scenario -EQ 'FreshInstall' | Select-Object -First 1
     if ($FreshTrace) {
       $ResponseValidation = Test-InstallShieldResponseFile -Path $EmbeddedResponseFile -Trace $FreshTrace
       if (-not $ResponseValidation.IsValid) {
-        $Warnings.Add('The embedded response file does not match the statically reconstructed fresh-install dialog order.')
+        $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.ResponseDialogMismatch' -Source 'InstallShieldInstallScript' -Message 'The embedded response file does not match the statically reconstructed fresh-install dialog order.' -Kind Mismatch -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
       }
     }
   }
@@ -921,7 +923,7 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     $SilentSupport = 'NotApplicable'
     $ResponseRequirement = 'None'
     if ($DialogCalls) {
-      $Warnings.Add('An embedded InstallScript action reaches dialog functions; validate the containing MSI or suite sequence and silent mode in a VM.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.EmbeddedDialogsRequireValidation' -Source 'InstallShieldInstallScript' -Message 'An embedded InstallScript action reaches dialog functions; validate the containing MSI or suite sequence and silent mode in a VM.' -Kind ManualValidation -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
     }
     # A valid setup.iss beside setup.inx is the documented default source used by
     # Setup.exe /s. This proves the package is self-contained even though the
@@ -937,7 +939,7 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     $SilentSupport = 'ResponseFileRequired'
     $ResponseRequirement = 'External'
     if (-not $ResponseInfo) {
-      $Warnings.Add('The InstallShield framework callback reaches response-backed dialogs but the media does not ship a valid fresh-install setup.iss.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.ExternalResponseRequired' -Source 'InstallShieldInstallScript' -Message 'The InstallShield framework callback reaches response-backed dialogs but the media does not ship a valid fresh-install setup.iss.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
     }
   } elseif ($DialogCalls -and $ResponseReferences) {
     # Revenera's InstallShield Silent contract reads built-in/Sd dialog answers
@@ -946,18 +948,18 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     $SilentSupport = 'ResponseFileRequired'
     $ResponseRequirement = 'External'
     if (-not $ResponseInfo) {
-      $Warnings.Add('The compiled script uses InstallShield response-backed dialog support but the media does not ship a valid fresh-install setup.iss.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.ExternalResponseRequired' -Source 'InstallShieldInstallScript' -Message 'The compiled script uses InstallShield response-backed dialog support but the media does not ship a valid fresh-install setup.iss.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
     }
   } else {
     $SilentSupport = 'Indeterminate'
     $ResponseRequirement = if ($ResponseReferences -or $DialogCalls) { 'Unknown' } else { 'None' }
     if ($DialogCalls) {
-      $Warnings.Add('InstallScript dialog functions are present, but static string evidence alone does not prove they are reachable in SILENTMODE.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.DialogReachabilityUnresolved' -Source 'InstallShieldInstallScript' -Message 'InstallScript dialog functions are present, but static string evidence alone does not prove they are reachable in SILENTMODE.' -Kind Ambiguous -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
     }
     if ($ResponseReferences) {
-      $Warnings.Add('The compiled script contains response-file runtime evidence but no valid embedded setup.iss was found.')
+      $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.ResponseEvidenceWithoutFile' -Source 'InstallShieldInstallScript' -Message 'The compiled script contains response-file runtime evidence but no valid embedded setup.iss was found.' -Kind Incomplete -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
     }
-    $Warnings.Add('InstallScript control-flow evidence is incomplete for this bytecode generation; response-file-free silent support is not proven.')
+    $Warnings.Add((New-InstallerDiagnostic -Id 'InstallShield.InstallScript.SilentControlFlowIncomplete' -Source 'InstallShieldInstallScript' -Message 'InstallScript control-flow evidence is incomplete for this bytecode generation; response-file-free silent support is not proven.' -Kind Incomplete -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
   }
 
   [pscustomobject][ordered]@{
@@ -992,8 +994,8 @@ function Invoke-InstallShieldInstallScriptAnalysis {
     ArpRuntimeEvidence         = [string[]]$ArpRuntimeEvidence
     EmbeddedResponseFile       = $ResponseInfo
     EmbeddedResponseValidation = $ResponseValidation
-    Warnings                   = [string[]]$Warnings.ToArray()
-    Notices                    = [string[]]$IrNotices.ToArray()
+    Diagnostics                = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'InstallShieldInstallScript' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$IrNotices.ToArray()) -Source 'InstallShieldInstallScript' -Kind Information -Areas Metadata)))
+
     ParserVersionInfo          = [pscustomobject][ordered]@{
       Parser                   = 'Dumplings.PackageModule.InstallShieldInstallScript'
       ParserMajor              = 11
@@ -1143,7 +1145,7 @@ function Merge-InstallShieldInstallScriptMediaEvidence {
     $Analysis | Add-Member -NotePropertyName ConditionalRegistryAssociationInfo -NotePropertyValue $ConditionalAssociationInfo -Force
     $Analysis | Add-Member -NotePropertyName ConditionalProtocols -NotePropertyValue ([string[]]@($ConditionalAssociationInfo.Protocols)) -Force
     $Analysis | Add-Member -NotePropertyName ConditionalFileExtensions -NotePropertyValue ([string[]]@($ConditionalAssociationInfo.FileExtensions)) -Force
-    $Analysis.Warnings = [string[]]@($Analysis.Warnings + @($AssociationInfo.Warnings | ForEach-Object { "InstallScript: $_" }))
+    $Analysis.Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic @($Analysis.Diagnostics, $AssociationInfo.Diagnostics))
   } else {
     $Analysis | Add-Member -NotePropertyName ConditionalRegistryAssociationInfo -NotePropertyValue $null -Force
     $Analysis | Add-Member -NotePropertyName ConditionalProtocols -NotePropertyValue ([string[]]@()) -Force
@@ -1153,12 +1155,22 @@ function Merge-InstallShieldInstallScriptMediaEvidence {
   if ($ConditionalRegistryWrites.Count) {
     $UnselectedNames = [string[]]@($ConditionalRegistryWrites | Where-Object Confidence -EQ 'ConditionalMediaSet' | ForEach-Object RegistrySet | Sort-Object -Unique)
     if ($UnselectedNames) {
-      $Analysis.Warnings = [string[]]@($Analysis.Warnings + "InstallShield media defines unassociated registry set(s) '$($UnselectedNames -join "', '")'; no complete literal CreateRegistrySet call selected them.")
+      $Analysis.Diagnostics = @(
+        Merge-InstallerDiagnostics -Diagnostic @(
+          $Analysis.Diagnostics
+          New-InstallerDiagnostic -Id 'InstallShield.InstallScript.UnselectedRegistrySets' -Source 'InstallShieldInstallScript' -Message "InstallShield media defines unassociated registry set(s) '$($UnselectedNames -join "', '")'; no complete literal CreateRegistrySet call selected them." -Kind Ambiguous -Areas Metadata -AffectedFields AppsAndFeaturesEntries
+        )
+      )
     }
   }
   $UnassociatedShortcuts = @($MediaShortcuts | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Component) })
   if ($UnassociatedShortcuts -and -not $HasReachedShellCreation) {
-    $Analysis.Warnings = [string[]]@($Analysis.Warnings + 'InstallShield media defines unassociated shell folders or shortcuts, but no complete CreateShellObjects call was reached; the records remain conditional evidence.')
+    $Analysis.Diagnostics = @(
+      Merge-InstallerDiagnostics -Diagnostic @(
+        $Analysis.Diagnostics
+        New-InstallerDiagnostic -Id 'InstallShield.InstallScript.UnselectedShellObjects' -Source 'InstallShieldInstallScript' -Message 'InstallShield media defines unassociated shell folders or shortcuts, but no complete CreateShellObjects call was reached; the records remain conditional evidence.' -Kind Ambiguous -Areas Metadata
+      )
+    )
   }
   return $Analysis
 }
@@ -1190,7 +1202,7 @@ function Get-InstallShieldInstallScriptArpInfo {
     [psobject]$Analysis
   )
 
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $UnresolvedFields = [Collections.Generic.List[string]]::new()
   $ConfigurationProperty = $Installer.PSObject.Properties['SetupConfiguration']
   $Configuration = $null -eq $ConfigurationProperty ? $null : $ConfigurationProperty.Value
@@ -1447,7 +1459,7 @@ function Get-InstallShieldInstallScriptArpInfo {
       Publisher          = $HasBuiltInRegistration ? 'Setup.ini:[Startup].CompanyName -> IFX_COMPANY_NAME default' : 'Explicit static uninstall Publisher write'
       RegistryItems      = 'Compiled RegDBSetItem calls applied before MaintenanceStart'
     }
-    Warnings                     = [string[]]$Warnings.ToArray()
+    Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'InstallShieldInstallScript' -Kind Incomplete -Areas Metadata)
     UnresolvedFields             = [string[]]$UnresolvedFields.ToArray()
   }
 }
@@ -1564,13 +1576,12 @@ function Get-InstallShieldInstallScriptInfo {
         RegistryWrites = [object[]]@(); ProjectProductCode = $null; ProjectName = $null
         ProjectPublisher = $null; RegistrationMode = 'EmbeddedAction'
         RuntimeEvidence = [string[]]$Analysis.ArpRuntimeEvidence; ValueSources = [ordered]@{}
-        Warnings = [string[]]@(); UnresolvedFields = [string[]]@()
+        Diagnostics = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'InstallShieldInstallScript' -Kind Incomplete -Areas Metadata); UnresolvedFields = [string[]]@()
       }
     } else {
       Get-InstallShieldInstallScriptArpInfo -Installer $Installer -Analysis $Analysis
     }
-    $Warnings = [string[]]@((@($Analysis.Warnings) + @($ArpInfo.Warnings)) | Select-Object -Unique)
-    $Notices = [string[]]@($Analysis.Notices | Select-Object -Unique)
+    $Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic @($Analysis.Diagnostics, $ArpInfo.Diagnostics))
     # Select-Object -Unique compares custom objects as their type name and can
     # collapse unrelated values. Deduplicate registry evidence by its stable
     # registry identity while retaining the first, most direct source.
@@ -1608,9 +1619,9 @@ function Get-InstallShieldInstallScriptInfo {
       WritesAppsAndFeaturesEntry         = $ArpInfo.WritesAppsAndFeaturesEntry
       AppsAndFeaturesProductCode         = $ArpInfo.AppsAndFeaturesProductCode
       AppsAndFeaturesInstallerType       = $ArpInfo.AppsAndFeaturesInstallerType
-      Warnings                           = $Warnings
+      Diagnostics                        = [object[]]$Diagnostics
       UnresolvedFields                   = [string[]]$ArpInfo.UnresolvedFields
-      Notices                            = $Notices
+
       AppsAndFeaturesEntries             = [object[]]$ArpInfo.AppsAndFeaturesEntries
       RegistryWrites                     = [object[]]$RegistryWrites.ToArray()
       RegistryItems                      = [object[]]$Analysis.RegistryItems

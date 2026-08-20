@@ -367,7 +367,7 @@ function Get-AdvancedInstallerMsiPrerequisiteInfo {
     HasPrerequisites = $Prerequisites.Count -gt 0
     Prerequisites    = [object[]]@($Prerequisites)
     Searches         = [object[]]$RawSearches
-    Warnings         = [string[]]$Warnings.ToArray()
+    Diagnostics      = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -465,7 +465,7 @@ function Get-AdvancedInstallerMsiInfo {
         WritesAppsAndFeaturesEntry    = $MsiInfo.WritesAppsAndFeaturesEntry
         AppsAndFeaturesProductCode    = $MsiInfo.AppsAndFeaturesProductCode
         AppsAndFeaturesInstallerType  = $MsiInfo.AppsAndFeaturesInstallerType
-        Warnings                      = [string[]]@($MsiInfo.Warnings + $PrerequisiteInfo.Warnings)
+        Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@($MsiInfo.Diagnostics + $PrerequisiteInfo.Diagnostics)) -Source 'AdvancedInstaller' -Kind Incomplete -Areas Metadata)
         UnresolvedFields              = [string[]]@($MsiInfo.UnresolvedFields)
         Name                          = $MsiFile.Name
         PackageArchitecture           = $MsiInfo.PackageArchitecture

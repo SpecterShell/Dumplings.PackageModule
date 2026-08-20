@@ -23,6 +23,7 @@ $ModulePaths = @(
   'Libraries\Infrastructure\FileSystem.psm1'
   'Libraries\Infrastructure\Archive.psm1'
   'Libraries\Infrastructure\PE.psm1'
+  'Libraries\Infrastructure\InstallerDiagnostics.psm1'
   'Libraries\Infrastructure\InstallerEvidence.psm1'
   'Libraries\Infrastructure\Cabinet.psm1'
   'Libraries\Infrastructure\InstallerBridge.psm1'

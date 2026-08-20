@@ -359,7 +359,7 @@ function Get-InstallerRegistryAssociationInfo {
     ProtocolAssociations      = @($ProtocolAssociations)
     FileExtensionAssociations = @($FileExtensionAssociations)
     RegistryWrites            = @($ClassWrites | ForEach-Object Source)
-    Warnings                  = @($Warnings | Select-Object -Unique)
+    Diagnostics               = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallerEvidence' -Kind Incomplete -Areas Metadata))
   }
 }
 

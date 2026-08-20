@@ -155,7 +155,7 @@ Describe 'Chromium resource classification' {
             Packages      = @([pscustomobject]@{ Name = 'mini_installer.exe' })
             InstallAction = [pscustomobject]@{ Run = 'mini_installer.exe'; Arguments = '--system-level' }
           }
-          NestedSetupInfo   = [pscustomobject]@{ ProductName = 'Vendor Browser'; Warnings = @() }
+          NestedSetupInfo   = [pscustomobject]@{ ProductName = 'Vendor Browser'; Diagnostics = @() }
           NestedSetupError  = $null
           ManifestEntryName = 'bin/Offline/{BUNDLE}/OfflineManifest.gup'
           TargetEntryName   = 'bin/Offline/{BUNDLE}/{APP-ID}/mini_installer.exe'
@@ -168,7 +168,7 @@ Describe 'Chromium resource classification' {
       $Info.UnresolvedFields | Should -Contain 'ProductCode'
       $Info.DisplayVersion | Should -BeExactly '10.20.30.40'
       $Info.IsOnlineBootstrapper | Should -BeFalse
-      $Info.Warnings | Should -BeNullOrEmpty
+      $Info.Diagnostics | Should -BeNullOrEmpty
       $Info.ExecutedPayloads | Should -Contain 'mini_installer.exe --system-level'
     }
   }
@@ -187,7 +187,7 @@ Describe 'Chromium resource classification' {
       $Info.ApplicationId | Should -Be '{APP-ID}'
       $Info.ProductCode | Should -BeNullOrEmpty
       $Info.Scope | Should -Be 'machine'
-      ($Info.Warnings -join ' ') | Should -Not -BeLike '*ProductCode*'
+      ($Info.Diagnostics.Message -join ' ') | Should -Not -BeLike '*ProductCode*'
     }
   }
 
@@ -203,7 +203,7 @@ Describe 'Chromium resource classification' {
 
       $Info.OfflineManifestChecked | Should -BeTrue
       $Info.IsOnlineBootstrapper | Should -BeNullOrEmpty
-      ($Info.Warnings -join ' ') | Should -BeLike '*could not be checked*malformed payload*'
+      ($Info.Diagnostics.Message -join ' ') | Should -BeLike '*could not be checked*malformed payload*'
     }
   }
 
@@ -394,7 +394,7 @@ Describe 'Chromium real installer fixtures' {
     $Info.IsOnlineBootstrapper | Should -BeFalse
     $Info.OfflineManifest.Packages[0].Name | Should -BeExactly 'brave_installer.exe'
     $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--do-not-launch-chrome'
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should parse a cached Microsoft Edge WebView2 standalone installer' {
@@ -414,7 +414,7 @@ Describe 'Chromium real installer fixtures' {
     $Info.SupportedScopes | Should -Be @('user', 'machine')
     $Info.IsOnlineBootstrapper | Should -BeFalse
     $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--msedgewebview --verbose-logging --do-not-launch-msedge'
-    ($Info.Warnings -join ' ') | Should -Not -BeLike '*ProductCode*'
+    ($Info.Diagnostics.Message -join ' ') | Should -Not -BeLike '*ProductCode*'
   }
 
   It 'Should parse the cached Perplexity Comet offline Chromium Updater bundle' {
@@ -430,7 +430,7 @@ Describe 'Chromium real installer fixtures' {
     $Info.UnresolvedFields | Should -Contain 'ProductCode'
     $Info.OfflineManifest.InstallAction.Run | Should -BeExactly 'mini_installer.exe'
     $Info.OfflineManifest.InstallAction.Arguments | Should -BeExactly '--system-level'
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 }
 

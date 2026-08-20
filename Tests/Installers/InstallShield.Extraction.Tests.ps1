@@ -49,7 +49,7 @@ Describe 'InstallShield cabinets and extraction' -Tag Unit {
     $Info.InstallShieldRelease.ReleaseName | Should -Be 'InstallShield 11.5'
     $Info.InstallShieldRelease.Build | Should -Be '42618'
     $Info.InstallShieldRelease.Confidence | Should -Be 'StructuredEngineVersion'
-    $Info.InstallShieldRelease.Warnings | Should -BeNullOrEmpty
+    $Info.InstallShieldRelease.Diagnostics | Should -BeNullOrEmpty
     $Info.InstallShieldStructuralRoutes.RouteId | Should -Be @('Media/External', 'Cabinet6/AnsiCatalog', 'Script/aLuZ')
   }
 
@@ -78,7 +78,7 @@ Describe 'InstallShield cabinets and extraction' -Tag Unit {
     $Info.InstallShieldCabinetSupport.MediaVersions.RawVersion | Should -Be ([uint32]0x0100600C)
     $Info.InstallShieldCabinetSupport.MediaVersions.StructuralProfile | Should -Be 'AnsiCatalog'
     $Info.InstallShieldCabinetSupport.MediaVersions.Limitations | Should -Match 'generation-specific optional registry and shell pointer layouts'
-    $Info.InstallShieldCabinetSupport.Warnings | Should -BeNullOrEmpty
+    $Info.InstallShieldCabinetSupport.Diagnostics | Should -BeNullOrEmpty
     $Info.InstallScriptInfo.ParserVersionInfo.HeaderKind | Should -Be 'aLuZ'
     $Info.InstallScriptInfo.ParserVersionInfo.InstructionCount | Should -BeGreaterThan 10000
     $Info.UnsupportedOpcodes | Should -BeNullOrEmpty
@@ -106,7 +106,7 @@ Describe 'InstallShield cabinets and extraction' -Tag Unit {
     $Info.InstallShieldStructuralRoutes.RouteId | Should -Be 'Classic3/Engine'
     $Info.InstallShieldStructuralRoutes.SupportStatus | Should -Be 'Partial'
     $Info.ExtractedFiles | Should -BeNullOrEmpty
-    $Info.Warnings | Should -Match 'without a validated embedded Setup30 package'
+    $Info.Diagnostics.Message | Should -Match 'without a validated embedded Setup30 package'
   }
 
   It 'extracts InstallShield 3 Setup30 footer members through bounded TTCOMP decoding' {
@@ -213,10 +213,10 @@ Describe 'InstallShield cabinets and extraction' -Tag Unit {
       param($Fixture, $Destination, $MsiPath)
       Mock Get-PEOverlayOffset { 0 }
       Mock Invoke-InstallShieldExtractionWithClassicFallback { [pscustomobject]@{ Result = $Destination; Files = @() } }
-      Mock Expand-InstallShieldCabinetSupport { [pscustomobject]@{ ExtractedFiles = @(); Warnings = @() } }
+      Mock Expand-InstallShieldCabinetSupport { [pscustomobject]@{ ExtractedFiles = @(); Diagnostics = @() } }
       Mock Get-ChildItem { @(Get-Item -LiteralPath $MsiPath) }
       Mock Get-InstallShieldMsiPayloadSelection {
-        [pscustomobject]@{ Configuration = $null; SelectedMsiPath = $MsiPath; SelectionSource = 'Test'; Warnings = @() }
+        [pscustomobject]@{ Configuration = $null; SelectedMsiPath = $MsiPath; SelectionSource = 'Test'; Diagnostics = @() }
       }
       Mock Resolve-InstallShieldMsiFile { Get-Item -LiteralPath $MsiPath }
       Mock Get-MsiInstallerInfo { [pscustomobject]@{ InstallShieldProjectType = 'Basic MSI' } }
@@ -241,7 +241,7 @@ Describe 'InstallShield cabinets and extraction' -Tag Unit {
       $Info.Variant | Should -Be 'Basic MSI'
       $Info.ContainerFormat | Should -Be 'InstallShield Overlay'
       $Info.SelectedMsiPath | Should -Be 'CAS CDC Driver.msi'
-      $Info.Warnings | Should -BeNullOrEmpty
+      $Info.Diagnostics | Should -BeNullOrEmpty
       $Info.InstallShieldRelease.ReleaseName | Should -Be 'InstallShield 2010'
       $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Overlay/InstallShield'
       $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'MSI/Basic'

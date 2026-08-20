@@ -189,7 +189,7 @@ Describe 'InstallShield MSI integration' -Tag Unit {
     $Info.InstallShieldScriptInfo.ExtractedFiles | Should -Contain 'Setup.inx'
     $Info.InstallShieldScriptInfo.ExtractedFiles | Should -Contain 'IsConfig.ini'
     $Info.InstallShieldScriptInfo.Analysis | Should -Not -BeNullOrEmpty
-    $Info.Warnings | Should -Not -Match 'Embedded InstallScript custom-action analysis failed'
+    $Info.Diagnostics.Message | Should -Not -Match 'Embedded InstallScript custom-action analysis failed'
   }
 
   It 'Should expose bounded SMART InstallScript paths as notices rather than incomplete-analysis warnings' {
@@ -201,8 +201,8 @@ Describe 'InstallShield MSI integration' -Tag Unit {
 
     $Info = Get-MsiInstallerInfo -Path $Fixture
 
-    $Info.Warnings | Should -Not -Match 'bounded, conservative, or malformed path'
-    $Info.Notices | Should -Match 'loop was bounded|unknown conditions were evaluated'
-    $Info.InstallShieldScriptInfo.Notices | Should -Match 'loop was bounded|unknown conditions were evaluated'
+    $Info.Diagnostics.Message | Should -Not -Match 'bounded, conservative, or malformed path'
+    $Info.Diagnostics.Message | Should -Match 'loop was bounded|unknown conditions were evaluated'
+    $Info.InstallShieldScriptInfo.Diagnostics.Message | Should -Match 'loop was bounded|unknown conditions were evaluated'
   }
 }

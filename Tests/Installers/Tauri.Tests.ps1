@@ -191,7 +191,7 @@ Describe 'Tauri executable structure and metadata' {
     $Info.ParserVersionInfo.RecordWidth | Should -Be 32
     $Info.AssetCompression | Should -Be 'Brotli'
     $Info.BundleType | Should -Be 'NSIS'
-    $Info.Notices | Should -Match 'earliest patched token'
+    ($Info.Diagnostics | Where-Object Kind -EQ Information).Message | Should -Match 'earliest patched token'
   }
 
   It 'recognizes multiple maps and preserves duplicate names' {
@@ -218,7 +218,7 @@ Describe 'Tauri executable structure and metadata' {
     $Info.DetectionConfidence | Should -Be 'medium'
     $Info.CanExpand | Should -BeFalse
     $Info.UnresolvedFields | Should -Contain 'EmbeddedAssets'
-    $Info.Warnings | Should -Match 'custom or URL-backed asset provider'
+    $Info.Diagnostics.Message | Should -Match 'custom or URL-backed asset provider'
   }
 
   It 'rejects DLLs and unrelated PEs' {
@@ -265,7 +265,7 @@ Describe 'Tauri executable structure and metadata' {
     $Info = Get-TauriExecutableInfo -Path $Path
     $Info.CanExpand | Should -BeFalse
     $Info.AssetCount | Should -Be 0
-    $Info.Warnings | Should -Match 'custom or URL-backed asset provider'
+    $Info.Diagnostics.Message | Should -Match 'custom or URL-backed asset provider'
   }
 
 }

@@ -221,7 +221,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Existing.Advanced.Product'
-      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Contain 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems. Existing installed-state fields are preserved until both nested packages are analyzed.'
+      ($Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message -join "`n") | Should -Match 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems'
       Should -Invoke Get-AdvancedInstallerMsiInfo -Exactly 0
     }
 
@@ -286,10 +286,11 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
                 Variant          = $Variant
                 ProductCode      = $null
                 UnresolvedFields = @('ProductCode')
-                Warnings         = @()
+                Diagnostics      = @()
               }
             })
           FamilyCandidates = @()
+          Diagnostics      = @()
         }
       }
       $Installer = [ordered]@{
@@ -322,7 +323,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
             SelectedMsiPath = 'payload.msi'
             SelectionMethod = 'SetupIni'
           }
-          Warnings            = @()
+          Diagnostics         = @()
         }
       }
       Mock Get-InstallShieldMsiInfo {
@@ -337,6 +338,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
           PackageArchitecture          = 'x64'
           SelectedMsiPath              = 'payload.msi'
           SelectionMethod              = 'SetupIni'
+          Diagnostics                  = @()
         }
       }
       $Installer = [ordered]@{
@@ -382,14 +384,16 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
               Name    = 'InstallShield'
               Success = $true
               Result  = [pscustomobject]@{
-                Family   = 'InstallShield'
-                Metadata = [pscustomobject]@{ HasMsi = $true; Variant = 'Basic MSI or InstallScript MSI'; Warnings = @() }
-                MsiInfo  = $MsiInfo
+                Family      = 'InstallShield'
+                Metadata    = [pscustomobject]@{ HasMsi = $true; Variant = 'Basic MSI or InstallScript MSI'; Diagnostics = @() }
+                MsiInfo     = $MsiInfo
+                Diagnostics = @()
               }
             })
           DetectedFamilies   = @()
           RoutingHints       = @()
           RejectedCandidates = @()
+          Diagnostics        = @()
         }
       }
       Mock Get-InstallShieldInfo { throw 'The outer InstallShield package must not be extracted again' }
@@ -440,7 +444,9 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
               InstallerType = 'exe'
             })
           UnresolvedFields             = @('DisplayVersion', 'Scope', 'DefaultInstallLocation')
-          Warnings                     = @('InstallScript ARP defaults require VM validation')
+          Diagnostics                  = @(
+            New-InstallerDiagnostic -Id 'InstallShield.InstallScript.ArpDefaults' -Source InstallShield -Message 'InstallScript ARP defaults require VM validation' -Kind ManualValidation -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries
+          )
         }
         [pscustomobject]@{
           InstallerType     = 'InstallShield'
@@ -448,7 +454,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
           HasMsi            = $false
           MsiFiles          = @()
           InstallScriptInfo = $InstallScriptInfo
-          Warnings          = @('InstallScript ARP defaults require VM validation')
+          Diagnostics       = $InstallScriptInfo.Diagnostics
         }
       }
       Mock Get-InstallShieldMsiInfo { throw 'The MSI parser should not be called' }
@@ -469,14 +475,17 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result.ProductCode | Should -Be '{INSTALLSCRIPT-PRODUCT}'
       $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'InstallScript Product'
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'InstallScript Publisher'
-      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Contain 'InstallShield InstallScript: InstallScript ARP defaults require VM validation'
+      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Contain '[InstallShield.InstallScript.ArpDefaults] InstallShield: InstallScript ARP defaults require VM validation'
       Should -Invoke Get-InstallShieldMsiInfo -Exactly 0
     }
 
     It 'Logs rejected generic EXE routing hints at verbose level without a classification warning' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
-          ParserResults      = @([pscustomobject]@{ Name = 'CreateInstall'; Success = $false; Error = 'No supported GEA archive' })
+          ParserResults      = @([pscustomobject]@{
+              Name = 'CreateInstall'; Success = $false
+              Diagnostics = @((New-InstallerDiagnostic -Id 'InstallerDetection.CreateInstall.ParserRejected' -Source CreateInstall -Message 'No supported GEA archive' -Kind Fallback -Areas Detection))
+            })
           DetectedFamilies   = @()
           RoutingHints       = @([pscustomobject]@{ Family = 'CreateInstall'; Confidence = 'low' })
           RejectedCandidates = @([pscustomobject]@{
@@ -484,7 +493,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
               EvidenceKind     = 'Heuristic'
               IsOuterContainer = $false
               ParserName       = 'CreateInstall'
-              Error            = 'No supported GEA archive'
+              Diagnostics      = @((New-InstallerDiagnostic -Id 'InstallerDetection.CreateInstall.ParserRejected' -Source CreateInstall -Message 'No supported GEA archive' -Kind Fallback -Areas Detection))
             })
         }
       }
@@ -539,7 +548,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Existing.Product'
-      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike '*synthetic analyzer failure*'
+      ($Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message -join "`n") | Should -BeLike '*synthetic analyzer failure*'
     }
 
     It 'Extracts only the selected nested installer from a ZIP archive' {

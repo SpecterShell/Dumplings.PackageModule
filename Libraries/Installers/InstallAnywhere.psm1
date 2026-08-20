@@ -629,13 +629,13 @@ function Get-InstallAnywhereActionAndRuleInfo {
         })
     } elseif ($ActionType -eq 'CreateShortcut') {
       $Shortcuts.Add([pscustomobject][ordered]@{
-          ObjectId        = $ObjectId
-          Name            = $ScalarProperties['destinationName']
-          TargetObjectId  = $TargetObjectId
-          Target          = $TargetName
-          Arguments       = $ScalarProperties['args']
+          ObjectId         = $ObjectId
+          Name             = $ScalarProperties['destinationName']
+          TargetObjectId   = $TargetObjectId
+          Target           = $TargetName
+          Arguments        = $ScalarProperties['args']
           WorkingDirectory = $ScalarProperties['workingDir']
-          RuleExpression  = $RuleExpression
+          RuleExpression   = $RuleExpression
         })
     } elseif ($ActionType -eq 'MakeExecutable') {
       $LaxProperties = [ordered]@{}
@@ -644,14 +644,14 @@ function Get-InstallAnywhereActionAndRuleInfo {
         if ($Name) { $LaxProperties[$Name] = Get-InstallAnywhereObjectPropertyValue -Object $LaxProperty -Name 'propertyValue' }
       }
       $Launchers.Add([pscustomobject][ordered]@{
-          ObjectId        = $ObjectId
-          Name            = $ScalarProperties['destinationName']
-          MainClass       = $ScalarProperties['mainClass']
-          GuiLauncher     = $ScalarProperties['guiLauncher']
-          ExecutionLevel  = $ScalarProperties['execLevel']
-          VmBehavior      = $ScalarProperties['launcherVMBehavior']
-          LaxProperties   = $LaxProperties
-          RuleExpression  = $RuleExpression
+          ObjectId       = $ObjectId
+          Name           = $ScalarProperties['destinationName']
+          MainClass      = $ScalarProperties['mainClass']
+          GuiLauncher    = $ScalarProperties['guiLauncher']
+          ExecutionLevel = $ScalarProperties['execLevel']
+          VmBehavior     = $ScalarProperties['launcherVMBehavior']
+          LaxProperties  = $LaxProperties
+          RuleExpression = $RuleExpression
         })
     }
   }
@@ -769,47 +769,47 @@ function Get-InstallAnywhereInfo {
     $DefaultInstallLocation = if ($Installer) { Get-InstallAnywhereInstallDirectoryExpression -Installer $Installer -ProductName $DisplayName } else { $null }
     $NotUpdateGlobalRegistry = if ($Installer) { Get-InstallAnywhereObjectPropertyValue -Object $Installer -Name 'notUpdateGlobalRegistry' } else { $null }
     [pscustomobject][ordered]@{
-      Path                         = $ArchiveData.SourcePath
-      InstallerType                = 'InstallAnywhere'
-      ProductCode                  = $ProductCode
-      UpgradeCode                  = Get-InstallAnywhereUuid -Object $InstallerInfo -Name 'upgradeCode'
-      DisplayName                  = $DisplayName
-      DisplayVersion               = Get-InstallAnywhereVersion -InstallerInfo $InstallerInfo
-      Publisher                    = Get-InstallAnywhereObjectPropertyValue -Object $InstallerInfo -Name 'vendorName'
-      Scope                        = $Scope
-      DefaultInstallLocation       = $DefaultInstallLocation
-      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
-      AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
-      AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
-      Warnings                     = [string[]]$Warnings
-      UnresolvedFields             = [string[]]@(
+      Path                           = $ArchiveData.SourcePath
+      InstallerType                  = 'InstallAnywhere'
+      ProductCode                    = $ProductCode
+      UpgradeCode                    = Get-InstallAnywhereUuid -Object $InstallerInfo -Name 'upgradeCode'
+      DisplayName                    = $DisplayName
+      DisplayVersion                 = Get-InstallAnywhereVersion -InstallerInfo $InstallerInfo
+      Publisher                      = Get-InstallAnywhereObjectPropertyValue -Object $InstallerInfo -Name 'vendorName'
+      Scope                          = $Scope
+      DefaultInstallLocation         = $DefaultInstallLocation
+      WritesAppsAndFeaturesEntry     = $WritesAppsAndFeaturesEntry
+      AppsAndFeaturesProductCode     = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
+      AppsAndFeaturesInstallerType   = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
+      Diagnostics                    = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallAnywhere' -Kind Incomplete -Areas Metadata)
+      UnresolvedFields               = [string[]]@(
         if (-not $ProductCode) { 'ProductCode' }
         if (-not $Scope) { 'Scope' }
       )
-      PublisherUrl                 = Get-InstallAnywhereObjectPropertyValue -Object $InstallerInfo -Name 'vendorURL'
-      ProjectProductId             = $ProjectProductId
-      InstanceManagementEnabled    = [bool]$InstanceManagementEnabled
-      SupportsSilentUI             = $Installer ? (Get-InstallAnywhereObjectPropertyValue -Object $Installer -Name 'supportsSilentUI') : $null
-      SupportsConsoleUI            = $Installer ? (Get-InstallAnywhereObjectPropertyValue -Object $Installer -Name 'supportsConsoleUI') : $null
-      ResponseFileEnabled          = $Installer ? (Get-InstallAnywhereObjectPropertyValue -Object $Installer -Name 'responseFileEnabled') : $null
+      PublisherUrl                   = Get-InstallAnywhereObjectPropertyValue -Object $InstallerInfo -Name 'vendorURL'
+      ProjectProductId               = $ProjectProductId
+      InstanceManagementEnabled      = [bool]$InstanceManagementEnabled
+      SupportsSilentUI               = $Installer ? (Get-InstallAnywhereObjectPropertyValue -Object $Installer -Name 'supportsSilentUI') : $null
+      SupportsConsoleUI              = $Installer ? (Get-InstallAnywhereObjectPropertyValue -Object $Installer -Name 'supportsConsoleUI') : $null
+      ResponseFileEnabled            = $Installer ? (Get-InstallAnywhereObjectPropertyValue -Object $Installer -Name 'responseFileEnabled') : $null
       UpdatesInstallAnywhereRegistry = $null -eq $NotUpdateGlobalRegistry ? $null : -not [bool]$NotUpdateGlobalRegistry
-      BuiltInUninstaller           = $UninstallerEvidence
-      ActionClasses                = [string[]]$ActionClasses
-      Actions                      = $ActionAndRuleInfo.Actions
-      Rules                        = $ActionAndRuleInfo.Rules
-      InstalledPayloads            = $ActionAndRuleInfo.InstalledPayloads
-      ExecutedPayloads             = $ActionAndRuleInfo.ExecutedPayloads
-      Shortcuts                    = $ActionAndRuleInfo.Shortcuts
-      Launchers                    = $ActionAndRuleInfo.Launchers
-      ConditionalActionCount       = $ActionAndRuleInfo.ConditionalActionCount
-      UnsupportedActionClasses     = $ActionAndRuleInfo.UnsupportedActionClasses
-      RegistryWrites               = $RegistryWrites
-      RegistryAssociationInfo      = $RegistryAssociationInfo
-      Protocols                    = $RegistryAssociationInfo.Protocols
-      FileExtensions               = $RegistryAssociationInfo.FileExtensions
-      EmbeddedFiles                = @($ArchiveData.EntryNames)
-      ArchiveRange                 = $ArchiveData.Range
-      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallAnywhere'; ParserMajor = 3; Sources = @('Validated embedded ZIP archive', 'InstallerData/Execute.zip', 'InstallScript.iap_xml', 'InstallAnywhere InstallUninstaller runtime behavior', 'Structured action and rule graph') }
+      BuiltInUninstaller             = $UninstallerEvidence
+      ActionClasses                  = [string[]]$ActionClasses
+      Actions                        = $ActionAndRuleInfo.Actions
+      Rules                          = $ActionAndRuleInfo.Rules
+      InstalledPayloads              = $ActionAndRuleInfo.InstalledPayloads
+      ExecutedPayloads               = $ActionAndRuleInfo.ExecutedPayloads
+      Shortcuts                      = $ActionAndRuleInfo.Shortcuts
+      Launchers                      = $ActionAndRuleInfo.Launchers
+      ConditionalActionCount         = $ActionAndRuleInfo.ConditionalActionCount
+      UnsupportedActionClasses       = $ActionAndRuleInfo.UnsupportedActionClasses
+      RegistryWrites                 = $RegistryWrites
+      RegistryAssociationInfo        = $RegistryAssociationInfo
+      Protocols                      = $RegistryAssociationInfo.Protocols
+      FileExtensions                 = $RegistryAssociationInfo.FileExtensions
+      EmbeddedFiles                  = @($ArchiveData.EntryNames)
+      ArchiveRange                   = $ArchiveData.Range
+      ParserVersionInfo              = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallAnywhere'; ParserMajor = 3; Sources = @('Validated embedded ZIP archive', 'InstallerData/Execute.zip', 'InstallScript.iap_xml', 'InstallAnywhere InstallUninstaller runtime behavior', 'Structured action and rule graph') }
     }
   }
 }

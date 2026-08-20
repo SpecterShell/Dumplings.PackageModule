@@ -186,7 +186,8 @@ Describe 'MicaSetup static installer evidence' {
       $Info.ProductCode | Should -BeNullOrEmpty
       $Info.WritesAppsAndFeaturesEntry | Should -BeFalse
       $Info.RegistryWrites | Should -BeNullOrEmpty
-      ($Info.Notices -join "`n") | Should -Match 'Uninst.dat'
+      ($Info.Diagnostics.Message -join "`n") | Should -Match 'Uninst.dat'
+      @($Info.Diagnostics | Where-Object Kind -EQ Information) | Should -Not -BeNullOrEmpty
     }
   }
 
@@ -236,7 +237,7 @@ Describe 'MicaSetup static installer evidence' {
       ($Info.RegistryWrites | Where-Object Name -EQ 'SystemComponent').Value | Should -Be 1
       $Info.Protocols | Should -Contain 'mica'
       $Info.FileExtensions | Should -Contain 'mica'
-      ($Info.Notices -join "`n") | Should -Match 'hidden uninstall entry'
+      ($Info.Diagnostics.Message -join "`n") | Should -Match 'hidden uninstall entry'
     }
   }
 }
@@ -298,7 +299,8 @@ Describe 'MicaSetup malformed nested payload handling' {
     Test-MicaSetupInstaller -Path $CorruptInstaller | Should -BeTrue
     $Info = Get-MicaSetupInfo -Path $CorruptInstaller
     $Info.CanExpand | Should -BeFalse
-    $Info.Warnings | Should -Match 'payload archive analysis failed'
+    ($Info.Diagnostics.Message -join "`n") | Should -Match 'payload archive analysis failed'
+    @($Info.Diagnostics | Where-Object Kind -EQ Incomplete) | Should -Not -BeNullOrEmpty
   }
 }
 
@@ -313,7 +315,7 @@ Describe 'MicaSetup analyzer integration' {
     $Result.Success | Should -BeTrue
     $Result.Result.ProductCode | Should -Be 'MicaSetup'
     $Result.Result.AppsAndFeaturesEntries.ProductCode | Should -Contain 'MicaSetup'
-    $Result.Result.Notices | Should -Not -BeNullOrEmpty
+    $Result.Result.Diagnostics | Should -Not -BeNullOrEmpty
     $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe # MicaSetup'
     $Result.Result.SuggestedManifestFields.InstallModes | Should -Be @('interactive')
     $Result.Result.SuggestedManifestFields.InstallerSwitches.Count | Should -Be 0
@@ -322,7 +324,8 @@ Describe 'MicaSetup analyzer integration' {
   It 'produces a conservative WinGet installer suggestion without fabricating silent switches' {
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.com/MicaSetup.exe' -InstallerPath $Script:MicaSetupV2 -Architecture x64
 
-    $Suggestion.BlockingIssues | Should -BeNullOrEmpty
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
+    $Suggestion.Diagnostics.Id | Should -Contain 'MicaSetup.Installability.SilentUnsupported'
     $Suggestion.Installers | Should -HaveCount 1
     $Suggestion.Installers[0].InstallerType | Should -Be 'exe'
     $Suggestion.Installers[0].ProductCode | Should -Be 'MicaSetup'

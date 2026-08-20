@@ -198,7 +198,7 @@ function ConvertFrom-ZeroInstallFeed {
     $Root = $Document.DocumentElement
     if (-not $Root -or $Root.LocalName -notin 'interface', 'feed') { throw 'The XML is not a Zero Install interface feed.' }
 
-    $Warnings = [Collections.Generic.List[string]]::new()
+    $Warnings = [Collections.Generic.List[object]]::new()
     $Implementations = [Collections.Generic.List[object]]::new()
     $ArchitectureSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($Node in $Root.SelectNodes('.//*[local-name()="implementation"]')) {
@@ -252,7 +252,7 @@ function ConvertFrom-ZeroInstallFeed {
       Protocols             = @($ProtocolSet | Sort-Object)
       FileExtensions        = @($ExtensionSet | Sort-Object)
       Requirements          = $Requirements
-      Warnings              = $Warnings.ToArray()
+      Diagnostics           = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'ZeroInstall' -Kind Incomplete -Areas Metadata)
     }
   }
 }
@@ -350,12 +350,12 @@ function Get-ZeroInstallInfo {
     }
 
     $FeedInfo = if ($PSBoundParameters.ContainsKey('FeedContent') -and -not [string]::IsNullOrWhiteSpace($FeedContent)) { ConvertFrom-ZeroInstallFeed -Content $FeedContent } else { $null }
-    $Warnings = [Collections.Generic.List[string]]::new()
+    $Warnings = [Collections.Generic.List[object]]::new()
     if ($ConfigurationSource.StartsWith('Adjacent INI:', [StringComparison]::Ordinal)) {
       $Warnings.Add('The adjacent INI overrides the embedded bootstrap configuration at runtime; ensure the package delivers both files together.')
     }
     if ($FeedInfo) {
-      foreach ($Warning in $FeedInfo.Warnings) { $Warnings.Add($Warning) }
+      foreach ($Warning in $FeedInfo.Diagnostics) { $Warnings.Add($Warning) }
       if ($FeedInfo.InterfaceUri -and $AppUri -and $FeedInfo.InterfaceUri -ne $AppUri.AbsoluteUri) {
         $Warnings.Add("The supplied feed URI '$($FeedInfo.InterfaceUri)' does not match embedded app_uri '$($AppUri.AbsoluteUri)'.")
       }
@@ -410,7 +410,7 @@ function Get-ZeroInstallInfo {
       WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
       AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry ? $ProductCode : $null
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry ? 'exe' : $null
-      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'ZeroInstall' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
       Family                       = 'Zero Install'
       BootstrapperVariant          = if ($IsGui) { 'GUI' } else { 'CLI' }

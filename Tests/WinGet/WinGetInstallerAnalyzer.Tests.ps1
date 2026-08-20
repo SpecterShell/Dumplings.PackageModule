@@ -201,7 +201,8 @@ Describe 'WinGet installer analyzer content detection' {
 
     $Analysis.DetectedFileType.Type | Should -BeExactly 'HTMLDocument'
     $Analysis.DetectedFileType.Confidence | Should -BeExactly 'high'
-    $Analysis.BlockingIssues | Should -Contain 'The downloaded response is an HTML document, not an installer.'
+    $Analysis.HasBlockingDiagnostics | Should -BeTrue
+    ($Analysis.Diagnostics | Where-Object Id -EQ 'InstallerArtifact.HtmlResponse').Message | Should -Be 'The downloaded response is an HTML document, not an installer.'
     $Analysis.ParserResults | Should -BeNullOrEmpty
   }
 
@@ -216,8 +217,7 @@ Describe 'WinGet installer analyzer content detection' {
     $Analysis.DetectedFileType.Evidence.ClassId | Should -Be '{000C1084-0000-0000-C000-000000000046}'
     $Analysis.ParserResults[0].Success | Should -BeTrue
     $Analysis.ParserResults[0].Result.InstallerBuilderSource | Should -Be 'SummaryInformation.CreatingApp'
-    $Analysis.ParserResults[0].Result.Warnings.GetType() | Should -Be ([string[]])
-    $Analysis.ParserResults[0].Result.Notices.GetType() | Should -Be ([string[]])
+    $Analysis.ParserResults[0].Result.Diagnostics.GetType() | Should -Be ([object[]])
   }
 
   It 'Should classify MSP by CFB root CLSID rather than extension' {
@@ -244,7 +244,8 @@ Describe 'WinGet installer analyzer content detection' {
     $Analysis.ParserResults[0].Result.SignatureEvidence.IsSigned | Should -BeFalse
     $Analysis.ParserResults[0].Result.SignatureEvidence.IsTrusted | Should -BeFalse
     $Analysis.ParserResults[0].Result.Rejected | Should -BeTrue
-    $Analysis.BlockingIssues | Should -Contain 'Reject: MSIX/AppX-family packages must contain a signature.'
+    $Analysis.HasBlockingDiagnostics | Should -BeTrue
+    ($Analysis.Diagnostics | Where-Object Id -EQ 'MSIX.RejectedInstaller').Message | Should -Be 'Reject: MSIX/AppX-family packages must contain a signature.'
   }
 
   It 'Should reject signed MSIX/AppX-family packages whose signature is not trusted by the system' {
@@ -259,7 +260,8 @@ Describe 'WinGet installer analyzer content detection' {
     $Analysis.ParserResults[0].Result.SignatureEvidence.IsTrusted | Should -BeFalse
     $Analysis.ParserResults[0].Result.SignatureSha256 | Should -Not -BeNullOrEmpty
     $Analysis.ParserResults[0].Result.Rejected | Should -BeTrue
-    $Analysis.BlockingIssues | Should -Contain 'Reject: MSIX/AppX-family package signature is not valid and trusted by this system.'
+    $Analysis.HasBlockingDiagnostics | Should -BeTrue
+    ($Analysis.Diagnostics | Where-Object Id -EQ 'MSIX.RejectedInstaller').Message | Should -Be 'Reject: MSIX/AppX-family package signature is not valid and trusted by this system.'
   }
 
   It 'Should warn about unknown MSIX/AppX package dependencies and omit them from suggested manifest dependencies' {
@@ -272,8 +274,10 @@ Describe 'WinGet installer analyzer content detection' {
     $Result.Dependencies.PackageDependencies.PackageIdentifier | Should -Contain 'Microsoft.WindowsAppRuntime.1.7'
     $Result.Dependencies.PackageDependencies.PackageIdentifier | Should -Not -Contain 'Contoso.UnknownFramework'
     $Result.UnknownPackageDependencies.PackageIdentifier | Should -Contain 'Contoso.UnknownFramework'
-    $Result.Warnings[0] | Should -BeLike '*Contoso.UnknownFramework*not included*'
-    $Analysis.SuggestedNextSteps | Should -Contain $Result.Warnings[0]
+    $DependencyDiagnostic = $Result.Diagnostics | Where-Object Id -EQ 'MSIX.Dependency.UnknownPackage'
+    $DependencyDiagnostic.Message | Should -BeLike '*Contoso.UnknownFramework*not included*'
+    $DependencyDiagnostic.AffectedFields | Should -Contain 'Dependencies'
+    ($Analysis.Diagnostics | Where-Object Id -EQ 'MSIX.Dependency.UnknownPackage').Level | Should -Be 'Warning'
   }
 
   It 'Should expose structured install4j parser evidence for install4j launchers' {
@@ -305,7 +309,7 @@ Describe 'WinGet installer analyzer content detection' {
     $Result.Result.Scope | Should -Be 'machine'
     $Result.Result.Metadata.FormatGeneration | Should -Be 11
     $Result.Result.Metadata.BuilderVersion | Should -Be '11.0.5'
-    $Result.Result.Warnings | Should -BeNullOrEmpty
+    $Result.Result.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should expose localized NSIS ARP entries and parser notices' {
@@ -329,8 +333,10 @@ Describe 'WinGet installer analyzer content detection' {
             [pscustomobject]@{ LanguageId = 2052; Locale = 'zh-CN'; DisplayName = '腾讯会议' }
           )
           HasLocalizedAppsAndFeaturesEntries = $true
-          Notices                            = @($Notice)
-          Warnings                           = @($Warning)
+          Diagnostics                        = @(
+            (New-InstallerDiagnostic -Id 'NSIS.ARP.LocalizedIdentity' -Source NSIS -Message $Notice -Kind Information -Areas Metadata -AffectedFields AppsAndFeaturesEntries),
+            (New-InstallerDiagnostic -Id 'NSIS.Metadata.Incomplete' -Source NSIS -Message $Warning -Kind Incomplete -Areas Metadata)
+          )
           Protocols                          = @()
           FileExtensions                     = @()
           RegistryAssociationInfo            = $null
@@ -345,10 +351,9 @@ Describe 'WinGet installer analyzer content detection' {
       $ParserResult.AppsAndFeaturesEntries.DisplayName | Should -Contain '腾讯会议'
       $ParserResult.AppsAndFeaturesEvidence.Locale | Should -Contain 'zh-CN'
       $ParserResult.HasLocalizedAppsAndFeaturesEntries | Should -BeTrue
-      $ParserResult.Notices | Should -Contain $Notice
-      $ParserResult.Warnings | Should -Contain $Warning
-      $ParserResult.Warnings | Should -Not -Contain $Notice
-      $ParserResult.Warnings | Should -HaveCount 1
+      ($ParserResult.Diagnostics | Where-Object Id -EQ 'NSIS.ARP.LocalizedIdentity').Message | Should -Be $Notice
+      ($ParserResult.Diagnostics | Where-Object Id -EQ 'NSIS.Metadata.Incomplete').Message | Should -Be $Warning
+      @($ParserResult.Diagnostics | Where-Object Kind -EQ Incomplete) | Should -HaveCount 1
     }
   }
 
@@ -373,7 +378,7 @@ Describe 'WinGet installer analyzer content detection' {
           Variant           = 'Basic MSI or InstallScript MSI'
           HasMsi            = $true
           InstallScriptInfo = $null
-          Warnings          = @()
+          Diagnostics       = @()
         }
       }
       Mock Get-InstallShieldMsiInfo {
@@ -385,7 +390,7 @@ Describe 'WinGet installer analyzer content detection' {
           Publisher       = 'Contoso'
           SelectedMsiPath = 'payload\Product.msi'
           SelectionMethod = 'SetupIni'
-          Warnings        = @()
+          Diagnostics     = @()
         }
       }
 
@@ -414,7 +419,7 @@ Describe 'WinGet installer analyzer content detection' {
           WritesAppsAndFeaturesEntry   = $true
           AppsAndFeaturesProductCode   = '{INSTALLSCRIPT-PRODUCT}'
           AppsAndFeaturesInstallerType = 'exe'
-          Warnings                     = @()
+          Diagnostics                  = @()
         }
         [pscustomobject]@{
           InstallerType                = 'InstallShield'
@@ -427,7 +432,7 @@ Describe 'WinGet installer analyzer content detection' {
           AppsAndFeaturesProductCode   = $InstallScriptInfo.AppsAndFeaturesProductCode
           AppsAndFeaturesInstallerType = 'exe'
           InstallScriptInfo            = $InstallScriptInfo
-          Warnings                     = @()
+          Diagnostics                  = @()
         }
       }
       Mock Get-InstallShieldMsiInfo { throw 'MSI parsing must not run for InstallScript-only media' }
@@ -543,6 +548,41 @@ Describe 'WinGet installer analyzer content detection' {
     $Analysis.FamilyCandidates.Family | Should -Not -Contain $Family
     $Analysis.RoutingHints.Family | Should -Contain $Family
     $Analysis.RejectedCandidates.Family | Should -Contain $Family
+    $ExpectedSource = $Family -eq 'Squirrel' ? 'Squirrel/Velopack' : $Family
+    $RejectedDiagnostic = $Analysis.Diagnostics | Where-Object Source -EQ $ExpectedSource | Select-Object -First 1
+    $RejectedDiagnostic.Kind | Should -Be 'Fallback'
+    $RejectedDiagnostic.Level | Should -Be 'Info'
+    $RejectedDiagnostic.IsBlocking | Should -BeFalse
+  }
+
+  It 'Should warn when a confirmed structural family fails metadata parsing' {
+    InModuleScope InstallerAnalyzer {
+      $Candidate = [pscustomobject]@{
+        Family                  = 'Inno Setup'
+        Confidence              = 'high'
+        EvidenceKind            = 'Structural'
+        ValidationStatus        = 'ConfirmedStructure'
+        IsOuterContainer        = $true
+        MatchedMarkers          = @('Inno Setup Setup Data')
+        SuggestedManifestFields = $null
+      }
+      $ParserResult = [pscustomobject]@{
+        Name        = 'Inno'
+        Success     = $false
+        Result      = $null
+        Diagnostics = @(
+          New-InstallerDiagnostic -Id 'InstallerDetection.Inno.ParserRejected' -Source Inno -Message 'The confirmed Inno header could not be decoded.' -Kind Fallback -Areas Detection
+        )
+      }
+
+      $Resolved = Resolve-InstallerFamilyEvidence -Candidates @($Candidate) -ParserResults @($ParserResult)
+      $Diagnostic = $Resolved.RejectedCandidates[0].Diagnostics[0]
+      $Diagnostic.Id | Should -Be 'InstallerDetection.Inno.Setup.ConfirmedParserFailure'
+      $Diagnostic.Kind | Should -Be 'Incomplete'
+      $Diagnostic.Areas | Should -Contain 'Detection'
+      $Diagnostic.AffectedFields | Should -Contain 'InstallerType'
+      (Resolve-InstallerDiagnostic -Diagnostic $Diagnostic -Scenario FullAnalysis).Level | Should -Be 'Warning'
+    }
   }
 
   It 'Should prefer a structured generic EXE parser over archive-wrapper heuristics' {
@@ -559,7 +599,8 @@ Describe 'WinGet installer analyzer content detection' {
           DisplayName = 'Analyzer QSetup Product'; DisplayVersion = '1.2.3'; Publisher = 'Contoso'
           ProductCode = 'Analyzer QSetup Product'; Scope = 'machine'; SupportedScopes = @('machine')
           Protocols = @(); FileExtensions = @('example'); RegistryAssociationInfo = $null
-          ExtractedFiles = @('Setup.txt'); CanExpand = $true; Warnings = @(); Notices = @('Execution action evidence')
+          ExtractedFiles = @('Setup.txt'); CanExpand = $true
+          Diagnostics = @((New-InstallerDiagnostic -Id 'QSetup.ExecutionActionEvidence' -Source QSetup -Message 'Execution action evidence' -Kind Information -Areas Installability))
           ExecutedPayloads = @([pscustomobject]@{ Command = 'runtime.exe'; Parameters = '/quiet' })
         }
       }
@@ -575,7 +616,7 @@ Describe 'WinGet installer analyzer content detection' {
       $QSetup.Result.ProductName | Should -Be 'Analyzer QSetup Product'
       $QSetup.Result.ProductVersion | Should -Be '1.2.3'
       $QSetup.Result.SuggestedManifestFields.Scope | Should -Be 'machine'
-      $QSetup.Result.Notices | Should -Be @('Execution action evidence')
+      $QSetup.Result.Diagnostics.Message | Should -Contain 'Execution action evidence'
       $QSetup.Result.ExecutedPayloads[0].Command | Should -Be 'runtime.exe'
       (& (Get-Module WinGetAnalysis) { Get-WinGetInstallerExeFamilyDefault -Family 'QSetup' }).InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
       Should -Invoke -CommandName Get-SevenZipSfxInfo -Times 0 -Exactly
@@ -609,7 +650,8 @@ Describe 'WinGet installer analyzer content detection' {
       $QtResult = $Results | Where-Object Name -EQ 'Qt Installer Framework' | Select-Object -First 1
 
       $QtResult.Success | Should -BeFalse
-      $QtResult.Error | Should -BeLike '*structurally supported*'
+      $QtResult.Diagnostics.Message | Should -BeLike '*structurally supported*'
+      $QtResult.Diagnostics.Kind | Should -Be 'Fallback'
       Should -Invoke -CommandName Get-QtInstallerFrameworkInfo -Times 0 -Exactly
     }
   }

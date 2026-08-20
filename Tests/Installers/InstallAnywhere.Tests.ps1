@@ -166,6 +166,6 @@ Describe 'InstallAnywhere static parser' {
     $Info.ExecutedPayloads.Target | Should -Contain 'vcredist_x64.exe'
     $Info.Launchers.Name | Should -Contain 'FlowJo_v10.10.0'
     $Info.Rules.Type | Should -Contain 'PlatformChk'
-    $Info.Warnings | Should -Contain 'InstallAnywhere chooses the built-in uninstall entry hive at runtime and can fall back from HKLM to HKCU. Validate scope in a VM.'
+    $Info.Diagnostics.Message | Should -Contain 'InstallAnywhere chooses the built-in uninstall entry hive at runtime and can fall back from HKLM to HKCU. Validate scope in a VM.'
   }
 }

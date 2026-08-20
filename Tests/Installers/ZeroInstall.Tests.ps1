@@ -97,7 +97,7 @@ Describe 'Zero Install bootstrapper parser' {
     $Info.Protocols | Should -Be @('example')
     $Info.FileExtensions | Should -Be @('example')
     $Info.DisplayVersion | Should -BeNullOrEmpty
-    $Info.Warnings | Should -Contain "The supplied feed URI 'https://downloads.example.test/product.xml' does not match embedded app_uri 'https://appdownload.deepl.com/windows/0install/deepl.xml'."
+    $Info.Diagnostics.Message | Should -Contain "The supplied feed URI 'https://downloads.example.test/product.xml' does not match embedded app_uri 'https://appdownload.deepl.com/windows/0install/deepl.xml'."
   }
 
   It 'distinguishes generic console and GUI launchers without inventing app metadata' {
@@ -132,7 +132,7 @@ integrate_args = --add-all
     $Info.AppName | Should -Be 'Sidecar Product'
     $Info.ProductCode | Should -Be 'https%3a##downloads.example.test#sidecar.xml'
     $Info.EmbeddedBootstrapConfig.Sections.bootstrap.app_name | Should -Be 'DeepL'
-    $Info.Warnings | Should -Contain 'The adjacent INI overrides the embedded bootstrap configuration at runtime; ensure the package delivers both files together.'
+    $Info.Diagnostics.Message | Should -Contain 'The adjacent INI overrides the embedded bootstrap configuration at runtime; ensure the package delivers both files together.'
   }
 
   It 'enumerates managed resources through a caller-owned stream and restores its position' {

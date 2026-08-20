@@ -50,7 +50,7 @@ Describe 'MSI Apps & Features parser' {
     $Info.PSObject.Properties.Name[0..13] | Should -Be @(
       'Path', 'InstallerType', 'ProductCode', 'UpgradeCode', 'DisplayName', 'DisplayVersion',
       'Publisher', 'Scope', 'DefaultInstallLocation', 'WritesAppsAndFeaturesEntry',
-      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Warnings', 'UnresolvedFields'
+      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Diagnostics', 'UnresolvedFields'
     )
     $Info.PSObject.Properties.Name | Should -Not -Contain 'ProductName'
     $Info.PSObject.Properties.Name | Should -Not -Contain 'ProductVersion'
@@ -59,9 +59,9 @@ Describe 'MSI Apps & Features parser' {
     $Info.DisplayVersion | Should -Not -BeNullOrEmpty
     $Info.PSObject.Properties.Name | Should -Contain 'Scope'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
-    $Info.Warnings | Should -Be @()
+    $Info.Diagnostics | Should -Be @()
     $Info.UnresolvedFields | Should -Be @()
-    $Info.Warnings.GetType() | Should -Be ([string[]])
+    $Info.Diagnostics.GetType() | Should -Be ([object[]])
     $Info.UnresolvedFields.GetType() | Should -Be ([string[]])
   }
 
@@ -201,7 +201,7 @@ Describe 'MSI builder and install-location parser' {
       $Requirement.VerifierAction.Action | Should -Be 'ISVerifyScriptingRuntime'
       $Requirement.SequenceConditions | Should -Be 'NOT AFTERREBOOT AND NOT ISSETUPDRIVEN'
       $Requirement.Evidence | Should -Contain 'ISVerifyScriptingRuntime custom action'
-      $Requirement.Warnings | Should -BeNullOrEmpty
+      $Requirement.Diagnostics | Should -BeNullOrEmpty
     }
 
     It 'Should classify Chromium enterprise MSIs compiled from WiX source' {

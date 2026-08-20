@@ -178,7 +178,7 @@ Describe 'InstallScript response behavior and real fixtures' -Tag 'RealFixture',
     $Info.InstallShieldCabinetSupport.SupportEntries.Name | Should -Contain 'setup.inx'
     $Info.InstallShieldCabinetSupport.SupportEntries.Name | Should -Contain 'StringTable_0x040c.ips'
     $Info.InstallShieldCabinetSupport.ExpandedBytes | Should -Be ($ScriptSize + 8858)
-    $Info.InstallShieldCabinetSupport.Warnings | Should -BeNullOrEmpty
+    $Info.InstallShieldCabinetSupport.Diagnostics | Should -BeNullOrEmpty
     $Info.ProductCode | Should -Be $ProductCode
     $Info.DisplayName | Should -Be $DisplayName
     $Info.Publisher | Should -Be 'Index Education'
@@ -193,7 +193,7 @@ Describe 'InstallScript response behavior and real fixtures' -Tag 'RealFixture',
     $Info.RegistryWrites | Where-Object { $_.Root -eq 'HKCR' -and $_.Key -eq '.pcprn' -and $_.Data -eq 'IndexEducation.pcprn' } | Should -HaveCount 1
     $Info.InstallScriptInfo.ParserVersionInfo.EmulationTruncated | Should -BeFalse
     $Info.InstallScriptInfo.UnsupportedOpcodes | Should -BeNullOrEmpty
-    $Info.InstallScriptInfo.Warnings -join ' ' | Should -Match 'does not ship a valid fresh-install setup\.iss'
+    $Info.InstallScriptInfo.Diagnostics.Message -join ' ' | Should -Match 'does not ship a valid fresh-install setup\.iss'
   }
 
   It 'parses Dell Display and Peripheral Manager multi-language media when cached' {
@@ -214,9 +214,9 @@ Describe 'InstallScript response behavior and real fixtures' -Tag 'RealFixture',
     $Info.InstallShieldRelease.ReleaseName | Should -Be 'InstallShield 2025'
     $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Cabinet17/UnicodeCatalog'
     $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Script/aLuZ'
-    $Info.Warnings -join ' ' | Should -Not -Match 'media (?:setup-type|registry) records are malformed or unsupported'
+    $Info.Diagnostics.Message -join ' ' | Should -Not -Match 'media (?:setup-type|registry) records are malformed or unsupported'
     $Info.InstallScriptInfo.EmbeddedResponseFile.DialogNames | Should -Contain 'SdWelcomeMaint'
-    $Info.InstallScriptInfo.Warnings -join ' ' | Should -Match 'does not match the statically reconstructed fresh-install dialog order'
+    $Info.InstallScriptInfo.Diagnostics.Message -join ' ' | Should -Match 'does not match the statically reconstructed fresh-install dialog order'
   }
 
   It 'builds an instruction-backed Celsys dialog trace and validates the embedded response order' {
@@ -259,7 +259,7 @@ Describe 'InstallScript response behavior and real fixtures' -Tag 'RealFixture',
     $Template.Content | Should -Match '\[\{11111111-2222-3333-4444-555555555555\}-DlgOrder\]'
     $Template.Content | Should -Match 'TODO: record this dialog in the validation VM'
     $Template.Content | Should -Match 'choose one of SdFinish, SdFinishReboot'
-    $Template.Warnings | Should -Contain "Dialog 'SdComponentTree' contains project-specific feature data that cannot be generated statically."
+    $Template.Diagnostics.Message | Should -Contain "Dialog 'SdComponentTree' contains project-specific feature data that cannot be generated statically."
   }
 
   It 'reports response dialog-order mismatches without executing Setup.exe' {

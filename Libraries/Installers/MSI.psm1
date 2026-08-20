@@ -443,8 +443,8 @@ function Get-MsiAssociationInfoFromStaticTableInfo {
   $FileExtensionAssociations = [System.Collections.Generic.List[object]]::new()
   foreach ($Association in @($RegistryAssociationInfo.FileExtensionAssociations)) { $FileExtensionAssociations.Add($Association) }
   $SeenTableExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-  $Warnings = [System.Collections.Generic.List[string]]::new()
-  foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add($Warning) }
+  $Warnings = [System.Collections.Generic.List[object]]::new()
+  foreach ($Warning in @($RegistryAssociationInfo.Diagnostics)) { $Warnings.Add($Warning) }
 
   # Merge explicit Registry-table associations with MSI's normalized Extension/ProgId/Verb/MIME
   # tables, deduplicating by literal extension.
@@ -483,7 +483,7 @@ function Get-MsiAssociationInfoFromStaticTableInfo {
     ProtocolAssociations      = @($RegistryAssociationInfo.ProtocolAssociations)
     FileExtensionAssociations = @($FileExtensionAssociations)
     RegistryAssociationInfo   = $RegistryAssociationInfo
-    Warnings                  = @($Warnings | Select-Object -Unique)
+    Diagnostics               = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'MSI' -Kind Incomplete -Areas Metadata))
   }
 }
 
@@ -803,7 +803,7 @@ function Get-MsiElevationInfoFromStaticTableInfo {
   )
 
   $Evidence = [System.Collections.Generic.List[object]]::new()
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
   $SummaryWordCount = [int]$StaticTableInfo.SummaryInfo.WordCount
   $AllowsInstallWithoutElevation = ($SummaryWordCount -band 0x08) -ne 0
 
@@ -925,7 +925,7 @@ function Get-MsiElevationInfoFromStaticTableInfo {
     Evidence                      = [object[]]$Evidence.ToArray()
     SummaryWordCount              = $SummaryWordCount
     AllowsInstallWithoutElevation = $AllowsInstallWithoutElevation
-    Warnings                      = [string[]]$Warnings.ToArray()
+    Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'MSI' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1467,9 +1467,15 @@ function Get-MsiInstallerInfo {
         WritesAppsAndFeaturesEntry          = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry -or -not $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
         AppsAndFeaturesProductCode          = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
         AppsAndFeaturesInstallerType        = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
-        Warnings                            = [string[]]@($ElevationInfo.Warnings + $InstallShieldLauncherRequirement.Warnings + @($InstallShieldScriptInfo.Warnings) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        Diagnostics                         = @(
+          Merge-InstallerDiagnostics -Diagnostic @(
+            $ElevationInfo.Diagnostics
+            $InstallShieldLauncherRequirement.Diagnostics
+            $InstallShieldScriptInfo.Diagnostics
+          )
+        )
         UnresolvedFields                    = [string[]]@()
-        Notices                             = [string[]]@($InstallShieldScriptInfo.Notices | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
         AllUsers                            = $Properties['ALLUSERS']
         InstallerBuilder                    = $AppsAndFeaturesInfo.InstallerBuilder
         InstallerBuilderSource              = $AppsAndFeaturesInfo.InstallerBuilderSource

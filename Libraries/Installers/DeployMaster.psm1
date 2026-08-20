@@ -681,7 +681,7 @@ function Read-DeployMasterPackageData {
   $LanguageBlock = Read-DeployMasterCompressedBlock -Stream $Stream -Offset $Header.LanguageBlockOffset -Properties $Header.LzmaProperties -Limit $IntegrityEnd
   $IdentityBlock = Read-DeployMasterCompressedBlock -Stream $Stream -Offset $LanguageBlock.EndOffset -Properties $Header.LzmaProperties -Limit $IntegrityEnd
   $Identity = ConvertFrom-DeployMasterIdentity -Bytes $IdentityBlock.Bytes -ScopeValue $Header.ScopeValue
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   if (-not $Identity.LocationMarkerMatchesScope) { $Warnings.Add('The DeployMaster identity scope marker does not match the package-control scope byte.') }
   try { $FileEntries = @(Get-DeployMasterFileEntry -Stream $Stream -Identity $Identity -IdentityEnd $IdentityBlock.EndOffset -PackageDataOffset $Locator.PackageDataOffset -Properties $Header.LzmaProperties -TableKind $Header.Layout) }
   catch {
@@ -702,7 +702,7 @@ function Read-DeployMasterPackageData {
     Identity         = $Identity
     FileEntries      = $FileEntries
     FileAssociations = $FileAssociations
-    Warnings         = @($Warnings)
+    Diagnostics      = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Warnings)) -Source 'DeployMaster' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -783,10 +783,10 @@ function Get-DeployMasterInfo {
       ProtocolAssociations      = @()
       FileExtensionAssociations = $PackageData.FileAssociations
       RegistryWrites            = @()
-      Warnings                  = @()
+      Diagnostics               = @(ConvertTo-InstallerDiagnostic -InputObject @(@()) -Source 'DeployMaster' -Kind Incomplete -Areas Metadata)
     }
-    $Warnings = [Collections.Generic.List[string]]::new()
-    foreach ($Warning in $PackageData.Warnings) { $Warnings.Add($Warning) }
+    $Warnings = [Collections.Generic.List[object]]::new()
+    foreach ($Warning in $PackageData.Diagnostics) { $Warnings.Add($Warning) }
     if ($PackageData.Header.SupportsDualScope) { $Warnings.Add('This DeployMaster package supports both user and machine scope; validate the default scope and any elevation-sensitive behavior in a VM.') }
     $Warnings.Add('DeployMaster custom registry action tables are not decoded; validate package-specific ARP overrides and first-run associations in a VM.')
     if ($PackageData.FileAssociations.Actions | Where-Object { $_.Executable32FileIndex -lt 0 -and $_.Executable64FileIndex -lt 0 }) {
@@ -811,7 +811,7 @@ function Get-DeployMasterInfo {
       WritesAppsAndFeaturesEntry            = $true
       AppsAndFeaturesProductCode            = $Identity.DisplayName
       AppsAndFeaturesInstallerType          = 'exe'
-      Warnings                              = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                           = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'DeployMaster' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                      = [string[]]@()
       ProductCodeEvidence                   = 'DeployMaster structured identity and built-in uninstall-key convention'
       PublisherUrl                          = $Identity.PublisherUrl

@@ -103,10 +103,12 @@ function ConvertTo-InstallerBridgeObject {
           $RequiresDictionary = $true
         }
         $ConvertedValue = ConvertTo-InstallerBridgeObject -InputObject $Entry.Value
-        if ($MemberName -in @('Warnings', 'Notices', 'UnresolvedFields')) {
-          # JSON arrays lose their element type. Restore the documented parser
-          # diagnostic contract as part of transport deserialization only.
+        if ($MemberName -eq 'UnresolvedFields') {
+          # JSON arrays lose their element type. Restore unresolved metadata
+          # field names without flattening structured diagnostic evidence.
           $ConvertedValue = [string[]]@($ConvertedValue)
+        } elseif ($MemberName -eq 'Diagnostics') {
+          $ConvertedValue = [object[]]@($ConvertedValue)
         }
         $Converted[$MemberName] = $ConvertedValue
       }

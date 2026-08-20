@@ -17,11 +17,13 @@ Describe 'Installer bridge' {
 
   It 'Should restore canonical diagnostic array types returned by a parser CLI' {
     $Result = InModuleScope InstallerBridge {
-      '{"Warnings":["Incomplete metadata"],"Notices":["Localized ARP identity"],"UnresolvedFields":[],"Files":["payload.exe"]}' | ConvertFrom-InstallerBridgeJson
+      '{"Diagnostics":[{"Id":"NSIS.Metadata.Incomplete","Source":"NSIS","Message":"Incomplete metadata","Kind":"Incomplete","Areas":["Metadata"],"AffectedFields":["ProductCode"],"Evidence":{"Offset":42},"Scenario":null,"Level":null,"IsBlocking":null}],"UnresolvedFields":[],"Files":["payload.exe"]}' | ConvertFrom-InstallerBridgeJson
     }
 
-    $Result.Warnings.GetType() | Should -Be ([string[]])
-    $Result.Notices.GetType() | Should -Be ([string[]])
+    $Result.Diagnostics.GetType() | Should -Be ([object[]])
+    $Result.Diagnostics[0].Kind | Should -Be 'Incomplete'
+    $Result.Diagnostics[0].AffectedFields | Should -Be @('ProductCode')
+    $Result.Diagnostics[0].Evidence.Offset | Should -Be 42
     $Result.UnresolvedFields.GetType() | Should -Be ([string[]])
     $Result.Files.GetType() | Should -Not -Be ([string[]])
   }
@@ -103,7 +105,7 @@ stagingPercentage: 25
 
     $X86Info.ProductCode | Should -Be 'BitComet'
     $X64Info.ProductCode | Should -Be 'BitComet_x64'
-    $X64Info.Notices.GetType() | Should -Be ([string[]])
+    $X64Info.Diagnostics.GetType() | Should -Be ([object[]])
   }
 
   It 'Should forward target scope to the NSIS parser bridge' {
@@ -154,7 +156,7 @@ stagingPercentage: 25
     $Info.Scope | Should -Be 'machine'
     $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\TranslatorX'
     @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should return FileInfo objects from the InstallerParsers NSIS extraction bridge' {
@@ -582,7 +584,7 @@ function Controller() {
     $Info.Scope | Should -Be 'machine'
     $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\TK Copilot'
     @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should classify the documented electron-builder example <PackageIdentifier>' -ForEach @(

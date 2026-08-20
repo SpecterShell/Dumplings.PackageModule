@@ -4,6 +4,8 @@ BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\FileSystem.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\Archive.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\Cabinet.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\InstallerDiagnostics.psm1') -Force
+  Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Infrastructure\InstallerEvidence.psm1') -Force
   . (Resolve-DumplingsTestModulePath 'Tests\Support\Import-DataInfrastructure.ps1')
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Data\YamlSchema.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\WinGet\WinGetManifestSchema.psm1') -Force

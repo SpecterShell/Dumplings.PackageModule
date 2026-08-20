@@ -896,7 +896,7 @@ function Get-PEDotNetRuntimeInfo {
     IncludedFrameworks              = @($IncludedFrameworks)
     RecommendedPackageDependencies  = @($RecommendedDependencies | Sort-Object -Property PackageIdentifier)
     RecommendedPackageDependencyIds = @($RecommendedDependencies | Select-Object -ExpandProperty PackageIdentifier | Sort-Object -Unique)
-    Warnings                        = @($Warnings)
+    Diagnostics                     = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'PEDependency' -Kind Incomplete -Areas Metadata -AffectedFields Dependencies)
   }
 }
 
@@ -1022,7 +1022,13 @@ function Get-PEDependencyInfo {
       DotNetInfo                      = $DotNetInfo
       RecommendedPackageDependencyIds = $PackageIds
       RecommendedPackageDependencies  = @($RecommendedDependencies | Sort-Object -Property PackageIdentifier)
-      Warnings                        = @($Warnings + $DotNetInfo.Warnings)
+      Diagnostics                     = @(
+        Merge-InstallerDiagnostics -Diagnostic @(
+          @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'PEDependency' -Kind Incomplete -Areas Metadata -AffectedFields Dependencies)
+          $DotNetInfo.Diagnostics
+          $PrimaryArchitectureInfo.Diagnostics
+        )
+      )
     }
   }
 }

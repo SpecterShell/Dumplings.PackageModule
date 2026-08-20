@@ -76,8 +76,8 @@ SET_PERFORM_EXECUTE_OP(*||Install prerequisite|Setup Start|10|UnConditional|0|0|
       $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
       $Info.FileExtensions | Should -Be @('example')
       $Info.Records.Name | Should -Be @('Engine.exe', 'Setup.txt')
-      $Info.Warnings | Should -BeNullOrEmpty
-      $Info.Notices | Should -HaveCount 1
+      @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
+      @($Info.Diagnostics | Where-Object Kind -EQ Information) | Should -HaveCount 1
       $Info.ExecutionActions | Should -HaveCount 1
       $Info.ExecutedPayloads | Should -HaveCount 1
       $Info.ExecutedPayloads[0].Command | Should -Be '<SrcDir>\runtime.exe'
@@ -99,7 +99,7 @@ SET_PERFORM_EXECUTE_OP(*||Install prerequisite|Setup Start|10|UnConditional|0|0|
       param($FixturePath)
       Mock Get-PEOverlayOffset { 512 }
       $Info = Get-QSetupInfo -Path $FixturePath
-      $Info.Warnings | Should -BeNullOrEmpty
+      $Info.Diagnostics | Should -BeNullOrEmpty
       $Info.Records | Should -HaveCount 2
       $Info.PackageFooter.DeclaredRecordCount | Should -Be 2
       $Info.Certificate | Should -BeNullOrEmpty
@@ -117,7 +117,7 @@ SET_PERFORM_EXECUTE_OP(*||Install prerequisite|Setup Start|10|UnConditional|0|0|
       $Result = Get-QSetupExecutionActionInfo -Directive $Directive
       $Result.Actions | Should -BeNullOrEmpty
       $Result.ExecutedPayloads | Should -BeNullOrEmpty
-      $Result.Warnings | Should -HaveCount 1
+      $Result.Diagnostics | Should -HaveCount 1
     }
   }
 
@@ -135,7 +135,7 @@ SET_PERFORM_EXECUTE_OP(*||Install prerequisite|Setup Start|10|UnConditional|0|0|
     }
 
     $Info = Get-QSetupInfo -Path $Fixture
-    $Info.Warnings | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
     $Info.PackageFooter.DeclaredRecordCount | Should -Be 241
     $Info.Records | Should -HaveCount 241
     $Info.Certificate.Offset | Should -BeGreaterThan $Info.PackageFooter.Offset
