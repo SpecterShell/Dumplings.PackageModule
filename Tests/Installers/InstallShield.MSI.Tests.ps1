@@ -190,6 +190,11 @@ Describe 'InstallShield MSI integration' -Tag Unit {
     $Info.InstallShieldScriptInfo.ExtractedFiles | Should -Contain 'IsConfig.ini'
     $Info.InstallShieldScriptInfo.Analysis | Should -Not -BeNullOrEmpty
     $Info.Diagnostics.Message | Should -Not -Match 'Embedded InstallScript custom-action analysis failed'
+    $Info.Diagnostics.Message | Should -Not -Match 'branch target 0 is unresolved'
+    $Info.Diagnostics.Message | Should -Not -Match 'Repeated InstallScript helper calls were bounded'
+    $Info.Diagnostics.Message | Should -Not -Match 'Recursive InstallScript call was bounded'
+    $Info.InstallShieldScriptInfo.Analysis.OpcodeCoverage.Where({ $_.Opcode -eq 1 }).Operation | Should -Be 'Goto'
+    $Info.InstallShieldScriptInfo.Diagnostics.Message | Should -Contain 'InstallScript loops, recursion, or repeated helper calls were bounded during static analysis.'
   }
 
   It 'Should expose bounded SMART InstallScript paths as notices rather than incomplete-analysis warnings' {
@@ -202,7 +207,7 @@ Describe 'InstallShield MSI integration' -Tag Unit {
     $Info = Get-MsiInstallerInfo -Path $Fixture
 
     $Info.Diagnostics.Message | Should -Not -Match 'bounded, conservative, or malformed path'
-    $Info.Diagnostics.Message | Should -Match 'loop was bounded|unknown conditions were evaluated'
-    $Info.InstallShieldScriptInfo.Diagnostics.Message | Should -Match 'loop was bounded|unknown conditions were evaluated'
+    $Info.Diagnostics.Message | Should -Match 'loops.*bounded|unknown conditions were evaluated'
+    $Info.InstallShieldScriptInfo.Diagnostics.Message | Should -Match 'loops.*bounded|unknown conditions were evaluated'
   }
 }
