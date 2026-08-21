@@ -770,7 +770,7 @@ function Get-InstallAnywhereInfo {
     $NotUpdateGlobalRegistry = if ($Installer) { Get-InstallAnywhereObjectPropertyValue -Object $Installer -Name 'notUpdateGlobalRegistry' } else { $null }
     [pscustomobject][ordered]@{
       Path                           = $ArchiveData.SourcePath
-      InstallerType                  = 'InstallAnywhere'
+      InstallerType                  = 'exe'
       ProductCode                    = $ProductCode
       UpgradeCode                    = Get-InstallAnywhereUuid -Object $InstallerInfo -Name 'upgradeCode'
       DisplayName                    = $DisplayName
@@ -786,6 +786,7 @@ function Get-InstallAnywhereInfo {
         if (-not $ProductCode) { 'ProductCode' }
         if (-not $Scope) { 'Scope' }
       )
+      Family                         = 'InstallAnywhere'
       PublisherUrl                   = Get-InstallAnywhereObjectPropertyValue -Object $InstallerInfo -Name 'vendorURL'
       ProjectProductId               = $ProjectProductId
       InstanceManagementEnabled      = [bool]$InstanceManagementEnabled

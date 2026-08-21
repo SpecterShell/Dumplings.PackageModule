@@ -165,7 +165,7 @@ function Get-ChromiumSetupInfoFromContext {
   $WritesAppsAndFeaturesEntry = if ($Variant -eq 'ChromiumMiniInstaller') { $true } else { $null }
   [pscustomobject][ordered]@{
     Path                         = $Context.File.FullName
-    InstallerType                = 'Chromium Setup'
+    InstallerType                = 'exe'
     ProductCode                  = $null
     UpgradeCode                  = $null
     DisplayName                  = $Tag.ApplicationName ?? $VersionInfo.ProductName
@@ -183,6 +183,7 @@ function Get-ChromiumSetupInfoFromContext {
       'ProductCode'
       if ($Tag.IsTagged -and -not $OfflineManifest) { 'DisplayVersion' }
     )
+    Family                       = 'Chromium Setup'
     Variant                      = $Variant
     OuterProductVersion          = $VersionInfo.ProductVersion
     OriginalFilename             = $VersionInfo.OriginalFilename

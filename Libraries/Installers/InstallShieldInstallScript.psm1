@@ -1603,7 +1603,7 @@ function Get-InstallShieldInstallScriptInfo {
     # manifest updater consume one result without reparsing setup.inx.
     return [pscustomobject][ordered]@{
       Path                               = $Installer.PSObject.Properties['Path'] ? [string]$Installer.Path : $Analysis.Path
-      InstallerType                      = 'InstallShield InstallScript'
+      InstallerType                      = 'exe'
       ProductCode                        = $ArpInfo.ProductCode
       UpgradeCode                        = $null
       DisplayName                        = $ArpInfo.DisplayName
@@ -1621,6 +1621,7 @@ function Get-InstallShieldInstallScriptInfo {
       AppsAndFeaturesInstallerType       = $ArpInfo.AppsAndFeaturesInstallerType
       Diagnostics                        = [object[]]$Diagnostics
       UnresolvedFields                   = [string[]]$ArpInfo.UnresolvedFields
+      Family                             = 'InstallShield InstallScript'
 
       AppsAndFeaturesEntries             = [object[]]$ArpInfo.AppsAndFeaturesEntries
       RegistryWrites                     = [object[]]$RegistryWrites.ToArray()

@@ -187,7 +187,7 @@ function Get-SevenZipSfxInfo {
     # and ARP metadata belong to that payload, not to the extraction stub.
     [pscustomobject][ordered]@{
       Path                         = $Installer.FullName
-      InstallerType                = '7zip-sfx'
+      InstallerType                = 'exe'
       ProductCode                  = $null
       UpgradeCode                  = $null
       DisplayName                  = $null
@@ -204,6 +204,7 @@ function Get-SevenZipSfxInfo {
             }
           )) -Source 'SevenZipSfx' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
+      Family                       = '7-Zip SFX'
       Format                       = '7z SFX'
       ConfigOffset                 = $ConfigStart
       ArchiveOffset                = $ArchiveOffset

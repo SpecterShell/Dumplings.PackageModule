@@ -148,7 +148,10 @@ Describe 'Provider-neutral installer analysis projection' {
     $WinGetRoute = $WinGet.RoutingHints | Where-Object Family -EQ 'Paquet Builder' | Select-Object -First 1
 
     $GenericRoute.Family | Should -Be 'Paquet Builder'
-    $GenericRoute.SuggestedManifestFields.InstallerSwitches.Silent | Should -BeNullOrEmpty
+    $Generic.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestFields'
+    $Generic.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestVariants'
+    $GenericRoute.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestFields'
+    $WinGet.SuggestedManifestFields.InstallerType | Should -Be 'exe'
     $WinGetRoute.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/s'
   }
 }

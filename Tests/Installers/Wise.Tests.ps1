@@ -25,7 +25,7 @@ Describe 'Wise MSI wrapper parser' {
     $Installer = Get-WiseFixture -Name 'TI-Connect-4.0.0.218.exe' -Url 'https://education.ti.com/download/en/ed-tech/14D11109C9F44D55B9BBF65E5A62E7F1/A885DD53BEC14496971FE5A42F1014CF/TI-Connect-4.0.0.218.exe'
     $Info = Get-WiseInfo -Path $Installer
 
-    $Info.InstallerType | Should -Be 'Wise MSI'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.DisplayVersion | Should -Be '4.0.0.218'
     $Info.Publisher | Should -Be 'Texas Instruments Inc.'
     $Info.ProductCode | Should -Be '{D06BA64C-4447-49B4-B99D-E85BEA9E1035}'

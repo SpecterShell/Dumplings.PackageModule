@@ -1278,7 +1278,7 @@ function Get-InstallShieldInfo {
     # Setup.ini has selected an MSI payload.
     $Result = [pscustomobject][ordered]@{
       Path                               = $InstallerPath
-      InstallerType                      = 'InstallShield'
+      InstallerType                      = 'exe'
       ProductCode                        = $null
       UpgradeCode                        = $null
       DisplayName                        = $null
@@ -1304,6 +1304,7 @@ function Get-InstallShieldInfo {
               if ($SelectedMsiInfo -and $SelectedMsiInfo.InstallShieldScriptInfo) { @($SelectedMsiInfo.InstallShieldScriptInfo.Diagnostics) }
             )) -Source 'InstallShield' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                   = [string[]]@()
+      Family                             = 'InstallShield'
       AppsAndFeaturesEntries             = [object[]]@()
       RegistryWrites                     = [object[]]@()
       RegistryItems                      = [object[]]@()

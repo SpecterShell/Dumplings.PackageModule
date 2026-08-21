@@ -411,7 +411,7 @@ function Get-InstallMateInfo {
 
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'InstallMate'
+      InstallerType                = 'exe'
       ProductCode                  = $ProductCode
       UpgradeCode                  = $null
       DisplayName                  = $DisplayName
@@ -424,6 +424,7 @@ function Get-InstallMateInfo {
       AppsAndFeaturesInstallerType = $null
       Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallMate' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
+      Family                       = 'InstallMate'
       ProductCodeEvidence          = if ($ProductCode) { 'Named StringFileInfo.ProductCode value in the PE version resource' } else { $null }
       PackageCode                  = $PackageCode
       FileDescription              = ([string]$VersionInfo.FileDescription).Trim()

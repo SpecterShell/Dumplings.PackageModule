@@ -460,8 +460,7 @@ function Get-MicaSetupInfo {
 
       return [pscustomobject]@{
         Path                           = $File.FullName
-        Family                         = 'MicaSetup'
-        InstallerType                  = 'MicaSetup'
+        InstallerType                  = 'exe'
         BuilderGeneration              = $Generation
         ConfigurationModel             = $ConfigurationModel
         TargetFramework                = $Managed.TargetFramework
@@ -525,6 +524,7 @@ function Get-MicaSetupInfo {
           )
         )
         UnresolvedFields               = @($UnresolvedFields | Sort-Object -Unique)
+        Family                         = 'MicaSetup'
         ParserVersionInfo              = [pscustomobject]@{ Name = 'Dumplings MicaSetup parser'; Version = 1; Generation = $Generation; Evidence = @($Managed.Evidence) }
       }
     } finally {

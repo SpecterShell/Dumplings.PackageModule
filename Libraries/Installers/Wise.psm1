@@ -169,7 +169,7 @@ function Get-WiseInfo {
 
       [pscustomobject][ordered]@{
         Path                         = $File.FullName
-        InstallerType                = 'Wise MSI'
+        InstallerType                = 'exe'
         ProductCode                  = $MsiInfo.ProductCode
         UpgradeCode                  = $MsiInfo.UpgradeCode
         DisplayName                  = $MsiInfo.DisplayName
@@ -185,6 +185,7 @@ function Get-WiseInfo {
               if (-not $Scope) { 'The nested MSI does not explicitly set ALLUSERS=1. Omit Scope unless VM validation proves the final installation scope.' }
             )) -Source 'Wise' -Kind Incomplete -Areas Metadata)
         UnresolvedFields             = [string[]]@()
+        Family                       = 'Wise MSI'
         WiseVariant                  = 'Wise for Windows Installer'
         SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
         InstallLocationProperty      = $MsiInfo.InstallLocationProperty

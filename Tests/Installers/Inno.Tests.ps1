@@ -110,7 +110,7 @@ Describe 'Inno bridge' {
       $Info = Get-InnoInfo -Path $Fixture
     }
 
-    $Info.InstallerType | Should -Be 'Inno'
+    $Info.InstallerType | Should -Be 'inno'
     $Info.DisplayName | Should -Be 'Argente'
     $Info.AppId | Should -Be 'Argente'
     $Info.ProductCode | Should -BeNullOrEmpty

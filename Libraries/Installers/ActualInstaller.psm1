@@ -115,7 +115,7 @@ function Get-ActualInstallerInfo {
 
       [pscustomobject][ordered]@{
         Path                           = $File.FullName
-        InstallerType                  = 'Actual Installer'
+        InstallerType                  = 'exe'
         ProductCode                    = $ProductCode
         UpgradeCode                    = $null
         DisplayName                    = $Setup['AppName']
@@ -128,6 +128,7 @@ function Get-ActualInstallerInfo {
         AppsAndFeaturesInstallerType   = $WritesAppsAndFeaturesEntry ? 'exe' : $null
         Diagnostics                    = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'ActualInstaller' -Kind Incomplete -Areas Metadata))
         UnresolvedFields               = [string[]]@()
+        Family                         = 'Actual Installer'
         PublisherUrl                   = $Setup['WebSite']
         AlternateInstallationDirectory = $Setup['AltInstallDir']
         MainExecutable                 = $Setup['MainExe']

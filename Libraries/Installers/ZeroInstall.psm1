@@ -399,7 +399,7 @@ function Get-ZeroInstallInfo {
 
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'Zero Install'
+      InstallerType                = 'exe'
       ProductCode                  = $ProductCode
       UpgradeCode                  = $null
       DisplayName                  = $DisplayName

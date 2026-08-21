@@ -1316,7 +1316,7 @@ function Get-BurnInfo {
     $ScopeInfo = Get-BurnScopeInfo -Path $Path
     $Info = [pscustomobject][ordered]@{
       Path                         = (Get-Item -Path $Path -Force).FullName
-      InstallerType                = 'Burn'
+      InstallerType                = 'burn'
       ProductCode                  = $ProductCode
       UpgradeCode                  = $UpgradeCode
       DisplayName                  = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayName') : $null
@@ -1329,6 +1329,12 @@ function Get-BurnInfo {
       AppsAndFeaturesInstallerType = 'burn'
       Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'Burn' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
+      Family                       = 'Burn'
+      SupportedScopes              = $ScopeInfo.SupportedScopes
+      SupportsDualScope            = $ScopeInfo.SupportsDualScope
+      UserScopeSwitch              = $ScopeInfo.SupportsDualScope ? 'InstallAllUsers=0' : $null
+      MachineScopeSwitch           = $ScopeInfo.SupportsDualScope ? 'InstallAllUsers=1' : $null
+      ScopeInstallLocationSwitches = $ScopeInfo.SupportsDualScope ? [pscustomobject]@{ User = 'DefaultJustForMeTargetDir="<INSTALLPATH>"'; Machine = 'DefaultAllUsersTargetDir="<INSTALLPATH>"' } : $null
     }
     if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { $Info.DisplayName = Read-ProductNameFromBurn -Path $Path }
     if ([string]::IsNullOrWhiteSpace($Info.DisplayVersion)) { $Info.DisplayVersion = Read-ProductVersionFromExe -Path $Path }

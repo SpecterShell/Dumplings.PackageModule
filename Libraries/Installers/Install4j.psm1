@@ -1813,7 +1813,7 @@ function Get-Install4jInfo {
 
     $Info = [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'install4j'
+      InstallerType                = 'exe'
       ProductCode                  = $ApplicationId
       UpgradeCode                  = $null
       DisplayName                  = $DisplayName

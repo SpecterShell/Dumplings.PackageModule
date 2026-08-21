@@ -258,6 +258,8 @@ function New-SquirrelInfo {
     The path to the installer
   .PARAMETER Family
     The detected Squirrel-family name
+  .PARAMETER DetectionRoute
+    The structural container route that exposed the package metadata
   .PARAMETER Confidence
     The confidence level of the static detection
   .PARAMETER ZipOffset
@@ -266,6 +268,10 @@ function New-SquirrelInfo {
     The nuspec metadata object
   .PARAMETER NupkgPath
     The optional nested nupkg path
+  .PARAMETER DetectionEvidence
+    Structural evidence supporting the selected family and route
+  .PARAMETER DiagnosticMessage
+    Diagnostic messages explaining incomplete or conflicting family evidence
   #>
   [OutputType([pscustomobject])]
   param (
@@ -273,7 +279,12 @@ function New-SquirrelInfo {
     [string]$Path,
 
     [Parameter(Mandatory, HelpMessage = 'The detected Squirrel-family name')]
+    [ValidateSet('Squirrel', 'Velopack', 'Squirrel/Velopack')]
     [string]$Family,
+
+    [Parameter(Mandatory, HelpMessage = 'The structural container route that exposed the package metadata')]
+    [ValidateSet('SquirrelPeResource', 'VelopackBundle', 'EmbeddedZipFallback', 'ConflictingAuthoritativeRoutes')]
+    [string]$DetectionRoute,
 
     [Parameter(Mandatory, HelpMessage = 'The confidence level of the static detection')]
     [string]$Confidence,
@@ -285,49 +296,66 @@ function New-SquirrelInfo {
     [pscustomobject]$Nuspec,
 
     [Parameter(HelpMessage = 'The optional nested nupkg path')]
-    [string]$NupkgPath
+    [string]$NupkgPath,
+
+    [Parameter(HelpMessage = 'Structural evidence supporting the selected family and route')]
+    [object[]]$DetectionEvidence = @(),
+
+    [Parameter(HelpMessage = 'Diagnostic messages explaining incomplete or conflicting family evidence')]
+    [string[]]$DiagnosticMessage = @()
   )
 
   $DisplayName = if ([string]::IsNullOrWhiteSpace($Nuspec.Title)) { $Nuspec.Id } else { $Nuspec.Title }
   # Squirrel.Windows and Velopack both use LocalAppData\<package ID> as the
   # default root unless an explicit install directory overrides it.
-  $DefaultInstallLocation = if ($Nuspec.Id -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$') {
+  $HasConfirmedLauncher = $Family -in @('Squirrel', 'Velopack')
+  $DefaultInstallLocation = if ($HasConfirmedLauncher -and $Nuspec.Id -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$') {
     '%LocalAppData%\' + $Nuspec.Id
   } else {
     $null
   }
 
-  # Nuspec identity is the same identity Squirrel uses for its per-user ARP
-  # registration, so emit the shared contract directly.
+  $UnresolvedFields = if ($Family -eq 'Squirrel/Velopack') {
+    [string[]]@('ProductCode', 'Scope', 'DefaultInstallLocation', 'AppsAndFeaturesEntries', 'InstallModes', 'InstallerSwitches', 'UpgradeBehavior')
+  } else {
+    [string[]]@()
+  }
+  $InstallModes = if ($Family -in @('Squirrel', 'Velopack')) { @('interactive', 'silent') } else { @() }
+  $InstallerSwitches = switch ($Family) {
+    'Squirrel' { [ordered]@{ Silent = '--silent'; SilentWithProgress = '--silent' } }
+    'Velopack' { [ordered]@{ Silent = '--silent'; SilentWithProgress = '--silent'; InstallLocation = '--installto "<INSTALLPATH>"'; Log = '--log "<LOGPATH>"' } }
+    default { [ordered]@{} }
+  }
+
+  # Nuspec identity is the same identity used by confirmed Squirrel and
+  # Velopack launchers for per-user ARP registration. Generic fallback results
+  # retain that package evidence without claiming an outer launcher contract.
   [pscustomobject][ordered]@{
     Path                         = [IO.Path]::GetFullPath($Path)
-    InstallerType                = 'Squirrel'
-    ProductCode                  = $Nuspec.Id
+    InstallerType                = 'exe'
+    ProductCode                  = $HasConfirmedLauncher ? $Nuspec.Id : $null
     UpgradeCode                  = $null
     DisplayName                  = $DisplayName
     DisplayVersion               = $Nuspec.Version
     Publisher                    = $Nuspec.Authors
-    Scope                        = 'user'
+    Scope                        = $HasConfirmedLauncher ? 'user' : $null
     DefaultInstallLocation       = $DefaultInstallLocation
-    WritesAppsAndFeaturesEntry   = $true
-    AppsAndFeaturesProductCode   = $Nuspec.Id
-    AppsAndFeaturesInstallerType = 'exe'
-    Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'Squirrel' -Kind Incomplete -Areas Metadata)
-    UnresolvedFields             = [string[]]@()
+    WritesAppsAndFeaturesEntry   = $HasConfirmedLauncher ? $true : $null
+    AppsAndFeaturesProductCode   = $HasConfirmedLauncher ? $Nuspec.Id : $null
+    AppsAndFeaturesInstallerType = $HasConfirmedLauncher ? 'exe' : $null
+    Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$DiagnosticMessage) -Source 'Squirrel/Velopack' -Kind Incomplete -Areas Metadata -AffectedFields $UnresolvedFields)
+    UnresolvedFields             = $UnresolvedFields
     Family                       = $Family
+    PackageId                    = $Nuspec.Id
     Confidence                   = $Confidence
+    DetectionRoute               = $DetectionRoute
+    DetectionEvidence            = @($DetectionEvidence)
+    InstallModes                 = $InstallModes
+    InstallerSwitches            = $InstallerSwitches
+    UpgradeBehavior              = $Family -in @('Squirrel', 'Velopack') ? 'install' : $null
     ZipOffset                    = $ZipOffset
     NupkgPath                    = $NupkgPath
     Nuspec                       = $Nuspec
-    SuggestedManifestFields      = [pscustomobject]@{
-      InstallerType        = 'exe # Squirrel'
-      Scope                = 'user'
-      ProductCode          = $Nuspec.Id
-      DisplayName          = $DisplayName
-      Publisher            = $Nuspec.Authors
-      DisplayVersion       = $Nuspec.Version
-      InstallationMetadata = [pscustomobject]@{ DefaultInstallLocation = $DefaultInstallLocation }
-    }
   }
 }
 
@@ -430,6 +458,16 @@ function Get-SquirrelInfoFromZipCandidate {
     The ZIP payload offset inside the installer
   .PARAMETER TemporaryPath
     The temporary workspace used for ZIP materialization
+  .PARAMETER Family
+    The family established by the outer container route
+  .PARAMETER DetectionRoute
+    The outer container route that exposed this ZIP candidate
+  .PARAMETER Confidence
+    The confidence assigned to the outer container route
+  .PARAMETER DetectionEvidence
+    Structural evidence supporting the outer container route
+  .PARAMETER DiagnosticMessage
+    Diagnostics associated with incomplete or conflicting route evidence
   #>
   [OutputType([pscustomobject])]
   param (
@@ -443,7 +481,25 @@ function Get-SquirrelInfoFromZipCandidate {
     [long]$Length,
 
     [Parameter(Mandatory, HelpMessage = 'The temporary workspace used for ZIP materialization')]
-    [string]$TemporaryPath
+    [string]$TemporaryPath,
+
+    [Parameter(Mandatory, HelpMessage = 'The family established by the outer container route')]
+    [ValidateSet('Squirrel', 'Velopack', 'Squirrel/Velopack')]
+    [string]$Family,
+
+    [Parameter(Mandatory, HelpMessage = 'The outer container route that exposed this ZIP candidate')]
+    [ValidateSet('SquirrelPeResource', 'VelopackBundle', 'EmbeddedZipFallback', 'ConflictingAuthoritativeRoutes')]
+    [string]$DetectionRoute,
+
+    [Parameter(Mandatory, HelpMessage = 'The confidence assigned to the outer container route')]
+    [ValidateSet('high', 'medium', 'low')]
+    [string]$Confidence,
+
+    [Parameter(HelpMessage = 'Structural evidence supporting the outer container route')]
+    [object[]]$DetectionEvidence = @(),
+
+    [Parameter(HelpMessage = 'Diagnostics associated with incomplete or conflicting route evidence')]
+    [string[]]$DiagnosticMessage = @()
   )
 
   $ZipPath = Join-Path $TemporaryPath "candidate-$Offset.zip"
@@ -458,13 +514,13 @@ function Get-SquirrelInfoFromZipCandidate {
       $NupkgPath = Join-Path $TemporaryPath ([System.IO.Path]::GetFileName($NupkgEntry.FullName))
       $Nuspec = Read-SquirrelNuspecFromNupkgEntry -Entry $NupkgEntry -DestinationPath $NupkgPath
       if ($Nuspec -and -not [string]::IsNullOrWhiteSpace($Nuspec.Id)) {
-        return New-SquirrelInfo -Path $Path -Family 'Squirrel' -Confidence 'medium' -ZipOffset $Offset -NupkgPath $NupkgEntry.FullName -Nuspec $Nuspec
+        return New-SquirrelInfo -Path $Path -Family $Family -DetectionRoute $DetectionRoute -Confidence $Confidence -ZipOffset $Offset -NupkgPath $NupkgEntry.FullName -Nuspec $Nuspec -DetectionEvidence $DetectionEvidence -DiagnosticMessage $DiagnosticMessage
       }
     }
 
     $DirectNuspec = Read-SquirrelNuspecFromZipArchive -Archive $Archive
     if ($DirectNuspec -and -not [string]::IsNullOrWhiteSpace($DirectNuspec.Id)) {
-      return New-SquirrelInfo -Path $Path -Family 'Velopack/Squirrel nupkg' -Confidence 'low' -ZipOffset $Offset -Nuspec $DirectNuspec
+      return New-SquirrelInfo -Path $Path -Family $Family -DetectionRoute $DetectionRoute -Confidence $Confidence -ZipOffset $Offset -Nuspec $DirectNuspec -DetectionEvidence $DetectionEvidence -DiagnosticMessage $DiagnosticMessage
     }
   } finally {
     $Archive.Dispose()
@@ -507,31 +563,70 @@ function Get-SquirrelInfo {
     }
     $TemporaryPath = New-TempFolder
     try {
-      # Candidate precedence follows format authority: documented PE resource,
-      # validated Velopack locator, then generic ZIP headers as a last fallback.
-      $Candidates = [System.Collections.Generic.List[psobject]]::new()
+      # Authoritative routes identify the outer launcher independently from the
+      # nupkg's internal shape. Preserve both routes until payload validation so
+      # conflicting structural evidence cannot be hidden by candidate order.
+      $AuthoritativeCandidates = [System.Collections.Generic.List[psobject]]::new()
       foreach ($ResourceCandidate in Get-SquirrelPeResourceZipCandidate -Path $File.FullName) {
-        $Candidates.Add([pscustomobject]@{ Offset = [long]$ResourceCandidate.Offset; Length = [long]$ResourceCandidate.Length })
+        $AuthoritativeCandidates.Add([pscustomobject]@{
+            Offset            = [long]$ResourceCandidate.Offset
+            Length            = [long]$ResourceCandidate.Length
+            Family            = 'Squirrel'
+            DetectionRoute    = 'SquirrelPeResource'
+            Confidence        = 'high'
+            DetectionEvidence = @([pscustomobject]@{ Kind = 'PEResource'; Type = $Script:SquirrelResourceType; Id = $Script:SquirrelResourceId; Offset = [long]$ResourceCandidate.Offset; Length = [long]$ResourceCandidate.Length })
+          })
       }
 
       $BundleHeader = Get-SquirrelBundleHeader -Path $File.FullName
       if ($BundleHeader) {
-        if (-not @($Candidates).Where({ $_.Offset -eq $BundleHeader.Offset }, 'First')) {
-          $Candidates.Add([pscustomobject]@{ Offset = [long]$BundleHeader.Offset; Length = [long]$BundleHeader.Length })
-        }
+        $AuthoritativeCandidates.Add([pscustomobject]@{
+            Offset            = [long]$BundleHeader.Offset
+            Length            = [long]$BundleHeader.Length
+            Family            = 'Velopack'
+            DetectionRoute    = 'VelopackBundle'
+            Confidence        = 'high'
+            DetectionEvidence = @([pscustomobject]@{ Kind = 'BundleLocator'; Signature = '94F0B17B6893E02937EB34EF53AAE7D42B54F5707EF5D6F57854983E5E94ED7D'; Offset = [long]$BundleHeader.Offset; Length = [long]$BundleHeader.Length })
+          })
       }
 
-      foreach ($Offset in Get-SquirrelZipLocalHeaderOffset -Path $File.FullName -Maximum $MaximumOffsets) {
-        if (-not @($Candidates).Where({ $_.Offset -eq $Offset }, 'First')) {
-          $Candidates.Add([pscustomobject]@{ Offset = [long]$Offset; Length = [long]0 })
-        }
-      }
-
-      # Every weak ZIP candidate must open successfully and yield structured
-      # nuspec identity. Parser failures are isolated so later offsets can run.
-      foreach ($Candidate in $Candidates) {
+      $AuthoritativeResults = [System.Collections.Generic.List[object]]::new()
+      foreach ($Candidate in $AuthoritativeCandidates) {
         try {
-          $Info = Get-SquirrelInfoFromZipCandidate -Path $File.FullName -Offset $Candidate.Offset -Length $Candidate.Length -TemporaryPath $TemporaryPath
+          $Info = Get-SquirrelInfoFromZipCandidate -Path $File.FullName -Offset $Candidate.Offset -Length $Candidate.Length -TemporaryPath $TemporaryPath -Family $Candidate.Family -DetectionRoute $Candidate.DetectionRoute -Confidence $Candidate.Confidence -DetectionEvidence $Candidate.DetectionEvidence
+          if ($Info) { $AuthoritativeResults.Add($Info) }
+        } catch {
+          continue
+        }
+      }
+
+      if ($AuthoritativeResults.Count -gt 0) {
+        $Families = @($AuthoritativeResults.Family | Sort-Object -Unique)
+        if ($Families.Count -eq 1) { return $AuthoritativeResults[0] }
+
+        # A file that validates both launcher layouts cannot safely inherit
+        # either command-line contract. Keep its package identity and surface
+        # all structural evidence for manual analysis.
+        $BaseInfo = $AuthoritativeResults[0]
+        $Evidence = @($AuthoritativeResults | ForEach-Object { $_.DetectionEvidence })
+        return New-SquirrelInfo -Path $File.FullName -Family 'Squirrel/Velopack' -DetectionRoute 'ConflictingAuthoritativeRoutes' -Confidence 'low' -ZipOffset $BaseInfo.ZipOffset -NupkgPath $BaseInfo.NupkgPath -Nuspec $BaseInfo.Nuspec -DetectionEvidence $Evidence -DiagnosticMessage @('The installer validates both the Squirrel PE-resource route and the Velopack bundle route; family-specific switches are omitted because the outer launcher contract is ambiguous.')
+      }
+
+      # ZIP signatures alone prove package metadata, not the setup launcher.
+      # Skip authoritative ranges already attempted so a malformed exact route
+      # cannot silently downgrade into a permissive generic interpretation.
+      foreach ($Offset in Get-SquirrelZipLocalHeaderOffset -Path $File.FullName -Maximum $MaximumOffsets) {
+        $InsideAuthoritativeRange = $false
+        foreach ($Candidate in $AuthoritativeCandidates) {
+          if ($Offset -ge $Candidate.Offset -and $Offset -lt $Candidate.Offset + $Candidate.Length) {
+            $InsideAuthoritativeRange = $true
+            break
+          }
+        }
+        if ($InsideAuthoritativeRange) { continue }
+        try {
+          $Evidence = @([pscustomobject]@{ Kind = 'EmbeddedZip'; Offset = [long]$Offset })
+          $Info = Get-SquirrelInfoFromZipCandidate -Path $File.FullName -Offset $Offset -Length 0 -TemporaryPath $TemporaryPath -Family 'Squirrel/Velopack' -DetectionRoute 'EmbeddedZipFallback' -Confidence 'low' -DetectionEvidence $Evidence -DiagnosticMessage @('Embedded Squirrel-compatible package metadata was found without an authoritative Squirrel or Velopack launcher structure; family-specific switches are omitted.')
           if ($Info) { return $Info }
         } catch {
           continue

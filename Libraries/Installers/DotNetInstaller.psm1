@@ -243,7 +243,7 @@ function Get-DotNetInstallerInfo {
     # nested commands but does not own their package identity or ARP entry.
     [pscustomobject][ordered]@{
       Path                         = $Installer.FullName
-      InstallerType                = 'dotnetinstaller'
+      InstallerType                = 'exe'
       ProductCode                  = $null
       UpgradeCode                  = $null
       DisplayName                  = $null
@@ -265,6 +265,7 @@ function Get-DotNetInstallerInfo {
             }
           )) -Source 'DotNetInstaller' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
+      Family                       = 'dotNetInstaller'
       Format                       = 'dotNetInstaller'
       FileVersion                  = $Config.FileVersion
       ConfigurationProductVersion  = $Config.ProductVersion

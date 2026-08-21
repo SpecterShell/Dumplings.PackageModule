@@ -1416,7 +1416,7 @@ function Get-InstallShieldAdvancedUiInfo {
 
     [pscustomobject][ordered]@{
       Path                         = $SetupXmlPath
-      InstallerType                = 'InstallShield Advanced UI'
+      InstallerType                = 'exe'
       ProductCode                  = $WritesArp ? $SuiteId : $null
       UpgradeCode                  = $null
       DisplayName                  = & $ReadArpValue 'DisplayName'
@@ -1434,6 +1434,7 @@ function Get-InstallShieldAdvancedUiInfo {
       AppsAndFeaturesInstallerType = $WritesArp ? 'exe' : $null
       Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallShieldAdvancedUI' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
+      Family                       = 'InstallShield Advanced UI'
       Variant                      = 'Advanced UI'
       SuiteId                      = $SuiteId
       Namespace                    = $Root.NamespaceURI

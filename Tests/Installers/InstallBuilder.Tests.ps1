@@ -146,7 +146,7 @@ Describe 'InstallBuilder static parser' {
 
     $Info = Get-InstallBuilderInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'InstallBuilder'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.ProductCode | Should -Be 'Example 1.2.3'
     $Info.DisplayName | Should -Be 'Example InstallBuilder Product'
     $Info.DisplayVersion | Should -Be '1.2.3'

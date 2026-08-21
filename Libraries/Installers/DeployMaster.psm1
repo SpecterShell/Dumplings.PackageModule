@@ -800,7 +800,7 @@ function Get-DeployMasterInfo {
 
     [pscustomobject][ordered]@{
       Path                                  = $File.FullName
-      InstallerType                         = 'DeployMaster'
+      InstallerType                         = 'exe'
       ProductCode                           = $Identity.DisplayName
       UpgradeCode                           = $null
       DisplayName                           = $Identity.DisplayName
@@ -813,6 +813,7 @@ function Get-DeployMasterInfo {
       AppsAndFeaturesInstallerType          = 'exe'
       Diagnostics                           = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'DeployMaster' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                      = [string[]]@()
+      Family                                = 'DeployMaster'
       ProductCodeEvidence                   = 'DeployMaster structured identity and built-in uninstall-key convention'
       PublisherUrl                          = $Identity.PublisherUrl
       PackageUrl                            = $Identity.PackageUrl

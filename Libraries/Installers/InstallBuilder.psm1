@@ -649,7 +649,7 @@ function Get-InstallBuilderInfo {
     $WritesAppsAndFeaturesEntry = if ($AppsAndFeaturesWrites.Count) { $true } elseif ($HasBuiltInUninstaller) { $null } else { $false }
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'InstallBuilder'
+      InstallerType                = 'exe'
       ProductCode                  = $ProductCode
       UpgradeCode                  = $null
       DisplayName                  = if ($FullName) { $FullName } else { $ShortName }
@@ -662,6 +662,7 @@ function Get-InstallBuilderInfo {
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
       Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallBuilder' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
+      Family                       = 'InstallBuilder'
       ProductCodeEvidence          = if ($ProductCode) { 'InstallBuilder candidate uninstaller-key convention: <shortName-or-fullName> <version>; validate visible ARP key in a VM.' } else { $null }
       SupportedScopes              = $ScopeInfo.SupportedScopes
       ScopeConfidence              = $ScopeInfo.Confidence

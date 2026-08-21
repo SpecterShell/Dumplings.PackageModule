@@ -3,22 +3,6 @@
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
-function Get-InstallerExeFamilyDefault {
-  param ([Parameter(Mandatory)][string]$Family)
-  if ($Script:InstallerFamilyProjectionProvider) {
-    return & $Script:InstallerFamilyProjectionProvider $Family
-  }
-
-  # Standalone generic analysis records only behavior discovered by a parser. The empty mutable
-  # shape lets family parsers add observed scope or switch evidence without assuming provider policy.
-  [pscustomobject][ordered]@{
-    InstallModes        = @()
-    InstallerSwitches   = [ordered]@{}
-    ExpectedReturnCodes = @()
-    Notes               = @()
-  }
-}
-
 function Invoke-InstallerDetector {
   <#
   .SYNOPSIS
@@ -587,10 +571,9 @@ function Get-InstallerGenericExeFamilyCandidate {
     if ($MatchedMarkers.Count -gt 0) {
       $Confidence = if ($MatchedMarkers.Count -gt 1) { 'medium' } else { 'low' }
       [pscustomobject]@{
-        Family                  = $Family.Name
-        Confidence              = $Confidence
-        MatchedMarkers          = $MatchedMarkers
-        SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family $Family.Name
+        Family         = $Family.Name
+        Confidence     = $Confidence
+        MatchedMarkers = $MatchedMarkers
       }
     }
   }
@@ -607,7 +590,7 @@ function Get-InstallerStructuralExeFamilyCandidate {
   $Seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $Layout = Get-PELayout -Path $File.FullName -ErrorAction SilentlyContinue
   if ($Layout -and @($Layout.Sections.Name) -contains '.wixburn' -and $Seen.Add('Burn')) {
-    [pscustomobject]@{ Family = 'Burn'; Confidence = 'high'; MatchedMarkers = @('.wixburn PE section'); SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'burn' } }
+    [pscustomobject]@{ Family = 'Burn'; Confidence = 'high'; MatchedMarkers = @('.wixburn PE section') }
   }
 
   # InstallShield 3 distributed a reusable setup32 engine without an embedded
@@ -619,13 +602,13 @@ function Get-InstallerStructuralExeFamilyCandidate {
     $VersionInfo.CompanyName -match '(?i)^InstallShield Corporation' -and
     $VersionInfo.ProductVersion -match '^3(?:\.|$)' -and
     $Seen.Add('InstallShield')) {
-    [pscustomobject]@{ Family = 'InstallShield'; Confidence = 'high'; MatchedMarkers = @('InstallShield 3 setup32 PE version identity'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'InstallShield' }
+    [pscustomobject]@{ Family = 'InstallShield'; Confidence = 'high'; MatchedMarkers = @('InstallShield 3 setup32 PE version identity') }
   }
 
   $Resources = @(Get-PEResourceInfo -Path $File.FullName -MaximumResources 16384 -ErrorAction SilentlyContinue)
   if ($Resources | Where-Object { $_.TypeId -eq 10 -and $_.Id -eq 11111 } | Select-Object -First 1) {
     if ($Seen.Add('Inno Setup')) {
-      [pscustomobject]@{ Family = 'Inno Setup'; Confidence = 'high'; MatchedMarkers = @('RCDATA/11111 loader offset table'); SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'inno' } }
+      [pscustomobject]@{ Family = 'Inno Setup'; Confidence = 'high'; MatchedMarkers = @('RCDATA/11111 loader offset table') }
     }
   }
 
@@ -634,31 +617,31 @@ function Get-InstallerStructuralExeFamilyCandidate {
   # unrelated .NET applications that merely mention Zero Install in strings.
   $ManagedConfig = Get-PEManagedResourceInfo -Path $File.FullName -Name 'ZeroInstall.BootstrapConfig.ini' -MaximumResources 16384 -MaximumResourceBytes 1048576 -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($ManagedConfig -and $Seen.Add('Zero Install')) {
-    [pscustomobject]@{ Family = 'Zero Install'; Confidence = 'high'; MatchedMarkers = @('CLR ManifestResource ZeroInstall.BootstrapConfig.ini'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Zero Install' }
+    [pscustomobject]@{ Family = 'Zero Install'; Confidence = 'high'; MatchedMarkers = @('CLR ManifestResource ZeroInstall.BootstrapConfig.ini') }
   }
 
   # Kachina is a native Tauri executable with a validated JSON-bearing TLV
   # stream. Route it before managed MicaSetup and generic Tauri evidence.
   if ((Test-KachinaInstaller -Path $File.FullName) -and $Seen.Add('Kachina')) {
-    [pscustomobject]@{ Family = 'Kachina'; Confidence = 'high'; MatchedMarkers = @('PE overlay Kachina TLV stream + compiled configuration'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Kachina' }
+    [pscustomobject]@{ Family = 'Kachina'; Confidence = 'high'; MatchedMarkers = @('PE overlay Kachina TLV stream + compiled configuration') }
   }
 
   # MicaSetup detection requires both its managed host model and the WPF payload
   # stream. This rejects ordinary WPF applications and native Kachina installers.
   if ((Test-MicaSetupInstaller -Path $File.FullName) -and $Seen.Add('MicaSetup')) {
-    [pscustomobject]@{ Family = 'MicaSetup'; Confidence = 'high'; MatchedMarkers = @('CLR MicaSetup configuration host + WPF resources/setups/publish.7z'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'MicaSetup' }
+    [pscustomobject]@{ Family = 'MicaSetup'; Confidence = 'high'; MatchedMarkers = @('CLR MicaSetup configuration host + WPF resources/setups/publish.7z') }
   }
 
   $NsisSignature = [byte[]](0xEF, 0xBE, 0xAD, 0xDE) + [Text.Encoding]::ASCII.GetBytes('NullsoftInst')
   $SignatureScanLength = [Math]::Min($File.Length, 67108864L)
   if ((Find-BinaryPattern -Path $File.FullName -Pattern $NsisSignature -Length $SignatureScanLength -Maximum 1).Count -gt 0 -and $Seen.Add('NSIS/Nullsoft')) {
-    [pscustomobject]@{ Family = 'NSIS/Nullsoft'; Confidence = 'high'; MatchedMarkers = @('DEADBEEF + NullsoftInst'); SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'nullsoft' } }
+    [pscustomobject]@{ Family = 'NSIS/Nullsoft'; Confidence = 'high'; MatchedMarkers = @('DEADBEEF + NullsoftInst') }
   }
 
   $QtCookie = [byte[]](0xF8, 0x68, 0xD6, 0x99, 0x1C, 0x0A, 0x63, 0xC2)
   $TailLength = [Math]::Min($File.Length, 1048576L)
   if ((Find-BinaryPattern -Path $File.FullName -Pattern $QtCookie -StartOffset ($File.Length - $TailLength) -Length $TailLength -Maximum 1 -Reverse).Count -gt 0 -and $Seen.Add('Qt Installer Framework')) {
-    [pscustomobject]@{ Family = 'Qt Installer Framework'; Confidence = 'high'; MatchedMarkers = @('Qt IFW magic cookie'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Qt Installer Framework' }
+    [pscustomobject]@{ Family = 'Qt Installer Framework'; Confidence = 'high'; MatchedMarkers = @('Qt IFW magic cookie') }
   }
 
   $AdvancedInstallerMagic = [Text.Encoding]::ASCII.GetBytes('ADVINSTSFX')
@@ -671,15 +654,14 @@ function Get-InstallerStructuralExeFamilyCandidate {
         Family                  = 'Advanced Installer'
         Confidence              = 'high'
         MatchedMarkers          = @("$($FormatInfo.FormatProfileId): $($FormatInfo.FooterRoute) + $($FormatInfo.CatalogRoute)")
-        FormatInfo              = $FormatInfo
-        SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Advanced Installer'
+        FormatInfo     = $FormatInfo
       }
     }
   }
 
   $InstallBuilderProjectMarker = [Text.Encoding]::ASCII.GetBytes('project.xml')
   if ((Find-BinaryPattern -Path $File.FullName -Pattern $InstallBuilderProjectMarker -Maximum 1).Count -gt 0 -and $Seen.Add('InstallBuilder')) {
-    [pscustomobject]@{ Family = 'InstallBuilder'; Confidence = 'medium'; MatchedMarkers = @('embedded project.xml record'); SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'InstallBuilder' }
+    [pscustomobject]@{ Family = 'InstallBuilder'; Confidence = 'medium'; MatchedMarkers = @('embedded project.xml record') }
   }
 }
 
@@ -708,8 +690,7 @@ function ConvertTo-InstallerFamilyEvidence {
     EvidenceKind            = $EvidenceKind
     ValidationStatus        = $IsOuterContainer ? 'ConfirmedStructure' : 'RoutingHint'
     IsOuterContainer        = $IsOuterContainer.IsPresent
-    MatchedMarkers          = @($Candidate.MatchedMarkers)
-    SuggestedManifestFields = $Candidate.SuggestedManifestFields
+    MatchedMarkers   = @($Candidate.MatchedMarkers)
   }
 }
 
@@ -775,8 +756,7 @@ function Resolve-InstallerFamilyEvidence {
           ValidationStatus        = 'ConfirmedParser'
           IsOuterContainer        = $true
           ParserName              = $ParserName
-          MatchedMarkers          = @($Candidate.MatchedMarkers)
-          SuggestedManifestFields = $SuccessfulRun.Result.SuggestedManifestFields
+          MatchedMarkers   = @($Candidate.MatchedMarkers)
         })
       continue
     }
@@ -817,9 +797,8 @@ function Resolve-InstallerFamilyEvidence {
           ValidationStatus        = 'RejectedByParser'
           IsOuterContainer        = [bool]$Candidate.IsOuterContainer
           ParserName              = $ParserName
-          MatchedMarkers          = @($Candidate.MatchedMarkers)
-          SuggestedManifestFields = $Candidate.SuggestedManifestFields
-          Diagnostics             = [object[]]@($FailureDiagnostics)
+          MatchedMarkers   = @($Candidate.MatchedMarkers)
+          Diagnostics      = [object[]]@($FailureDiagnostics)
         })
     }
   }
@@ -840,8 +819,7 @@ function Resolve-InstallerFamilyEvidence {
         ValidationStatus        = 'ConfirmedParser'
         IsOuterContainer        = $true
         ParserName              = [string]$ParserResult.Name
-        MatchedMarkers          = @()
-        SuggestedManifestFields = $ParserResult.Result.SuggestedManifestFields
+        MatchedMarkers   = @()
       })
   }
 
@@ -1020,8 +998,6 @@ function Invoke-InstallerMsiAnalysis {
     Scope                        = $ScopeRecommendation.Scope
     ScopeRecommendation          = $ScopeRecommendation
     Diagnostics                  = [object[]]@($MsiInfo.Diagnostics)
-
-    SuggestedManifestFields      = [pscustomobject]@{ InstallerType = $ManifestInstallerType; Scope = $ScopeRecommendation.Scope }
   }
 }
 
@@ -1095,8 +1071,7 @@ function Invoke-InstallerMsixAnalysis {
     SignatureSha256            = $SignatureEvidence.SignatureSha256
     SignatureEvidence          = $SignatureEvidence
     Rejected                   = -not $SignatureEvidence.IsTrusted
-    RejectionReason            = $SignatureEvidence.RequiredAction
-    SuggestedManifestFields    = [pscustomobject]@{ InstallerType = $PackageTypeInfo.InstallerType; Dependencies = $DependencyInfo.Dependencies }
+    RejectionReason           = $SignatureEvidence.RequiredAction
   }
 }
 
@@ -1361,7 +1336,6 @@ function Invoke-InstallerZipAnalysis {
       NestedInstallerFiles      = $NestedInstallers
       PortableCandidates        = $PortableCandidates
       PortableCandidateEvidence = @($PortableCandidateEvidence)
-      SuggestedManifestFields   = [pscustomobject]@{ InstallerType = 'zip'; NestedInstallerType = 'exe/msi/msix/portable based on selected nested file' }
     }
   } finally {
     $Archive.Dispose()
@@ -1423,14 +1397,10 @@ function Invoke-InstallerExeParser {
       [ValidateSet('low', 'medium', 'high')][string]$Confidence = 'high'
     )
 
-    $SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family $Family
-    if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
-    if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue @($Info.SupportedScopes) -Force }
-    if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
     [pscustomobject]@{
       Family                      = $Family
       Confidence                  = $Confidence
-      InstallerType               = "exe # $Family"
+      InstallerType               = 'exe'
       Metadata                    = $Info
       ProductVersion              = $Info.DisplayVersion
       ProductName                 = $Info.DisplayName
@@ -1438,6 +1408,9 @@ function Invoke-InstallerExeParser {
       ProductCode                 = $Info.ProductCode
       Scope                       = $Info.Scope
       SupportedScopes             = @($Info.SupportedScopes)
+      SupportsDualScope           = [bool]($Info.PSObject.Properties['SupportsDualScope'] -and $Info.SupportsDualScope)
+      UserScopeSwitch             = $Info.PSObject.Properties['UserScopeSwitch'] ? $Info.UserScopeSwitch : $null
+      MachineScopeSwitch          = $Info.PSObject.Properties['MachineScopeSwitch'] ? $Info.MachineScopeSwitch : $null
       DefaultScopeIsAuthoritative = [bool]($Info.PSObject.Properties['DefaultScopeIsAuthoritative'] -and $Info.DefaultScopeIsAuthoritative)
       AppsAndFeaturesEntries      = if ($Info.PSObject.Properties['AppsAndFeaturesEntries']) { @($Info.AppsAndFeaturesEntries) } else { @() }
       Protocols                   = @($Info.Protocols)
@@ -1448,7 +1421,6 @@ function Invoke-InstallerExeParser {
       CanExpand                   = $Info.CanExpand
 
       Diagnostics                 = [object[]]@($Info.Diagnostics)
-      SuggestedManifestFields     = $SuggestedManifestFields
     }
   }
 
@@ -1465,9 +1437,6 @@ function Invoke-InstallerExeParser {
         $Evidence | Add-Member -NotePropertyName RuntimePackages -NotePropertyValue @($Info.RuntimePackages) -Force
         $Evidence | Add-Member -NotePropertyName EmbeddedRuntimePackages -NotePropertyValue @($Info.EmbeddedRuntimePackages) -Force
         $Evidence | Add-Member -NotePropertyName PatchFiles -NotePropertyValue @($Info.PatchFiles) -Force
-        $Evidence.SuggestedManifestFields.InstallModes = @($Info.InstallModes)
-        $Evidence.SuggestedManifestFields.InstallerSwitches = $Info.InstallerSwitches
-        $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName ElevationRequirement -NotePropertyValue $Info.ElevationRequirement -Force
         $Evidence
       }
     }
@@ -1479,8 +1448,6 @@ function Invoke-InstallerExeParser {
         $Evidence.NestedInstallerFiles = @($Info.PayloadFiles.Path)
         $Evidence | Add-Member -NotePropertyName PayloadArchitectures -NotePropertyValue @($Info.PayloadArchitectures) -Force
         $Evidence | Add-Member -NotePropertyName DependencyInfo -NotePropertyValue $Info.DependencyInfo -Force
-        $Evidence.SuggestedManifestFields.InstallModes = @($Info.InstallModes)
-        $Evidence.SuggestedManifestFields.InstallerSwitches = $Info.InstallerSwitches
         $Evidence
       }
     }
@@ -1490,13 +1457,6 @@ function Invoke-InstallerExeParser {
         $Info = Get-ZeroInstallInfo -Path $AnalyzerInstallerPath
         $Evidence = ConvertTo-GenericExeParserEvidence -Family 'Zero Install' -Info $Info
 
-        # Bootstrap configuration controls whether this is an app-bound GUI or
-        # CLI launcher, whether a store path is accepted, and whether --machine
-        # can create a second scope. Replace broad family defaults accordingly.
-        $Evidence.SuggestedManifestFields.InstallModes = @($Info.InstallModes)
-        $Evidence.SuggestedManifestFields.InstallerSwitches = $Info.InstallerSwitches
-        if ($Info.ScopeSwitches) { $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue $Info.ScopeSwitches -Force }
-        if (-not $Info.Scope) { $Evidence.SuggestedManifestFields.PSObject.Properties.Remove('Scope') }
         $Evidence
       }
     }
@@ -1504,31 +1464,10 @@ function Invoke-InstallerExeParser {
     if (Test-InstallerCandidateFamily -Family 'Chromium Setup') {
       Invoke-InstallerDetector -Name 'Chromium Setup' -ScriptBlock {
         $Info = Get-ChromiumSetupInfo -Path $AnalyzerInstallerPath
-        $SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Chromium Setup'
-        if ($Info.Variant -eq 'ChromiumMiniInstaller') {
-          $SuggestedManifestFields.InstallModes = @('silent')
-          $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Custom = '--do-not-launch-chrome'; Log = '--verbose-logging --log-file="<LOGPATH>"' }
-          $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = $null; Machine = '--system-level' }) -Force
-        } elseif ($Info.Variant -eq 'ChromiumUpdater' -and -not $Info.IsOnlineBootstrapper) {
-          $SuggestedManifestFields.InstallModes = @('interactive', 'silent')
-          $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Silent = '--install --silent'; SilentWithProgress = '--install --silent'; Interactive = '--install'; Log = '--enable-logging'; Upgrade = '--update' }
-          $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = '--enterprise'; Machine = '--system --enterprise' }) -Force
-        } elseif ($Info.Variant -eq 'Omaha' -and -not $Info.IsOnlineBootstrapper -and -not $Info.UpdaterTag.IsTagged) {
-          $SuggestedManifestFields.InstallModes = @('silent')
-          $SuggestedManifestFields.InstallerSwitches = [ordered]@{ Silent = '/silent'; SilentWithProgress = '/silent' }
-          $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{ User = $Info.UserScopeSwitch; Machine = $Info.MachineScopeSwitch }) -Force
-          $SuggestedManifestFields.Notes += 'This untagged Omaha package installs its embedded updater runtime. Keep the complete /install runtime tag in each scope-specific Custom switch.'
-        } elseif ($Info.Variant -eq 'Omaha' -and $Info.OfflineManifest) {
-          $SuggestedManifestFields.Notes += 'This tagged Omaha package contains an offline target manifest and payload. Use its package action as static wrapper evidence, but preserve vendor-specific accepted switches.'
-        } else {
-          $SuggestedManifestFields.Notes += 'This tagged updater setup is an application bootstrapper. Expand its payload and validate package-specific switches and final ARP behavior.'
-        }
-        if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
-        if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue @($Info.SupportedScopes) -Force }
         [pscustomobject]@{
           Family                  = 'Chromium Setup'
           Confidence              = 'high'
-          InstallerType           = 'exe # Chromium Setup'
+          InstallerType           = 'exe'
           Metadata                = $Info
           Variant                 = $Info.Variant
           ProductVersion          = $Info.DisplayVersion
@@ -1546,7 +1485,6 @@ function Invoke-InstallerExeParser {
           ExecutedPayloads        = $Info.ExecutedPayloads
           NestedInstallerFiles    = $Info.NestedFiles
           Diagnostics             = @(ConvertTo-InstallerDiagnostic -InputObject @($Info.Diagnostics) -Source 'InstallerAnalyzer' -Kind Incomplete -Areas Metadata)
-          SuggestedManifestFields = $SuggestedManifestFields
         }
       }
     }
@@ -1554,14 +1492,10 @@ function Invoke-InstallerExeParser {
     if (Test-InstallerCandidateFamily -Family 'Wise') {
       Invoke-InstallerDetector -Name 'Wise' -ScriptBlock {
         $Info = Get-WiseInfo -Path $AnalyzerInstallerPath
-        $SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Wise'
-        if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
-        if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
-        if ($Info.InstallLocationSwitch) { $SuggestedManifestFields.InstallerSwitches['InstallLocation'] = $Info.InstallLocationSwitch }
         [pscustomobject]@{
           Family                  = 'Wise'
           Confidence              = 'high'
-          InstallerType           = 'exe # Wise MSI'
+          InstallerType           = 'exe'
           Metadata                = $Info
           ProductVersion          = $Info.DisplayVersion
           ProductName             = $Info.DisplayName
@@ -1577,7 +1511,6 @@ function Invoke-InstallerExeParser {
           NestedInstallerFiles    = $Info.ExtractedFiles
           CanExpand               = $Info.CanExpand
           Diagnostics             = @(ConvertTo-InstallerDiagnostic -InputObject @($Info.Diagnostics) -Source 'InstallerAnalyzer' -Kind Incomplete -Areas Metadata)
-          SuggestedManifestFields = $SuggestedManifestFields
         }
       }
     }
@@ -1588,7 +1521,7 @@ function Invoke-InstallerExeParser {
         [pscustomobject]@{
           Family                  = 'Setup Factory'
           Confidence              = 'high'
-          InstallerType           = 'exe # Setup Factory'
+          InstallerType           = 'exe'
           Metadata                = $Info
           ProductVersion          = $Info.DisplayVersion
           ProductName             = $Info.DisplayName
@@ -1598,7 +1531,6 @@ function Invoke-InstallerExeParser {
           Protocols               = $Info.Protocols
           FileExtensions          = $Info.FileExtensions
           RegistryAssociationInfo = $Info.RegistryAssociationInfo
-          SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Setup Factory'
         }
       }
     }
@@ -1609,7 +1541,7 @@ function Invoke-InstallerExeParser {
         [pscustomobject]@{
           Family                  = 'InstallAnywhere'
           Confidence              = 'high'
-          InstallerType           = 'exe # InstallAnywhere'
+          InstallerType           = 'exe'
           Metadata                = $Info
           ProductVersion          = $Info.DisplayVersion
           ProductName             = $Info.DisplayName
@@ -1620,7 +1552,6 @@ function Invoke-InstallerExeParser {
           Protocols               = $Info.Protocols
           FileExtensions          = $Info.FileExtensions
           RegistryAssociationInfo = $Info.RegistryAssociationInfo
-          SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'InstallAnywhere'
         }
       }
     }
@@ -1631,7 +1562,7 @@ function Invoke-InstallerExeParser {
         [pscustomobject]@{
           Family                  = 'Actual Installer'
           Confidence              = 'high'
-          InstallerType           = 'exe # Actual Installer'
+          InstallerType           = 'exe'
           Metadata                = $Info
           ProductVersion          = $Info.DisplayVersion
           ProductName             = $Info.DisplayName
@@ -1642,7 +1573,6 @@ function Invoke-InstallerExeParser {
           Protocols               = $Info.Protocols
           FileExtensions          = $Info.FileExtensions
           RegistryAssociationInfo = $Info.RegistryAssociationInfo
-          SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Actual Installer'
         }
       }
     }
@@ -1653,7 +1583,7 @@ function Invoke-InstallerExeParser {
         [pscustomobject]@{
           Family                  = 'InstallBuilder'
           Confidence              = 'high'
-          InstallerType           = 'exe # InstallBuilder'
+          InstallerType           = 'exe'
           Metadata                = $Info
           ProductVersion          = $Info.DisplayVersion
           ProductName             = $Info.DisplayName
@@ -1666,7 +1596,6 @@ function Invoke-InstallerExeParser {
           SupportedScopes         = $Info.SupportedScopes
           NestedInstallerFiles    = $Info.PayloadFiles
           PayloadCompression      = if ($Info.CookfsInfo) { $Info.CookfsInfo.CompressionTypes } else { @() }
-          SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'InstallBuilder'
         }
       }
     }
@@ -1730,22 +1659,6 @@ function Invoke-InstallerExeParser {
           $Evidence | Add-Member -NotePropertyName MsiInfo -NotePropertyValue $MsiInfo -Force
           $Evidence | Add-Member -NotePropertyName InstallScriptInfo -NotePropertyValue $Info.InstallScriptInfo -Force
 
-          # Basic MSI forwarding switches are not valid for InstallScript-only
-          # media. Recommend /s only when static analysis proves the package is
-          # self-contained, such as a valid embedded setup.iss.
-          if ($Info.Variant -eq 'InstallScript') {
-            $Evidence.SuggestedManifestFields = [pscustomobject][ordered]@{
-              InstallerType = 'exe # InstallShield InstallScript'
-              Notes         = @("Static silent-support result: $($Info.InstallScriptInfo.SilentSupport).")
-            }
-            if ($Info.InstallScriptInfo.SilentSupport -eq 'Supported') {
-              $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName InstallModes -NotePropertyValue @('interactive', 'silent')
-              $Evidence.SuggestedManifestFields | Add-Member -NotePropertyName InstallerSwitches -NotePropertyValue ([ordered]@{ Silent = '/s' })
-            }
-          } elseif ($Info.Variant -eq 'Advanced UI') {
-            $Evidence | Add-Member -NotePropertyName InstallerType -NotePropertyValue 'exe # InstallShield Advanced UI' -Force
-            $Evidence.SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'InstallShield Advanced UI'
-          }
           $Evidence
         } finally {
           Remove-Item -LiteralPath $TemporaryPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -1762,13 +1675,12 @@ function Invoke-InstallerExeParser {
       [pscustomobject]@{
         Family                  = '7z SFX'
         Confidence              = 'high'
-        InstallerType           = 'exe # 7z SFX'
+        InstallerType           = 'exe'
         Metadata                = $Info
         ExecutedPayload         = $Info.ExecutedPayload
         ExecutedPayloads        = $Info.ExecutedPayloads
         PayloadArguments        = $Info.PayloadArguments
-        NestedInstallerFiles    = $Info.NestedFiles
-        SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family '7z SFX'
+        NestedInstallerFiles = $Info.NestedFiles
       }
     }
     $WrapperResult
@@ -1781,11 +1693,10 @@ function Invoke-InstallerExeParser {
       [pscustomobject]@{
         Family                  = 'WinRAR GUI SFX'
         Confidence              = 'high'
-        InstallerType           = 'exe # WinRAR GUI SFX'
+        InstallerType           = 'exe'
         Metadata                = $Info
         ExecutedPayloads        = $Info.ExecutedPayloads
-        NestedInstallerFiles    = $Info.NestedFiles
-        SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'WinRAR GUI SFX'
+        NestedInstallerFiles = $Info.NestedFiles
       }
     }
     $WrapperResult
@@ -1798,11 +1709,10 @@ function Invoke-InstallerExeParser {
       [pscustomobject]@{
         Family                  = 'IExpress'
         Confidence              = 'high'
-        InstallerType           = 'exe # IExpress'
+        InstallerType           = 'exe'
         Metadata                = $Info
         ExecutedPayloads        = $Info.ExecutedPayloads
-        NestedInstallerFiles    = $Info.NestedFiles
-        SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'IExpress'
+        NestedInstallerFiles = $Info.NestedFiles
       }
     }
     $WrapperResult
@@ -1815,12 +1725,11 @@ function Invoke-InstallerExeParser {
       [pscustomobject]@{
         Family                  = 'dotNetInstaller'
         Confidence              = 'high'
-        InstallerType           = 'exe # dotNetInstaller'
+        InstallerType           = 'exe'
         Metadata                = $Info
         ProductVersion          = $Info.ConfigurationProductVersion
         ExecutedPayloads        = $Info.ExecutedPayloads
-        NestedInstallerFiles    = $Info.NestedFiles
-        SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'dotNetInstaller'
+        NestedInstallerFiles = $Info.NestedFiles
       }
     }
     $WrapperResult
@@ -1851,8 +1760,7 @@ function Invoke-InstallerExeParser {
         Metadata                = $Info
         ProductCode             = $ProductCode
         UpgradeCode             = $UpgradeCode
-        ProductName             = $ProductName
-        SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'burn' }
+        ProductName   = $ProductName
       }
     }
     $KnownResult
@@ -1870,8 +1778,7 @@ function Invoke-InstallerExeParser {
         ProductVersion          = $Info.DisplayVersion
         ProductName             = $Info.DisplayName
         Publisher               = $Info.Publisher
-        ProductCode             = $Info.ProductCode
-        SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'inno' }
+        ProductCode    = $Info.ProductCode
       }
     }
     $KnownResult
@@ -1899,7 +1806,6 @@ function Invoke-InstallerExeParser {
         Protocols                          = $Info.Protocols
         FileExtensions                     = $Info.FileExtensions
         RegistryAssociationInfo            = $Info.RegistryAssociationInfo
-        SuggestedManifestFields            = [pscustomobject]@{ InstallerType = 'nullsoft'; Scope = $Info.Scope; Notes = @('Create duplicate user/machine entries only when switch or registry-write evidence proves both modes.', 'Check decompiled strings/control flow for TestParameter, IfSilent, GetOptions, and custom silent-mode rejection.') }
       }
     }
     $KnownResult
@@ -1913,13 +1819,12 @@ function Invoke-InstallerExeParser {
       [pscustomobject]@{
         Family                  = 'Advanced Installer'
         Confidence              = 'high'
-        InstallerType           = 'exe # Advanced Installer'
+        InstallerType           = 'exe'
         Metadata                = $Info
         MsiInfo                 = $MsiInfo
         Protocols               = if ($MsiInfo) { $MsiInfo.Protocols } else { @() }
         FileExtensions          = if ($MsiInfo) { $MsiInfo.FileExtensions } else { @() }
         RegistryAssociationInfo = if ($MsiInfo) { $MsiInfo.RegistryAssociationInfo } else { $null }
-        SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Advanced Installer'
       }
     }
     $KnownResult
@@ -1936,31 +1841,10 @@ function Invoke-InstallerExeParser {
         throw "The Qt Installer Framework media role is '$($FormatInfo.MediaRole)', not Installer."
       }
       $Info = Get-QtInstallerFrameworkInfo -Path $AnalyzerInstallerPath
-      $SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'Qt Installer Framework'
-      if (-not $Info.SupportsSilentInstallation) {
-        $SuggestedManifestFields.InstallModes = @('interactive')
-        $SuggestedManifestFields.InstallerSwitches = [ordered]@{}
-        $SuggestedManifestFields.Notes += 'This installer is GUI-only or has its command-line interface disabled; do not submit it as silent-capable.'
-      } elseif (-not $Info.RequiresExplicitInstallLocation) {
-        $SuggestedManifestFields.InstallerSwitches = [ordered]@{
-          Silent             = 'install --accept-licenses --default-answer --confirm-command'
-          SilentWithProgress = 'install --accept-licenses --default-answer --confirm-command'
-          InstallLocation    = '--root "<INSTALLPATH>"'
-        }
-      }
-      $SuggestedManifestFields | Add-Member -NotePropertyName UpgradeBehavior -NotePropertyValue $Info.RecommendedUpgradeBehavior -Force
-      $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force
-      $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue $Info.SupportedScopes -Force
-      if ($Info.SupportsDualScope) {
-        $SuggestedManifestFields | Add-Member -NotePropertyName ScopeSwitches -NotePropertyValue ([pscustomobject]@{
-            User    = $Info.UserScopeSwitch
-            Machine = $Info.MachineScopeSwitch
-          }) -Force
-      }
       [pscustomobject]@{
         Family                               = 'Qt Installer Framework'
         Confidence                           = 'high'
-        InstallerType                        = 'exe # Qt Installer Framework'
+        InstallerType                        = 'exe'
         Metadata                             = $Info
         FormatInfo                           = $FormatInfo
         ProductVersion                       = $Info.DisplayVersion
@@ -1978,7 +1862,6 @@ function Invoke-InstallerExeParser {
         RequiresExplicitInstallLocation      = $Info.RequiresExplicitInstallLocation
         SupportsExistingInstallationOverride = $Info.SupportsExistingInstallationOverride
         RecommendedUpgradeBehavior           = $Info.RecommendedUpgradeBehavior
-        SuggestedManifestFields              = $SuggestedManifestFields
       }
     }
     $KnownResult
@@ -1988,14 +1871,10 @@ function Invoke-InstallerExeParser {
   if (Test-InstallerCandidateFamily -Family 'install4j') {
     $KnownResult = Invoke-InstallerDetector -Name 'install4j' -ScriptBlock {
       $Info = Get-Install4jInfo -Path $AnalyzerInstallerPath
-      $SuggestedManifestFields = Get-InstallerExeFamilyDefault -Family 'install4j'
-      if ($Info.Scope) { $SuggestedManifestFields | Add-Member -NotePropertyName Scope -NotePropertyValue $Info.Scope -Force }
-      if ($Info.SupportedScopes) { $SuggestedManifestFields | Add-Member -NotePropertyName SupportedScopes -NotePropertyValue $Info.SupportedScopes -Force }
-      if ($Info.ProductCode) { $SuggestedManifestFields | Add-Member -NotePropertyName ProductCode -NotePropertyValue $Info.ProductCode -Force }
       [pscustomobject]@{
         Family                  = 'install4j'
         Confidence              = if ($Info.Config) { 'high' } else { 'medium' }
-        InstallerType           = 'exe # install4j'
+        InstallerType           = 'exe'
         Metadata                = $Info
         ProductVersion          = $Info.DisplayVersion
         ProductName             = $Info.DisplayName
@@ -2003,8 +1882,7 @@ function Invoke-InstallerExeParser {
         ProductCode             = $Info.ProductCode
         Scope                   = $Info.Scope
         SupportedScopes         = $Info.SupportedScopes
-        SupportsDualScope       = $Info.SupportsDualScope
-        SuggestedManifestFields = $SuggestedManifestFields
+        SupportsDualScope = $Info.SupportsDualScope
       }
     }
     $KnownResult
@@ -2015,16 +1893,15 @@ function Invoke-InstallerExeParser {
     $KnownResult = Invoke-InstallerDetector -Name 'Squirrel/Velopack' -ScriptBlock {
       $Info = Get-SquirrelInfo -Path $AnalyzerInstallerPath
       [pscustomobject]@{
-        Family                  = $Info.Family
-        Confidence              = $Info.Confidence
-        InstallerType           = 'exe # Squirrel'
-        Metadata                = $Info
-        ProductVersion          = $Info.DisplayVersion
-        ProductName             = $Info.DisplayName
-        Publisher               = $Info.Publisher
-        ProductCode             = $Info.ProductCode
-        Scope                   = $Info.Scope
-        SuggestedManifestFields = $Info.SuggestedManifestFields
+        Family         = $Info.Family
+        Confidence     = $Info.Confidence
+        InstallerType  = 'exe'
+        Metadata       = $Info
+        ProductVersion = $Info.DisplayVersion
+        ProductName    = $Info.DisplayName
+        Publisher      = $Info.Publisher
+        ProductCode    = $Info.ProductCode
+        Scope          = $Info.Scope
       }
     }
     $KnownResult
@@ -2103,10 +1980,9 @@ function Invoke-InstallerAnalysisCore {
           Name    = 'Windows Installer Patch'
           Success = $true
           Result  = [pscustomobject]@{
-            Family                  = 'MSP'
-            Confidence              = 'high'
-            InstallerType           = 'msp'
-            SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'msp'; Note = 'Windows Installer patch package; verify winget-pkgs support and target-product behavior before authoring.' }
+            Family        = 'MSP'
+            Confidence    = 'high'
+            InstallerType = 'msp'
           }
         }
         $Analysis.SuggestedNextSteps += 'This file is a Windows Installer patch package by CFB root storage CLSID. Verify patch-package behavior before authoring.'
@@ -2201,8 +2077,7 @@ function Invoke-InstallerAnalysisCore {
           ValidationStatus        = 'ConfirmedParser'
           IsOuterContainer        = $true
           ParserName              = [string]$ParserResult.Name
-          MatchedMarkers          = @()
-          SuggestedManifestFields = $ParserResult.Result.SuggestedManifestFields
+          MatchedMarkers   = @()
         }
       }
       $Analysis.DetectedFamilies = @($Analysis.DetectedFamilies | Group-Object Family | ForEach-Object { $_.Group | Select-Object -First 1 })
@@ -2254,24 +2129,15 @@ function Get-InstallerAnalysis {
     Total byte budget used for bounded multi-window string heuristics.
   .PARAMETER ExtractEmbeddedMsi
     Also extract embedded MSI metadata from supported wrappers.
-  .PARAMETER FamilyProjectionProvider
-    Optional provider-specific family projection used by adapters such as WinGetAnalysis.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)][string]$Path,
     [ValidateRange(4096, 268435456)][int64]$ScanBytes = 16777216,
-    [switch]$ExtractEmbeddedMsi,
-    [scriptblock]$FamilyProjectionProvider
+    [switch]$ExtractEmbeddedMsi
   )
   process {
-    $PreviousProvider = $Script:InstallerFamilyProjectionProvider
-    try {
-      $Script:InstallerFamilyProjectionProvider = $FamilyProjectionProvider
-      Invoke-InstallerAnalysisCore -Path $Path -ScanBytes $ScanBytes -ExtractEmbeddedMsi:$ExtractEmbeddedMsi
-    } finally {
-      $Script:InstallerFamilyProjectionProvider = $PreviousProvider
-    }
+    Invoke-InstallerAnalysisCore -Path $Path -ScanBytes $ScanBytes -ExtractEmbeddedMsi:$ExtractEmbeddedMsi
   }
 }
 

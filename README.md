@@ -47,7 +47,7 @@ Package submissions are claimed by effective WinGet identifier in process-wide s
 
 ### Installer Analysis
 
-`Get-InstallerAnalysis` detects file and installer families from structured content and magic bytes without applying package-provider policy. `Get-WinGetInstallerAnalysis` projects the same evidence into WinGet installer types, architecture recommendations, defaults, and snippets. `DetectedFamilies` contains only structurally confirmed or successfully parsed families; `RoutingHints` and `RejectedCandidates` retain heuristic diagnostics without promoting them to detections. `FamilyCandidates` remains a confirmed-only compatibility projection.
+`Get-InstallerAnalysis` detects file and installer families from structured content and magic bytes without applying package-provider policy or returning manifest suggestions. `Get-WinGetInstallerAnalysis` projects the same evidence into schema-valid `SuggestedManifestFields`, complete `SuggestedManifestVariants`, and separate `SuggestedNextSteps`. Generic EXE families keep their identity in `Family` and use `InstallerType: exe`; YAML family comments are not runtime values. `DetectedFamilies` contains only structurally confirmed or successfully parsed families, while `RoutingHints` and `RejectedCandidates` retain heuristic diagnostics without promoting them to detections. `FamilyCandidates` remains a confirmed-only compatibility projection.
 
 Some implementations are maintained in the separately licensed InstallerParsers submodule. [`InstallerBridge.psm1`](Libraries/Infrastructure/InstallerBridge.psm1) invokes its JSON CLI in a child PowerShell process and returns deserialized evidence. It does not import GPL parser code into PackageModule's process module scope.
 

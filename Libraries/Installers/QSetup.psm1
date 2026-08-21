@@ -513,7 +513,7 @@ function Get-QSetupInfo {
 
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'QSetup'
+      InstallerType                = 'exe'
       ProductCode                  = $ProductCode
       UpgradeCode                  = $null
       DisplayName                  = $DisplayName
@@ -527,6 +527,7 @@ function Get-QSetupInfo {
       Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(@(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'QSetup' -Kind Incomplete -Areas Metadata), @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$InformationMessages) -Source 'QSetup' -Kind Information -Areas Metadata)))
 
       UnresolvedFields             = [string[]]@()
+      Family                       = 'QSetup'
       PublisherUrl                 = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_COMPANY_URL'
       ProjectName                  = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PROJECT_NAME'
       ProjectStamp                 = Get-QSetupDirectiveValue -Directive $Directive -Name 'SET_PC_STAMP'

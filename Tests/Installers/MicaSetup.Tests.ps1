@@ -316,9 +316,9 @@ Describe 'MicaSetup analyzer integration' {
     $Result.Result.ProductCode | Should -Be 'MicaSetup'
     $Result.Result.AppsAndFeaturesEntries.ProductCode | Should -Contain 'MicaSetup'
     $Result.Result.Diagnostics | Should -Not -BeNullOrEmpty
-    $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe # MicaSetup'
+    $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe'
     $Result.Result.SuggestedManifestFields.InstallModes | Should -Be @('interactive')
-    $Result.Result.SuggestedManifestFields.InstallerSwitches.Count | Should -Be 0
+    $Result.Result.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
   }
 
   It 'produces a conservative WinGet installer suggestion without fabricating silent switches' {
@@ -331,6 +331,6 @@ Describe 'MicaSetup analyzer integration' {
     $Suggestion.Installers[0].ProductCode | Should -Be 'MicaSetup'
     $Suggestion.Installers[0].Scope | Should -Be 'machine'
     $Suggestion.Installers[0].Contains('InstallerSwitches') | Should -BeFalse
-    $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe # MicaSetup'
+    $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe'
   }
 }

@@ -778,7 +778,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
               Family                  = 'CreateInstall'
               Confidence              = 'low'
               MatchedMarkers          = @('.ciq')
-              SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe # CreateInstall' }
+              SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe' }
             })
           RejectedCandidates = @([pscustomobject]@{
               Family           = 'CreateInstall'
@@ -957,7 +957,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
           DetectedFileType = [pscustomobject]@{ Type = 'PE' }
-          FamilyCandidates = @([pscustomobject]@{ Family = '7z SFX'; Confidence = 'medium'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe # 7z SFX' } })
+          FamilyCandidates = @([pscustomobject]@{ Family = '7z SFX'; Confidence = 'medium'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe' } })
         }
       }
       $Installer = [ordered]@{

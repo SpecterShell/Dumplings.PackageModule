@@ -784,8 +784,7 @@ function Get-KachinaInfo {
 
       return [pscustomobject][ordered]@{
         Path                           = $File.FullName
-        Family                         = 'Kachina'
-        InstallerType                  = 'Kachina'
+        InstallerType                  = 'exe'
         FormatGeneration               = $Context.FormatGeneration
         ProductCode                    = $ProductCode
         UpgradeCode                    = $null
@@ -853,6 +852,7 @@ function Get-KachinaInfo {
           )
         )
         UnresolvedFields               = @($UnresolvedFields | Sort-Object -Unique)
+        Family                         = 'Kachina'
         ParserVersionInfo              = [pscustomobject]@{ Name = 'Dumplings Kachina parser'; Version = 1; Generation = $Context.FormatGeneration; Evidence = @('PE overlay Kachina TLV stream', 'compiled JSON configuration', 'metadata/index cross-check') }
       }
     } finally { $Stream.Dispose() }

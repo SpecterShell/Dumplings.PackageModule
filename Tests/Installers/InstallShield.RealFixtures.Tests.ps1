@@ -38,7 +38,7 @@ Describe 'InstallShield real installer fixtures' -Tag 'RealFixture', 'Network' {
       $Info = Get-InstallShieldInfo -Path $Fixture -DestinationPath $ExpandedPath
       $MsiInfo = Get-InstallShieldMsiInfo -Installer $Info
 
-      $Info.InstallerType | Should -Be 'InstallShield'
+      $Info.InstallerType | Should -Be 'exe'
       $Info.HasMsi | Should -BeTrue
       $Info.SetupIniPath | Should -Be 'Setup.ini'
       $Info.MsiPayloadSelection.SelectionMethod | Should -Be 'SetupIni'
@@ -100,7 +100,7 @@ Describe 'InstallShield real installer fixtures' -Tag 'RealFixture', 'Network' {
       $Info = Get-InstallShieldInfo -Path $Fixture -DestinationPath $ExpandedPath
       $MsiInfo = Get-InstallShieldMsiInfo -Installer $Info
 
-      $Info.InstallerType | Should -Be 'InstallShield'
+      $Info.InstallerType | Should -Be 'exe'
       $Info.HasMsi | Should -BeTrue
       $Info.MsiPayloadSelection.PackageName | Should -Be 'Tachograph File Viewer.msi'
       $Info.SelectedMsiPath | Should -Be 'Tachograph File Viewer.msi'
@@ -124,7 +124,7 @@ Describe 'InstallShield real installer fixtures' -Tag 'RealFixture', 'Network' {
       $Info = Get-InstallShieldInfo -Path $Fixture -DestinationPath $ExpandedPath
       $MsiInfo = Get-InstallShieldMsiInfo -Installer $Info
 
-      $Info.InstallerType | Should -Be 'InstallShield'
+      $Info.InstallerType | Should -Be 'exe'
       $Info.HasMsi | Should -BeTrue
       $Info.MsiPayloadSelection.PackageName | Should -Be 'WiFi Sensor Software.msi'
       $Info.SelectedMsiPath | Should -Be 'WiFi Sensor Software.msi'

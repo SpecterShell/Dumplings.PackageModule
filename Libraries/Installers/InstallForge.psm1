@@ -263,7 +263,7 @@ function Get-InstallForgeInfo {
       $WritesAppsAndFeaturesEntry = $Setup['Uninstaller'] -eq '1'
       [pscustomobject][ordered]@{
         Path                         = $File.FullName
-        InstallerType                = 'InstallForge'
+        InstallerType                = 'exe'
         ProductCode                  = $null
         UpgradeCode                  = $null
         DisplayName                  = $Setup['Appname']
@@ -276,6 +276,7 @@ function Get-InstallForgeInfo {
         AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
         Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @($Diagnostics, @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallForge' -Kind Incomplete -Areas Metadata)))
         UnresolvedFields             = [string[]]@()
+        Family                       = 'InstallForge'
         PublisherUrl                 = $Setup['Website1']
         MainExecutable               = $Setup['ProgramRun']
         MainExecutableArguments      = $Setup['ProgramRunArguments']

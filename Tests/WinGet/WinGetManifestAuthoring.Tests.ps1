@@ -209,8 +209,7 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     @{ FamilyType = 'nullsoft'; Expected = 'nullsoft' }
     @{ FamilyType = 'inno'; Expected = 'inno' }
     @{ FamilyType = 'burn'; Expected = 'burn' }
-    @{ FamilyType = 'exe # Advanced Installer'; Expected = 'exe' }
-    @{ FamilyType = 'exe # Squirrel'; Expected = 'exe' }
+    @{ FamilyType = 'exe'; Expected = 'exe' }
   ) {
     Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
       New-AuthoringAnalyzerResult -InstallerType $FamilyType

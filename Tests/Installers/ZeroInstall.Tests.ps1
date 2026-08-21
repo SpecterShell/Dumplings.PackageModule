@@ -67,7 +67,7 @@ Describe 'Zero Install bootstrapper parser' {
   It 'reads the configured DeepL bootstrapper and derives its exact uninstall identity' {
     $Info = Get-ZeroInstallInfo -Path $Script:DeepLInstaller
 
-    $Info.InstallerType | Should -Be 'Zero Install'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.BootstrapperVariant | Should -Be 'GUI'
     $Info.AppUri | Should -Be 'https://appdownload.deepl.com/windows/0install/deepl.xml'
     $Info.AppName | Should -Be 'DeepL'
@@ -186,6 +186,6 @@ integrate_args = --add-all
     $Candidate.MatchedMarkers | Should -Contain 'CLR ManifestResource ZeroInstall.BootstrapConfig.ini'
     $Result.Success | Should -BeTrue
     $Result.Result.ProductCode | Should -Be 'https%3a##appdownload.deepl.com#windows#0install#deepl.xml'
-    $Result.Result.SuggestedManifestFields.ScopeSwitches.Machine | Should -Be '--machine'
+    ($Result.Result.SuggestedManifestVariants | Where-Object Name -EQ machine).ManifestFields.InstallerSwitches.Custom | Should -Be '--machine'
   }
 }

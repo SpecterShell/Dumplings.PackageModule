@@ -147,7 +147,7 @@ Describe 'Advanced Installer structural analyzer routing' {
 Describe 'Installer manifest behavior defaults' {
   It 'Should mirror documented Advanced Installer modes and return codes' {
     InModuleScope WinGetAnalysis {
-      $Defaults = Get-WinGetInstallerExeFamilyDefault -Family 'Advanced Installer'
+      $Defaults = (Get-WinGetInstallerFamilySuggestion -Family 'Advanced Installer').ManifestFields
 
       $Defaults.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
       $Defaults.ExpectedReturnCodes.Count | Should -Be 20
@@ -157,13 +157,24 @@ Describe 'Installer manifest behavior defaults' {
 
   It 'Should limit generic EXE families without progress mode support' {
     InModuleScope WinGetAnalysis {
-      (Get-WinGetInstallerExeFamilyDefault -Family 'Squirrel').InstallModes | Should -Be @('interactive', 'silent')
+      $Squirrel = (Get-WinGetInstallerFamilySuggestion -Family 'Squirrel').ManifestFields
+      $Velopack = (Get-WinGetInstallerFamilySuggestion -Family 'Velopack').ManifestFields
+
+      $Squirrel.InstallModes | Should -Be @('interactive', 'silent')
+      $Squirrel.InstallerSwitches.Silent | Should -Be '--silent'
+      $Squirrel.InstallerSwitches.SilentWithProgress | Should -Be '--silent'
+      $Squirrel.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'InstallLocation'
+      $Velopack.InstallModes | Should -Be @('interactive', 'silent')
+      $Velopack.InstallerSwitches.Silent | Should -Be '--silent'
+      $Velopack.InstallerSwitches.SilentWithProgress | Should -Be '--silent'
+      $Velopack.InstallerSwitches.InstallLocation | Should -Be '--installto "<INSTALLPATH>"'
+      $Velopack.InstallerSwitches.Log | Should -Be '--log "<LOGPATH>"'
     }
   }
 
   It 'Should mirror the documented InstallShield Advanced UI snippet' {
     InModuleScope WinGetAnalysis {
-      $Defaults = Get-WinGetInstallerExeFamilyDefault -Family 'InstallShield Advanced UI'
+      $Defaults = (Get-WinGetInstallerFamilySuggestion -Family 'InstallShield Advanced UI').ManifestFields
 
       $Defaults.InstallerSwitches.Silent | Should -Be '/silent'
       $Defaults.InstallerSwitches.SilentWithProgress | Should -Be '/passive'
@@ -175,19 +186,113 @@ Describe 'Installer manifest behavior defaults' {
   It 'Should not invent scope where the documented generic-family snippet omits it' {
     InModuleScope WinGetAnalysis {
       foreach ($Family in @('Setup Factory', 'InstallAnywhere', 'InstallMate', 'QSetup', 'Paquet Builder')) {
-        (Get-WinGetInstallerExeFamilyDefault -Family $Family).PSObject.Properties.Name | Should -Not -Contain 'Scope'
+        (Get-WinGetInstallerFamilySuggestion -Family $Family).ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'Scope'
       }
     }
   }
 
   It 'Should mirror documented Wise and Qt IFW installer-level fields' {
     InModuleScope WinGetAnalysis {
-      $Wise = Get-WinGetInstallerExeFamilyDefault -Family 'Wise'
-      $Qt = Get-WinGetInstallerExeFamilyDefault -Family 'Qt Installer Framework'
+      $Wise = (Get-WinGetInstallerFamilySuggestion -Family 'Wise').ManifestFields
+      $Qt = (Get-WinGetInstallerFamilySuggestion -Family 'Qt Installer Framework').ManifestFields
 
       $Wise.Scope | Should -Be 'machine'
       $Wise.InstallerSwitches.InstallLocation | Should -Be 'INSTALLDIR="<INSTALLPATH>"'
-      $Qt.UpgradeBehavior | Should -Be 'uninstallPrevious'
+      $Qt.InstallerType | Should -Be 'exe'
+      $Qt.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+      $Qt.PSObject.Properties.Name | Should -Not -Contain 'InstallModes'
+    }
+  }
+
+  It 'Should return schema-valid fields for every documented family projection' {
+    InModuleScope WinGetAnalysis {
+      $Families = @(
+        'MSI', 'MSIX/AppX', 'ZIP/archive', 'Portable', 'Font', 'Burn', 'Inno Setup', 'NSIS/Nullsoft', 'MSP',
+        'Squirrel/Velopack', 'Advanced Installer', 'InstallShield', 'InstallShield Advanced UI', 'Squirrel', 'Velopack',
+        'Zero Install', 'MicaSetup', 'Kachina', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer',
+        'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress',
+        'Wise', 'Chromium Setup', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge', 'Qt Installer Framework'
+      )
+      $Schema = Get-WinGetManifestSchema -ManifestType installer -ManifestVersion '1.12.0'
+      foreach ($Family in $Families) {
+        $Suggestion = Get-WinGetInstallerFamilySuggestion -Family $Family
+        foreach ($ManifestFields in @(@($Suggestion.ManifestFields) + @($Suggestion.ManifestVariants.ManifestFields) | Where-Object { $null -ne $_ })) {
+          $ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'Notes'
+          $ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'SupportedScopes'
+          $ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'ScopeSwitches'
+          if ($ManifestFields.PSObject.Properties['InstallerType']) { $ManifestFields.InstallerType | Should -Not -Match '#' }
+          $Entry = Merge-WinGetManifestDictionary -Base ([ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/installer.exe'; InstallerSha256 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }) -Override (ConvertTo-WinGetSuggestedManifestFieldSet -InputObject $ManifestFields)
+          (Get-YamlSchemaValidationResult -InputObject $Entry -Schema $Schema.definitions.Installer -RootSchema $Schema -ValidatePropertyNames).IsValid | Should -BeTrue -Because $Family
+        }
+      }
+    }
+  }
+
+  It 'Should distinguish exact InstallScript behavior from the generic InstallShield template' {
+    InModuleScope WinGetAnalysis {
+      $Result = [pscustomobject]@{
+        Family        = 'InstallShield'
+        InstallerType = 'exe'
+        Metadata      = [pscustomobject]@{
+          Variant           = 'InstallScript'
+          InstallScriptInfo = [pscustomobject]@{ SilentSupport = 'Supported' }
+        }
+      }
+      $Suggestion = Get-WinGetParserResultSuggestion -Result $Result
+
+      $Suggestion.ManifestFields.InstallModes | Should -Be @('interactive', 'silent')
+      $Suggestion.ManifestFields.InstallerSwitches.Silent | Should -Be '/s'
+      $Suggestion.ManifestFields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+    }
+  }
+
+  It 'Should select InstallShield behavior only after project classification' {
+    InModuleScope WinGetAnalysis {
+      $Unclassified = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'InstallShield'; InstallerType = 'exe'; Metadata = [pscustomobject]@{} })
+      $BasicMsi = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'InstallShield'; InstallerType = 'exe'; Metadata = [pscustomobject]@{ InstallShieldProjectType = 'Basic MSI' } })
+      $AdvancedUi = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'InstallShield'; InstallerType = 'exe'; Metadata = [pscustomobject]@{ InstallShieldProjectType = 'Advanced UI' } })
+
+      $Unclassified.ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+      $BasicMsi.ManifestFields.InstallerSwitches.Silent | Should -Be '/S /V/quiet /V/norestart'
+      $AdvancedUi.ManifestFields.InstallerSwitches.Silent | Should -Be '/silent'
+    }
+  }
+
+  It 'Should distinguish CLI-capable and GUI-only Qt IFW media' {
+    InModuleScope WinGetAnalysis {
+      $Cli = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Qt Installer Framework'; InstallerType = 'exe'; Metadata = [pscustomobject]@{ SupportsSilentInstallation = $true; RequiresExplicitInstallLocation = $true; RecommendedUpgradeBehavior = 'uninstallPrevious' } })
+      $Gui = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Qt Installer Framework'; InstallerType = 'exe'; Metadata = [pscustomobject]@{ SupportsSilentInstallation = $false } })
+
+      $Cli.ManifestFields.InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
+      $Cli.ManifestFields.InstallerSwitches.Silent | Should -Match '--root "<INSTALLPATH>"'
+      $Cli.ManifestFields.UpgradeBehavior | Should -Be 'uninstallPrevious'
+      $Gui.ManifestFields.InstallModes | Should -Be @('interactive')
+      $Gui.ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
+    }
+  }
+
+  It 'Should project source-proven dual-scope selectors as complete variants' -ForEach @(
+    @{ Family = 'Inno Setup'; Type = 'inno'; User = '/CURRENTUSER'; Machine = '/ALLUSERS'; UserLocation = $null; MachineLocation = $null }
+    @{ Family = 'NSIS/Nullsoft'; Type = 'nullsoft'; User = '/CurrentUser'; Machine = '/AllUsers'; UserLocation = $null; MachineLocation = $null }
+    @{ Family = 'Burn'; Type = 'burn'; User = 'InstallAllUsers=0'; Machine = 'InstallAllUsers=1'; UserLocation = 'DefaultJustForMeTargetDir="<INSTALLPATH>"'; MachineLocation = 'DefaultAllUsersTargetDir="<INSTALLPATH>"' }
+  ) {
+    InModuleScope WinGetAnalysis -Parameters $_ {
+      param($Family, $Type, $User, $Machine, $UserLocation, $MachineLocation)
+      $Metadata = [pscustomobject]@{ SupportsDualScope = $true; SupportedScopes = @('user', 'machine'); UserScopeSwitch = $User; MachineScopeSwitch = $Machine }
+      if ($UserLocation) { $Metadata | Add-Member -NotePropertyName ScopeInstallLocationSwitches -NotePropertyValue ([pscustomobject]@{ User = $UserLocation; Machine = $MachineLocation }) }
+      $Suggestion = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = $Family; InstallerType = $Type; Metadata = $Metadata })
+      $UserVariant = $Suggestion.ManifestVariants | Where-Object Name -EQ user
+      $MachineVariant = $Suggestion.ManifestVariants | Where-Object Name -EQ machine
+
+      $UserVariant.ManifestFields.InstallerType | Should -Be $Type
+      $UserVariant.ManifestFields.Scope | Should -Be 'user'
+      $UserVariant.ManifestFields.InstallerSwitches.Custom | Should -Be $User
+      $MachineVariant.ManifestFields.Scope | Should -Be 'machine'
+      $MachineVariant.ManifestFields.InstallerSwitches.Custom | Should -Be $Machine
+      if ($UserLocation) {
+        $UserVariant.ManifestFields.InstallerSwitches.InstallLocation | Should -Be $UserLocation
+        $MachineVariant.ManifestFields.InstallerSwitches.InstallLocation | Should -Be $MachineLocation
+      }
     }
   }
 }
@@ -442,9 +547,8 @@ Describe 'WinGet installer analyzer content detection' {
           Where-Object { $_.Name -eq 'InstallShield' -and $_.Success })[0].Result
 
       $Result.ProductCode | Should -Be '{INSTALLSCRIPT-PRODUCT}'
-      $Result.SuggestedManifestFields.InstallModes | Should -Be @('interactive', 'silent')
-      $Result.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/s'
-      $Result.SuggestedManifestFields.InstallerSwitches.Contains('SilentWithProgress') | Should -BeFalse
+      $Result.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestFields'
+      $Result.Metadata.InstallScriptInfo.SilentSupport | Should -Be 'Supported'
       Should -Invoke Get-InstallShieldMsiInfo -Exactly 0
     }
   }
@@ -462,13 +566,14 @@ Describe 'WinGet installer analyzer content detection' {
 
   It 'Should use the documented Actual Installer dual-scope switch defaults' {
     $Module = Get-Module WinGetAnalysis
-    $Defaults = & $Module { Get-WinGetInstallerExeFamilyDefault -Family 'Actual Installer' }
+    $Suggestion = & $Module { Get-WinGetInstallerFamilySuggestion -Family 'Actual Installer' }
+    $Defaults = $Suggestion.ManifestFields
 
     $Defaults.InstallerSwitches.Silent | Should -Be '/S /L'
     $Defaults.InstallerSwitches.InstallLocation | Should -Be '/D "<INSTALLPATH>"'
-    $Defaults.ScopeSwitches.User | Should -Be '/CU'
-    $Defaults.ScopeSwitches.Machine | Should -Be '/RUNAS /ALL'
-    $Defaults.Notes | Should -Contain 'Actual Installer can use /CU for current-user scope and /RUNAS /ALL for machine scope.'
+    ($Suggestion.ManifestVariants | Where-Object Name -EQ user).ManifestFields.InstallerSwitches.Custom | Should -Be '/CU'
+    ($Suggestion.ManifestVariants | Where-Object Name -EQ machine).ManifestFields.InstallerSwitches.Custom | Should -Be '/RUNAS /ALL'
+    $Suggestion.SuggestedNextSteps | Should -Contain 'Actual Installer can use /CU for current-user scope and /RUNAS /ALL for machine scope.'
   }
 
   It 'Should route Paquet Builder markers to its family defaults' {
@@ -483,8 +588,8 @@ Describe 'WinGet installer analyzer content detection' {
     } $FixturePath
 
     $Candidate.Family | Should -Be 'Paquet Builder'
-    $Candidate.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'Scope'
-    (& (Get-Module WinGetAnalysis) { Get-WinGetInstallerExeFamilyDefault -Family 'Paquet Builder' }).InstallerSwitches.Silent | Should -Be '/s'
+    $Candidate.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestFields'
+    (& (Get-Module WinGetAnalysis) { (Get-WinGetInstallerFamilySuggestion -Family 'Paquet Builder').ManifestFields }).InstallerSwitches.Silent | Should -Be '/s'
   }
 
   It 'Should route CreateInstall markers to its family defaults' {
@@ -499,7 +604,7 @@ Describe 'WinGet installer analyzer content detection' {
     } $FixturePath
 
     $Candidate.Family | Should -Be 'CreateInstall'
-    $Defaults = & (Get-Module WinGetAnalysis) { Get-WinGetInstallerExeFamilyDefault -Family 'CreateInstall' }
+    $Defaults = & (Get-Module WinGetAnalysis) { (Get-WinGetInstallerFamilySuggestion -Family 'CreateInstall').ManifestFields }
     $Defaults.Scope | Should -Be 'machine'
     $Defaults.InstallerSwitches.Silent | Should -Be '-silent'
   }
@@ -526,6 +631,21 @@ Describe 'WinGet installer analyzer content detection' {
     $Analysis.FamilyCandidates.Family | Should -Not -Contain 'CreateInstall'
     $Analysis.RoutingHints.Family | Should -Contain 'CreateInstall'
     ($Analysis.RejectedCandidates | Where-Object Family -EQ 'CreateInstall').ValidationStatus | Should -Be 'RejectedByParser'
+  }
+
+  It 'Should project the structurally confirmed Squirrel or Velopack family' -ForEach @(
+    @{ Name = 'SourceTreeSetup-3.4.31.exe'; Url = 'https://product-downloads.atlassian.com/software/sourcetree/windows/ga/SourceTreeSetup-3.4.31.exe'; Family = 'Squirrel' }
+    @{ Name = 'AppeeeSetup.exe'; Url = 'https://web.appeee.nl/Files/UpdateWinApp/appeee/AppeeeSetup.exe'; Family = 'Velopack' }
+  ) {
+    $Installer = Get-AnalyzerInstallerFixture -Name $Name -Url $Url
+
+    $Analysis = Get-WinGetInstallerAnalysis -Path $Installer
+    $ParserResult = $Analysis.ParserResults | Where-Object Name -EQ 'Squirrel/Velopack' | Select-Object -First 1
+
+    $ParserResult.Success | Should -BeTrue
+    $ParserResult.Result.Family | Should -Be $Family
+    $ParserResult.Result.InstallerType | Should -Be 'exe'
+    $ParserResult.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe'
   }
 
   It 'Should not promote common embedded marker strings when their parser rejects the file' -ForEach @(
@@ -564,7 +684,6 @@ Describe 'WinGet installer analyzer content detection' {
         ValidationStatus        = 'ConfirmedStructure'
         IsOuterContainer        = $true
         MatchedMarkers          = @('Inno Setup Setup Data')
-        SuggestedManifestFields = $null
       }
       $ParserResult = [pscustomobject]@{
         Name        = 'Inno'
@@ -615,10 +734,11 @@ Describe 'WinGet installer analyzer content detection' {
 
       $QSetup.Result.ProductName | Should -Be 'Analyzer QSetup Product'
       $QSetup.Result.ProductVersion | Should -Be '1.2.3'
-      $QSetup.Result.SuggestedManifestFields.Scope | Should -Be 'machine'
+      $QSetup.Result.PSObject.Properties.Name | Should -Not -Contain 'SuggestedManifestFields'
+      $QSetup.Result.Scope | Should -Be 'machine'
       $QSetup.Result.Diagnostics.Message | Should -Contain 'Execution action evidence'
       $QSetup.Result.ExecutedPayloads[0].Command | Should -Be 'runtime.exe'
-      (& (Get-Module WinGetAnalysis) { Get-WinGetInstallerExeFamilyDefault -Family 'QSetup' }).InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
+      (& (Get-Module WinGetAnalysis) { (Get-WinGetInstallerFamilySuggestion -Family 'QSetup').ManifestFields }).InstallModes | Should -Be @('interactive', 'silent', 'silentWithProgress')
       Should -Invoke -CommandName Get-SevenZipSfxInfo -Times 0 -Exactly
     }
   }

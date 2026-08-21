@@ -398,7 +398,7 @@ Describe 'install4j parser' {
     $Fixture = New-Install4jConfigFixture -Name 'i4jparams.conf' -Content $Script:SyntheticConfig
     $Info = Get-Install4jInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'install4j'
+    $Info.InstallerType | Should -Be 'exe'
     $Info.ProductCode | Should -Be '1234-5678-9012-3456'
     $Info.DisplayName | Should -Be 'Synthetic install4j App 1.2.3'
     $Info.DisplayVersion | Should -Be '1.2.3'

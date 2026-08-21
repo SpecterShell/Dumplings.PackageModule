@@ -95,7 +95,7 @@ function Get-InstallAwareInfo {
 
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'InstallAware'
+      InstallerType                = 'exe'
       ProductCode                  = $null
       UpgradeCode                  = $null
       DisplayName                  = $DisplayName
@@ -108,6 +108,7 @@ function Get-InstallAwareInfo {
       AppsAndFeaturesInstallerType = $null
       Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallAware' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
+      Family                       = 'InstallAware'
       FileDescription              = ([string]$VersionInfo.FileDescription).Trim()
       SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
       RequestedExecutionLevel      = $ExecutionLevel

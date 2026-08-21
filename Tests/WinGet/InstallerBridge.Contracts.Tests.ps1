@@ -8,7 +8,7 @@ Describe 'Installer bridge' {
     }
 
     $Result | Should -BeOfType ([pscustomobject])
-    $Result.InstallerType | Should -Be 'Nullsoft'
+    $Result.InstallerType | Should -Be 'nullsoft'
     $Result.RegistryValues | Should -BeOfType ([System.Collections.Specialized.OrderedDictionary])
     $Result.RegistryValues.Contains('') | Should -BeTrue
     $Result.RegistryValues[''] | Should -Be '1'
@@ -32,7 +32,7 @@ Describe 'Installer bridge' {
     $Fixture = Get-InstallerFixture -Name 'Readest_0.11.20_x64-setup.exe' -Url 'https://github.com/readest/readest/releases/download/v0.11.20/Readest_0.11.20_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture -Scope user
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'Readest'
     $Info.DisplayVersion | Should -Be '0.11.20'
     $Info.RegistryValues.CurrentUser | Should -Be '1'
@@ -80,7 +80,7 @@ stagingPercentage: 25
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'alist-desktop'
     $Info.DisplayVersion | Should -Be '3.60.0'
   }
@@ -435,7 +435,7 @@ function Controller() {
     $Info = Get-QtInstallerFrameworkInfo -Path $Fixture
     $FormatInfo = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Qt Installer Framework'
+    $Info.InstallerType | Should -Be 'exe'
     $FormatInfo.IsQtInstallerFramework | Should -BeTrue
     $FormatInfo.IsSupported | Should -BeTrue
     $FormatInfo.FormatGeneration | Should -Be 'BinaryContent'

@@ -385,6 +385,19 @@ function Get-WinGetAuthoringAnalysisProjection {
     if ($Value.Count -gt 0) { $ManifestFields[$Field] = $Value }
   }
 
+  # Generic EXE families have no WinGet runtime defaults. Apply behavior only
+  # when the successful parser returned it as artifact-specific evidence;
+  # family templates remain advisory under Suggestions.
+  if ($InstallerType -ceq 'exe') {
+    foreach ($Field in @('InstallModes', 'InstallerSwitches', 'InstallerSuccessCodes', 'ExpectedReturnCodes', 'ElevationRequirement', 'UpgradeBehavior')) {
+      $Value = Get-WinGetAuthoringPropertyValue -Source $Sources -Name $Field
+      if ($null -eq $Value) { continue }
+      if ($Value -is [string] -and [string]::IsNullOrWhiteSpace([string]$Value)) { continue }
+      if ($Value -is [System.Collections.ICollection] -and $Value.Count -eq 0) { continue }
+      $ManifestFields[$Field] = if ($Value.GetType() -eq [pscustomobject]) { ConvertTo-WinGetAuthoringDictionary -InputObject $Value } else { Copy-WinGetManifestValue -Value $Value }
+    }
+  }
+
   # Only known package mappings from MSIX or portable runtime analysis are
   # authoritative enough to author automatically.
   $Dependencies = Get-WinGetAuthoringPropertyValue -Source $Sources -Name Dependencies
@@ -396,7 +409,8 @@ function Get-WinGetAuthoringAnalysisProjection {
 
   $InstallLocationSwitch = Get-WinGetAuthoringPropertyValue -Source $Sources -Name InstallLocationSwitch
   if (-not [string]::IsNullOrWhiteSpace([string]$InstallLocationSwitch)) {
-    $ManifestFields['InstallerSwitches'] = [ordered]@{ InstallLocation = [string]$InstallLocationSwitch }
+    if (-not $ManifestFields.Contains('InstallerSwitches')) { $ManifestFields['InstallerSwitches'] = [ordered]@{} }
+    $ManifestFields['InstallerSwitches']['InstallLocation'] = [string]$InstallLocationSwitch
   }
 
   $AppsAndFeaturesEntry = [ordered]@{}
@@ -429,7 +443,11 @@ function Get-WinGetAuthoringAnalysisProjection {
     $Suggestions['AppsAndFeaturesIdentity'] = [ordered]@{ DisplayName = $DisplayName; Publisher = $Publisher }
   }
   $SuggestedFields = Get-WinGetAuthoringPropertyValue -Source $Sources -Name SuggestedManifestFields
-  if ($SuggestedFields) { $Suggestions['FamilyDefaults'] = $SuggestedFields }
+  if ($SuggestedFields -and @($SuggestedFields.PSObject.Properties).Count -gt 0) { $Suggestions['FamilyDefaults'] = $SuggestedFields }
+  $SuggestedVariants = @(Get-WinGetAuthoringPropertyValue -Source $Sources -Name SuggestedManifestVariants)
+  if ($SuggestedVariants.Count -gt 0) { $Suggestions['ManifestVariants'] = $SuggestedVariants }
+  $FamilyNextSteps = @(Get-WinGetAuthoringPropertyValue -Source $Sources -Name SuggestedNextSteps | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+  if ($FamilyNextSteps.Count -gt 0) { $Suggestions['FamilyNextSteps'] = $FamilyNextSteps }
 
   return [pscustomobject]@{
     InstallerType  = $InstallerType
@@ -679,25 +697,25 @@ function Get-WinGetInstallerManifestSuggestion {
       $Installers.Add($Entry)
     }
 
-    $ResolvedDiagnostics = @(Resolve-InstallerDiagnostics -Diagnostic $AuthoringDiagnostics.ToArray() -Scenario ManifestAuthoring -ConfirmedFamily:($Projection.ParserResult -ne $null))
+    $ResolvedDiagnostics = @(Resolve-InstallerDiagnostics -Diagnostic $AuthoringDiagnostics.ToArray() -Scenario ManifestAuthoring -ConfirmedFamily:($null -ne $Projection.ParserResult))
 
     return [pscustomobject]@{
-      PSTypeName            = 'Dumplings.WinGet.InstallerManifestSuggestion'
-      InstallerUrl          = $InstallerUrl.AbsoluteUri
-      InstallerPath         = $InstallerPath
-      Installers            = @($Installers)
-      ProposedInstallers    = @($Installers)
-      AppliedEvidence       = [pscustomobject]@{ Sha256 = $Hash; AnalyzerFields = $Projection.ManifestFields; ReleaseDate = $ReleaseDate }
-      Suggestions           = $Projection.Suggestions
-      UnresolvedSuggestions = $Projection.Suggestions
-      Diagnostics           = $ResolvedDiagnostics
-      HasWarningDiagnostics = @($ResolvedDiagnostics | Where-Object Level -EQ Warning).Count -gt 0
-      HasErrorDiagnostics   = @($ResolvedDiagnostics | Where-Object Level -EQ Error).Count -gt 0
+      PSTypeName             = 'Dumplings.WinGet.InstallerManifestSuggestion'
+      InstallerUrl           = $InstallerUrl.AbsoluteUri
+      InstallerPath          = $InstallerPath
+      Installers             = @($Installers)
+      ProposedInstallers     = @($Installers)
+      AppliedEvidence        = [pscustomobject]@{ Sha256 = $Hash; AnalyzerFields = $Projection.ManifestFields; ReleaseDate = $ReleaseDate }
+      Suggestions            = $Projection.Suggestions
+      UnresolvedSuggestions  = $Projection.Suggestions
+      Diagnostics            = $ResolvedDiagnostics
+      HasWarningDiagnostics  = @($ResolvedDiagnostics | Where-Object Level -EQ Warning).Count -gt 0
+      HasErrorDiagnostics    = @($ResolvedDiagnostics | Where-Object Level -EQ Error).Count -gt 0
       HasBlockingDiagnostics = @($ResolvedDiagnostics | Where-Object IsBlocking).Count -gt 0
-      Analysis              = $Analysis
-      RawAnalysis           = $Analysis
-      NestedAnalysis        = $NestedAnalysis
-      DownloadResult        = $DownloadResult
+      Analysis               = $Analysis
+      RawAnalysis            = $Analysis
+      NestedAnalysis         = $NestedAnalysis
+      DownloadResult         = $DownloadResult
     }
   } finally {
     if ($NestedTemporaryFolder) { Remove-Item -LiteralPath $NestedTemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue }

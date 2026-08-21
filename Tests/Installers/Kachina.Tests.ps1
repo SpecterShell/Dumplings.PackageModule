@@ -353,7 +353,7 @@ Describe 'Kachina analyzer integration' {
     $Analysis.DetectedFamilies.Family | Should -Not -Contain 'MicaSetup'
     $Result.Success | Should -BeTrue
     $Result.Result.ProductCode | Should -Be 'Akasha Navigator'
-    $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe # Kachina'
+    $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe'
     $Result.Result.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '-S'
   }
 
@@ -362,7 +362,7 @@ Describe 'Kachina analyzer integration' {
     $Suggestion.HasBlockingDiagnostics | Should -BeFalse
     $Suggestion.Installers[0].ProductCode | Should -Be 'Akasha Navigator'
     $Suggestion.Installers[0].Scope | Should -Be 'machine'
-    $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe # Kachina'
+    $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe'
   }
 
   It 'updates existing generic EXE identity fields through manifest processing' {

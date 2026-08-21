@@ -833,7 +833,7 @@ function Get-CreateInstallInfo {
     $WritesAppsAndFeaturesEntry = if ($ProductCode) { $true } else { $null }
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'CreateInstall'
+      InstallerType                = 'exe'
       ProductCode                  = $ProductCode
       UpgradeCode                  = $null
       DisplayName                  = $ProductName
@@ -846,6 +846,7 @@ function Get-CreateInstallInfo {
       AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
       Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'CreateInstall' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
+      Family                       = 'CreateInstall'
       ProductCodeEvidence          = if ($ProductCode) { 'Compiled Gentee addremoveext uninstall-key argument' } else { $null }
       FileDescription              = ([string]$VersionInfo.FileDescription).Trim()
       SupportedScopes              = $SupportedScopes

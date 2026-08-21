@@ -99,7 +99,7 @@ function Get-PaquetBuilderInfo {
 
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'Paquet Builder'
+      InstallerType                = 'exe'
       ProductCode                  = $null
       UpgradeCode                  = $null
       DisplayName                  = ([string]$VersionInfo.ProductName).Trim()
@@ -112,6 +112,7 @@ function Get-PaquetBuilderInfo {
       AppsAndFeaturesInstallerType = $null
       Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'PaquetBuilder' -Kind Incomplete -Areas Metadata))
       UnresolvedFields             = [string[]]@()
+      Family                       = 'Paquet Builder'
       FileDescription              = ([string]$VersionInfo.FileDescription).Trim()
       SupportedScopes              = if ($Scope) { @($Scope) } else { @() }
       RequestedExecutionLevel      = $ExecutionLevel

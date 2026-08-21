@@ -442,7 +442,7 @@ Describe 'WinGet analyzer Chromium routing' {
 
     $Result.Result.Variant | Should -Be 'ChromiumUpdater'
     $Result.Result.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '--install --silent'
-    $Result.Result.SuggestedManifestFields.ScopeSwitches.Machine | Should -Be '--system --enterprise'
+    ($Result.Result.SuggestedManifestVariants | Where-Object Name -EQ machine).ManifestFields.InstallerSwitches.Custom | Should -Be '--system --enterprise'
   }
 
   It 'Should emit Omaha-specific switches for the legacy Google Updater package' {
@@ -452,7 +452,7 @@ Describe 'WinGet analyzer Chromium routing' {
 
     $Result.Result.Variant | Should -Be 'Omaha'
     $Result.Result.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '/silent'
-    $Result.Result.SuggestedManifestFields.ScopeSwitches.User | Should -Be '/install "runtime=true" /enterprise'
-    $Result.Result.SuggestedManifestFields.ScopeSwitches.Machine | Should -Be '/install "runtime=true&needsadmin=true" /enterprise'
+    ($Result.Result.SuggestedManifestVariants | Where-Object Name -EQ user).ManifestFields.InstallerSwitches.Custom | Should -Be '/install "runtime=true" /enterprise'
+    ($Result.Result.SuggestedManifestVariants | Where-Object Name -EQ machine).ManifestFields.InstallerSwitches.Custom | Should -Be '/install "runtime=true&needsadmin=true" /enterprise'
   }
 }
