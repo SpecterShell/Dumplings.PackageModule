@@ -199,6 +199,7 @@ Describe 'Actual Installer static parser' {
     $Info.FileExtensions | Should -Be 'aip'
     $Info.Diagnostics.Id | Should -Contain 'ActualInstaller.Metadata.DynamicVersion'
     $Info.InstallerSwitches.Silent | Should -Be '/S'
+    $Info.InstallerSwitches.SilentWithProgress | Should -Be '/S'
     $Info.InstallModes | Should -Be @('interactive', 'silent')
     $Info.Operations.Files[0].IfExistsMode | Should -Be 'Overwrite'
     $Info.Operations.Files[0].RemoveOnUninstall | Should -BeTrue

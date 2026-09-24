@@ -1917,7 +1917,7 @@ function Get-PaquetBuilderInfo {
 
     $SilentValues = @(Get-PaquetBuilderAssignmentValue -Assignments $Assignments -Name 'SILENT' | Where-Object { $_ -ceq '1' })
     $SupportsSilentInstallation = $Data.Profile.Id -eq 'SplitArchiveRuntime' -and $SilentValues.Count -gt 0
-    $InstallerSwitches = $SupportsSilentInstallation ? [ordered]@{ Silent = '/s' } : $null
+    $InstallerSwitches = $SupportsSilentInstallation ? [ordered]@{ Silent = '/s'; SilentWithProgress = '/s' } : $null
     $InstallModes = $SupportsSilentInstallation ? @('interactive', 'silent') : @('interactive')
     if ($Data.Profile.Id -ne 'SplitArchiveRuntime') {
       $Diagnostics.Add((ConvertTo-PaquetBuilderDiagnostic -Id 'Installability.GenerationSpecific' -Message 'Silent-install support is not projected for this historical structural route without exact compiled switch evidence.' -Kind ManualValidation -Areas Installability -AffectedFields @('InstallerSwitches', 'InstallModes') -Evidence $Data.Profile.Id))

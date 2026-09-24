@@ -13,6 +13,18 @@ BeforeAll {
 }
 
 Describe 'Paquet Builder static parser' {
+  It 'Should populate both WinGet unattended switch slots for current silent-capable media' {
+    $Path = Join-Path $Script:PaquetFixtureRoot 'current\pbinst.exe'
+    if (-not (Test-Path -LiteralPath $Path)) { Set-ItResult -Skipped -Because 'The persistent current Paquet Builder fixture is unavailable.'; return }
+
+    $Info = Get-PaquetBuilderInfo -Path $Path
+
+    $Info.SupportsSilentInstallation | Should -BeTrue
+    $Info.InstallModes | Should -Be @('interactive', 'silent')
+    $Info.InstallerSwitches.Silent | Should -Be '/s'
+    $Info.InstallerSwitches.SilentWithProgress | Should -Be '/s'
+  }
+
   It 'Should classify independent payload and runtime archives without assuming physical order' {
     $PayloadBytes = [Convert]::FromBase64String('N3q8ryccAAQ9qmANEQAAAAAAAABaAAAAAAAAAMFZj+oBAAzvu79NWiBwYXlsb2FkAAEEBgABCREABwsBAAEhIQEADA0ACAoBlIuc5QAABQEZDAAAAAAAAAAAAAAAABERAGEAcABwAC4AZQB4AGUAAAAZAgAAFAoBAB62AVRLEN0BFQYBACAAAAAAAA==')
     $RuntimeBytes = [Convert]::FromBase64String('N3q8ryccAARvFqxziQAAAAAAAAAhAAAAAAAAAIeEEHoBABHvu79NWiBjb3Jl77u/cHJvcHMAAACBMweuD89dLwwHyEN/QbH6/eXHfeltPRF+KAQ4jdN8i3B2bHASkmtshsURP/CTxIVxKBlS3RJpSTQfS1uagxDwitrxEOECC63BwAFZFPCO/UlgqXK0gK4zcbXJH8lrfwIF5lsbjlRuLVrCC1IqcmXAABcGFgEJcwAHCwEAASMDAQEFXQAQAAAMgIYKASqU5xkAAA==')

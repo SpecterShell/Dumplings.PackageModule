@@ -2033,6 +2033,7 @@ function Get-AstrumInstallWizardInfo {
       $InstallModes = @('interactive')
       if ($SupportsSilentInstallation -eq $true) {
         $InstallerSwitches['Silent'] = '/silent'
+        $InstallerSwitches['SilentWithProgress'] = '/silent'
         if ($LicenseRequired) { $InstallerSwitches['Custom'] = '/AcceptLicense' }
         $InstallModes = @('interactive', 'silent')
       }

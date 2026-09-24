@@ -158,6 +158,7 @@ Describe 'Astrum InstallWizard structural detection' {
     $LegacyInfo = Get-AstrumInstallWizardInfo -Path $Script:AstrumLegacy180
     $LegacyInfo.SupportsSilentInstallation | Should -BeTrue
     $LegacyInfo.InstallerSwitches.Silent | Should -Be '/silent'
+    $LegacyInfo.InstallerSwitches.SilentWithProgress | Should -Be '/silent'
     $LegacyInfo.InstallModes | Should -Be @('interactive', 'silent')
     $LegacyInfo.InstallerSuccessCodes | Should -BeNullOrEmpty
     $LegacyInfo.RuntimeCommandLineEvidence.Switches | Should -Contain '/silent'
@@ -267,6 +268,7 @@ Describe 'Astrum InstallWizard metadata and ARP evidence' {
     $Info.ArpEntries[0].InstallLocation | Should -BeNullOrEmpty
     $Info.ArpEntries[0].DisplayIcon | Should -BeNullOrEmpty
     $Info.InstallerSwitches.Silent | Should -Be '/silent'
+    $Info.InstallerSwitches.SilentWithProgress | Should -Be '/silent'
     $Info.InstallModes | Should -Be @('interactive', 'silent')
     $Info.InstallerSuccessCodes | Should -Be @(1)
     $Info.PayloadCatalog.Path | Should -Contain '<InstallDir>\Data\Alpha.txt'

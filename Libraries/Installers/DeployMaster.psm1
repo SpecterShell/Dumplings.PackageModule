@@ -761,7 +761,7 @@ function Get-DeployMasterInfo {
       MinimumWindows11VersionCode           = $PackageData.Header.MinimumWindows11VersionCode
       MaximumWindows11VersionCode           = $PackageData.Header.MaximumWindows11VersionCode
       RequestedExecutionLevel               = Get-PERequestedExecutionLevel -Path $File.FullName
-      InstallerSwitches                     = [ordered]@{ Silent = '/silent'; InstallLocation = $PackageData.Settings.PortableInstallationMode -eq 'Always' ? '/portable "<INSTALLPATH>"' : '/appfolder "<INSTALLPATH>"' }
+      InstallerSwitches                     = [ordered]@{ Silent = '/silent'; SilentWithProgress = '/silent'; InstallLocation = $PackageData.Settings.PortableInstallationMode -eq 'Always' ? '/portable "<INSTALLPATH>"' : '/appfolder "<INSTALLPATH>"' }
       InstallModes                          = @('interactive', 'silent')
       CommandLineSwitches                   = [pscustomobject]@{
         Silent                   = @('/s', '/silent')

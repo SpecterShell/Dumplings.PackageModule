@@ -204,7 +204,7 @@ Describe 'DeployMaster static parser' {
     $Info.PackageSettings.PortableDefaultFolder | Should -Be 'DMDeployMasterKnown'
     $Info.InstallerSwitches.Silent | Should -Be '/silent'
     $Info.InstallerSwitches.InstallLocation | Should -Be '/appfolder "<INSTALLPATH>"'
-    $Info.InstallerSwitches.Contains('SilentWithProgress') | Should -BeFalse
+    $Info.InstallerSwitches.SilentWithProgress | Should -Be '/silent'
     $Info.InstallModes | Should -Be @('interactive', 'silent')
     $Info.CommandLineSwitches.Portable | Should -Be '/portable "<PATH>"'
     $Info.CommandLineSwitches.InstallForAllUsers | Should -Be '/userall'

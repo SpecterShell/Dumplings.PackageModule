@@ -85,6 +85,9 @@ Describe 'Wise MSI wrapper parser' {
     if ($ScriptSupported) {
       $Info.FormatProfile | Should -Be 'ExtendedOverlay'
       $Info.BuilderVersion | Should -Be '7.01'
+      $Info.InstallModes | Should -Be @('interactive', 'silent')
+      $Info.InstallerSwitches.Silent | Should -Be '/S'
+      $Info.InstallerSwitches.SilentWithProgress | Should -Be '/S'
       $Info.PayloadCatalog.Count | Should -BeGreaterThan 500
       $Info.AppsAndFeaturesEvidence[0].ProductCode | Should -Be 'Wise InstallMaster'
       $Info.ProductCode | Should -BeNullOrEmpty

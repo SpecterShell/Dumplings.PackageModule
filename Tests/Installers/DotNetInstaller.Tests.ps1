@@ -337,6 +337,7 @@ Describe 'dotNetInstaller historical resource routes' {
     $Info.RuntimeCapabilityProfile | Should -Be 'LegacyQuiet'
     $Info.InstallModes | Should -Be @('interactive', 'silent')
     $Info.InstallerSwitches.Silent | Should -Be '/q'
+    $Info.InstallerSwitches.SilentWithProgress | Should -Be '/q'
     $Info.UnresolvedFields | Should -Contain 'ProductCode'
   }
 }

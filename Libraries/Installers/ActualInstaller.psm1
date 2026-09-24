@@ -2041,7 +2041,11 @@ function Get-ActualInstallerInfo {
     }
     $InstallerSwitches = [ordered]@{ InstallLocation = '/D "<INSTALLPATH>"' }
     $InstallModes = @('interactive')
-    if ($SetupParameterInfo.AllowsSilent) { $InstallerSwitches['Silent'] = '/S'; $InstallModes += 'silent' }
+    if ($SetupParameterInfo.AllowsSilent) {
+      $InstallerSwitches['Silent'] = '/S'
+      $InstallerSwitches['SilentWithProgress'] = '/S'
+      $InstallModes += 'silent'
+    }
     $CompanionContext = $null
     $CompanionPayloadCatalog = @()
     try {

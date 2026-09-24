@@ -730,6 +730,7 @@ function Get-InstallBuilderInfo {
     if ($SupportsUnattended) {
       $InstallerSwitches.Silent = $SupportsUnattendedModeUi ? '--mode unattended --unattendedmodeui none' : '--mode unattended'
       if ($SupportsUnattendedModeUi) { $InstallerSwitches.SilentWithProgress = '--mode unattended --unattendedmodeui minimal' }
+      else { $InstallerSwitches.SilentWithProgress = $InstallerSwitches.Silent }
     }
     $InstallCliOption = if ($Context.InstallParameter) { Get-InstallBuilderXmlValue -Xml $Context.InstallParameter -XPath 'cliOptionName' } else { $null }
     if ([string]::IsNullOrWhiteSpace($InstallCliOption) -and $Context.InstallParameter) { $InstallCliOption = 'installdir' }

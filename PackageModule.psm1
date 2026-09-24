@@ -50,6 +50,7 @@ $ModulePaths = @(
   'Libraries\Installers\InstallShieldInstallScript.psm1'
   'Libraries\Installers\InstallShieldMsi.psm1'
   'Libraries\Installers\MSI.psm1'
+  'Libraries\Installers\AKInstaller.psm1'
   'Libraries\Installers\ActualInstaller.psm1'
   'Libraries\Installers\AdvancedInstaller.psm1'
   'Libraries\Installers\AstrumInstallWizard.psm1'

@@ -3,6 +3,7 @@
 BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
+  Import-Module (Join-Path -Path $Script:DumplingsModuleRoot -ChildPath 'Libraries\Infrastructure\InstallerDiagnostics.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Installers' 'MSI.psm1') -Force
 }

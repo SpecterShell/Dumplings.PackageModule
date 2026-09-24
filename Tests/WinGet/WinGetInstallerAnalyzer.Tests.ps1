@@ -203,6 +203,7 @@ Describe 'Installer manifest behavior defaults' {
 
       $Enabled.ManifestFields.InstallModes | Should -Be @('interactive', 'silent')
       $Enabled.ManifestFields.InstallerSwitches.Silent | Should -Be '/S'
+      $Enabled.ManifestFields.InstallerSwitches.SilentWithProgress | Should -Be '/S'
       $Disabled.ManifestFields.InstallModes | Should -Be @('interactive')
       $Disabled.ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
       $Disabled.SuggestedNextSteps | Should -Contain 'This Setup Factory artifact is interactive-only because its generation predates silent mode or its compiled project disables the feature; do not add /S.'
@@ -224,13 +225,13 @@ Describe 'Installer manifest behavior defaults' {
     }
   }
 
-  It 'Should not invent a DeployMaster silent-with-progress switch' {
+  It 'Should reuse DeployMaster silent mode for WinGet default invocation' {
     InModuleScope WinGetAnalysis {
       $DeployMaster = (Get-WinGetInstallerFamilySuggestion -Family 'DeployMaster').ManifestFields
 
       $DeployMaster.InstallModes | Should -Be @('interactive', 'silent')
       $DeployMaster.InstallerSwitches.Silent | Should -Be '/silent'
-      $DeployMaster.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+      $DeployMaster.InstallerSwitches.SilentWithProgress | Should -Be '/silent'
     }
   }
 
@@ -240,9 +241,9 @@ Describe 'Installer manifest behavior defaults' {
           Family        = 'DeployMaster'
           InstallerType = 'exe'
           Metadata      = [pscustomobject]@{
-            InstallModes       = @('interactive')
-            InstallerSwitches  = [ordered]@{}
-            SupportsDualScope  = $false
+            InstallModes      = @('interactive')
+            InstallerSwitches = [ordered]@{}
+            SupportsDualScope = $false
           }
         })
 
@@ -256,7 +257,7 @@ Describe 'Installer manifest behavior defaults' {
       $Defaults = (Get-WinGetInstallerFamilySuggestion -Family 'dotNetInstaller').ManifestFields
       $Defaults.InstallModes | Should -Be @('interactive', 'silent')
       $Defaults.InstallerSwitches.Silent | Should -Be '/q'
-      $Defaults.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+      $Defaults.InstallerSwitches.SilentWithProgress | Should -Be '/q'
       $Defaults.InstallerSwitches.Silent | Should -Not -Match 'ComponentArgs'
 
       $Parsed = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{
@@ -280,7 +281,7 @@ Describe 'Installer manifest behavior defaults' {
       $Families = @(
         'MSI', 'MSIX/AppX', 'ZIP/archive', 'Portable', 'Font', 'Burn', 'Inno Setup', 'NSIS/Nullsoft', 'MSP',
         'Squirrel/Velopack', 'Advanced Installer', 'InstallShield', 'InstallShield Advanced UI', 'Squirrel', 'Velopack',
-        'Zero Install', 'MicaSetup', 'Kachina', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer',
+        'Zero Install', 'MicaSetup', 'Kachina', 'AKInstaller', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer',
         'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress',
         'Wise', 'Chromium Setup', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge', 'Qt Installer Framework'
       )
@@ -292,6 +293,11 @@ Describe 'Installer manifest behavior defaults' {
           $ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'SupportedScopes'
           $ManifestFields.PSObject.Properties.Name | Should -Not -Contain 'ScopeSwitches'
           if ($ManifestFields.PSObject.Properties['InstallerType']) { $ManifestFields.InstallerType | Should -Not -Match '#' }
+          $EffectiveType = if ($ManifestFields.InstallerType -eq 'zip' -and $ManifestFields.PSObject.Properties['NestedInstallerType']) { $ManifestFields.NestedInstallerType } else { $ManifestFields.InstallerType }
+          $Switches = $ManifestFields.PSObject.Properties['InstallerSwitches'] ? $ManifestFields.InstallerSwitches : $null
+          if ($EffectiveType -eq 'exe' -and $Switches -is [Collections.IDictionary] -and $Switches.Contains('Silent')) {
+            $Switches.Contains('SilentWithProgress') | Should -BeTrue
+          }
           $Entry = Merge-WinGetManifestDictionary -Base ([ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/installer.exe'; InstallerSha256 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }) -Override (ConvertTo-WinGetSuggestedManifestFieldSet -InputObject $ManifestFields)
           (Get-YamlSchemaValidationResult -InputObject $Entry -Schema $Schema.definitions.Installer -RootSchema $Schema -ValidatePropertyNames).IsValid | Should -BeTrue -Because $Family
         }
@@ -313,7 +319,7 @@ Describe 'Installer manifest behavior defaults' {
 
       $Suggestion.ManifestFields.InstallModes | Should -Be @('interactive', 'silent')
       $Suggestion.ManifestFields.InstallerSwitches.Silent | Should -Be '/s'
-      $Suggestion.ManifestFields.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+      $Suggestion.ManifestFields.InstallerSwitches.SilentWithProgress | Should -Be '/s'
     }
   }
 
@@ -667,9 +673,9 @@ Describe 'WinGet installer analyzer content detection' {
     $Defaults = $Suggestion.ManifestFields
 
     $Defaults.InstallerSwitches.Silent | Should -Be '/S'
+    $Defaults.InstallerSwitches.SilentWithProgress | Should -Be '/S'
     $Defaults.InstallerSwitches.InstallLocation | Should -Be '/D "<INSTALLPATH>"'
     $Defaults.InstallModes | Should -Be @('interactive', 'silent')
-    $Defaults.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
     $Defaults.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'Interactive'
     ($Suggestion.ManifestVariants | Where-Object Name -EQ user).ManifestFields.InstallerSwitches.Custom | Should -Be '/CU'
     ($Suggestion.ManifestVariants | Where-Object Name -EQ machine).ManifestFields.InstallerSwitches.Custom | Should -Be '/RUNAS /ALL'

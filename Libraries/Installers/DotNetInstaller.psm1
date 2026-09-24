@@ -1633,6 +1633,10 @@ function Get-DotNetInstallerInfo {
         $BasicParts.Add('/qb')
         if ($Context.RuntimeCapabilities.NoReboot) { $BasicParts.Add('/noreboot') }
         $InstallerSwitches['SilentWithProgress'] = $BasicParts -join ' '
+      } elseif ($InstallerSwitches.Contains('Silent')) {
+        # WinGet defaults to SilentWithProgress. Reuse the proven quiet route when this
+        # runtime has no separate basic-UI mode, without advertising a progress mode.
+        $InstallerSwitches['SilentWithProgress'] = $InstallerSwitches['Silent']
       }
       if ($Context.RuntimeCapabilities.Logging -and $Context.RuntimeCapabilities.LogFile) {
         $InstallerSwitches['Log'] = '/Log /LogFile "<LOGPATH>"'

@@ -733,7 +733,7 @@ Describe 'InstallBuilder static parser' {
     $LegacyInfo = Get-InstallBuilderInfo -Path $LegacyUnattended
     $LegacyInfo.InstallModes | Should -Be @('silent')
     $LegacyInfo.InstallerSwitches.Silent | Should -Be '--mode unattended'
-    $LegacyInfo.InstallerSwitches.PSObject.Properties.Name | Should -Not -Contain 'SilentWithProgress'
+    $LegacyInfo.InstallerSwitches.SilentWithProgress | Should -Be '--mode unattended'
 
     $ModernInfo = Get-InstallBuilderInfo -Path $ModernUnattended
     $ModernInfo.InstallModes | Should -Be @('silent', 'silentWithProgress')

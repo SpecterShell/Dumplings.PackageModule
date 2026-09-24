@@ -168,6 +168,16 @@ function Get-WinGetInstallerFamilyTemplate {
         )
       }
     }
+    'AKInstaller' {
+      [pscustomobject]@{
+        InstallerType = 'exe'
+        Notes         = @(
+          'Use Get-AKInstallerInfo once for the compiled native project table or AKInstallerMSI configuration and nested MSI evidence.',
+          'Use explicit native registry rows or nested MSI metadata for ProductCode and AppsAndFeaturesEntries; PE version strings are not ARP evidence.',
+          'Only exact parser evidence should add switches because native AKInstaller and AKInstallerMSI use different command lines.'
+        )
+      }
+    }
     'Velopack' {
       [pscustomobject]@{
         InstallerType       = 'exe'
@@ -505,6 +515,15 @@ function ConvertTo-WinGetSuggestedManifestFieldSet {
     if (-not $Validation.IsValid) { continue }
     $Result[$Field] = $Value
   }
+
+  # WinGet defaults to SilentWithProgress and warns when either unattended
+  # switch is absent for an effective EXE. A fully silent route is a safe
+  # fallback for that slot even when the installer has no progress UI.
+  $EffectiveInstallerType = if ($Result['InstallerType'] -ceq 'zip') { $Result['NestedInstallerType'] } else { $Result['InstallerType'] }
+  $Switches = $Result['InstallerSwitches']
+  if ($EffectiveInstallerType -ceq 'exe' -and $Switches -is [System.Collections.IDictionary] -and $Switches.Contains('Silent') -and -not $Switches.Contains('SilentWithProgress')) {
+    $Switches['SilentWithProgress'] = $Switches['Silent']
+  }
   return $Result
 }
 
@@ -660,12 +679,43 @@ function Get-WinGetParserResultSuggestion {
     }
   }
 
-  $GenericBehaviorFamilies = @('Advanced Installer', 'InstallShield', 'InstallShield MSI Wrapper', 'InstallShield Advanced UI', 'Squirrel', 'Velopack', 'Zero Install', 'MicaSetup', 'Kachina', 'Astrum InstallWizard', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer', 'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress', 'Wise', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge')
+  $GenericBehaviorFamilies = @('Advanced Installer', 'InstallShield', 'InstallShield MSI Wrapper', 'InstallShield Advanced UI', 'Squirrel', 'Velopack', 'Zero Install', 'MicaSetup', 'Kachina', 'Astrum InstallWizard', 'AKInstaller', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer', 'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress', 'Wise', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge')
   if ($TemplateFamily -cin $GenericBehaviorFamilies -and $Metadata) {
-    foreach ($Field in @('InstallModes', 'InstallerSwitches', 'InstallerSuccessCodes', 'ElevationRequirement', 'UpgradeBehavior')) {
+    foreach ($Field in @('InstallModes', 'InstallerSwitches', 'InstallerSuccessCodes', 'ExpectedReturnCodes', 'ElevationRequirement', 'UpgradeBehavior')) {
       $Value = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name $Field
       if (Test-WinGetSuggestionValue -Value $Value) { $Fields[$Field] = Copy-Object -Value $Value }
     }
+  }
+
+  if ($Family -ceq 'AKInstaller' -and $Metadata) {
+    # Family guidance cannot safely mix modern native, classic native, and MSI
+    # bootstrapper command lines. Replace it with the exact route's evidence.
+    foreach ($Field in @('InstallModes', 'InstallerSwitches', 'ExpectedReturnCodes')) { $Fields.Remove($Field) }
+    $MetadataModes = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallModes
+    if (Test-WinGetSuggestionValue -Value $MetadataModes) { $Fields['InstallModes'] = Copy-Object -Value $MetadataModes }
+    $MetadataSwitches = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name InstallerSwitches
+    if (Test-WinGetSuggestionValue -Value $MetadataSwitches) { $Fields['InstallerSwitches'] = Copy-Object -Value $MetadataSwitches }
+
+    # WinGet handles zero as success and cannot use the generic 1603 failure to
+    # make a more specific decision. Project only actionable documented codes.
+    $DocumentedReturnCodes = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name DocumentedReturnCodes
+    $ExpectedReturnCodes = @(
+      foreach ($ReturnCode in $DocumentedReturnCodes) {
+        $NumericCode = 0
+        if (-not [int]::TryParse([string]$ReturnCode, [ref]$NumericCode)) { continue }
+        $ReturnResponse = switch ($NumericCode) {
+          1602 { 'cancelledByUser' }
+          1618 { 'installInProgress' }
+          1625 { 'blockedByPolicy' }
+          1638 { 'alreadyInstalled' }
+          3010 { 'rebootRequiredToFinish' }
+          1641 { 'rebootInitiated' }
+          default { $null }
+        }
+        if ($ReturnResponse) { [ordered]@{ InstallerReturnCode = $NumericCode; ReturnResponse = $ReturnResponse } }
+      }
+    )
+    if ($ExpectedReturnCodes.Count -gt 0) { $Fields['ExpectedReturnCodes'] = $ExpectedReturnCodes }
   }
 
   if ($Family -ceq 'Setup Factory' -and $Metadata) {

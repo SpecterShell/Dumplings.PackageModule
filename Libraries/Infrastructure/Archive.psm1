@@ -100,16 +100,27 @@ function Get-InstallerArchive {
   <#
   .SYNOPSIS
     Open an archive from a path or seekable stream
+  .PARAMETER Path
+    Resolved archive path.
+  .PARAMETER Stream
+    Caller-owned seekable archive stream. The returned archive leaves it open.
+  .PARAMETER Password
+    Optional archive password passed directly to SharpCompress.
   #>
+  [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '', Justification = 'SharpCompress requires an archive password string; callers must keep recovered installer passwords private.')]
   param (
     [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
-    [Parameter(Mandatory, ParameterSetName = 'Stream')][System.IO.Stream]$Stream
+    [Parameter(Mandatory, ParameterSetName = 'Stream')][System.IO.Stream]$Stream,
+    [AllowNull()][string]$Password
   )
   Import-InstallerArchiveDependency
+  $Options = [SharpCompress.Readers.ReaderOptions]::new()
+  $Options.LeaveStreamOpen = $PSCmdlet.ParameterSetName -eq 'Stream'
+  if (-not [string]::IsNullOrEmpty($Password)) { $Options.Password = $Password }
   if ($PSCmdlet.ParameterSetName -eq 'Path') {
-    return [SharpCompress.Archives.ArchiveFactory]::Open((Get-Item -LiteralPath $Path -Force).FullName)
+    return [SharpCompress.Archives.ArchiveFactory]::Open((Get-Item -LiteralPath $Path -Force).FullName, $Options)
   }
-  return [SharpCompress.Archives.ArchiveFactory]::Open($Stream)
+  return [SharpCompress.Archives.ArchiveFactory]::Open($Stream, $Options)
 }
 
 function Open-InstallerArchiveRange {
@@ -119,13 +130,17 @@ function Open-InstallerArchiveRange {
   .DESCRIPTION
     The returned context owns the archive, bounded range stream, and source file
     stream. Pass it to Close-InstallerArchiveRange when archive access is done.
+  .PARAMETER Password
+    Optional archive password passed directly to SharpCompress. Callers remain responsible for keeping sensitive values out of returned evidence and logs.
   #>
   [OutputType([pscustomobject])]
+  [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '', Justification = 'SharpCompress requires an archive password string; callers must keep recovered installer passwords private.')]
   param (
     [Parameter(Mandatory)][string]$Path,
     [Parameter(Mandatory, ParameterSetName = 'Range')]$Range,
     [Parameter(Mandatory, ParameterSetName = 'Coordinates')][ValidateRange(0, [long]::MaxValue)][long]$Offset,
-    [Parameter(Mandatory, ParameterSetName = 'Coordinates')][ValidateRange(1, [long]::MaxValue)][long]$Length
+    [Parameter(Mandatory, ParameterSetName = 'Coordinates')][ValidateRange(1, [long]::MaxValue)][long]$Length,
+    [AllowNull()][string]$Password
   )
 
   if ($PSCmdlet.ParameterSetName -eq 'Range') {
@@ -137,7 +152,7 @@ function Open-InstallerArchiveRange {
   $Archive = $null
   try {
     $RangeStream = New-BoundedReadStream -Stream $Source -Offset $Offset -Length $Length -LeaveOpen
-    $Archive = Get-InstallerArchive -Stream $RangeStream
+    $Archive = Get-InstallerArchive -Stream $RangeStream -Password $Password
     return [pscustomobject]@{
       Archive      = $Archive
       RangeStream  = $RangeStream

@@ -591,6 +591,7 @@ function Get-InstallerGenericExeFamilyCandidate {
     @{ Name = 'CreateInstall'; Patterns = @('CreateInstall', 'Novostrim', '.ciq') },
     @{ Name = 'InstallForge'; Patterns = @('InstallForge', 'InstallForge Setup', 'installforge.net') },
     @{ Name = 'Astrum InstallWizard'; Patterns = @('Astrum InstallWizard', 'Thraex Software') },
+    @{ Name = 'AKInstaller'; Patterns = @('>AKINST_SETUP<', '>KAPI_SETUP<', '>INSTALLMSI_SETUP<', 'AKInstallerMSI', 'AKApplications') },
     @{ Name = 'Qt Installer Framework'; Patterns = @('Qt Installer Framework', 'org.qtproject.ifw', 'installerbase', 'MaintenanceTool') }
   )
 
@@ -663,6 +664,14 @@ function Get-InstallerStructuralExeFamilyCandidate {
   # protected configuration, and complete payload catalog rather than relying on marker strings.
   if ((Test-AstrumInstallWizard -Path $File.FullName) -and $Seen.Add('Astrum InstallWizard')) {
     [pscustomobject]@{ Family = 'Astrum InstallWizard'; Confidence = 'high'; MatchedMarkers = @('Astrum 1.x/2.x footer + protected configuration + bounded payload catalog') }
+  }
+
+  # AKInstaller validates either the classic GZip catalog or the later footer,
+  # protected password/configuration, bounded archive, and compiled catalog.
+  # The direct-MSI route additionally requires AKInstallerMSI Summary
+  # Information from the nested database.
+  if ((Test-AKInstaller -Path $File.FullName) -and $Seen.Add('AKInstaller')) {
+    [pscustomobject]@{ Family = 'AKInstaller'; Confidence = 'high'; MatchedMarkers = @('AKInstaller classic/legacy/modern footer and catalog or AKInstallerMSI nested database identity') }
   }
 
   # Kachina is a native Tauri executable with a validated JSON-bearing TLV
@@ -1454,7 +1463,7 @@ function Invoke-InstallerExeParser {
       Confidence                  = $Confidence
       InstallerType               = 'exe'
       Metadata                    = $Info
-      ProductVersion              = $Info.DisplayVersion
+      ProductVersion              = $Info.PSObject.Properties['ProductVersion'] ? $Info.ProductVersion : $Info.DisplayVersion
       ProductName                 = $Info.DisplayName
       Publisher                   = $Info.Publisher
       ProductCode                 = $Info.ProductCode
@@ -1479,6 +1488,17 @@ function Invoke-InstallerExeParser {
   # Structured generic-family parsers are authoritative. Stop before broad SFX
   # heuristics when one succeeds because many installer engines embed archives.
   $StructuredParserResults = @(
+    if (Test-InstallerCandidateFamily -Family 'AKInstaller') {
+      Invoke-InstallerDetector -Name 'AKInstaller' -ScriptBlock {
+        $Info = Get-AKInstallerInfo -Path $AnalyzerInstallerPath
+        $Evidence = ConvertTo-GenericExeParserEvidence -Family 'AKInstaller' -Info $Info
+        $Evidence.NestedInstallerFiles = @($Info.PayloadFiles.Path)
+        $Evidence | Add-Member -NotePropertyName ProductLine -NotePropertyValue $Info.ProductLine -Force
+        $Evidence | Add-Member -NotePropertyName Route -NotePropertyValue $Info.Route -Force
+        $Evidence
+      }
+    }
+
     if (Test-InstallerCandidateFamily -Family 'Astrum InstallWizard') {
       Invoke-InstallerDetector -Name 'Astrum InstallWizard' -ScriptBlock {
         $Info = Get-AstrumInstallWizardInfo -Path $AnalyzerInstallerPath
@@ -2095,7 +2115,7 @@ function Invoke-InstallerAnalysisCore {
             # These structures identify the outer container by format. The raw
             # NSIS signature and InstallBuilder project marker remain routes until
             # their parsers validate surrounding offsets and records.
-            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Astrum InstallWizard', 'Kachina', 'MicaSetup', 'CreateInstall', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
+            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'AKInstaller', 'Astrum InstallWizard', 'Kachina', 'MicaSetup', 'CreateInstall', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
             ConvertTo-InstallerFamilyEvidence -Candidate $_ -EvidenceKind Structural -IsOuterContainer:$OuterContainer
           })
         $HeuristicCandidates = @(Get-InstallerGenericExeFamilyCandidate -File $Installer -Budget $ScanBytes -Text $ScanText | ForEach-Object {

@@ -626,7 +626,7 @@ function Get-WiseInfo {
         if (-not [string]::IsNullOrWhiteSpace([string]$MsiInfo.InstallLocationProperty)) { $DirectSwitches['InstallLocation'] = "$($MsiInfo.InstallLocationProperty)=`"<INSTALLPATH>`"" }
         $DirectSwitches
       } else {
-        [ordered]@{ Silent = '/S' }
+        [ordered]@{ Silent = '/S'; SilentWithProgress = '/S' }
       }
 
       $Diagnostics = [Collections.Generic.List[object]]::new()

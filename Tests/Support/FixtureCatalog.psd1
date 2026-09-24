@@ -1,4 +1,16 @@
 @{
+  # AKInstaller and AKInstallerMSI
+  'AKInstaller-4.4.505.exe'                                    = 'Installers\AKInstaller\AKApplications.AKInstaller\4.4.505\AKInstaller-4.4.505.exe'
+  'AKInstaller-6.6.225.exe'                                    = 'Installers\AKInstaller\AKApplications.AKInstaller\6.6.225\AKInstaller-6.6.225.exe'
+  'IncCopy-3.0.exe'                                            = 'Installers\AKInstaller\AKApplications.IncCopy\3.0\IncCopy-3.0.exe'
+  'Update-Download-Tool-1.9.10.exe'                            = 'Installers\AKInstaller\AKApplications.UpdateDownloadTool\1.9.10\Update-Download-Tool-1.9.10.exe'
+  'AKPackIt-1.8.6.exe'                                         = 'Installers\AKInstaller\AKApplications.AKPackIt\1.8.6\AKPackIt-1.8.6.exe'
+  'AKInstallerMSI-3.5.1.exe'                                   = 'Installers\AKInstaller\AKApplications.AKInstallerMSI\3.5.1\AKInstallerMSI-3.5.1.exe'
+  'AKInstallerMSI-5.6.700.exe'                                 = 'Installers\AKInstaller\AKApplications.AKInstallerMSI\5.6.700\AKInstallerMSI-5.6.700.exe'
+  'Update-Download-Tool-2.9.610.exe'                           = 'Installers\AKInstaller\AKApplications.UpdateDownloadTool\2.9.610\Update-Download-Tool-2.9.610.exe'
+  'regibox-3.0.3-18428.exe'                                    = 'Installers\AKInstaller\regify.regibox\3.0.3-18428\regibox-3.0.3-18428.exe'
+  'regipay-5.0.0-233.x86.exe'                                  = 'Installers\AKInstaller\regify.regipay\5.0.0-233\regipay-5.0.0-233.x86.exe'
+
   # Advanced Installer
   'AccountResetInstaller.zip'                                  = 'Installers\AdvancedInstaller\Cjwdev.ADAccountResetTool\Current\AccountResetInstaller.zip'
   'bm-14.2.0.exe'                                              = 'Installers\AdvancedInstaller\MatthiasZronek.BenchMate\14.2.0\bm-14.2.0.exe'

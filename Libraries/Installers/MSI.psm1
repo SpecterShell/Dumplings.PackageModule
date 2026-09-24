@@ -950,6 +950,7 @@ function Get-MsiBuilderEvidenceFromStaticTableInfo {
   # application. It outranks incidental property and custom-action names that
   # an application can carry independently of the MSI compiler.
   $SummaryBuilder = switch -Regex ($CreatingApplication) {
+    '(?i)\bAKInstallerMSI\b' { 'AKInstallerMSI'; break }
     '(?i)\bAdvanced Installer\b' { 'AdvancedInstaller'; break }
     '(?i)\bInstallShield\b' { 'InstallShield'; break }
     '(?i)\b(WiX|Windows Installer XML|WixSharp)\b' { 'WiX'; break }
@@ -1035,6 +1036,7 @@ function Get-MsiInstallerBuilderVersionInfo {
   $CreatingApplication = [string]$StaticTableInfo.SummaryInfo.CreatingApp
   $Pattern = switch ($InstallerBuilder) {
     'AdvancedInstaller' { '(?i)\bAdvanced Installer(?:\s+|/)(?<Version>\d+(?:\.\d+){1,3})\b' }
+    'AKInstallerMSI' { '(?i)\bAKInstallerMSI(?:\s+V?)?(?<Version>\d+(?:\.\d+){1,3})\b' }
     default { $null }
   }
   if ($Pattern -and $CreatingApplication -match $Pattern) {

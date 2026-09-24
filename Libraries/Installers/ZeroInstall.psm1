@@ -1712,6 +1712,11 @@ function Get-ZeroInstallInfo {
         $InstallerSwitches['Silent'] = '--silent'
       }
     }
+    if ($InstallerSwitches.Contains('Silent') -and -not $InstallerSwitches.Contains('SilentWithProgress')) {
+      # CLI-only and legacy routes have no progress UI. Populate WinGet's default
+      # switch slot with the same quiet command while retaining the exact mode list.
+      $InstallerSwitches['SilentWithProgress'] = $InstallerSwitches['Silent']
+    }
     if ($CustomizableStorePath -and $StorePathSupported -eq $true) { $InstallerSwitches['InstallLocation'] = '--store-path="<INSTALLPATH>"' }
 
     $UninstallKeyNameCandidate = $AppUri ? (ConvertTo-ZeroInstallPrettyEscape -Value $AppUri.AbsoluteUri) : $null

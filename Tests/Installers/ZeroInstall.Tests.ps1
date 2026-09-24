@@ -681,6 +681,7 @@ Describe 'Zero Install bootstrapper parser' {
     $Info.ProductCode | Should -BeNullOrEmpty
     $Info.CanExpand | Should -BeFalse
     $Info.InstallModes | Should -Contain 'silent'
+    $Info.InstallerSwitches.SilentWithProgress | Should -Be $Info.InstallerSwitches.Silent
     $Info.SupportedCommandLineSwitches | Should -Contain '--verysilent'
     $Info.SupportedCommandLineSwitches | Should -Not -Contain '--content-dir=<PATH>'
     $Info.Diagnostics.Id | Should -Contain 'ZeroInstall.Configuration.LegacyGenericBootstrapper'
@@ -731,6 +732,9 @@ Describe 'Zero Install bootstrapper parser' {
       $Info.WritesAppsAndFeaturesEntry | Should -Be $Case.WritesArp -Because "Zero Install $($Case.Version) has a source-backed ARP boundary"
       $Info.SupportsDualScope | Should -Be $Case.DualScope
       $Info.InstallModes | Should -Be $Case.Modes
+      if ($Info.InstallModes -contains 'silent' -and $Info.InstallModes -notcontains 'silentWithProgress') {
+        $Info.InstallerSwitches.SilentWithProgress | Should -Be $Info.InstallerSwitches.Silent
+      }
       if ($Case.WritesArp) {
         $Info.ProductCode | Should -Be 'https%3a##downloads.example.test#product.xml'
         $Info.AppsAndFeaturesEvidence.DisplayName | Should -Be $Case.ArpName
