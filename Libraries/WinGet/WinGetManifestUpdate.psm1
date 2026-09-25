@@ -1556,6 +1556,8 @@ function Update-WinGetLocaleManifest {
     Update the locale manifest using the provided locale entries
   .PARAMETER PackageVersion
     The package version to use for updating the locale manifest
+  .PARAMETER PreserveAuthoredMetadata
+    Keep the release notes and the copyright year of the existing manifests instead of cleaning them up
   #>
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The old locale manifests to update')]
@@ -1564,6 +1566,8 @@ function Update-WinGetLocaleManifest {
     [System.Collections.IDictionary[]]$LocaleEntries = @(),
     [Parameter(Mandatory, HelpMessage = 'The package version to use for updating the locale manifest')]
     [string]$PackageVersion,
+    [Parameter(HelpMessage = 'Keep the release notes and the copyright year of the existing manifests')]
+    [switch]$PreserveAuthoredMetadata,
     [Parameter(DontShow, HelpMessage = 'The scriptblock or method for logging')]
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType 'Method' })]
     $Logger = { param($Message, $Level) Write-Host $Message }
@@ -1577,14 +1581,17 @@ function Update-WinGetLocaleManifest {
   foreach ($OldLocaleManifest in $OldLocaleManifests) {
     $LocaleManifest = $OldLocaleManifest | Copy-Object
 
-    # Clean up volatile fields
-    if ($LocaleManifest.Contains('ReleaseNotes')) { $LocaleManifest.Remove('ReleaseNotes') }
-    # Update Copyright
-    if ($LocaleManifest.Contains('Copyright')) {
-      $Match = [regex]::Matches($LocaleManifest.Copyright, '20\d{2}(?!-)')
-      if ($Match.Count -gt 0) {
-        $LatestYear = $Match.Value | Sort-Object -Bottom 1
-        $Match.Where({ $_.Value -eq $LatestYear }).ForEach({ $LocaleManifest.Copyright = $LocaleManifest.Copyright.Remove($_.Index, $_.Length).Insert($_.Index, (Get-Date).Year.ToString()) })
+    # Clean up volatile fields. A version that is rewritten in place keeps its authored metadata, so a
+    # submission that targets an existing version preserves its release notes and copyright year.
+    if (-not $PreserveAuthoredMetadata) {
+      if ($LocaleManifest.Contains('ReleaseNotes')) { $LocaleManifest.Remove('ReleaseNotes') }
+      # Update Copyright
+      if ($LocaleManifest.Contains('Copyright')) {
+        $Match = [regex]::Matches($LocaleManifest.Copyright, '20\d{2}(?!-)')
+        if ($Match.Count -gt 0) {
+          $LatestYear = $Match.Value | Sort-Object -Bottom 1
+          $Match.Where({ $_.Value -eq $LatestYear }).ForEach({ $LocaleManifest.Copyright = $LocaleManifest.Copyright.Remove($_.Index, $_.Length).Insert($_.Index, (Get-Date).Year.ToString()) })
+        }
       }
     }
 
@@ -1666,6 +1673,9 @@ function Update-WinGetManifest {
     Replace instead of matching and updating existing installer entries.
   .PARAMETER SkipInstallerAnalysis
     Skip nested payload extraction, installer-family detection, and static metadata parsers.
+  .PARAMETER PreserveAuthoredMetadata
+    Keep the manifest version and the authored locale metadata of the reference manifests instead of
+    normalizing them to the current authoring defaults
   .PARAMETER Logger
     Dumplings logging callback.
   #>
@@ -1680,6 +1690,8 @@ function Update-WinGetManifest {
     [System.Collections.IDictionary]$InstallerFileEvidence = @{},
     [switch]$ReplaceInstallers,
     [switch]$SkipInstallerAnalysis,
+    [Parameter(HelpMessage = 'Keep the manifest version and the authored locale metadata of the reference manifests')]
+    [switch]$PreserveAuthoredMetadata,
     [ValidateScript({ Get-Member -InputObject $_ -Name 'Invoke' -MemberType Method })]
     $Logger = { param($Message, $Level) Write-Host $Message }
   )
@@ -1690,6 +1702,10 @@ function Update-WinGetManifest {
   $StartedAt = [Diagnostics.Stopwatch]::GetTimestamp()
   try {
     $PackageIdentifier = [string]::IsNullOrWhiteSpace($NewPackageIdentifier) ? [string]$Manifest.PackageIdentifier : $NewPackageIdentifier
+    # A version that is already published is rewritten in place, so it keeps the schema it was authored
+    # with. Only a version that does not exist yet is authored with the current authoring default.
+    $ManifestVersion = $Script:WinGetAuthoringManifestVersion
+    if ($PreserveAuthoredMetadata -and -not [string]::IsNullOrWhiteSpace([string]$Manifest.ManifestVersion)) { $ManifestVersion = [string]$Manifest.ManifestVersion }
     $OldInstallers = [System.Collections.IDictionary[]]@($Manifest.Installers | ForEach-Object { Copy-Object -Value $_ })
     if ($ReplaceInstallers) {
       $UpdatedInstallers = @(Set-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $InstallerFiles -Operation $Operation -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Logger)
@@ -1708,7 +1724,7 @@ function Update-WinGetManifest {
       $DefaultLocaleDocument[$Key] = Copy-Object -Value $Manifest.DefaultLocalization[$Key]
     }
     $DefaultLocaleDocument['ManifestType'] = 'defaultLocale'
-    $DefaultLocaleDocument['ManifestVersion'] = $Script:WinGetAuthoringManifestVersion
+    $DefaultLocaleDocument['ManifestVersion'] = $ManifestVersion
     $LocaleDocuments.Add($DefaultLocaleDocument)
     foreach ($Localization in @($Manifest.Localizations)) {
       $LocaleDocument = [ordered]@{
@@ -1717,10 +1733,10 @@ function Update-WinGetManifest {
       }
       foreach ($Key in $Localization.Keys) { $LocaleDocument[$Key] = Copy-Object -Value $Localization[$Key] }
       $LocaleDocument['ManifestType'] = 'locale'
-      $LocaleDocument['ManifestVersion'] = $Script:WinGetAuthoringManifestVersion
+      $LocaleDocument['ManifestVersion'] = $ManifestVersion
       $LocaleDocuments.Add($LocaleDocument)
     }
-    $UpdatedLocaleDocuments = @(Update-WinGetLocaleManifest -OldLocaleManifests ([System.Collections.IDictionary[]]$LocaleDocuments.ToArray()) -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -Logger $Logger)
+    $UpdatedLocaleDocuments = @(Update-WinGetLocaleManifest -OldLocaleManifests ([System.Collections.IDictionary[]]$LocaleDocuments.ToArray()) -LocaleEntries $LocaleEntries -PackageVersion $PackageVersion -PreserveAuthoredMetadata:$PreserveAuthoredMetadata -Logger $Logger)
 
     $DefaultLocalization = [ordered]@{}
     $Localizations = [System.Collections.Generic.List[object]]::new()
@@ -1738,7 +1754,7 @@ function Update-WinGetManifest {
       }
     }
 
-    $UpdatedModel = New-WinGetManifestModel -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -Channel ([string]$Manifest.Channel) -Moniker ([string]$Manifest.Moniker) -ManifestVersion $Script:WinGetAuthoringManifestVersion -InstallerDefaults ([ordered]@{}) -Installers ([System.Collections.IDictionary[]]$UpdatedInstallers) -DefaultLocalization $DefaultLocalization -Localizations ([System.Collections.IDictionary[]]$Localizations.ToArray()) -SourceFormat Memory
+    $UpdatedModel = New-WinGetManifestModel -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -Channel ([string]$Manifest.Channel) -Moniker ([string]$Manifest.Moniker) -ManifestVersion $ManifestVersion -InstallerDefaults ([ordered]@{}) -Installers ([System.Collections.IDictionary[]]$UpdatedInstallers) -DefaultLocalization $DefaultLocalization -Localizations ([System.Collections.IDictionary[]]$Localizations.ToArray()) -SourceFormat Memory
     # Return the same post-processed authored state that serialization emits so
     # task callers do not observe redundant locale or ARP fields temporarily.
     $UpdatedModel = Optimize-WinGetManifest -Manifest $UpdatedModel

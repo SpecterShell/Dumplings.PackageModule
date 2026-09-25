@@ -476,6 +476,8 @@ function Send-WinGetManifest {
     3. Validate new manifests.
     4. Upload new manifests to origin.
     5. Create pull requests in upstream.
+    The reference manifests are those of the submitted version itself when that version already exists in
+    the repository, and those of the newest existing version otherwise.
   .PARAMETER Task
     The task object to be handled
   .PARAMETER SkipInstallerAnalysis
@@ -513,7 +515,13 @@ function Send-WinGetManifest {
       $ReferenceRevision = (Get-WinGetGitHubBranch -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch).object.sha
       if ([string]::IsNullOrWhiteSpace($ReferenceRevision)) { throw 'The reference branch did not return a commit SHA.' }
     }
-    $RefPackageVersion = ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath)) | Select-Object -Last 1
+    $RefPackageVersions = @($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath))
+    # A version that is already in the repository is updated in place, so it is its own reference. A
+    # version that is not there yet is modeled after the newest existing version, which is the only
+    # manifest available for it. Generating an existing version from a newer one would carry that
+    # newer version's metadata into older manifests.
+    $RefPackageVersion = @($RefPackageVersions | Where-Object -FilterScript { $_ -ceq $NewPackageVersion }) | Select-Object -First 1
+    if (-not $RefPackageVersion) { $RefPackageVersion = $RefPackageVersions | Select-Object -Last 1 }
     if (-not $RefPackageVersion) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
 
     $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName
@@ -603,7 +611,11 @@ function Send-WinGetManifest {
     }
     $TrackingArguments = @{}
     if ($Task.PSObject.Properties['InstallerFileEvidence']) { $TrackingArguments.InstallerFileEvidence = $Task.InstallerFileEvidence }
-    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles @TrackingArguments -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Task.Log
+    # The reference manifests describe the submitted version itself when that version is already
+    # published, and such a submission must not rewrite the authored metadata or the schema of the
+    # manifests it replaces.
+    $PreserveAuthoredMetadata = $RefPackageVersion -ceq $NewPackageVersion
+    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles @TrackingArguments -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -SkipInstallerAnalysis:$SkipInstallerAnalysis -PreserveAuthoredMetadata:$PreserveAuthoredMetadata -Logger $Task.Log
     $NewManifests = $NewManifest | ConvertTo-WinGetManifestYaml
     #endregion
 
