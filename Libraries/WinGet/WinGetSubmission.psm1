@@ -726,6 +726,12 @@ function Send-WinGetManifest {
     $NewPullRequestBody = (Test-Path -Path 'Env:\GITHUB_ACTIONS') ? `
       "Automated by [🥟 ${Env:GITHUB_REPOSITORY_OWNER}/Dumplings](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings) in workflow run [#${Env:GITHUB_RUN_NUMBER}](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings/actions/runs/${Env:GITHUB_RUN_ID})." : `
       "Created by [🥟 Dumplings](https://github.com/${OriginRepoOwner}/Dumplings)."
+    # The issues the submission resolves, so the merge closes them. They have to be named when the
+    # pull request is created, because that is the body the merge reads. A task setting or the
+    # command line preference (-WinGetResolveIssues "123,456") supplies them, like the authoring
+    # script's own resolved issues prompt.
+    $ResolvedIssues = @(@($Task.Config['WinGetResolveIssues'] ?? $Global:DumplingsPreference['WinGetResolveIssues']) | ForEach-Object -Process { ([string]$_ -split '[,;\s]+') } | Where-Object -FilterScript { $_ })
+    if ($ResolvedIssues) { $NewPullRequestBody += "`n`n$($ResolvedIssues | ForEach-Object -Process { "Resolves #$_" } | Join-String -Separator "`n")" }
     $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 
