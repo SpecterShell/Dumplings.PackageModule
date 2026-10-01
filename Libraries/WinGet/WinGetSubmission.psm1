@@ -531,7 +531,9 @@ function Send-WinGetManifest {
     else {
       switch (([WinGetVersion]$NewPackageVersion).CompareTo([WinGetVersion]$RefPackageVersion)) {
         { $_ -gt 0 } { 'New version'; continue }
-        0 { 'Update'; continue }
+        # A version that is already in the repository is rewritten in place, so it is a metadata
+        # change and takes the commit type the authoring script uses for that.
+        0 { 'Metadata'; continue }
         { $_ -lt 0 } { 'Add version'; continue }
       }
     }
