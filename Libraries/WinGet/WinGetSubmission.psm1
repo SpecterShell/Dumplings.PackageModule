@@ -808,6 +808,12 @@ function Send-WinGetManifest {
     if ($PendingReference) {
       $NewPullRequestBody += "`n`nReference manifests: $($PendingReference.PullRequest.html_url), version ${RefPackageVersion}, commit $($PendingReference.HeadSha). The referenced PR remains open."
     }
+    # The issues the submission resolves, so the merge closes them. They have to be named when the
+    # pull request is created, because that is the body the merge reads. A task setting or the
+    # command line preference (-WinGetResolveIssues "123,456") supplies them, like the authoring
+    # script's own resolved issues prompt.
+    $ResolvedIssues = @(@($Task.Config['WinGetResolveIssues'] ?? $Global:DumplingsPreference['WinGetResolveIssues']) | ForEach-Object -Process { ([string]$_ -split '[,;\s]+') } | Where-Object -FilterScript { $_ })
+    if ($ResolvedIssues) { $NewPullRequestBody += "`n`n$($ResolvedIssues | ForEach-Object -Process { "Resolves #$_" } | Join-String -Separator "`n")" }
     $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 
