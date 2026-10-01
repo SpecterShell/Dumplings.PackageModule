@@ -683,3 +683,113 @@ Describe 'Get-WinGetGitHubManifestVersionCommit' -Tag Unit {
     Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 0 -Exactly
   }
 }
+
+Describe 'GitHub issue reference forms' -Tag Unit {
+  # Every form the documentation lists for an issue or pull request, with the reference the module reads from
+  # text and writes into the pull request. A reference to the targeted repository reads back as a bare number.
+  It 'reads and names the <Form> form' -ForEach @(
+    @{ Form = "'#' number"; Written = '#12'; Reference = '#12' }
+    @{ Form = "'GH-' number"; Written = 'GH-9'; Reference = '#9' }
+    @{ Form = "'owner/repo#' number"; Written = 'octo-org/octo-repo#100'; Reference = 'octo-org/octo-repo#100' }
+    @{ Form = "'owner/repo#' number of the targeted repository"; Written = 'example/REPO#13'; Reference = '#13' }
+    @{ Form = 'issue URL'; Written = 'https://github.com/octo-org/octo-repo/issues/7'; Reference = 'octo-org/octo-repo#7' }
+    @{ Form = 'pull request URL'; Written = 'https://github.com/octo-org/octo-repo/pull/7'; Reference = 'octo-org/octo-repo#7' }
+    @{ Form = 'issue URL of the targeted repository'; Written = 'https://github.com/Example/repo/issues/18'; Reference = '#18' }
+  ) {
+    (Select-WinGetGitHubIssueReference -Text "Closes $Written" -RepoOwner Example -RepoName repo) | Should -Be $Reference
+    (New-WinGetGitHubIssueReference -IssueNumber $Written -RepoOwner Example -RepoName repo) | Should -BeLike "* $Reference"
+  }
+}
+
+Describe 'Select-WinGetGitHubIssueReference' -Tag Unit {
+  It 'reads every reference a text names' {
+    $Text = 'Closes #12, follows GH-9, resolves octo-org/octo-repo#100 and fixes https://github.com/octo-org/octo-repo/issues/7'
+
+    @(Select-WinGetGitHubIssueReference -Text $Text -RepoOwner Example -RepoName repo).Count | Should -Be 4
+  }
+
+  It 'ignores numbers that name no issue' {
+    @(Select-WinGetGitHubIssueReference -Text 'Vendor.Package version 2.0 ships 10 installers').Count | Should -Be 0
+  }
+}
+
+Describe 'New-WinGetGitHubIssueReference' -Tag Unit {
+  It 'names every issue of a free-form list with one documented keyword' {
+    $References = @(New-WinGetGitHubIssueReference -IssueNumber '12, 13;14  ')
+
+    $References.Count | Should -Be 3
+    $Keywords = @($References | ForEach-Object -Process { ($_ -split ' ')[0] } | Select-Object -Unique)
+    $Keywords.Count | Should -Be 1
+    # The submission may only use a spelling GitHub documents, so the module states them.
+    $DumplingsWinGetGitHubIssueClosingKeywords | Should -Contain $Keywords[0].ToLowerInvariant()
+    $References[-1] | Should -BeLike "*#14"
+  }
+
+  It 'ignores empty entries and accepts a leading hash' {
+    $References = @(New-WinGetGitHubIssueReference -IssueNumber @('#7', '', '  ', $null))
+
+    $References.Count | Should -Be 1
+    $References[0] | Should -BeLike '*#7'
+  }
+
+  It 'names a bare number entry' {
+    (New-WinGetGitHubIssueReference -IssueNumber '15' -RepoOwner Example -RepoName repo) | Should -BeLike '* #15'
+  }
+
+  It 'rejects a value that is not a reference to an issue' {
+    { New-WinGetGitHubIssueReference -IssueNumber 'the tracking issue' } | Should -Throw '*is not a reference to one issue*'
+  }
+}
+
+Describe 'Get-WinGetGitHubIssueReferencePlace' -Tag Unit {
+  It 'needs only the body when every merge method keeps the body' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{
+        allow_squash_merge           = $true
+        squash_merge_commit_title    = 'PR_TITLE'
+        squash_merge_commit_message  = 'PR_BODY'
+        allow_merge_commit           = $true
+        merge_commit_title           = 'MERGE_MESSAGE'
+        merge_commit_message         = 'PR_BODY'
+        allow_rebase_merge           = $false
+      }
+    }
+
+    (Get-WinGetGitHubIssueReferencePlace -RepoOwner Example -RepoName repo) -join ',' | Should -Be 'Body'
+  }
+
+  It 'needs the title when a squash merge drops the body' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{
+        allow_squash_merge           = $true
+        squash_merge_commit_title    = 'PR_TITLE'
+        squash_merge_commit_message  = 'BLANK'
+        allow_merge_commit           = $false
+        allow_rebase_merge           = $false
+      }
+    }
+
+    (Get-WinGetGitHubIssueReferencePlace -RepoOwner Example -RepoName repo) -join ',' | Should -Be 'Body,Title'
+  }
+
+  It 'needs the title when a rebase merge keeps only the commit messages' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{
+        allow_squash_merge           = $false
+        allow_merge_commit           = $false
+        allow_rebase_merge           = $true
+      }
+    }
+
+    (Get-WinGetGitHubIssueReferencePlace -RepoOwner Example -RepoName repo) -join ',' | Should -Be 'Body,Title'
+  }
+
+  It 'needs the title when the repository keeps its merge settings private' {
+    # GitHub reports the merge settings only to a caller that can administer the repository.
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ full_name = 'Example/repo'; merges_url = 'https://api.github.com/repos/Example/repo/merges' }
+    }
+
+    (Get-WinGetGitHubIssueReferencePlace -RepoOwner Example -RepoName repo) -join ',' | Should -Be 'Body,Title'
+  }
+}

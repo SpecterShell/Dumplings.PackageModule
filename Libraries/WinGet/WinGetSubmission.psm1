@@ -580,6 +580,22 @@ function Send-WinGetManifest {
     }
     $NewCommitName = "${NewCommitType}: ${NewPackageIdentifier} version ${NewPackageVersion}$($Task.CurrentState.Contains('RealVersion') ? " ($($Task.CurrentState.Version))" : '')"
 
+    # A task setting or the command line preference (-WinGetResolveIssues "123,456") names the issues
+    # the submission resolves. GitHub closes an issue only when the merge writes the closing keyword
+    # into the commit on the base branch, which holds the pull request title and keeps the body only
+    # under some repository settings, so the references go into the title whenever the body may not
+    # survive the merge. The title carries them into the candidate commit message as well.
+    $ResolvedIssueReferences = @(New-WinGetGitHubIssueReference -IssueNumber @($Task.Config['WinGetResolveIssues'] ?? $Global:DumplingsPreference['WinGetResolveIssues']) -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
+    if ($ResolvedIssueReferences) {
+      try {
+        $IssueReferencePlace = @(Get-WinGetGitHubIssueReferencePlace -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
+      } catch {
+        $IssueReferencePlace = @('Body', 'Title')
+        $Task.Log("Unable to read how ${UpstreamRepoOwner}/${UpstreamRepoName} writes a merge commit: ${_}. Naming the resolved issues in the pull request title as well.", 'Warning')
+      }
+      if ($IssueReferencePlace -contains 'Title') { $NewCommitName = "$NewCommitName - $($ResolvedIssueReferences -join ', ')" }
+    }
+
     $Script:GitHubTokenUsername ??= (Get-WinGetGitHubApiTokenUser).login
     #endregion
 
@@ -831,6 +847,8 @@ function Send-WinGetManifest {
     if ($PendingReference) {
       $NewPullRequestBody += "`n`nReference manifests: $($PendingReference.PullRequest.html_url), version ${RefPackageVersion}, commit $($PendingReference.HeadSha). The referenced PR remains open."
     }
+    # The body always records the issues, one reference per line, for a human reading the pull request.
+    if ($ResolvedIssueReferences) { $NewPullRequestBody += "`n`n$($ResolvedIssueReferences -join "`n")" }
     $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 

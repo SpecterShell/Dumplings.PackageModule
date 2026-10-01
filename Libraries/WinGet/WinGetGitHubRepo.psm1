@@ -5,6 +5,10 @@ $ErrorActionPreference = 'Stop'
 # Force stop on undefined variables or properties
 Set-StrictMode -Version 3
 
+# The keywords GitHub documents as the ones that close an issue, so that no spelling is invented here.
+# https://docs.github.com/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue
+$DumplingsWinGetGitHubIssueClosingKeywords = [string[]]@('close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved')
+
 function Get-WinGetGitHubPackagePath {
   <#
   .SYNOPSIS
@@ -1472,4 +1476,173 @@ function Get-WinGetGitHubApiTokenUser {
   return (Invoke-GitHubApi -Uri 'https://api.github.com/user' @TokenArguments)
 }
 
-Export-ModuleMember -Function '*' -Variable 'DumplingsWinGetGitHubRepoDefaultOwner', 'DumplingsWinGetGitHubRepoDefaultName', 'DumplingsWinGetGitHubRepoDefaultBranch', 'DumplingsWinGetGitHubRepoDefaultRootPath'
+function Get-WinGetGitHubIssueClosingKeyword {
+  <#
+  .SYNOPSIS
+    Get the keyword a submission names a resolved issue with
+  .DESCRIPTION
+    GitHub accepts several spellings of each closing action and ignores the words around them, so a
+    submission picks one documented form and uses it everywhere it names the issue.
+  .PARAMETER Action
+    The documented action whose keyword to use: close, fix, or resolve
+  .OUTPUTS
+    System.String. The keyword, for example 'Resolves'.
+  #>
+  [OutputType([string])]
+  param (
+    [Parameter(HelpMessage = 'The documented action whose keyword to use: close, fix, or resolve')]
+    [ValidateSet('close', 'fix', 'resolve')]
+    [string]$Action = 'resolve'
+  )
+
+  $Keyword = switch ($Action.ToLowerInvariant()) {
+    'close' { 'closes' }
+    'fix' { 'fixes' }
+    'resolve' { 'resolves' }
+  }
+  if (-not ($DumplingsWinGetGitHubIssueClosingKeywords -contains $Keyword)) {
+    throw "GitHub documents no '$Keyword' keyword that closes an issue. Use one of: $($DumplingsWinGetGitHubIssueClosingKeywords -join ', ')."
+  }
+  return [string]::Concat($Keyword.Substring(0, 1).ToUpperInvariant(), $Keyword.Substring(1))
+}
+
+function Select-WinGetGitHubIssueReference {
+  <#
+  .SYNOPSIS
+    Find the issues a text names
+  .DESCRIPTION
+    GitHub autolinks an issue or pull request named by any of the forms its documentation lists, and
+    writes each back the way the calling repository refers to it: '#number' for that repository itself
+    and 'owner/repo#number' for any other. A bare number is not a reference, so ordinary text such as a
+    version number never matches.
+    https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/autolinked-references-and-urls#issues-and-pull-requests
+  .PARAMETER Text
+    The text to search, such as a pull request title or body
+  .PARAMETER RepoOwner
+    The owner of the repository the reference is written for; omit it to keep every repository name
+  .PARAMETER RepoName
+    The name of the repository the reference is written for; omit it to keep every repository name
+  .OUTPUTS
+    System.String[]. One normalized reference per issue, for example '#12' or 'octo-org/octo-repo#100'.
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, Mandatory, ValueFromPipeline, HelpMessage = 'The text to search, such as a pull request title or body')]
+    [AllowEmptyString()]
+    [string]$Text,
+    [Parameter(HelpMessage = 'The owner of the repository the reference is written for')]
+    [string]$RepoOwner,
+    [Parameter(HelpMessage = 'The name of the repository the reference is written for')]
+    [string]$RepoName
+  )
+
+  # The documented forms are the '#number', 'GH-number', and 'owner/repo#number' shorthands, and the
+  # issue or pull request URL, whose path carries the repository. The URL host is left open because a
+  # GitHub Enterprise host serves the same paths under its own name.
+  process {
+    [regex]::Matches($Text, '(?:(?<Owner>[A-Za-z0-9_.-]+)/(?<Repo>[A-Za-z0-9_.-]+)#|GH-|https?://[^/\s]+/(?<UrlOwner>[A-Za-z0-9_.-]+)/(?<UrlRepo>[A-Za-z0-9_.-]+)/(?:issues|pull)/|#)(?<Number>\d+)(?!\d)', [Text.RegularExpressions.RegexOptions]::IgnoreCase) | ForEach-Object {
+      $ReferenceOwner = $_.Groups['Owner'].Success ? $_.Groups['Owner'].Value : $_.Groups['UrlOwner'].Value
+      $ReferenceRepo = $_.Groups['Repo'].Success ? $_.Groups['Repo'].Value : $_.Groups['UrlRepo'].Value
+      $Number = $_.Groups['Number'].Value
+      if ($ReferenceOwner -and $ReferenceRepo -and -not ($ReferenceOwner -ieq $RepoOwner -and $ReferenceRepo -ieq $RepoName)) {
+        "${ReferenceOwner}/${ReferenceRepo}#${Number}"
+      } else {
+        "#${Number}"
+      }
+    }
+  }
+}
+
+function New-WinGetGitHubIssueReference {
+  <#
+  .SYNOPSIS
+    Name the issues a pull request resolves
+  .DESCRIPTION
+    GitHub reads the closing keyword only next to the issue, so each reference names exactly one issue.
+    The input keeps the shape a task setting or a command line writes, where the references arrive as
+    one string or as several values separated by commas, semicolons, or whitespace, and where each of
+    them may be a number, a '#' number, an 'owner/repo#number', or the URL of the issue.
+  .PARAMETER IssueNumber
+    The issue references, separated by commas, semicolons, or whitespace. Empty entries are ignored.
+  .PARAMETER RepoOwner
+    The owner of the repository the pull request targets, so that a reference to that repository reads
+    as a bare number
+  .PARAMETER RepoName
+    The name of the repository the pull request targets, so that a reference to that repository reads as
+    a bare number
+  .PARAMETER Action
+    The documented action whose keyword to use: close, fix, or resolve
+  .OUTPUTS
+    System.String[]. One reference per issue, for example 'Resolves #12'.
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, HelpMessage = 'The issue references, separated by commas, semicolons, or whitespace')]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [AllowEmptyCollection()]
+    [string[]]$IssueNumber,
+    [Parameter(HelpMessage = 'The owner of the repository the pull request targets')]
+    [string]$RepoOwner,
+    [Parameter(HelpMessage = 'The name of the repository the pull request targets')]
+    [string]$RepoName,
+    [Parameter(HelpMessage = 'The documented action whose keyword to use: close, fix, or resolve')]
+    [ValidateSet('close', 'fix', 'resolve')]
+    [string]$Action = 'resolve'
+  )
+
+  process {
+    $Keyword = Get-WinGetGitHubIssueClosingKeyword -Action $Action
+    $IssueNumber | ForEach-Object {
+      [string]$_ -split '[,;\s]+' | ForEach-Object {
+        $Entry = $_
+        if ($Entry) {
+          # A bare number is one of the forms, so it becomes a reference before it is read back.
+          $Reference = @(Select-WinGetGitHubIssueReference -Text ($Entry -match '^#?\d+$' ? "#$($Entry.TrimStart('#'))" : $Entry) -RepoOwner $RepoOwner -RepoName $RepoName)
+          if ($Reference.Count -ne 1) { throw "'${Entry}' is not a reference to one issue." }
+          "${Keyword} $($Reference[0])"
+        }
+      }
+    }
+  }
+}
+
+function Get-WinGetGitHubIssueReferencePlace {
+  <#
+  .SYNOPSIS
+    Get the pull request parts a submission must name its resolved issues in
+  .DESCRIPTION
+    GitHub closes an issue only when the merge writes its closing keyword into the commit on the base
+    branch. That commit holds the pull request title and the candidate commit messages, and the body
+    only when the repository appends it, so a repository whose merge drops the body needs the issues in
+    the title as well. GitHub reports the merge settings only to a caller that can administer the
+    repository, so a repository that hides them gets both places rather than an unproven promise.
+  .PARAMETER RepoOwner
+    The owner of the repository
+  .PARAMETER RepoName
+    The name of the repository
+  .OUTPUTS
+    System.String[]. 'Body', and 'Title' when the merge does not keep the body.
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName
+  )
+
+  $Repository = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}"
+  if (-not $Repository.PSObject.Properties['squash_merge_commit_title']) {
+    return [string[]]@('Body', 'Title')
+  }
+
+  # A rebase keeps neither the title nor the body, only the candidate commit messages.
+  return -not (
+    ($Repository.allow_squash_merge -and $Repository.squash_merge_commit_message -ne 'PR_BODY') -or
+    ($Repository.allow_merge_commit -and $Repository.merge_commit_message -ne 'PR_BODY') -or
+    $Repository.allow_rebase_merge
+  ) ? [string[]]@('Body') : [string[]]@('Body', 'Title')
+}
+
+Export-ModuleMember -Function '*' -Variable 'DumplingsWinGetGitHubRepoDefaultOwner', 'DumplingsWinGetGitHubRepoDefaultName', 'DumplingsWinGetGitHubRepoDefaultBranch', 'DumplingsWinGetGitHubRepoDefaultRootPath', 'DumplingsWinGetGitHubIssueClosingKeywords'
