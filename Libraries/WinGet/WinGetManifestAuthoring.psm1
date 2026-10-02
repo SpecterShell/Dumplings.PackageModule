@@ -539,7 +539,8 @@ function Get-WinGetInstallerManifestSuggestion {
   .PARAMETER NestedInstallerFile
     Exact archive-relative payload path when a ZIP has multiple candidates.
   .PARAMETER Override
-    Explicit schema-validated fields applied after analyzer evidence.
+    Explicit schema-validated fields applied after analyzer evidence. Silent and
+    Custom installer switches also inform static command-line analysis.
   .PARAMETER PackageVersion
     Optional package version used to author meaningful ARP version differences.
   .PARAMETER Header
@@ -590,7 +591,18 @@ function Get-WinGetInstallerManifestSuggestion {
     }
 
     $Hash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
-    $Analysis = Get-WinGetInstallerAnalysis -Path $InstallerPath -ExtractEmbeddedMsi
+    # Analyze the command that will actually be authored. Wrapper passthrough
+    # arguments can replace defaults and invalidate otherwise proven ARP fields.
+    $CommandArguments = ''
+    if ($Override['InstallerSwitches'] -is [System.Collections.IDictionary]) {
+      $Switches = $Override['InstallerSwitches']
+      $SilentSwitch = $Switches.Contains('Silent') ? [string]$Switches['Silent'] : ''
+      $CustomSwitch = $Switches.Contains('Custom') ? [string]$Switches['Custom'] : ''
+      $CommandArguments = ($SilentSwitch + ' ' + $CustomSwitch).Trim()
+    }
+    $AnalysisArguments = @{ Path = $InstallerPath; ExtractEmbeddedMsi = $true }
+    if ($CommandArguments) { $AnalysisArguments.CommandLine = '"' + $InstallerPath + '" ' + $CommandArguments }
+    $Analysis = Get-WinGetInstallerAnalysis @AnalysisArguments
     $ProjectionAnalysis = $Analysis
     $NestedAnalysis = $null
     $PhysicalInstallerType = $null
@@ -644,7 +656,9 @@ function Get-WinGetInstallerManifestSuggestion {
           } finally {
             $Archive.Dispose()
           }
-          $NestedAnalysis = Get-WinGetInstallerAnalysis -Path $NestedPath -ExtractEmbeddedMsi
+          $NestedAnalysisArguments = @{ Path = $NestedPath; ExtractEmbeddedMsi = $true }
+          if ($CommandArguments) { $NestedAnalysisArguments.CommandLine = '"' + $NestedPath + '" ' + $CommandArguments }
+          $NestedAnalysis = Get-WinGetInstallerAnalysis @NestedAnalysisArguments
           $ProjectionAnalysis = $NestedAnalysis
           $PhysicalInstallerType = 'zip'
         }

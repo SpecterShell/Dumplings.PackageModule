@@ -178,6 +178,12 @@ function Get-WinGetInstallerFamilyTemplate {
         )
       }
     }
+    'Dell Update Package' {
+      [pscustomobject]@{
+        InstallerType = 'exe'
+        Notes         = @('Use Mup.xml to select the vendor executable; nested metadata owns ARP.', 'Prefer /passthrough when the selected nested family provides additional or different proven switches; otherwise use its embedded unattended MUP behavior.', 'Dell applicability can reject unsupported hardware before the nested installer runs.')
+      }
+    }
     'Velopack' {
       [pscustomobject]@{
         InstallerType       = 'exe'
@@ -610,6 +616,102 @@ function Get-WinGetInstallerFamilySuggestion {
   }
 }
 
+function Get-WinGetDellPassthroughSuggestion {
+  <#
+  .SYNOPSIS
+    Prefer richer known nested switches over Dell's embedded unattended command.
+  .PARAMETER Metadata
+    Parsed DUP evidence, including its exact selected nested family and command.
+  .OUTPUTS
+    Switches and modes for an advisory passthrough route, or no output when the
+    embedded command is the better-supported route. Raw parser facts are unchanged.
+  #>
+  param ([Parameter(Mandatory)]$Metadata)
+
+  $Command = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name CommandBehavior
+  if ([bool](Get-WinGetSuggestionPropertyValue -InputObject $Command -Name UsesPassthrough)) { return }
+  # A configured SFX adds another command-translation layer. Final child
+  # switches cannot be sent straight to that outer executable without proof.
+  $ExecutionChain = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name ExecutionChain
+  if ($ExecutionChain -and @($ExecutionChain).Count -gt 0) { return }
+  $Nested = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name NestedInstallerInfo
+  $Family = [string](Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name NestedFamily)
+  if (-not $Nested -or -not $Family -or $Family -ceq 'Dell Update Package') { return }
+  if ((Get-WinGetSuggestionPropertyValue -InputObject $Nested -Name SupportsSilentInstallation) -eq $false) { return }
+
+  $Wrapper = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name NestedWrapperInfo
+  $Behavior = $Wrapper ?? $Nested
+  if ((Get-WinGetSuggestionPropertyValue -InputObject $Behavior -Name SupportsSilentInstallation) -eq $false) { return }
+  $Type = ConvertTo-WinGetSuggestedInstallerType -InstallerType ([string](Get-WinGetSuggestionPropertyValue -InputObject $Behavior -Name InstallerType))
+  $NestedResult = [pscustomobject]@{ Family = $Family; InstallerType = $Type; Metadata = $Behavior; MsiInfo = $Wrapper ? $Nested : $null }
+  $Suggestion = Get-WinGetParserResultSuggestion -Result $NestedResult
+  $Fields = $Suggestion.ManifestFields
+  $Switches = Get-WinGetInstallerDefaultSwitches -InstallerType ($Type ?? 'exe')
+  $AuthoredSwitches = Get-WinGetSuggestionPropertyValue -InputObject $Fields -Name InstallerSwitches
+  if ($AuthoredSwitches) {
+    foreach ($Key in $AuthoredSwitches.Keys) { $Switches[$Key] = [string]$AuthoredSwitches[$Key] }
+  }
+
+  # MSI directory switches must come from the selected database, never a
+  # generic INSTALLDIR/TARGETDIR placeholder or a suite's hidden MSI parcel.
+  $ProjectType = [string](Get-WinGetSuggestionPropertyValue -InputObject $Behavior -Name InstallShieldProjectType)
+  $IsInstallShieldMsi = $Family -ceq 'InstallShield' -and $ProjectType -cin @('Basic MSI', 'InstallScript MSI')
+  if ($Type -cin @('msi', 'wix') -or $IsInstallShieldMsi) {
+    $Location = [string](Get-WinGetSuggestionPropertyValue -InputObject $Nested -Name InstallLocationSwitch)
+    if ($Location) { $Switches['InstallLocation'] = $IsInstallShieldMsi ? '/V"' + $Location.Replace('"', '""') + '"' : $Location }
+    else { $Switches.Remove('InstallLocation') }
+  }
+  if (-not $Switches['Silent']) { return }
+  if (-not $Switches['SilentWithProgress']) { $Switches['SilentWithProgress'] = $Switches['Silent'] }
+  $DefaultArguments = [string](Get-WinGetSuggestionPropertyValue -InputObject $Command -Name VendorArguments)
+  if ($DefaultArguments -match '<VALUE>') { return }
+  $DifferentModes = $Switches['Silent'] -cne $DefaultArguments -or $Switches['SilentWithProgress'] -cne $DefaultArguments
+  $AdditionalSwitches = @($Switches.Keys | Where-Object { $_ -cnotin @('Silent', 'SilentWithProgress', 'Interactive') }).Count -gt 0
+  if (-not $DifferentModes -and -not $AdditionalSwitches) { return }
+
+  # Keep package-specific properties, transforms, wait flags and scope options.
+  # Remove only known mode tokens; preserve residual tokens' original quoting.
+  $ModeTokens = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($Mode in @('Silent', 'SilentWithProgress')) {
+    foreach ($Token in @(Split-BootstrapperCommandLine -CommandLine $Switches[$Mode])) { $null = $ModeTokens.Add($Token) }
+  }
+  $MsiModes = @('/qn', '/quiet', '/qb', '/qb!', '/passive')
+  if ($Type -cin @('msi', 'wix')) { foreach ($Mode in $MsiModes) { $null = $ModeTokens.Add($Mode) } }
+  $Residual = [Collections.Generic.List[string]]::new()
+  foreach ($Token in @(Split-BootstrapperCommandLine -CommandLine $DefaultArguments -IncludeExtent)) {
+    if ($ModeTokens.Contains($Token.Value)) { continue }
+    if ($IsInstallShieldMsi -and $Token.Value.StartsWith('/v', [StringComparison]::OrdinalIgnoreCase)) {
+      # A separate /v operand needs a different framing rule. Do not rewrite
+      # that command as though the following quoted argument were standalone.
+      if ($Token.Value -ieq '/v') { return }
+      $MsiArguments = $Token.Value.Substring(2)
+      $Remaining = @(Split-BootstrapperCommandLine -CommandLine $MsiArguments -IncludeExtent | Where-Object { $_.Value -notin $MsiModes -and -not $ModeTokens.Contains('/V' + $_.Value) })
+      if ($Remaining.Count) {
+        $Tail = (@($Remaining | ForEach-Object { $MsiArguments.Substring($_.Start, $_.Length) }) -join ' ')
+        # Re-encode one Windows argument: preserve inner MSI quotes and double
+        # backslashes before quotes or the closing delimiter, not other slashes.
+        $EncodedTail = [regex]::Replace($Tail, '(\\*)"', { param($Match) $Match.Groups[1].Value + $Match.Groups[1].Value + '\"' })
+        $EncodedTail = [regex]::Replace($EncodedTail, '(\\+)$', '$1$1')
+        $Residual.Add('/V"' + $EncodedTail + '"')
+      }
+    } else { $Residual.Add($DefaultArguments.Substring($Token.Start, $Token.Length)) }
+  }
+  if ($Residual.Count) { $Switches['Custom'] = (@($Switches['Custom'], ($Residual -join ' ')) | Where-Object { $_ }) -join ' ' }
+
+  # WinGet appends Log before Custom, so the delimiter must live in each mode
+  # switch, including Interactive. All later switches then belong to the vendor.
+  foreach ($Mode in @('Silent', 'SilentWithProgress', 'Interactive')) {
+    $Switches[$Mode] = ('/passthrough ' + [string]$Switches[$Mode]).TrimEnd()
+  }
+  $ModeValue = Get-WinGetSuggestionPropertyValue -InputObject $Fields -Name InstallModes
+  $Modes = @($ModeValue | Where-Object { $_ })
+  if (-not $Modes.Count) {
+    $Modes = @('interactive', 'silent')
+    if ($Switches['SilentWithProgress'] -cne $Switches['Silent']) { $Modes += 'silentWithProgress' }
+  }
+  [pscustomobject]@{ InstallerSwitches = $Switches; InstallModes = $Modes }
+}
+
 function Get-WinGetParserResultSuggestion {
   <#
   .SYNOPSIS
@@ -679,7 +781,7 @@ function Get-WinGetParserResultSuggestion {
     }
   }
 
-  $GenericBehaviorFamilies = @('Advanced Installer', 'InstallShield', 'InstallShield MSI Wrapper', 'InstallShield Advanced UI', 'Squirrel', 'Velopack', 'Zero Install', 'MicaSetup', 'Kachina', 'Astrum InstallWizard', 'AKInstaller', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer', 'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress', 'Wise', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge')
+  $GenericBehaviorFamilies = @('Advanced Installer', 'InstallShield', 'InstallShield MSI Wrapper', 'InstallShield Advanced UI', 'Squirrel', 'Velopack', 'Zero Install', 'MicaSetup', 'Kachina', 'Astrum InstallWizard', 'AKInstaller', 'Dell Update Package', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer', 'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress', 'Wise', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge')
   if ($TemplateFamily -cin $GenericBehaviorFamilies -and $Metadata) {
     foreach ($Field in @('InstallModes', 'InstallerSwitches', 'InstallerSuccessCodes', 'ExpectedReturnCodes', 'ElevationRequirement', 'UpgradeBehavior')) {
       $Value = Get-WinGetSuggestionPropertyValue -InputObject $Metadata -Name $Field
@@ -716,6 +818,23 @@ function Get-WinGetParserResultSuggestion {
       }
     )
     if ($ExpectedReturnCodes.Count -gt 0) { $Fields['ExpectedReturnCodes'] = $ExpectedReturnCodes }
+  }
+
+  if ($Family -ceq 'Dell Update Package' -and $Metadata) {
+    $Passthrough = Get-WinGetDellPassthroughSuggestion -Metadata $Metadata
+    if ($Passthrough) {
+      $Fields['InstallerSwitches'] = $Passthrough.InstallerSwitches
+      $Fields['InstallModes'] = $Passthrough.InstallModes
+      $NextSteps.Add('Prefer the suggested /passthrough route, then validate its exact silent/progress, vendor log, install-location, ARP and exit-code behavior in a VM. Raw parser metadata still describes the embedded MUP command; reanalyze authored overrides before using its ARP fields.')
+    }
+    # DUP maps vendor return codes to its own documented process status. Do
+    # not project the MUP vendor mappings as outer EXE ExpectedReturnCodes.
+    $Fields['ExpectedReturnCodes'] = @(
+      [ordered]@{ InstallerReturnCode = 2; ReturnResponse = 'rebootRequiredToFinish' }
+      [ordered]@{ InstallerReturnCode = 4; ReturnResponse = 'missingDependency' }
+      [ordered]@{ InstallerReturnCode = 5; ReturnResponse = 'systemNotSupported' }
+      [ordered]@{ InstallerReturnCode = 6; ReturnResponse = 'rebootInitiated' }
+    )
   }
 
   if ($Family -ceq 'Setup Factory' -and $Metadata) {
@@ -1055,15 +1174,18 @@ function Get-WinGetInstallerAnalysis {
     Bounded byte budget for family heuristics.
   .PARAMETER ExtractEmbeddedMsi
     Extract embedded MSI metadata when a supported wrapper exposes it.
+  .PARAMETER CommandLine
+    Virtual command line for NSIS simulation and Dell vendor argument routing.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)][string]$Path,
     [ValidateRange(4096, 268435456)][int64]$ScanBytes = 16777216,
-    [switch]$ExtractEmbeddedMsi
+    [switch]$ExtractEmbeddedMsi,
+    [AllowEmptyString()][string]$CommandLine = ''
   )
   process {
-    $Result = Get-InstallerAnalysis -Path $Path -ScanBytes $ScanBytes -ExtractEmbeddedMsi:$ExtractEmbeddedMsi
+    $Result = Get-InstallerAnalysis -Path $Path -ScanBytes $ScanBytes -ExtractEmbeddedMsi:$ExtractEmbeddedMsi -CommandLine $CommandLine
     Add-WinGetInstallerProjection -InputObject $Result
   }
 }

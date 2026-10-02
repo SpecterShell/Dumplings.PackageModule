@@ -88,6 +88,26 @@ $Script:WinGetDefaultReturnCodes = @{
 $Script:WinGetDefaultReturnCodes.wix = $Script:WinGetDefaultReturnCodes.burn
 $Script:WinGetDefaultReturnCodes.msi = $Script:WinGetDefaultReturnCodes.burn
 
+function Get-WinGetInstallerDefaultSwitches {
+  <#
+  .SYNOPSIS
+    Return a detached copy of WinGet's switches for a known installer type.
+  .PARAMETER InstallerType
+    Effective installer type, rather than an archive's outer type. An empty
+    type returns no defaults so malformed entries can receive schema diagnostics.
+  .OUTPUTS
+    Ordered switch dictionary. Unknown types return an empty dictionary.
+    InstallLocation is a runtime default, not proof of an MSI directory property.
+  #>
+  [OutputType([System.Collections.Specialized.OrderedDictionary])]
+  param ([Parameter(Mandatory)][AllowEmptyString()][string]$InstallerType)
+
+  if ($Script:WinGetDefaultSwitches.Contains($InstallerType)) {
+    return Copy-Object -Value $Script:WinGetDefaultSwitches[$InstallerType]
+  }
+  return [ordered]@{}
+}
+
 function New-WinGetManifestDiagnostic {
   <#
   .SYNOPSIS
@@ -212,10 +232,11 @@ function Get-WinGetEffectiveInstallers {
   foreach ($Entry in @($AuthoredModel.Installers)) {
     $Effective = Copy-Object -Value $Entry
     $EffectiveType = Get-WinGetManifestEffectiveInstallerType -Installer $Effective
-    if ($Script:WinGetDefaultSwitches.Contains($EffectiveType)) {
+    $DefaultSwitches = Get-WinGetInstallerDefaultSwitches -InstallerType $EffectiveType
+    if ($DefaultSwitches.Count -gt 0) {
       $Switches = if ($Effective.Contains('InstallerSwitches')) { Copy-Object $Effective.InstallerSwitches } else { [ordered]@{} }
-      foreach ($Key in $Script:WinGetDefaultSwitches[$EffectiveType].Keys) {
-        if (-not $Switches.Contains($Key)) { $Switches[$Key] = $Script:WinGetDefaultSwitches[$EffectiveType][$Key] }
+      foreach ($Key in $DefaultSwitches.Keys) {
+        if (-not $Switches.Contains($Key)) { $Switches[$Key] = $DefaultSwitches[$Key] }
       }
       $Effective['InstallerSwitches'] = $Switches
     }
@@ -1154,4 +1175,4 @@ function Test-WinGetManifest {
   if ($PassThru) { return $Result }
 }
 
-Export-ModuleMember -Function Get-WinGetManifestValidationResult, Test-WinGetManifest
+Export-ModuleMember -Function Get-WinGetManifestValidationResult, Test-WinGetManifest, Get-WinGetInstallerDefaultSwitches

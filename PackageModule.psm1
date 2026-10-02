@@ -82,6 +82,7 @@ $ModulePaths = @(
   'Libraries\Installers\Tauri.psm1'
   'Libraries\Installers\Wise.psm1'
   'Libraries\Installers\ZeroInstall.psm1'
+  'Libraries\Installers\DellUpdatePackage.psm1'
   'Libraries\Infrastructure\InstallerAnalyzer.psm1'
   'Libraries\Browser\WebDriver.psm1'
   'Libraries\Browser\Playwright.psm1'

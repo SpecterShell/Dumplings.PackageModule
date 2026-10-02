@@ -10,6 +10,16 @@ BeforeAll {
 }
 
 Describe 'Bootstrapper command resolution' {
+  It 'returns raw token extents without changing the default string contract' {
+    $Line = '"C:\Program Files\setup.exe" /PaSsThRoUgH /v"/qn INSTALLDIR=\"C:\App Path\""'
+    $Tokens = @(Split-BootstrapperCommandLine -CommandLine $Line -IncludeExtent)
+    $Tokens.Value | Should -Be @(Split-BootstrapperCommandLine -CommandLine $Line)
+    $Line.Substring($Tokens[0].Start, $Tokens[0].Length) | Should -Be '"C:\Program Files\setup.exe"'
+    $Line.Substring($Tokens[1].Start + $Tokens[1].Length).TrimStart() | Should -Be '/v"/qn INSTALLDIR=\"C:\App Path\""'
+    @(Split-BootstrapperCommandLine -CommandLine 'a "" b' -IncludeExtent)[1].Value | Should -Be ''
+    @(Split-BootstrapperCommandLine -CommandLine '').Count | Should -Be 0
+  }
+
   It 'Resolves payloads launched through a script host' {
     $Result = Resolve-BootstrapperCommand -CommandLine 'wscript.exe //B //NoLogo nmsetup.vbs /q' -CandidatePath @('netmon.msi', 'nmsetup.vbs')
 

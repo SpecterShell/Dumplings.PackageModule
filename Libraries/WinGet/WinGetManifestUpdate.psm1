@@ -475,6 +475,9 @@ function Get-WinGetGenericInstallerManifestInfo {
     A previously computed installer analysis to reuse instead of re-analyzing the file
   .PARAMETER Logger
     Logger used for immediate progress messages. Parser diagnostics are returned to the caller.
+  .PARAMETER CommandLine
+    Virtual silent-install command, including authored custom switches. It is
+    included in the operation cache key and passed to supported static parsers.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -492,13 +495,15 @@ function Get-WinGetGenericInstallerManifestInfo {
     $Analysis,
 
     [Parameter(Mandatory, HelpMessage = 'The scriptblock or method used for warnings')]
-    $Logger
+    $Logger,
+
+    [AllowEmptyString()][string]$CommandLine = ''
   )
 
   $Diagnostics = [System.Collections.Generic.List[object]]::new()
   if (-not $Analysis) {
     try {
-      $Analysis = Get-WinGetInstallerAnalysis -Path $Path
+      $Analysis = Get-WinGetInstallerAnalysis -Path $Path -CommandLine $CommandLine
     } catch {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetManifestUpdate.GenericExe.DetectionFailed' -Source 'WinGetManifestUpdate' -Message "Failed to detect the generic EXE installer family: $($_.Exception.Message)" -Kind Incomplete -Areas Detection, Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries, DefaultInstallLocation))
       return [pscustomobject]@{ ParserName = 'Generic EXE'; InputObject = @(); Diagnostics = $Diagnostics.ToArray() }
@@ -1199,6 +1204,14 @@ function Update-WinGetInstallerManifestInstallerMetadata {
             Logger       = $Logger
           }
           if ($Installer.Contains('InstallerLocale')) { $ParserInfoArguments.InstallerLocale = $Installer.InstallerLocale }
+          if ($Installer.Contains('InstallerSwitches') -and $Installer.InstallerSwitches -is [Collections.IDictionary]) {
+            # Generic EXEs have no WinGet silent default. Preserve the authored
+            # order: a Dell /passthrough tail must receive vendor switches intact.
+            $Switches = $Installer.InstallerSwitches
+            $SilentSwitch = $Switches.Contains('Silent') ? [string]$Switches.Silent : ''
+            $CustomSwitch = $Switches.Contains('Custom') ? [string]$Switches.Custom : ''
+            if ($SilentSwitch -or $CustomSwitch) { $ParserInfoArguments.CommandLine = ('"' + $EffectiveInstallerPath + '" ' + $SilentSwitch + ' ' + $CustomSwitch).Trim() }
+          }
           $ParserInfo = Invoke-WinGetUpdateParser -Context $Operation -Arguments $ParserInfoArguments -Generic
           if ($ParserInfo) {
             Add-WinGetManifestUpdateDiagnostic -Collection $DiagnosticCollection -Diagnostic @($ParserInfo.Diagnostics) -Installer $Installer -InstallerEntry $InstallerEntry

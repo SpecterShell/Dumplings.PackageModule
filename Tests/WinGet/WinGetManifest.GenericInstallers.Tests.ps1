@@ -31,6 +31,32 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result.Diagnostics.Id | Should -Not -Contain 'WinGetManifestUpdate.GenericExe.MetadataUpdateFailed'
     }
 
+    It 'passes authored silent and custom switches into generic analysis and cache identity' {
+      Mock Get-WinGetInstallerAnalysis {
+        $ProductCode = $CommandLine -match '/passthrough' ? $null : 'New.Product'
+        [pscustomobject]@{
+          ParserResults = @([pscustomobject]@{ Name = 'Dell Update Package'; Success = $true; Result = [pscustomobject]@{
+                Family = 'Dell Update Package'; Metadata = [pscustomobject]@{ ProductCode = $ProductCode; Diagnostics = @() }
+              }
+            })
+          Diagnostics   = @()
+        }
+      }
+      $Context = New-WinGetManifestUpdateContext
+      try {
+        $Normal = [ordered]@{ Architecture = 'x64'; InstallerType = 'exe'; InstallerUrl = $Script:InstallerUrl; ProductCode = 'Existing.Product'; InstallerSwitches = [ordered]@{ Silent = '/s' } }
+        $Override = Copy-Object $Normal
+        $Override.InstallerSwitches.Silent = '/passthrough'
+        $Override.InstallerSwitches.Custom = '/clone_wait /s /v"/qn ARPSYSTEMCOMPONENT=1"'
+        $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Normal -OldInstaller (Copy-Object $Normal) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger -Operation $Context
+        $Result.ProductCode | Should -Be 'New.Product'
+        $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Override -OldInstaller (Copy-Object $Override) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger -Operation $Context
+        $Result.ProductCode | Should -Be 'Existing.Product'
+        Should -Invoke Get-WinGetInstallerAnalysis -Times 2 -Exactly
+        Should -Invoke Get-WinGetInstallerAnalysis -Times 1 -Exactly -ParameterFilter { $CommandLine.EndsWith(' /passthrough /clone_wait /s /v"/qn ARPSYSTEMCOMPONENT=1"') }
+      } finally { Close-WinGetManifestUpdateContext -Context $Context }
+    }
+
     It 'Selects dotNetInstaller nested MSI metadata by installer architecture and locale' {
       $DotNetInfo = [pscustomobject]@{
         NestedInstallerInfos = @(

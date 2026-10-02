@@ -19,6 +19,7 @@ param (
   [string]$TauriPath,
   [string]$ActualInstallerPath,
   [string]$ActualInstallerCompanionFile,
+  [string[]]$DellUpdatePackagePath,
   [string]$OutputPath
 )
 
@@ -148,6 +149,11 @@ $Results = @(
     } else { '' }
     Invoke-InstallerParserBenchmark -Name ActualInstallerInfo -Path $ActualInstallerPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression "Get-ActualInstallerInfo -Path `$InstallerPath$CompanionArgument"
     Invoke-InstallerParserBenchmark -Name ActualInstallerExtract -Path $ActualInstallerPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression "`$DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ('Dumplings-ActualInstallerBenchmark-' + [guid]::NewGuid().ToString('N')); try { Expand-ActualInstallerInstaller -Path `$InstallerPath$CompanionArgument -DestinationPath `$DestinationPath -CollisionAction Rename } finally { Remove-Item -LiteralPath `$DestinationPath -Recurse -Force -ErrorAction SilentlyContinue }"
+  }
+  foreach ($DellPath in $DellUpdatePackagePath) {
+    Invoke-InstallerParserBenchmark -Name DellConfiguration -Path $DellPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression 'Get-DellUpdatePackageInfo -Path $InstallerPath -SkipNestedAnalysis'
+    Invoke-InstallerParserBenchmark -Name DellNestedAnalysis -Path $DellPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression 'Get-DellUpdatePackageInfo -Path $InstallerPath'
+    Invoke-InstallerParserBenchmark -Name DellWinGetAnalysis -Path $DellPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression 'Get-WinGetInstallerAnalysis -Path $InstallerPath'
   }
 ) | Where-Object { $null -ne $_ }
 

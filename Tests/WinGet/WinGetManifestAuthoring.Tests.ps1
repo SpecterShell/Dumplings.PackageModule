@@ -255,6 +255,20 @@ Describe 'Get-WinGetInstallerManifestSuggestion' -Tag Unit {
     $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
+  It 'analyzes authored passthrough arguments before projecting installer identity' {
+    Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
+      New-AuthoringAnalyzerResult -InstallerType exe -Extra @{ ProductCode = $null }
+    }
+    $Tail = '/s /v"/qn ARPSYSTEMCOMPONENT=1"'
+    $Override = [ordered]@{ InstallerSwitches = [ordered]@{ Silent = '/passthrough'; Custom = $Tail } }
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath -Override $Override
+    $Suggestion.Installers[0].Contains('ProductCode') | Should -BeFalse
+    $Suggestion.Installers[0]['InstallerSwitches']['Custom'] | Should -BeExactly $Tail
+    Should -Invoke Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring -Times 1 -Exactly -ParameterFilter {
+      $CommandLine -ceq ('"' + $Script:InstallerPath + '" /passthrough /s /v"/qn ARPSYSTEMCOMPONENT=1"')
+    }
+  }
+
   It 'requires explicit architecture when evidence is ambiguous' {
     Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
       New-AuthoringAnalyzerResult -Architecture $null -Extra @{ SupportedArchitectures = @('x86', 'x64') }

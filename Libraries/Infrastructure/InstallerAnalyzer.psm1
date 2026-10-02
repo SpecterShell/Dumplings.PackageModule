@@ -660,6 +660,10 @@ function Get-InstallerStructuralExeFamilyCandidate {
     [pscustomobject]@{ Family = 'dotNetInstaller'; Confidence = 'high'; MatchedMarkers = @('CUSTOM/RES_CONFIGURATION + configurations XML root') }
   }
 
+  if ((Test-DellUpdatePackage -Path $File.FullName) -and $Seen.Add('Dell Update Package')) {
+    [pscustomobject]@{ Family = 'Dell Update Package'; Confidence = 'high'; MatchedMarkers = @('DUPFramework PE identity + bounded ZIP/7z overlay + MUPDefinition') }
+  }
+
   # Astrum detection validates a generation-specific footer, source-backed legacy runtime identity,
   # protected configuration, and complete payload catalog rather than relying on marker strings.
   if ((Test-AstrumInstallWizard -Path $File.FullName) -and $Seen.Add('Astrum InstallWizard')) {
@@ -1411,6 +1415,8 @@ function Invoke-InstallerExeParser {
     The installer path
   .PARAMETER ExtractEmbeddedMsi
     Also extract embedded MSI metadata for Advanced Installer when available
+  .PARAMETER CommandLine
+    Virtual command line for NSIS simulation and Dell vendor argument routing.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -1421,7 +1427,9 @@ function Invoke-InstallerExeParser {
     [bool]$ExtractEmbeddedMsi,
 
     [Parameter(HelpMessage = 'Bounded generic-family candidates collected by the analyzer')]
-    [object[]]$FamilyCandidates = @()
+    [object[]]$FamilyCandidates = @(),
+
+    [AllowEmptyString()][string]$CommandLine = ''
   )
 
   $AnalyzerInstallerPath = $InstallerPath
@@ -1488,6 +1496,13 @@ function Invoke-InstallerExeParser {
   # Structured generic-family parsers are authoritative. Stop before broad SFX
   # heuristics when one succeeds because many installer engines embed archives.
   $StructuredParserResults = @(
+    if (Test-InstallerCandidateFamily -Family 'Dell Update Package') {
+      Invoke-InstallerDetector -Name 'Dell Update Package' -ScriptBlock {
+        $Info = Get-DellUpdatePackageInfo -Path $AnalyzerInstallerPath -CommandLine $CommandLine
+        ConvertTo-GenericExeParserEvidence -Family 'Dell Update Package' -Info $Info
+      }
+    }
+
     if (Test-InstallerCandidateFamily -Family 'AKInstaller') {
       Invoke-InstallerDetector -Name 'AKInstaller' -ScriptBlock {
         $Info = Get-AKInstallerInfo -Path $AnalyzerInstallerPath
@@ -1880,7 +1895,7 @@ function Invoke-InstallerExeParser {
       # unknown existing-file predicates into upgrade and maintenance paths;
       # installed-state analysis remains available through Get-NSISInfo's
       # explicit virtual filesystem parameters.
-      $Info = Get-NSISInfo -Path $AnalyzerInstallerPath -FileSystemComplete
+      $Info = Get-NSISInfo -Path $AnalyzerInstallerPath -FileSystemComplete -CommandLine $CommandLine
       [pscustomobject]@{
         Family                             = 'NSIS/Nullsoft'
         Confidence                         = 'high'
@@ -2021,6 +2036,8 @@ function Invoke-InstallerAnalysisCore {
     Total byte budget used for bounded multi-window string heuristics
   .PARAMETER ExtractEmbeddedMsi
     For Advanced Installer, also try static extraction of embedded MSI metadata
+  .PARAMETER CommandLine
+    Virtual command line for NSIS simulation and Dell vendor argument routing.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -2032,7 +2049,9 @@ function Invoke-InstallerAnalysisCore {
     [int64]$ScanBytes = 16777216,
 
     [Parameter(HelpMessage = 'For Advanced Installer, also try static extraction of embedded MSI metadata')]
-    [switch]$ExtractEmbeddedMsi
+    [switch]$ExtractEmbeddedMsi,
+
+    [AllowEmptyString()][string]$CommandLine = ''
   )
 
   process {
@@ -2115,7 +2134,7 @@ function Invoke-InstallerAnalysisCore {
             # These structures identify the outer container by format. The raw
             # NSIS signature and InstallBuilder project marker remain routes until
             # their parsers validate surrounding offsets and records.
-            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'AKInstaller', 'Astrum InstallWizard', 'Kachina', 'MicaSetup', 'CreateInstall', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
+            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Dell Update Package', 'AKInstaller', 'Astrum InstallWizard', 'Kachina', 'MicaSetup', 'CreateInstall', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
             ConvertTo-InstallerFamilyEvidence -Candidate $_ -EvidenceKind Structural -IsOuterContainer:$OuterContainer
           })
         $HeuristicCandidates = @(Get-InstallerGenericExeFamilyCandidate -File $Installer -Budget $ScanBytes -Text $ScanText | ForEach-Object {
@@ -2126,7 +2145,7 @@ function Invoke-InstallerAnalysisCore {
           $HeuristicCandidates
         )
         $FamilyCandidates = @($AllCandidates | Group-Object Family | ForEach-Object { $_.Group | Sort-Object { if ($_.Confidence -eq 'high') { 0 } elseif ($_.Confidence -eq 'medium') { 1 } else { 2 } } | Select-Object -First 1 })
-        $ParserRuns = @(Invoke-InstallerExeParser -InstallerPath $Installer.FullName -ExtractEmbeddedMsi:$ExtractEmbeddedMsi.IsPresent -FamilyCandidates $FamilyCandidates)
+        $ParserRuns = @(Invoke-InstallerExeParser -InstallerPath $Installer.FullName -ExtractEmbeddedMsi:$ExtractEmbeddedMsi.IsPresent -FamilyCandidates $FamilyCandidates -CommandLine $CommandLine)
         $Analysis.ParserResults += $ParserRuns
         $ResolvedFamilies = Resolve-InstallerFamilyEvidence -Candidates $FamilyCandidates -ParserResults $ParserRuns
         $Analysis.DetectedFamilies += @($ResolvedFamilies.DetectedFamilies)
@@ -2223,15 +2242,18 @@ function Get-InstallerAnalysis {
     Total byte budget used for bounded multi-window string heuristics.
   .PARAMETER ExtractEmbeddedMsi
     Also extract embedded MSI metadata from supported wrappers.
+  .PARAMETER CommandLine
+    Virtual command line for NSIS simulation and Dell vendor argument routing.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory, Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName)][string]$Path,
     [ValidateRange(4096, 268435456)][int64]$ScanBytes = 16777216,
-    [switch]$ExtractEmbeddedMsi
+    [switch]$ExtractEmbeddedMsi,
+    [AllowEmptyString()][string]$CommandLine = ''
   )
   process {
-    Invoke-InstallerAnalysisCore -Path $Path -ScanBytes $ScanBytes -ExtractEmbeddedMsi:$ExtractEmbeddedMsi
+    Invoke-InstallerAnalysisCore -Path $Path -ScanBytes $ScanBytes -ExtractEmbeddedMsi:$ExtractEmbeddedMsi -CommandLine $CommandLine
   }
 }
 

@@ -9,24 +9,30 @@ function Split-BootstrapperCommandLine {
     Split a Windows-style bootstrapper command line without executing it
   .PARAMETER CommandLine
     The command line to split
+  .PARAMETER IncludeExtent
+    Return Value, Start, and Length for each token. Offsets are UTF-16 positions
+    in the original string, allowing callers to preserve a raw argument tail.
   #>
-  [OutputType([string[]])]
-  param ([Parameter(Mandatory)][AllowEmptyString()][string]$CommandLine)
+  [OutputType([string[]], [pscustomobject[]])]
+  param ([Parameter(Mandatory)][AllowEmptyString()][string]$CommandLine, [switch]$IncludeExtent)
 
-  $Arguments = [Collections.Generic.List[string]]::new()
+  $Arguments = $IncludeExtent ? [Collections.Generic.List[object]]::new() : [Collections.Generic.List[string]]::new()
   $Builder = [Text.StringBuilder]::new()
   $InQuotes = $false
   $Index = 0
+  $TokenStart = -1
   while ($Index -lt $CommandLine.Length) {
     $Character = $CommandLine[$Index]
     if ([char]::IsWhiteSpace($Character) -and -not $InQuotes) {
-      if ($Builder.Length -gt 0) {
-        $Arguments.Add($Builder.ToString())
+      if ($Builder.Length -gt 0 -or ($IncludeExtent -and $TokenStart -ge 0)) {
+        if ($IncludeExtent) { $Arguments.Add([pscustomobject]@{ Value = $Builder.ToString(); Start = $TokenStart; Length = $Index - $TokenStart }) } else { $Arguments.Add($Builder.ToString()) }
         $null = $Builder.Clear()
       }
+      $TokenStart = -1
       $Index++
       continue
     }
+    if ($TokenStart -lt 0) { $TokenStart = $Index }
     if ($Character -eq '"') {
       $InQuotes = -not $InQuotes
       $Index++
@@ -50,7 +56,9 @@ function Split-BootstrapperCommandLine {
     $null = $Builder.Append($Character)
     $Index++
   }
-  if ($Builder.Length -gt 0) { $Arguments.Add($Builder.ToString()) }
+  if ($Builder.Length -gt 0 -or ($IncludeExtent -and $TokenStart -ge 0)) {
+    if ($IncludeExtent) { $Arguments.Add([pscustomobject]@{ Value = $Builder.ToString(); Start = $TokenStart; Length = $Index - $TokenStart }) } else { $Arguments.Add($Builder.ToString()) }
+  }
   return @($Arguments)
 }
 
