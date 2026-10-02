@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Dell Update Package (DUP) static wrapper analysis, independently derived from
-# Command Update 4.1/5.7 and Watchdog 2.0 media. CLI reference:
+# Command Update 4.1/5.7 and catalog-derived DUPFramework media. CLI reference:
 # https://www.dell.com/support/manuals/en-us/dell-update-packages
 #
 # PE sections (.rsrc: DUPFramework identity and elevation manifest)
@@ -231,7 +231,7 @@ function Open-DellUpdatePackage {
         $Diagnostics = @(New-InstallerDiagnostic -Id 'DellUpdatePackage.PackageMetadata.Invalid' -Source 'Dell Update Package' -Kind Incomplete -Areas Metadata -AffectedFields PackageMetadata, ReleaseNotes -Message "Optional package.xml could not be read: $($_.Exception.Message)")
       }
     }
-    return [pscustomobject]@{ Path = $Path; Route = $Route; ArchiveContext = $Context; Entries = $Entries; Selected = $Selected; Configuration = $Configuration; Package = $Package; Diagnostics = $Diagnostics; FrameworkVersion = $Version.PSObject.Properties['FileVersion']?.Value; OuterArchitecture = $Layout.MachineName }
+    return [pscustomobject]@{ Path = $Path; Route = $Route; ArchiveContext = $Context; Entries = $Entries; ExpandedBytes = $Total; Selected = $Selected; Configuration = $Configuration; Package = $Package; Diagnostics = $Diagnostics; FrameworkVersion = $Version.PSObject.Properties['FileVersion']?.Value; OuterArchitecture = $Layout.MachineName }
   } catch { Close-InstallerArchiveRange -Context $Context; throw }
 }
 
@@ -241,11 +241,28 @@ function Test-DellUpdatePackage {
     Test structural DUP identity without extracting or executing payloads.
   .PARAMETER Path
     Executable to inspect; marker strings or branding alone do not qualify.
+  .PARAMETER PassThru
+    Return a validated, caller-owned context instead of a Boolean. A rejected
+    file produces no output. Release Context.ArchiveContext with
+    Close-InstallerArchiveRange after all analysis using the context finishes.
+  .OUTPUTS
+    Boolean by default, or an owned disposable archive context with PassThru.
   #>
-  [OutputType([bool])]
-  param ([Parameter(Mandatory, Position = 0)][string]$Path)
+  [OutputType([bool], [pscustomobject])]
+  param ([Parameter(Mandatory, Position = 0)][string]$Path, [switch]$PassThru)
   $Context = $null
-  try { $Context = Open-DellUpdatePackage -Path $Path; return $true } catch { return $false } finally { if ($Context) { Close-InstallerArchiveRange -Context $Context.ArchiveContext } }
+  try {
+    $Context = Open-DellUpdatePackage -Path $Path
+    if ($PassThru) {
+      $Result = $Context
+      # Only PassThru transfers ownership; ordinary Boolean probes dispose here.
+      $Context = $null
+      return $Result
+    }
+    return $true
+  } catch {
+    if (-not $PassThru) { return $false }
+  } finally { if ($Context) { Close-InstallerArchiveRange -Context $Context.ArchiveContext } }
 }
 
 function Get-DellUpdatePackageNestedInfo {
@@ -269,8 +286,8 @@ function Get-DellUpdatePackageNestedInfo {
   #>
   param ([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$WorkPath, [Parameter(Mandatory)]$Budget, [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Diagnostics, [int]$Depth = 0, [AllowEmptyString()][string]$Arguments = '')
   if ($Depth -gt 3) { throw 'Dell nested wrapper depth exceeds the limit.' }
-  if (Test-DellUpdatePackage -Path $Path) { throw 'Nested Dell packages require separate applicability analysis.' }
   if ([IO.Path]::GetExtension($Path) -ieq '.msi') { return [pscustomobject]@{ Family = 'MSI'; Info = Get-MsiInstallerInfo -Path $Path } }
+  if (Test-DellUpdatePackage -Path $Path) { throw 'Nested Dell packages require separate applicability analysis.' }
   $Analysis = Get-InstallerAnalysis -Path $Path -ExtractEmbeddedMsi -CommandLine ('"' + $Path + '" ' + $Arguments)
   $Successful = @($Analysis.ParserResults | Where-Object Success)
   if ($Successful.Count -ne 1) { throw 'The selected Dell payload has no unique supported nested installer parser.' }
@@ -325,30 +342,47 @@ function Get-DellUpdatePackageCommandAffectedField {
     Literal configured unattended arguments, never executed.
   .PARAMETER Family
     Selected nested family. NSIS already consumes the virtual command line.
+  .PARAMETER NestedInfo
+    Selected payload metadata supplying its actual MSI directory property.
   .OUTPUTS
     Canonical fields to preserve as unresolved instead of publishing defaults.
   #>
-  param ([AllowEmptyString()][string]$Arguments, [AllowNull()][string]$Family)
+  param ([AllowEmptyString()][string]$Arguments, [AllowNull()][string]$Family, [AllowNull()]$NestedInfo)
   if ($Family -ceq 'NSIS/Nullsoft') { return }
+  # A changed directory also changes path-bearing ARP values and association
+  # commands. Do not publish the unmodified database's paths or registrations.
+  $PathFields = @('DefaultInstallLocation', 'UninstallString', 'QuietUninstallString', 'DisplayIcon', 'Protocols', 'FileExtensions', 'RegistryAssociationInfo')
+  $ScopeFields = @('Scope', 'RegistryView') + $PathFields
   $PropertyFields = [ordered]@{
-    ProductCode        = @('ProductCode', 'AppsAndFeaturesProductCode', 'AppsAndFeaturesEntries')
+    ProductCode        = @('ProductCode', 'AppsAndFeaturesProductCode', 'AppsAndFeaturesEntries', 'UninstallString', 'QuietUninstallString')
     ProductName        = @('DisplayName', 'AppsAndFeaturesEntries')
     ProductVersion     = @('DisplayVersion', 'AppsAndFeaturesEntries')
     Manufacturer       = @('Publisher', 'AppsAndFeaturesEntries')
-    ARPSYSTEMCOMPONENT = @('WritesAppsAndFeaturesEntry', 'ProductCode', 'AppsAndFeaturesProductCode', 'AppsAndFeaturesEntries', 'DisplayName', 'DisplayVersion', 'Publisher')
-    ALLUSERS           = @('Scope')
-    MSIINSTALLPERUSER  = @('Scope')
-    INSTALLDIR         = @('DefaultInstallLocation')
-    INSTALLLOCATION    = @('DefaultInstallLocation')
-    TARGETDIR          = @('DefaultInstallLocation')
-    TRANSFORMS         = @('ProductCode', 'AppsAndFeaturesProductCode', 'AppsAndFeaturesEntries', 'DisplayName', 'DisplayVersion', 'Publisher', 'Scope', 'DefaultInstallLocation', 'WritesAppsAndFeaturesEntry')
+    ARPSYSTEMCOMPONENT = @('WritesAppsAndFeaturesEntry', 'ProductCode', 'AppsAndFeaturesProductCode', 'AppsAndFeaturesEntries', 'DisplayName', 'DisplayVersion', 'Publisher', 'SystemComponent')
+    ALLUSERS           = $ScopeFields
+    MSIINSTALLPERUSER  = $ScopeFields
+    INSTALLDIR         = $PathFields
+    INSTALLLOCATION    = $PathFields
+    TARGETDIR          = $PathFields
+    ARPHELPLINK        = @('HelpLink')
+    ARPURLINFOABOUT    = @('URLInfoAbout')
+    ARPPRODUCTICON     = @('DisplayIcon')
+    TRANSFORMS         = @('ProductCode', 'UpgradeCode', 'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'AppsAndFeaturesEntries', 'DisplayName', 'DisplayVersion', 'Publisher', 'WritesAppsAndFeaturesEntry', 'SystemComponent', 'URLInfoAbout', 'HelpLink') + $ScopeFields
   }
+  # MSI already identifies the directory used by this package. Accept its
+  # property or switch evidence instead of assuming only INSTALLDIR/TARGETDIR.
+  $LocationProperty = ''
+  if ($NestedInfo) {
+    $LocationProperty = [string]$NestedInfo.PSObject.Properties['InstallLocationProperty']?.Value
+    if (-not $LocationProperty -and [string]$NestedInfo.PSObject.Properties['InstallLocationSwitch']?.Value -match '^([A-Za-z_][A-Za-z0-9_]*)=') { $LocationProperty = $Matches[1] }
+  }
+  if ($LocationProperty -match '^[A-Za-z_][A-Za-z0-9_]*$') { $PropertyFields[$LocationProperty] = ($PropertyFields.Contains($LocationProperty) ? $PropertyFields[$LocationProperty] : @()) + $PathFields }
   $Fields = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
   foreach ($Property in $PropertyFields.Keys) {
     if ($Arguments -match "(?i)(?<![A-Za-z0-9_])$Property\s*=") { foreach ($Field in $PropertyFields[$Property]) { $null = $Fields.Add($Field) } }
   }
-  if ($Arguments -match '(?i)(?:^|\s)/(?:ALLUSERS|CURRENTUSER)(?:\s|$)') { $null = $Fields.Add('Scope') }
-  if ($Arguments -match '(?i)(?:^|\s)(?:/D=|/DIR=|--installto(?:\s|=))') { $null = $Fields.Add('DefaultInstallLocation') }
+  if ($Arguments -match '(?i)(?:^|\s)/(?:ALLUSERS|CURRENTUSER)(?:\s|$)') { foreach ($Field in $ScopeFields) { $null = $Fields.Add($Field) } }
+  if ($Arguments -match '(?i)(?:^|\s)(?:/D=|/DIR=|--installto(?:\s|=))') { foreach ($Field in $PathFields) { $null = $Fields.Add($Field) } }
   $Fields | Sort-Object -CaseSensitive
 }
 
@@ -392,6 +426,10 @@ function Get-DellUpdatePackageInfo {
   .PARAMETER CommandLine
     Virtual outer command line including the executable. /passthrough replaces
     MUP's default vendor arguments; the remaining text is preserved verbatim.
+  .PARAMETER AnalysisContext
+    Optional validated context from Test-DellUpdatePackage -PassThru. It must
+    belong to Path and remain open. The caller retains ownership on success or
+    failure; this function neither caches it nor releases its source streams.
   .OUTPUTS
     Standard parser envelope plus Configuration, PackageMetadata, PayloadFiles,
     CommandBehavior, ExecutedPayloads, NestedInstallerInfo, NestedWrapperInfo,
@@ -402,9 +440,19 @@ function Get-DellUpdatePackageInfo {
     selected parser, with unsimulated command overrides reported as unresolved.
   #>
   [CmdletBinding()]
-  param ([Parameter(Mandatory, Position = 0, ValueFromPipeline)][string]$Path, [switch]$SkipNestedAnalysis, [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 4294967296, [AllowEmptyString()][string]$CommandLine = '')
+  param ([Parameter(Mandatory, Position = 0, ValueFromPipeline)][string]$Path, [switch]$SkipNestedAnalysis, [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 4294967296, [AllowEmptyString()][string]$CommandLine = '', [psobject]$AnalysisContext)
   process {
-    $Context = Open-DellUpdatePackage -Path $Path -MaximumExpandedBytes $MaximumExpandedBytes
+    $OwnsContext = $null -eq $AnalysisContext
+    $Context = if ($OwnsContext) {
+      Open-DellUpdatePackage -Path $Path -MaximumExpandedBytes $MaximumExpandedBytes
+    } else {
+      $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
+      if ($AnalysisContext.Path -ine $ResolvedPath) { throw 'The Dell analysis context belongs to a different source file.' }
+      if (-not $AnalysisContext.ArchiveContext.SourceStream.CanRead) { throw 'The Dell analysis context is closed.' }
+      # A reused probe must still enforce a caller's smaller output budget.
+      if ($AnalysisContext.ExpandedBytes -gt $MaximumExpandedBytes) { throw 'Dell package catalog exceeds the expanded-byte limit.' }
+      $AnalysisContext
+    }
     $TemporaryPath = $null
     try {
       $Configuration = $Context.Configuration
@@ -496,11 +544,11 @@ function Get-DellUpdatePackageInfo {
       # DLL/custom-action effects remain the nested parser's responsibility.
       # Do not let command-line overrides silently reuse its default ARP tuple.
       $EffectiveArguments = $ExecutionChain.Count -gt 0 ? $ExecutionChain[-1].Arguments : $Arguments
-      $CommandAffectedFields = @(Get-DellUpdatePackageCommandAffectedField -Arguments $EffectiveArguments -Family $NestedFamily)
+      $CommandAffectedFields = @(Get-DellUpdatePackageCommandAffectedField -Arguments $EffectiveArguments -Family $NestedFamily -NestedInfo $NestedInfo)
       if ($NestedInfo -and $CommandAffectedFields.Count) {
         foreach ($Field in $CommandAffectedFields) {
           if (-not $Unresolved.Contains($Field)) { $Unresolved.Add($Field) }
-          if ($Fields.Contains($Field)) { $Fields[$Field] = $Field -ceq 'AppsAndFeaturesEntries' ? @() : $null }
+          if ($Fields.Contains($Field)) { $Fields[$Field] = $Field -cin @('AppsAndFeaturesEntries', 'Protocols', 'FileExtensions') ? @() : $null }
         }
         $Diagnostics.Add((New-InstallerDiagnostic -Id 'DellUpdatePackage.Nested.CommandOverrides' -Source 'Dell Update Package' -Kind ManualValidation -Areas Metadata -AffectedFields $CommandAffectedFields -Message 'Configured vendor arguments can change installed-state fields that this nested parser does not simulate; unmodified payload defaults are retained only as nested evidence.' -Evidence $CommandAffectedFields))
       }
@@ -543,7 +591,7 @@ function Get-DellUpdatePackageInfo {
       $Fields['UnresolvedFields'] = $Unresolved.ToArray()
       [pscustomobject]$Fields
     } finally {
-      Close-InstallerArchiveRange -Context $Context.ArchiveContext
+      if ($OwnsContext) { Close-InstallerArchiveRange -Context $Context.ArchiveContext }
       if ($TemporaryPath) { Remove-Item -LiteralPath $TemporaryPath -Recurse -Force -ErrorAction SilentlyContinue }
     }
   }

@@ -281,7 +281,7 @@ Describe 'Installer manifest behavior defaults' {
       $Families = @(
         'MSI', 'MSIX/AppX', 'ZIP/archive', 'Portable', 'Font', 'Burn', 'Inno Setup', 'NSIS/Nullsoft', 'MSP',
         'Squirrel/Velopack', 'Advanced Installer', 'InstallShield', 'InstallShield Advanced UI', 'Squirrel', 'Velopack',
-        'Zero Install', 'MicaSetup', 'Kachina', 'AKInstaller', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer',
+        'Zero Install', 'TigerSetup', 'MicaSetup', 'Kachina', 'AKInstaller', 'Setup Factory', 'InstallAnywhere', 'InstallAware', 'Actual Installer',
         'DeployMaster', '7z SFX', 'WinRAR GUI SFX', 'InstallMate', 'QSetup', 'install4j', 'dotNetInstaller', 'IExpress',
         'Wise', 'Chromium Setup', 'InstallBuilder', 'Paquet Builder', 'CreateInstall', 'InstallForge', 'Qt Installer Framework'
       )

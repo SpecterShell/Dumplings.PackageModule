@@ -269,6 +269,31 @@ Describe 'Get-WinGetInstallerManifestSuggestion' -Tag Unit {
     }
   }
 
+  It 'exposes Dell family defaults and embedded alternatives as separate authoring suggestions' {
+    Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
+      $Result = New-AuthoringAnalyzerResult -InstallerType exe
+      $Metadata = [pscustomobject]@{
+        InstallerType = 'exe'; PackageArchitecture = 'x64'; ProductCode = 'Contoso.Product'
+        InstallerSwitches = [ordered]@{ Silent = '/s'; SilentWithProgress = '/s'; Log = '/l="<LOGPATH>"' }
+        InstallModes = @('interactive', 'silent'); Diagnostics = @(); ExecutionChain = @()
+        NestedFamily = 'MSI'; NestedInstallerInfo = [pscustomobject]@{ InstallerType = 'msi' }
+        CommandBehavior = [pscustomobject]@{ UsesPassthrough = $false; DefaultVendorArguments = '/qn ALLUSERS=1'; VendorArguments = '/qn ALLUSERS=1' }
+      }
+      $Result.ParserResults[0].Result = [pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata }
+      $Result.DetectedFamilies[0].Family = 'Dell Update Package'
+      & (Get-Module WinGetAnalysis) { param($Analysis) Add-WinGetInstallerProjection -InputObject $Analysis } $Result
+    }
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath
+    $Suggestion.Suggestions.FamilyDefaults.InstallerSwitches.Silent | Should -Be '/passthrough /quiet /norestart'
+    $Suggestion.Suggestions.FamilyDefaults.InstallerSwitches.Contains('Custom') | Should -BeFalse
+    $Alternative = @($Suggestion.Suggestions.ManifestVariants | Where-Object Name -EQ EmbeddedMup)[0]
+    $Alternative.ManifestFields.InstallerSwitches.Silent | Should -Be '/s'
+    $Alternative.Evidence.VendorArguments | Should -Be '/qn ALLUSERS=1'
+    # Authoring must not silently replace the parser's analyzed command with
+    # advisory defaults or combine both command routes into one entry.
+    $Suggestion.Installers[0]['InstallerSwitches']['Silent'] | Should -Be '/s'
+  }
+
   It 'requires explicit architecture when evidence is ambiguous' {
     Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
       New-AuthoringAnalyzerResult -Architecture $null -Extra @{ SupportedArchitectures = @('x86', 'x64') }

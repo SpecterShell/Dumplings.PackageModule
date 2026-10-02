@@ -134,6 +134,74 @@ Describe 'Dell archive and nested evidence' {
   It 'requires framework identity, not Dell application branding' {
     Mock Get-PEVersionStringTable -ModuleName DellUpdatePackage { [pscustomobject]@{ OriginalFilename = 'DellApplication.exe' } }
     Test-DellUpdatePackage -Path $Script:ZipPath | Should -BeFalse
+    Test-DellUpdatePackage -Path $Script:ZipPath -PassThru | Should -BeNullOrEmpty
+  }
+
+  It 'reuses one validated container without taking ownership or weakening limits' {
+    $Context = Test-DellUpdatePackage -Path $Script:ZipPath -PassThru
+    try {
+      Mock Open-DellUpdatePackage -ModuleName DellUpdatePackage { throw 'A borrowed context must not reopen the container.' }
+      $First = Get-DellUpdatePackageInfo -Path $Script:ZipPath -SkipNestedAnalysis -AnalysisContext $Context
+      $Second = Get-DellUpdatePackageInfo -Path $Script:ZipPath -SkipNestedAnalysis -AnalysisContext $Context
+      $First.PayloadFiles | Should -HaveCount 3
+      $Second.ProductVersion | Should -Be $First.ProductVersion
+      Should -Invoke Get-PEVersionStringTable -ModuleName DellUpdatePackage -Times 1 -Exactly
+      $Context.ArchiveContext.SourceStream.CanRead | Should -BeTrue
+      { Get-DellUpdatePackageInfo -Path $Script:ZipPath -AnalysisContext $Context -MaximumExpandedBytes 10 } | Should -Throw '*byte limit*'
+      $Other = New-DellTestZip -Path (Join-Path $TestDrive 'other.exe') -Entries ([ordered]@{ 'mup.xml' = $Script:Mup; 'payload.exe' = 'other' })
+      { Get-DellUpdatePackageInfo -Path $Other -AnalysisContext $Context } | Should -Throw '*different source*'
+      $Context.ArchiveContext.SourceStream.CanRead | Should -BeTrue
+      Should -Invoke Open-DellUpdatePackage -ModuleName DellUpdatePackage -Times 0 -Exactly
+    } finally { Close-InstallerArchiveRange -Context $Context.ArchiveContext }
+    { Get-DellUpdatePackageInfo -Path $Script:ZipPath -AnalysisContext $Context } | Should -Throw '*closed*'
+  }
+
+  It 'passes the validated probe context into the real Dell EXE parser' {
+    $Context = Test-DellUpdatePackage -Path $Script:ZipPath -PassThru
+    Mock Open-DellUpdatePackage -ModuleName DellUpdatePackage { throw 'The analyzer must reuse its probe.' }
+    Mock Get-DellUpdatePackageNestedInfo -ModuleName DellUpdatePackage {
+      [pscustomobject]@{ Family = 'Test'; Info = [pscustomobject]@{ ProductCode = 'Selected'; Diagnostics = @() } }
+    }
+    try {
+      $Result = @(InModuleScope InstallerAnalyzer -Parameters @{ Path = $Script:ZipPath; Context = $Context } {
+          Invoke-InstallerExeParser -InstallerPath $Path -ExtractEmbeddedMsi $true -FamilyCandidates @([pscustomobject]@{ Family = 'Dell Update Package'; Confidence = 'high' }) -ParserContexts @{ 'Dell Update Package' = $Context }
+        })
+      $Result | Should -HaveCount 1
+      $Result[0].Success | Should -BeTrue
+      $Result[0].Result.Metadata.ProductCode | Should -Be 'Selected'
+      $Context.ArchiveContext.SourceStream.CanRead | Should -BeTrue
+      Should -Invoke Open-DellUpdatePackage -ModuleName DellUpdatePackage -Times 0 -Exactly
+    } finally { Close-InstallerArchiveRange -Context $Context.ArchiveContext }
+  }
+
+  It 'releases operation-owned contexts after analyzer success or failure' -TestCases @(
+    @{ Fail = $false }
+    @{ Fail = $true }
+  ) {
+    param($Fail)
+    $Context = Test-DellUpdatePackage -Path $Script:ZipPath -PassThru
+    Mock Get-InstallerFileTypeEvidence -ModuleName InstallerAnalyzer { [pscustomobject]@{ Type = 'PE' } }
+    Mock Read-InstallerStringWindows -ModuleName InstallerAnalyzer { '' }
+    Mock Get-InstallerGenericExeFamilyCandidate -ModuleName InstallerAnalyzer { }
+    Mock Get-InstallerWrapperDiagnostic -ModuleName InstallerAnalyzer { }
+    Mock Get-InstallerStructuralExeFamilyCandidate -ModuleName InstallerAnalyzer {
+      $ParserContexts['Dell Update Package'] = $Context
+      [pscustomobject]@{ Family = 'Dell Update Package'; Confidence = 'high'; MatchedMarkers = @('validated container') }
+    }
+    Mock Invoke-InstallerExeParser -ModuleName InstallerAnalyzer {
+      $ParserContexts['Dell Update Package'] | Should -Be $Context
+      if ($Fail) { throw 'Injected parser failure.' }
+      [pscustomobject]@{ Name = 'Dell Update Package'; Success = $true; Result = [pscustomobject]@{ Family = 'Dell Update Package'; Diagnostics = @() } }
+    }
+    try {
+      if ($Fail) { { Get-InstallerAnalysis -Path $Script:ZipPath } | Should -Throw '*Injected parser failure*' }
+      else {
+        $Analysis = Get-InstallerAnalysis -Path $Script:ZipPath
+        $Analysis.DetectedFamilies.Family | Should -Contain 'Dell Update Package'
+        $Analysis.PSObject.Properties.Name | Should -Not -Contain 'ParserContexts'
+      }
+      $Context.ArchiveContext.SourceStream.CanRead | Should -BeFalse
+    } finally { Close-InstallerArchiveRange -Context $Context.ArchiveContext }
   }
 
   It 'uses catalog spelling for a case-insensitive MUP payload match' {
@@ -366,8 +434,56 @@ Describe 'Dell archive and nested evidence' {
       $Fields | Should -Contain 'ProductCode'
       $Fields | Should -Contain 'DefaultInstallLocation'
       $Fields | Should -Contain 'DisplayName'
+      $Fields | Should -Contain 'UpgradeCode'
+      $Fields | Should -Contain 'UninstallString'
+      $Fields | Should -Contain 'QuietUninstallString'
+      $Fields | Should -Contain 'DisplayIcon'
+      $Fields | Should -Contain 'Protocols'
+      $Fields | Should -Contain 'FileExtensions'
+      $Fields | Should -Contain 'RegistryAssociationInfo'
       @(Get-DellUpdatePackageCommandAffectedField -Arguments 'NOTALLUSERS=1 /v/qn' -Family 'InstallShield').Count | Should -Be 0
+      $IdentityFields = @(Get-DellUpdatePackageCommandAffectedField -Arguments 'ProductCode={OVERRIDE}' -Family MSI)
+      $IdentityFields | Should -Contain 'UninstallString'
+      $IdentityFields | Should -Contain 'QuietUninstallString'
     }
+  }
+
+  It 'derives package-specific directory overrides from selected MSI evidence' -ForEach @(
+    @{ Nested = [pscustomobject]@{ InstallLocationProperty = 'APPDIR' } }
+    @{ Nested = [pscustomobject]@{ InstallLocationSwitch = 'APPDIR="<INSTALLPATH>"' } }
+  ) {
+    InModuleScope DellUpdatePackage -Parameters @{ Nested = $Nested } {
+      $Fields = @(Get-DellUpdatePackageCommandAffectedField -Arguments '/v"/qn APPDIR=\"C:\Custom App\""' -Family InstallShield -NestedInfo $Nested)
+      $Fields | Should -Contain 'DefaultInstallLocation'
+      $Fields | Should -Contain 'DisplayIcon'
+      $Fields | Should -Contain 'UninstallString'
+      $Fields | Should -Contain 'RegistryAssociationInfo'
+      $Fields | Should -Not -Contain 'ProductCode'
+      @(Get-DellUpdatePackageCommandAffectedField -Arguments 'NOTAPPDIR=C:\Other' -Family MSI -NestedInfo $Nested).Count | Should -Be 0
+    }
+  }
+
+  It 'withholds paths and associations changed by a custom directory without modifying raw nested facts' {
+    Mock Get-DellUpdatePackageNestedInfo -ModuleName DellUpdatePackage {
+      [pscustomobject]@{ Family = 'MSI'; Info = [pscustomobject]@{
+          ProductCode = '{DEFAULT}'; InstallLocationProperty = 'APPDIR'; DefaultInstallLocation = 'C:\Default'; DisplayIcon = 'C:\Default\app.exe'
+          UninstallString = 'C:\Default\uninstall.exe'; QuietUninstallString = 'C:\Default\uninstall.exe /S'
+          Protocols = @('test'); FileExtensions = @('test'); RegistryAssociationInfo = [pscustomobject]@{ Command = 'C:\Default\app.exe' }; Diagnostics = @()
+        }
+      }
+    }
+    $Info = Get-DellUpdatePackageInfo -Path $Script:ZipPath -CommandLine 'setup.exe /passthrough /qn APPDIR="C:\Custom App"'
+    $Info.ProductCode | Should -Be '{DEFAULT}'
+    $Info.DefaultInstallLocation | Should -BeNullOrEmpty
+    $Info.DisplayIcon | Should -BeNullOrEmpty
+    $Info.UninstallString | Should -BeNullOrEmpty
+    $Info.QuietUninstallString | Should -BeNullOrEmpty
+    $Info.Protocols.Count | Should -Be 0
+    $Info.FileExtensions.Count | Should -Be 0
+    $Info.RegistryAssociationInfo | Should -BeNullOrEmpty
+    $Info.NestedInstallerInfo.DefaultInstallLocation | Should -Be 'C:\Default'
+    $Info.NestedInstallerInfo.Protocols | Should -Be @('test')
+    $Info.UnresolvedFields | Should -Contain 'DisplayIcon'
   }
 
   It 'passes the virtual vendor command from the analyzer into NSIS without execution' {
@@ -419,7 +535,7 @@ Describe 'Dell preferred WinGet command route' {
     }
   }
 
-  It 'prefers InstallShield forwarding and preserves configured properties and wait flags' {
+  It 'uses InstallShield defaults and exposes configured properties and wait flags only as an alternative' {
     $Metadata = New-DellSuggestionMetadata -Family InstallShield -Nested ([pscustomobject]@{ InstallerType = 'msi'; InstallLocationSwitch = 'APPDIR="<INSTALLPATH>"' }) -Wrapper ([pscustomobject]@{ InstallerType = 'exe'; InstallShieldProjectType = 'Basic MSI' }) -Arguments '/clone_wait /s /v"/qn ALLUSERS=1 TRANSFORMS=\"custom transform.mst\""'
     $Before = $Metadata | ConvertTo-Json -Depth 8 -Compress
     InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Metadata } {
@@ -428,18 +544,22 @@ Describe 'Dell preferred WinGet command route' {
       $Fields.InstallerSwitches.Silent | Should -Be '/passthrough /S /V/quiet /V/norestart'
       $Fields.InstallerSwitches.SilentWithProgress | Should -Be '/passthrough /S /V/passive /V/norestart'
       $Fields.InstallerSwitches.Interactive | Should -Be '/passthrough'
-      $Fields.InstallerSwitches.Log | Should -Be '/V"/log ""<LOGPATH>"""'
-      $Fields.InstallerSwitches.InstallLocation | Should -Be '/V"APPDIR=""<INSTALLPATH>"""'
-      $Fields.InstallerSwitches.Custom | Should -Match '^/clone_wait /V"ALLUSERS=1 TRANSFORMS='
-      $Fields.InstallerSwitches.Custom | Should -Not -Match '/qn'
-      $ForwardedMsi = @(Split-BootstrapperCommandLine -CommandLine $Fields.InstallerSwitches.Custom)[1].Substring(2)
-      @(Split-BootstrapperCommandLine -CommandLine $ForwardedMsi) | Should -Be @('ALLUSERS=1', 'TRANSFORMS=custom transform.mst')
+      $Fields.InstallerSwitches.Log | Should -Be '/V"/log \"<LOGPATH>\""'
+      $Fields.InstallerSwitches.InstallLocation | Should -Be '/V"APPDIR=\"<INSTALLPATH>\""'
+      $Fields.InstallerSwitches.Contains('Custom') | Should -BeFalse
+      $Alternative = @($Result.ManifestVariants | Where-Object Name -EQ EmbeddedMup)[0]
+      $Alternative.ManifestFields.InstallerSwitches.Silent | Should -Be '/s'
+      $Alternative.ManifestFields.InstallerSwitches.Log | Should -Be '/l="<LOGPATH>"'
+      $Alternative.ManifestFields.InstallModes | Should -Be @('interactive', 'silent')
+      $Alternative.Evidence.CommandSource | Should -Be 'MupUnattended'
+      $Alternative.Evidence.VendorArguments | Should -BeExactly $Metadata.CommandBehavior.VendorArguments
+      $Alternative.ManifestFields.ExpectedReturnCodes.InstallerReturnCode | Should -Be @(2, 4, 5, 6)
       $Fields.InstallModes | Should -Contain 'silentWithProgress'
       $Fields.ExpectedReturnCodes.InstallerReturnCode | Should -Be @(2, 4, 5, 6)
-      $Result.SuggestedNextSteps -join ' ' | Should -Match 'Prefer.*passthrough'
+      $Result.SuggestedNextSteps -join ' ' | Should -Match 'EmbeddedMup.*required package-specific options'
       # WinGet places the mode first, then Log and Custom, then location.
       foreach ($Mode in @('Silent', 'SilentWithProgress', 'Interactive')) {
-        $Line = 'setup.exe ' + $Fields.InstallerSwitches[$Mode] + ' ' + $Fields.InstallerSwitches.Log + ' ' + $Fields.InstallerSwitches.Custom + ' ' + $Fields.InstallerSwitches.InstallLocation
+        $Line = 'setup.exe ' + $Fields.InstallerSwitches[$Mode] + ' ' + $Fields.InstallerSwitches.Log + ' ' + $Fields.InstallerSwitches.InstallLocation
         $Command = & (Get-Module DellUpdatePackage) { param($Line) Resolve-DellUpdatePackageCommand -Configuration ([pscustomobject]@{ Behaviors = @() }) -CommandLine $Line } $Line
         $Command.OptionConflicts.Count | Should -Be 0
         $Command.VendorArguments | Should -Match '/V.*<LOGPATH>'
@@ -448,18 +568,20 @@ Describe 'Dell preferred WinGet command route' {
       $Schema = Get-WinGetManifestSchema -ManifestType installer -ManifestVersion '1.12.0'
       $Entry = Merge-WinGetManifestDictionary -Base ([ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/setup.exe'; InstallerSha256 = 'A' * 64 }) -Override (ConvertTo-WinGetSuggestedManifestFieldSet -InputObject $Fields)
       (Get-YamlSchemaValidationResult -InputObject $Entry -Schema $Schema.definitions.Installer -RootSchema $Schema).IsValid | Should -BeTrue
+      $AlternativeEntry = Merge-WinGetManifestDictionary -Base ([ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/setup.exe'; InstallerSha256 = 'A' * 64 }) -Override (ConvertTo-WinGetSuggestedManifestFieldSet -InputObject $Alternative.ManifestFields)
+      (Get-YamlSchemaValidationResult -InputObject $AlternativeEntry -Schema $Schema.definitions.Installer -RootSchema $Schema -ValidatePropertyNames).IsValid | Should -BeTrue
     }
     ($Metadata | ConvertTo-Json -Depth 8 -Compress) | Should -BeExactly $Before
   }
 
-  It 'uses known MSI defaults with the actual directory property and package-specific command tail' {
+  It 'uses known MSI defaults with the actual directory property without package-specific arguments' {
     $Metadata = New-DellSuggestionMetadata -Family MSI -Nested ([pscustomobject]@{ InstallerType = 'wix'; InstallLocationSwitch = 'APPLICATIONROOT="<INSTALLPATH>"' }) -Arguments '/qn REINSTALL=all REINSTALLMODE=vomus REBOOT=REALLYSUPPRESS'
     InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Metadata } {
       $Fields = (Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })).ManifestFields
       $Fields.InstallerSwitches.Silent | Should -Be '/passthrough /quiet /norestart'
       $Fields.InstallerSwitches.InstallLocation | Should -Be 'APPLICATIONROOT="<INSTALLPATH>"'
       $Fields.InstallerSwitches.Log | Should -Be '/log "<LOGPATH>"'
-      $Fields.InstallerSwitches.Custom | Should -Be 'REINSTALL=all REINSTALLMODE=vomus REBOOT=REALLYSUPPRESS'
+      $Fields.InstallerSwitches.Contains('Custom') | Should -BeFalse
     }
   }
 
@@ -473,18 +595,18 @@ Describe 'Dell preferred WinGet command route' {
     }
   }
 
-  It 'uses case-correct NSIS defaults while retaining a configured scope option' {
+  It 'uses case-correct NSIS defaults without retaining a configured scope option' {
     $Metadata = New-DellSuggestionMetadata -Family 'NSIS/Nullsoft' -Nested ([pscustomobject]@{ InstallerType = 'nullsoft' }) -Arguments '/s /ALLUSERS'
     InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Metadata } {
       $Fields = (Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })).ManifestFields
       $Fields.InstallerSwitches.Silent | Should -Be '/passthrough /S'
       $Fields.InstallerSwitches.SilentWithProgress | Should -Be '/passthrough /S'
-      $Fields.InstallerSwitches.Custom | Should -Be '/ALLUSERS'
+      $Fields.InstallerSwitches.Contains('Custom') | Should -BeFalse
       $Fields.InstallModes | Should -Not -Contain 'silentWithProgress'
     }
   }
 
-  It 'uses Inno defaults without replacing a configured task selection' {
+  It 'uses Inno defaults without retaining a configured task selection' {
     $Metadata = New-DellSuggestionMetadata -Family 'Inno Setup' -Nested ([pscustomobject]@{ InstallerType = 'inno' }) -Arguments '/SILENT /TASKS="desktopicon,associate"'
     InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Metadata } {
       $Fields = (Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })).ManifestFields
@@ -492,7 +614,7 @@ Describe 'Dell preferred WinGet command route' {
       $Fields.InstallerSwitches.SilentWithProgress | Should -Be '/passthrough /SP- /SILENT /SUPPRESSMSGBOXES /NORESTART'
       $Fields.InstallerSwitches.Log | Should -Be '/LOG="<LOGPATH>"'
       $Fields.InstallerSwitches.InstallLocation | Should -Be '/DIR="<INSTALLPATH>"'
-      $Fields.InstallerSwitches.Custom | Should -Be '/TASKS="desktopicon,associate"'
+      $Fields.InstallerSwitches.Contains('Custom') | Should -BeFalse
     }
   }
 
@@ -508,19 +630,22 @@ Describe 'Dell preferred WinGet command route' {
     }
   }
 
-  It 'keeps an embedded InstallShield command with a separate v operand intact' {
-    $Metadata = New-DellSuggestionMetadata -Family InstallShield -Nested ([pscustomobject]@{ InstallerType = 'msi' }) -Wrapper ([pscustomobject]@{ InstallerType = 'exe'; InstallShieldProjectType = 'Basic MSI' }) -Arguments '/s /v "/qn TRANSFORMS=\"custom transform.mst\""'
+  It 'does not parse invalid embedded InstallShield v operands into the preferred defaults' -ForEach @(
+    @{ Arguments = '/s /v' }
+    @{ Arguments = '/s /v /qn' }
+    @{ Arguments = '/s /v "/qn TRANSFORMS=\"custom transform.mst\""' }
+  ) {
+    $Metadata = New-DellSuggestionMetadata -Family InstallShield -Nested ([pscustomobject]@{ InstallerType = 'msi' }) -Wrapper ([pscustomobject]@{ InstallerType = 'exe'; InstallShieldProjectType = 'Basic MSI' }) -Arguments $Arguments
     InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Metadata } {
       $Fields = (Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })).ManifestFields
-      $Fields.InstallerSwitches.Silent | Should -Be '/s'
-      $Fields.InstallerSwitches.Log | Should -Be '/l="<LOGPATH>"'
+      $Fields.InstallerSwitches.Silent | Should -Be '/passthrough /S /V/quiet /V/norestart'
+      $Fields.InstallerSwitches.Contains('Custom') | Should -BeFalse
     }
   }
 
-  It 'keeps the embedded command for incomplete, equal, interactive-only or indirectly selected nested routes' -ForEach @(
+  It 'keeps the embedded command for incomplete, interactive-only or indirectly selected nested routes' -ForEach @(
     @{ Route = 'Missing' }
     @{ Route = 'Unknown' }
-    @{ Route = 'Same' }
     @{ Route = 'Interactive' }
     @{ Route = 'SFX' }
   ) {
@@ -535,6 +660,41 @@ Describe 'Dell preferred WinGet command route' {
       $Fields = (Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })).ManifestFields
       $Fields.InstallerSwitches.Silent | Should -Be '/s'
       $Fields.InstallerSwitches.Log | Should -Be '/l="<LOGPATH>"'
+    }
+  }
+
+  It 'prefers family defaults even when the embedded command already matches them' {
+    $Metadata = New-DellSuggestionMetadata -Family Squirrel -Nested ([pscustomobject]@{ InstallerType = 'exe' }) -Arguments '--silent'
+    InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Metadata } {
+      $Result = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })
+      $Result.ManifestFields.InstallerSwitches.Silent | Should -Be '/passthrough --silent'
+      $Result.ManifestVariants[0].Evidence.VendorArguments | Should -Be '--silent'
+    }
+  }
+
+  It 'never carries embedded MSI UI tokens into family-default commands' -ForEach @(
+    @{ Family = 'MSI'; Type = 'msi'; Arguments = '/qn+ ALLUSERS=1' }
+    @{ Family = 'MSI'; Type = 'wix'; Arguments = '/qb- REINSTALL=all' }
+    @{ Family = 'Advanced Installer'; Type = 'exe'; Arguments = '/exenoui /qn ALLUSERS=1' }
+  ) {
+    $Metadata = New-DellSuggestionMetadata -Family $Family -Nested ([pscustomobject]@{ InstallerType = $Type }) -Arguments $Arguments
+    InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Metadata; Arguments = $Arguments } {
+      $Result = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })
+      $Result.ManifestFields.InstallerSwitches.Contains('Custom') | Should -BeFalse
+      $Result.ManifestFields.InstallerSwitches.Silent | Should -Match '/quiet /norestart$'
+      $Result.ManifestFields.InstallerSwitches.SilentWithProgress | Should -Match '/passive /norestart$'
+      $Result.ManifestVariants[0].Evidence.VendorArguments | Should -BeExactly $Arguments
+    }
+  }
+
+  It 'does not invent an unattended embedded alternative when MUP has none' {
+    $Metadata = New-DellSuggestionMetadata -Family MSI -Nested ([pscustomobject]@{ InstallerType = 'msi' }) -Arguments '/qn <VALUE>'
+    $Metadata.InstallerSwitches.Clear()
+    $Metadata.InstallModes = @('interactive')
+    InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Metadata } {
+      $Result = Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })
+      $Result.ManifestFields.InstallerSwitches.Silent | Should -Be '/passthrough /quiet /norestart'
+      $Result.ManifestVariants.Count | Should -Be 0
     }
   }
 
@@ -623,6 +783,13 @@ Describe 'Dell real media regressions' -Tag Integration {
     $Info.ExecutionChain.Count | Should -Be 1
     $Info.ExecutionChain[0].SelectedPayload | Should -Be 'WDTAppSetUp.exe'
     $Info.ExecutionChain[0].Arguments | Should -Be '/s'
+    InModuleScope WinGetAnalysis -Parameters @{ Metadata = $Info } {
+      $Fields = (Get-WinGetParserResultSuggestion -Result ([pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata })).ManifestFields
+      $Fields.InstallerSwitches.Silent | Should -Be '/s'
+      $Fields.InstallerSwitches.SilentWithProgress | Should -Be '/s'
+      $Fields.InstallerSwitches.Log | Should -Be '/l="<LOGPATH>"'
+      $Fields.InstallerSwitches.Values -join ' ' | Should -Not -Match '/passthrough'
+    }
   }
 
   It 'uses the ARM64 Optimizer suite identity instead of any of its nested MSI identities' {
@@ -652,6 +819,11 @@ Describe 'Dell real media regressions' -Tag Integration {
     $Fields.InstallerSwitches.Silent | Should -Match '^/passthrough /S /V/quiet'
     $Fields.ExpectedReturnCodes.InstallerReturnCode | Should -Contain 2
     $Fields.ExpectedReturnCodes.InstallerReturnCode | Should -Not -Contain 3010
+    $Fields.InstallerSwitches.Contains('Custom') | Should -BeFalse
+    $Alternative = @($Analysis.SuggestedManifestVariants | Where-Object Name -EQ EmbeddedMup)[0]
+    $Alternative.ManifestFields.InstallerSwitches.Silent | Should -Be '/s'
+    $Alternative.Evidence.VendorArguments | Should -BeExactly $Result.Result.Metadata.CommandBehavior.DefaultVendorArguments
+    $Result.Result.SuggestedManifestVariants[0].Name | Should -Be 'EmbeddedMup'
     InModuleScope WinGetAnalysis -Parameters @{ Fields = $Fields } {
       $Schema = Get-WinGetManifestSchema -ManifestType installer -ManifestVersion '1.12.0'
       $Entry = Merge-WinGetManifestDictionary -Base ([ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/setup.exe'; InstallerSha256 = 'A' * 64 }) -Override (ConvertTo-WinGetSuggestedManifestFieldSet -InputObject $Fields)

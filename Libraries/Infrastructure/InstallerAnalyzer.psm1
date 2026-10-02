@@ -612,9 +612,12 @@ function Get-InstallerStructuralExeFamilyCandidate {
   <#
   .SYNOPSIS
     Detect installer families from bounded structural signatures before invoking parsers
+  .PARAMETER ParserContexts
+    Optional caller-owned dictionary for validated container contexts. The
+    caller releases their ArchiveContext after parsing, including failures.
   #>
   [OutputType([pscustomobject[]])]
-  param ([Parameter(Mandatory)][IO.FileInfo]$File)
+  param ([Parameter(Mandatory)][IO.FileInfo]$File, [Collections.IDictionary]$ParserContexts)
 
   $Seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $Layout = Get-PELayout -Path $File.FullName -ErrorAction SilentlyContinue
@@ -660,7 +663,14 @@ function Get-InstallerStructuralExeFamilyCandidate {
     [pscustomobject]@{ Family = 'dotNetInstaller'; Confidence = 'high'; MatchedMarkers = @('CUSTOM/RES_CONFIGURATION + configurations XML root') }
   }
 
-  if ((Test-DellUpdatePackage -Path $File.FullName) -and $Seen.Add('Dell Update Package')) {
+  $DellDetected = if ($null -ne $ParserContexts) {
+    # Keep the complete validated container alive through the parser call. No
+    # stream or mutable catalog is added to public family evidence or JSON.
+    $DellContext = Test-DellUpdatePackage -Path $File.FullName -PassThru
+    if ($DellContext) { $ParserContexts['Dell Update Package'] = $DellContext }
+    $null -ne $DellContext
+  } else { Test-DellUpdatePackage -Path $File.FullName }
+  if ($DellDetected -and $Seen.Add('Dell Update Package')) {
     [pscustomobject]@{ Family = 'Dell Update Package'; Confidence = 'high'; MatchedMarkers = @('DUPFramework PE identity + bounded ZIP/7z overlay + MUPDefinition') }
   }
 
@@ -676,6 +686,11 @@ function Get-InstallerStructuralExeFamilyCandidate {
   # Information from the nested database.
   if ((Test-AKInstaller -Path $File.FullName) -and $Seen.Add('AKInstaller')) {
     [pscustomobject]@{ Family = 'AKInstaller'; Confidence = 'high'; MatchedMarkers = @('AKInstaller classic/legacy/modern footer and catalog or AKInstallerMSI nested database identity') }
+  }
+
+  # TigerSetup has a CRC-protected footer and hashed, schema-aware metadata.
+  if ((Test-TigerSetupInstaller -Path $File.FullName) -and $Seen.Add('TigerSetup')) {
+    [pscustomobject]@{ Family = 'TigerSetup'; Confidence = 'high'; MatchedMarkers = @('PE + TigerSetup generation-specific footer/layout + hashed metadata') }
   }
 
   # Kachina is a native Tauri executable with a validated JSON-bearing TLV
@@ -1417,6 +1432,8 @@ function Invoke-InstallerExeParser {
     Also extract embedded MSI metadata for Advanced Installer when available
   .PARAMETER CommandLine
     Virtual command line for NSIS simulation and Dell vendor argument routing.
+  .PARAMETER ParserContexts
+    Optional validated contexts owned by the enclosing analysis operation.
   #>
   [OutputType([pscustomobject[]])]
   param (
@@ -1429,7 +1446,8 @@ function Invoke-InstallerExeParser {
     [Parameter(HelpMessage = 'Bounded generic-family candidates collected by the analyzer')]
     [object[]]$FamilyCandidates = @(),
 
-    [AllowEmptyString()][string]$CommandLine = ''
+    [AllowEmptyString()][string]$CommandLine = '',
+    [Collections.IDictionary]$ParserContexts
   )
 
   $AnalyzerInstallerPath = $InstallerPath
@@ -1498,7 +1516,9 @@ function Invoke-InstallerExeParser {
   $StructuredParserResults = @(
     if (Test-InstallerCandidateFamily -Family 'Dell Update Package') {
       Invoke-InstallerDetector -Name 'Dell Update Package' -ScriptBlock {
-        $Info = Get-DellUpdatePackageInfo -Path $AnalyzerInstallerPath -CommandLine $CommandLine
+        $DellArguments = @{ Path = $AnalyzerInstallerPath; CommandLine = $CommandLine }
+        if ($null -ne $ParserContexts -and $ParserContexts.Contains('Dell Update Package')) { $DellArguments.AnalysisContext = $ParserContexts['Dell Update Package'] }
+        $Info = Get-DellUpdatePackageInfo @DellArguments
         ConvertTo-GenericExeParserEvidence -Family 'Dell Update Package' -Info $Info
       }
     }
@@ -1522,6 +1542,13 @@ function Invoke-InstallerExeParser {
         $Evidence | Add-Member -NotePropertyName PayloadArchitectures -NotePropertyValue @($Info.PayloadArchitectures) -Force
         $Evidence | Add-Member -NotePropertyName DependencyInfo -NotePropertyValue $Info.DependencyInfo -Force
         $Evidence
+      }
+    }
+
+    if (Test-InstallerCandidateFamily -Family 'TigerSetup') {
+      Invoke-InstallerDetector -Name 'TigerSetup' -ScriptBlock {
+        $Info = Get-TigerSetupInfo -Path $AnalyzerInstallerPath -CommandLine $CommandLine
+        ConvertTo-GenericExeParserEvidence -Family 'TigerSetup' -Info $Info
       }
     }
 
@@ -2129,41 +2156,46 @@ function Invoke-InstallerAnalysisCore {
         }
       }
       'PE' {
-        $ScanText = Read-InstallerStringWindows -File $Installer -Budget $ScanBytes
-        $StructuralCandidates = @(Get-InstallerStructuralExeFamilyCandidate -File $Installer | ForEach-Object {
-            # These structures identify the outer container by format. The raw
-            # NSIS signature and InstallBuilder project marker remain routes until
-            # their parsers validate surrounding offsets and records.
-            $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Dell Update Package', 'AKInstaller', 'Astrum InstallWizard', 'Kachina', 'MicaSetup', 'CreateInstall', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
-            ConvertTo-InstallerFamilyEvidence -Candidate $_ -EvidenceKind Structural -IsOuterContainer:$OuterContainer
-          })
-        $HeuristicCandidates = @(Get-InstallerGenericExeFamilyCandidate -File $Installer -Budget $ScanBytes -Text $ScanText | ForEach-Object {
-            ConvertTo-InstallerFamilyEvidence -Candidate $_ -EvidenceKind Heuristic
-          })
-        $AllCandidates = @(
-          $StructuralCandidates
-          $HeuristicCandidates
-        )
-        $FamilyCandidates = @($AllCandidates | Group-Object Family | ForEach-Object { $_.Group | Sort-Object { if ($_.Confidence -eq 'high') { 0 } elseif ($_.Confidence -eq 'medium') { 1 } else { 2 } } | Select-Object -First 1 })
-        $ParserRuns = @(Invoke-InstallerExeParser -InstallerPath $Installer.FullName -ExtractEmbeddedMsi:$ExtractEmbeddedMsi.IsPresent -FamilyCandidates $FamilyCandidates -CommandLine $CommandLine)
-        $Analysis.ParserResults += $ParserRuns
-        $ResolvedFamilies = Resolve-InstallerFamilyEvidence -Candidates $FamilyCandidates -ParserResults $ParserRuns
-        $Analysis.DetectedFamilies += @($ResolvedFamilies.DetectedFamilies)
-        $Analysis.RoutingHints += @($ResolvedFamilies.RoutingHints)
-        $Analysis.RejectedCandidates += @($ResolvedFamilies.RejectedCandidates)
-        $Analysis.FamilyCandidates += @($ResolvedFamilies.DetectedFamilies)
-        $Analysis.Diagnostics += @(Get-InstallerWrapperDiagnostic -File $Installer -Budget $ScanBytes -ParserRuns $ParserRuns -Text $ScanText)
-        if (-not ($ParserRuns.Success -contains $true)) {
-          $Analysis.PortableEvidence = try { Get-InstallerPortableEvidence -Path $Installer.FullName } catch { $null }
+        $ParserContexts = @{}
+        try {
+          $ScanText = Read-InstallerStringWindows -File $Installer -Budget $ScanBytes
+          $StructuralCandidates = @(Get-InstallerStructuralExeFamilyCandidate -File $Installer -ParserContexts $ParserContexts | ForEach-Object {
+              # These structures identify the outer container by format. The raw
+              # NSIS signature and InstallBuilder project marker remain routes until
+              # their parsers validate surrounding offsets and records.
+              $OuterContainer = $_.Family -cin @('Burn', 'Inno Setup', 'Dell Update Package', 'AKInstaller', 'Astrum InstallWizard', 'TigerSetup', 'Kachina', 'MicaSetup', 'CreateInstall', 'Zero Install', 'Qt Installer Framework', 'Advanced Installer')
+              ConvertTo-InstallerFamilyEvidence -Candidate $_ -EvidenceKind Structural -IsOuterContainer:$OuterContainer
+            })
+          $HeuristicCandidates = @(Get-InstallerGenericExeFamilyCandidate -File $Installer -Budget $ScanBytes -Text $ScanText | ForEach-Object {
+              ConvertTo-InstallerFamilyEvidence -Candidate $_ -EvidenceKind Heuristic
+            })
+          $AllCandidates = @(
+            $StructuralCandidates
+            $HeuristicCandidates
+          )
+          $FamilyCandidates = @($AllCandidates | Group-Object Family | ForEach-Object { $_.Group | Sort-Object { if ($_.Confidence -eq 'high') { 0 } elseif ($_.Confidence -eq 'medium') { 1 } else { 2 } } | Select-Object -First 1 })
+          $ParserRuns = @(Invoke-InstallerExeParser -InstallerPath $Installer.FullName -ExtractEmbeddedMsi:$ExtractEmbeddedMsi.IsPresent -FamilyCandidates $FamilyCandidates -CommandLine $CommandLine -ParserContexts $ParserContexts)
+          $Analysis.ParserResults += $ParserRuns
+          $ResolvedFamilies = Resolve-InstallerFamilyEvidence -Candidates $FamilyCandidates -ParserResults $ParserRuns
+          $Analysis.DetectedFamilies += @($ResolvedFamilies.DetectedFamilies)
+          $Analysis.RoutingHints += @($ResolvedFamilies.RoutingHints)
+          $Analysis.RejectedCandidates += @($ResolvedFamilies.RejectedCandidates)
+          $Analysis.FamilyCandidates += @($ResolvedFamilies.DetectedFamilies)
+          $Analysis.Diagnostics += @(Get-InstallerWrapperDiagnostic -File $Installer -Budget $ScanBytes -ParserRuns $ParserRuns -Text $ScanText)
+          if (-not ($ParserRuns.Success -contains $true)) {
+            $Analysis.PortableEvidence = try { Get-InstallerPortableEvidence -Path $Installer.FullName } catch { $null }
+          }
+          if ($Analysis.PortableEvidence -and $Analysis.PortableEvidence.RecommendedPackageDependencyIds.Count -gt 0) {
+            $Analysis.SuggestedNextSteps += "Portable evidence: static dependency evidence maps to package dependencies: $($Analysis.PortableEvidence.RecommendedPackageDependencyIds -join ', ')."
+          }
+          if (@($Analysis.Diagnostics | Where-Object Id -Like 'InstallerWrapper.*').Count -gt 0) {
+            $Analysis.SuggestedNextSteps += 'Wrapper warning: the NSIS/Inno outer installer appears to contain nested installer payloads. Inspect the nested payload or use VM ARP-delta validation before setting AppsAndFeaturesEntries.'
+          }
+          $Analysis.SuggestedNextSteps += 'Use high-confidence parser results first. Use heuristic candidates only to choose which family-specific static or VM validation to run next.'
+          $Analysis.SuggestedNextSteps += 'For generic EXE families, confirm silent switches and visible ARP entries in a VM unless publisher docs or existing manifest evidence is exact.'
+        } finally {
+          foreach ($Context in $ParserContexts.Values) { Close-InstallerArchiveRange -Context $Context.ArchiveContext }
         }
-        if ($Analysis.PortableEvidence -and $Analysis.PortableEvidence.RecommendedPackageDependencyIds.Count -gt 0) {
-          $Analysis.SuggestedNextSteps += "Portable evidence: static dependency evidence maps to package dependencies: $($Analysis.PortableEvidence.RecommendedPackageDependencyIds -join ', ')."
-        }
-        if (@($Analysis.Diagnostics | Where-Object Id -Like 'InstallerWrapper.*').Count -gt 0) {
-          $Analysis.SuggestedNextSteps += 'Wrapper warning: the NSIS/Inno outer installer appears to contain nested installer payloads. Inspect the nested payload or use VM ARP-delta validation before setting AppsAndFeaturesEntries.'
-        }
-        $Analysis.SuggestedNextSteps += 'Use high-confidence parser results first. Use heuristic candidates only to choose which family-specific static or VM validation to run next.'
-        $Analysis.SuggestedNextSteps += 'For generic EXE families, confirm silent switches and visible ARP entries in a VM unless publisher docs or existing manifest evidence is exact.'
       }
       'AppInstaller' {
         $Analysis.SuggestedNextSteps += '.appinstaller is not accepted by winget-pkgs manifests. Parse its XML and analyze the referenced MSIX/AppX package instead.'

@@ -270,13 +270,20 @@ function Export-InstallerArchiveEntry {
   <#
   .SYNOPSIS
     Export one bounded archive entry to a validated destination
+  .PARAMETER MaximumBytes
+    Remaining output budget in bytes. Zero permits only a proven empty entry;
+    an extra stream read still rejects data beyond its declared length.
+  .PARAMETER EntryStream
+    Optional already-open decompressed stream. The caller retains ownership;
+    without this parameter the function opens and disposes the entry stream.
   #>
   [OutputType([System.IO.FileInfo])]
   param (
     [Parameter(Mandatory)]$Entry,
     [Parameter(Mandatory)][string]$DestinationPath,
-    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes,
-    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename'
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$MaximumBytes,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename',
+    [IO.Stream]$EntryStream
   )
 
   $Length = if ($Entry.PSObject.Properties.Name -contains 'Length') { [long]$Entry.Length } else { [long]$Entry.Size }
@@ -288,15 +295,18 @@ function Export-InstallerArchiveEntry {
   $ResolvedDestinationPath = $Target.Path
   $Parent = [IO.Path]::GetDirectoryName($ResolvedDestinationPath)
   if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
-  $EntryStream = Open-InstallerArchiveEntry -Entry $Entry
-  $Output = [IO.File]::Open($ResolvedDestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $OwnsEntryStream = -not $EntryStream
+  if ($OwnsEntryStream) { $EntryStream = Open-InstallerArchiveEntry -Entry $Entry }
+  $Output = $null
   try {
+    $Output = [IO.File]::Open($ResolvedDestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
     $CopyArguments = @{ Source = $EntryStream; Destination = $Output; MaximumBytes = $MaximumBytes }
     if ($Length -ge 0) { $CopyArguments.ExpectedBytes = $Length }
     $null = Copy-BoundedStream @CopyArguments
+    if ($Length -ge 0 -and $EntryStream.ReadByte() -ge 0) { throw "The archive entry exceeds its declared $Length-byte length." }
   } finally {
-    $Output.Dispose()
-    $EntryStream.Dispose()
+    if ($Output) { $Output.Dispose() }
+    if ($OwnsEntryStream) { $EntryStream.Dispose() }
   }
   return Get-Item -LiteralPath $ResolvedDestinationPath
 }
@@ -305,6 +315,11 @@ function Export-InstallerArchiveSelection {
   <#
   .SYNOPSIS
     Export selected entries with aggregate limits and safe path handling
+  .DESCRIPTION
+    Full 7z extraction over a borrowed stream shares one sequential decoder
+    across each solid block. Selective extraction, file-owned archives and
+    other formats retain direct entry access. The caller owns the archive;
+    this function disposes only its reader and streams.
   #>
   param (
     [Parameter(Mandatory)]$Archive,
@@ -319,18 +334,48 @@ function Export-InstallerArchiveSelection {
   $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $ExpandedBytes = 0L
   $EntryCount = 0
-  foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
-    if ([string]::IsNullOrWhiteSpace($Entry.FullName)) { continue }
-    if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
-    if (++$EntryCount -gt $MaximumEntries) { throw "The archive selection exceeds the $MaximumEntries-entry limit." }
-    if (-not [string]::IsNullOrWhiteSpace($Entry.LinkTarget)) { throw "Archive links are not extracted: $($Entry.FullName)" }
-    $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.FullName -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
-    if (-not $Target.ShouldWrite) { continue }
-    $Remaining = $MaximumExpandedBytes - $ExpandedBytes
-    if ($Remaining -le 0 -or $Entry.Length -gt $Remaining) { throw "The archive selection exceeds the $MaximumExpandedBytes-byte output limit." }
-    $File = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $Target.Path -MaximumBytes $Remaining -CollisionAction Overwrite
-    $ExpandedBytes += $File.Length
-    $Files.Add($File)
+  $Reader = $null
+  $Enumerator = $null
+  try {
+    # Opening each solid 7z entry separately replays its block from the start.
+    # SharpCompress's reader retains the block decoder and skips directories or
+    # collision-skipped entries while advancing through the physical catalog.
+    if ($Name -ceq '*' -and $Archive.Type -eq [SharpCompress.Common.ArchiveType]::SevenZip) {
+      # The reader disposes its archive volume. Only use it when the archive's
+      # existing ownership policy protects that stream; file-owned archives
+      # must remain reusable. ReaderOptions is protected in bundled SharpCompress.
+      $OptionsProperty = $Archive.GetType().GetProperty('ReaderOptions', [Reflection.BindingFlags]'Instance,NonPublic')
+      if ($OptionsProperty -and $OptionsProperty.GetValue($Archive).LeaveStreamOpen) { $Reader = $Archive.ExtractAllEntries() }
+    }
+    if (-not $Reader) { $Enumerator = $Archive.Entries.GetEnumerator() }
+    while ($Reader ? $Reader.MoveToNextEntry() : $Enumerator.MoveNext()) {
+      $Entry = $Reader ? $Reader.Entry : $Enumerator.Current
+      if ($Entry.IsDirectory -or [string]::IsNullOrWhiteSpace($Entry.Key)) { continue }
+      if (-not (Test-ExtractionPattern -Path $Entry.Key -Pattern $Name)) { continue }
+      if (++$EntryCount -gt $MaximumEntries) { throw "The archive selection exceeds the $MaximumEntries-entry limit." }
+      if ($Entry.PSObject.Properties.Name -contains 'LinkTarget' -and -not [string]::IsNullOrWhiteSpace($Entry.LinkTarget)) { throw "Archive links are not extracted: $($Entry.Key)" }
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Key -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if (-not $Target.ShouldWrite) {
+        # Explicitly advance via the reader stream: SharpCompress's generic
+        # skip path queries packed-size metadata that empty 7z files lack.
+        if ($Reader) { $SkippedStream = $Reader.OpenEntryStream(); $SkippedStream.Dispose() }
+        continue
+      }
+      $Remaining = $MaximumExpandedBytes - $ExpandedBytes
+      # Empty entries consume no budget; their stream is still checked against
+      # the declared size so a forged zero length cannot bypass this limit.
+      if ($Remaining -lt 0 -or $Entry.Size -gt $Remaining) { throw "The archive selection exceeds the $MaximumExpandedBytes-byte output limit." }
+      $EntryStream = $null
+      try {
+        if ($Reader) { $EntryStream = $Reader.OpenEntryStream() }
+        $File = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $Target.Path -MaximumBytes $Remaining -CollisionAction Overwrite -EntryStream $EntryStream
+      } finally { if ($EntryStream) { $EntryStream.Dispose() } }
+      $ExpandedBytes += $File.Length
+      $Files.Add($File)
+    }
+  } finally {
+    if ($Reader) { $Reader.Dispose() }
+    if ($Enumerator -is [IDisposable]) { $Enumerator.Dispose() }
   }
   [pscustomobject]@{ Files = @($Files); ExpandedBytes = $ExpandedBytes; EntryCount = $EntryCount }
 }
