@@ -204,7 +204,7 @@ function Resolve-InstallShieldRelease {
     [object[]]@($MappedEvidence | Where-Object { $CommonIdentityKeys -contains "$($_.ProductVersion)|$($_.Year)" })
   } else { $MappedEvidence }
 
-  # A year or major is deliberately broad evidence. Once a structured schema or
+  # A year or major is broad evidence. Once a structured schema or
   # trusted runtime names an exact point release, specificity refines compatible
   # broad evidence even when the broad suite namespace has a higher source rank.
   $HighestSpecificity = ($EligibleEvidence | Measure-Object -Property Specificity -Maximum).Maximum

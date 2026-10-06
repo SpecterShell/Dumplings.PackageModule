@@ -149,7 +149,7 @@ namespace Dumplings.InstallerInfrastructure
                     DirectoryEntry item = directories[i];
                     uint address = unchecked((uint)item.RelativeVirtualAddress);
                     uint size = unchecked((uint)item.Size);
-                    // The certificate directory uses a file offset; all other directories use RVAs.
+                    // The certificate directory uses a file offset. Other directories use RVAs.
                     long offset = address == 0 ? -1 : (i == 4 ? (long)address : RvaToOffset(address, layout.Sections));
                     layout.DataDirectories[DirectoryNames[i]] = new PeDirectoryData {
                         Index = i, Name = DirectoryNames[i], Rva = address, Size = size, Offset = offset

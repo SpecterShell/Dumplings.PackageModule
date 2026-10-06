@@ -5,7 +5,7 @@ using module Microsoft.PowerShell.Utility
 # SPDX-License-Identifier: Apache-2.0
 # This module contains a checked-in ProxyCommand generated from
 # Microsoft.PowerShell.Utility\Invoke-RestMethod. The generated parameter block
-# is intentionally retained so GitHub requests support the same transport,
+# is retained so GitHub requests support the same transport,
 # timeout, proxy, certificate, session, output, and pipeline controls as the
 # underlying PowerShell cmdlet. Its basis is
 # [System.Management.Automation.ProxyCommand]::Create(
@@ -40,7 +40,7 @@ function Initialize-GitHubApiRequest {
   $null = $BoundParameters.Remove('AllowNonGitHubUri')
 
   # A bearer token must only be attached to the exact GitHub API origins. Host
-  # suffix checks are deliberately avoided because names such as
+  # suffix checks are avoided because names such as
   # api.github.com.example.org are controlled by an unrelated site. Preserving
   # authorization across redirects is likewise opt-in because the destination
   # cannot be validated before Invoke-RestMethod follows the response.

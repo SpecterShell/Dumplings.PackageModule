@@ -27,6 +27,9 @@ function Get-InnoInfo {
     Include bounded textual IFPS disassembly. This implies Pascal Script analysis.
   .PARAMETER MaximumDisassemblyCharacters
     Maximum characters retained from optional disassembly.
+  .PARAMETER Architecture
+    Architecture of the installer entry being analyzed. Suppress the required
+    64-bit constant diagnostic for x64 entries while retaining compatibility evidence.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -34,17 +37,22 @@ function Get-InnoInfo {
     [string]$Path,
     [switch]$IncludePascalScriptAnalysis,
     [switch]$IncludeDisassembly,
-    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = 4194304
+    [ValidateRange(1024, 16777216)][int]$MaximumDisassemblyCharacters = 4194304,
+    [Parameter(HelpMessage = 'Architecture of the installer entry used to avoid redundant compatibility diagnostics')]
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
   )
 
   process {
     $InstallerPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
-    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.GetInfo' -Argument @{
+    $Arguments = @{
       Path                         = $InstallerPath
       IncludePascalScriptAnalysis  = [bool]$IncludePascalScriptAnalysis
       IncludeDisassembly           = [bool]$IncludeDisassembly
       MaximumDisassemblyCharacters = $MaximumDisassemblyCharacters
     }
+    if ($PSBoundParameters.ContainsKey('Architecture')) { $Arguments.Architecture = $Architecture }
+    $Info = Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'Inno.GetInfo' -Argument $Arguments
     return $Info
   }
 }

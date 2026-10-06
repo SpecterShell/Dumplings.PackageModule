@@ -2,7 +2,7 @@
 
 `Assets/Assemblies/SabreTools.IO.dll` and `Assets/Assemblies/SabreTools.Serialization.dll` are pinned MIT-licensed dependencies used by `Libraries/Installers/Wise.psm1`.
 
-The Serialization asset was built from SabreTools.Serialization commit `3798dbcb479f42cd607e0ac8a01ed06ba892fbe3`. The local patch removes two unconditional `Console.WriteLine` fallback messages from `SabreTools.Serialization.Readers.WiseScript`; it does not change parsing decisions or public types. Apply `SabreTools.Serialization-no-console.patch` at the repository root with `git apply --ignore-space-change <path-to-patch>`, then build the `SabreTools.Serialization` project for `net8.0`.
+The Serialization asset was built from SabreTools.Serialization commit `3798dbcb479f42cd607e0ac8a01ed06ba892fbe3`. The local patch removes two unconditional `Console.WriteLine` fallback messages from `SabreTools.Serialization.Readers.WiseScript`. It does not change parsing decisions or public types. Apply `SabreTools.Serialization-no-console.patch` at the repository root with `git apply --ignore-space-change <path-to-patch>`, then build the `SabreTools.Serialization` project for `net8.0`.
 
 Expected asset hashes:
 

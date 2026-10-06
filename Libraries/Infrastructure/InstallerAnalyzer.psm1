@@ -627,7 +627,7 @@ function Get-InstallerStructuralExeFamilyCandidate {
 
   # InstallShield 3 distributed a reusable setup32 engine without an embedded
   # package overlay. Exact version-resource identity is structural runtime
-  # evidence and is intentionally narrower than an InstallShield text marker.
+  # evidence and is narrower than an InstallShield text marker.
   $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
   if ($VersionInfo.ProductName -ieq 'InstallShield' -and
     $VersionInfo.FileDescription -ieq 'InstallShield Engine EXE' -and
@@ -705,7 +705,7 @@ function Get-InstallerStructuralExeFamilyCandidate {
     [pscustomobject]@{ Family = 'MicaSetup'; Confidence = 'high'; MatchedMarkers = @('CLR MicaSetup configuration host + WPF resources/setups/publish.7z') }
   }
 
-  # CreateInstall projects may deliberately contain no GEA payload and may omit all product-name
+  # CreateInstall projects may contain no GEA payload and may omit all product-name
   # markers. The compiled GE4 program and referenced MAINVAR table are the authoritative structure,
   # so run the bounded Boolean probe rather than relying on the heuristic text scan.
   if ((Test-CreateInstall -Path $File.FullName) -and $Seen.Add('CreateInstall')) {

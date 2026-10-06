@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Internal CreateInstall implementation. See CreateInstall.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# CreateInstall Gentee layer. Internal modules are imported locally; public commands stay in the facade.
+# CreateInstall gentee implementation, imported locally by the public facade.
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 

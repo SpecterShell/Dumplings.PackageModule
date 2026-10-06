@@ -216,7 +216,7 @@ function Split-MessageText {
       }
 
       # Reserve room for closing either a fenced or inline code construct. The reserve is
-      # intentionally applied to all Markdown chunks because the state is known only after slicing.
+      # applied to all Markdown chunks because the state is known only after slicing.
       $ClosingReserve = $MarkdownAware ? 4 : 0
       $BodyBudget = $MaximumLength - (Get-MessageTextLength -Text $Prefix -LengthMode $LengthMode) - $ClosingReserve
       if ($BodyBudget -lt 1) { throw "The maximum message length ${MaximumLength} is too small for Markdown continuation markers" }

@@ -76,6 +76,15 @@ Describe 'Inno bridge' {
     $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
     $Info.UnsupportedArchitectures | Should -Be @('x86')
     $Info.RequiredArchitectureConstants | Should -Be @('commonpf64')
+    @($Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitConstant') | Should -HaveCount 1
+
+    $X64Info = Get-InnoInfo -Path $Fixture -Architecture x64
+    @($X64Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitConstant') | Should -HaveCount 0
+    $X64Info.SupportedArchitectures | Should -Be $Info.SupportedArchitectures
+    $X64Info.UnsupportedArchitectures | Should -Be $Info.UnsupportedArchitectures
+    $X64Info.RequiredArchitectureConstants | Should -Be $Info.RequiredArchitectureConstants
+    $X64Info.ArchitectureRequirementEvidence[0].Field | Should -Be 'DefaultDirName'
+
     Read-UnsupportedArchitecturesFromInno -Path $Fixture | Should -Be @('x86')
     Test-InnoUnsupportedArchitecture -Path $Fixture -Architecture x86 | Should -BeTrue
     Test-InnoUnsupportedArchitecture -Path $Fixture -Architecture x64 | Should -BeFalse

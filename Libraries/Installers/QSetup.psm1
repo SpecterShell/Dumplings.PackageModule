@@ -1231,7 +1231,7 @@ function Get-QSetupUninstallerInfo {
       $ComposerBuild = Get-QSetupDirectiveTextValue -Directive $Directive -Name 'SET_COMPOSER_BUILD'
       $ComposerMajor = 0
       if ([int]::TryParse(($ComposerBuild -split '\.')[0], [ref]$ComposerMajor)) {
-        # Generations 8 through 11 intentionally have no fallback until a
+        # Generations 8 through 11 have no fallback until a
         # blank-name fixture proves which runtime formula they use.
         $Route = @($Script:QSetupFormatCatalog.UninstallerRoutes | Where-Object {
             (-not $_.ContainsKey('MinimumMajor') -or $ComposerMajor -ge $_.MinimumMajor) -and
@@ -2462,7 +2462,7 @@ function Expand-QSetupInstaller {
     }
     if ($RawRecords) {
       # Raw mode exports the physical records of the requested media layer. It
-      # deliberately does not follow an embedded setup wrapper, whose records
+      # does not follow an embedded setup wrapper, whose records
       # are a separate physical container selected by normal installed mode.
       $MainLayout = Get-QSetupLayout -Path $ResolvedPath
       $PhysicalContext = Get-QSetupPhysicalMediaContext -InstallerPath $ResolvedPath -MainLayout $MainLayout -CompanionFile $CompanionInventory

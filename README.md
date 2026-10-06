@@ -1,8 +1,6 @@
 # Dumplings.PackageModule
 
-Dumplings.PackageModule is the Apache-2.0-licensed package automation and WinGet toolkit used by [Dumplings](https://github.com/SpecterShell/Dumplings). It supplies task models, release and download helpers, static installer analysis, manifest modeling and validation, notification transports, and guarded submission workflows.
-
-The module is designed for PowerShell 7.4 or later on Windows.
+Dumplings.PackageModule provides package automation and WinGet tooling for [Dumplings](https://github.com/SpecterShell/Dumplings). It runs on Windows with PowerShell 7.4 or later and is licensed under Apache-2.0, with the file-level exceptions listed below.
 
 ## Loading
 
@@ -12,9 +10,9 @@ Core loads PackageModule through `Index.ps1` in every task worker. Standalone ca
 Import-Module .\Modules\PackageModule\PackageModule.psd1 -Force
 ```
 
-`PackageModule.psd1` is the supported entry point. `PackageModule.psm1` imports focused implementation modules in explicit dependency order; each command retains its implementation-module owner so PowerShell exposes one command with its native help and completion metadata. `Index.ps1` imports that manifest globally, then loads the task model classes for Core.
+`PackageModule.psd1` is the supported entry point. `PackageModule.psm1` imports focused implementation modules in explicit dependency order. Each command retains its implementation-module owner so PowerShell exposes one command with its native help and completion metadata. `Index.ps1` imports that manifest globally, then loads the task model classes for Core.
 
-Libraries are grouped by responsibility:
+Libraries are grouped by responsibility.
 
 - `Infrastructure` contains bounded binary, archive, PE, cabinet, filesystem, parser-bridge, installed-state, and provider-neutral installer-analysis mechanics.
 - `Installers` contains installer-family parsing and extraction. Thin executable wrappers use separate `DotNetInstaller`, `IExpress`, `SevenZipSfx`, and `WinRarSfx` modules backed by the shared `Bootstrapper` command resolver.
@@ -37,21 +35,19 @@ Functions that perform task execution, messaging, or submission expect the globa
 
 `SimpleTask` provides the same Core construction and skip behavior for scripts that do not need package state or WinGet submission.
 
-Use the [`author-dumplings-task` skill](../../.agents/skills/author-dumplings-task/SKILL.md)
-for the supported task layout, state contract, source patterns, provider tasks,
-and dry-run workflow.
+Use the [`author-dumplings-task` skill](../../.agents/skills/author-dumplings-task/SKILL.md) for task layout, state handling, source patterns, providers, and dry runs.
 
 Use the [`use-dumplings-functions` skill](../../.agents/skills/use-dumplings-functions/SKILL.md) for the curated networking, temporary-file, archive, content, feed, browser, HTML, and YAML helper contracts used by tasks and standalone analysis.
 
-Package submissions are claimed by effective WinGet identifier in process-wide shared storage. The first task owns the claim for the run; duplicate tasks skip submission rather than racing the same package.
+Package submissions are claimed by effective WinGet identifier in process-wide shared storage. The first task owns the claim for the run. Duplicate tasks skip submission, so they do not race the same package.
 
-`DumplingsTaskBase` owns common construction, invocation status and logging for `SimpleTask` and `PackageTask`. Package state comparison and submission remain in `PackageTask`. Markdown and Telegram notifications use one state walk with separate escaping and spacing. Identical state notifications are suppressed while the existing ticket remains usable; failed, cancelled or superseded tickets can be retried. Custom messages remain distinct.
+`DumplingsTaskBase` handles construction, invocation status, and logging for `SimpleTask` and `PackageTask`. `PackageTask` handles state comparison and submission. Markdown and Telegram notifications share one state traversal with format-specific escaping and spacing. An identical state notification is suppressed while its ticket remains usable. Failed, cancelled, or superseded tickets can be retried. Custom messages remain distinct.
 
-Normal imports reuse modules within a runspace. For development, dot-source `Index.ps1 -Reload` to reload the implementation modules explicitly. Direct imports use `Import-Module ./PackageModule.psd1 -Force -ArgumentList $true` for the same behavior. Commands keep their family module ownership; no forwarding proxies are generated.
+Normal imports reuse modules within a runspace. During development, reload them with `Index.ps1 -Reload` or `Import-Module ./PackageModule.psd1 -Force -ArgumentList $true`. Commands retain their implementation-module ownership.
 
 ### Versionless Installer Tracking
 
-`PackageTask.CheckInstallerUpdates(options)` handles per-installer ETag, Last-Modified, Content-Length, custom checksum-header, or SHA256 checks. It downloads candidates, confirms hashes, and calls the required `ReadVersion(Path, Installer)` callback. It prepares `CurrentState` without writing files, messaging, or submitting. `CompleteInstallerUpdates(result)` applies the decision once through the existing task enablement gates. Existing `Check()` behavior is unchanged.
+`PackageTask.CheckInstallerUpdates(options)` checks per-installer ETag, Last-Modified, Content-Length, custom checksum headers, or SHA256. It downloads candidates, verifies hashes, and calls the required `ReadVersion(Path, Installer)` callback. It prepares `CurrentState` without writing files, messaging, or submitting. `CompleteInstallerUpdates(result)` applies the decision once, respecting the task's enablement settings. `Check()` retains its existing behavior.
 
 ```powershell
 $this.CurrentState.Installer += [ordered]@{ InstallerUrl = 'https://example.com/setup.msi' }
@@ -65,49 +61,49 @@ if ($Result.NeedsMetadata) {
 $this.CompleteInstallerUpdates($Result)
 ```
 
-Unchanged validators avoid downloads. Rotated validators with identical SHA256 refresh tracking only, preserving package metadata. Newer releases and same-version rebuilds use normal submission safeguards; rollbacks are rejected unless explicitly allowed. All architectures must resolve consistent versions. `Hash` always downloads; `Force` also reruns version readers. Date and length checks trust the endpoint and can miss byte changes with unchanged headers.
+Unchanged validators avoid downloads. Changed validators with identical SHA256 refresh tracking only, preserving package metadata. New releases and same-version rebuilds use the normal submission safeguards. Rollbacks require explicit permission. All architectures must resolve to consistent versions. `Hash` always downloads, and `Force` also reruns version readers. Date and length checks can miss byte changes when the endpoint returns unchanged headers.
 
-State contains bounded, versioned `InstallerTracking` records, not HTTP responses, credentials, or temporary paths. Retained downloads and verified file identities feed manifest updating without a second hash pass; task disposal removes owned files only. `Installers` overrides provide stable keys and architecture-specific readers. Synchronous `Probe`/`Download` callbacks cover custom endpoints without introducing another task type or Core service.
+State stores bounded, versioned `InstallerTracking` records. It excludes HTTP responses, credentials, and temporary paths. Manifest updating reuses retained downloads and verified file identities without hashing again. Task disposal removes only owned files. `Installers` overrides provide stable keys and architecture-specific readers. Synchronous `Probe`/`Download` callbacks support custom endpoints.
 
 See the [versionless task reference](../../.agents/skills/author-dumplings-task/references/sources/versionless.md) for complete options, callback contracts, outcomes, legacy mappings, and migration examples.
 
-### Data API Migration
+### Shared data and operation ownership
 
-Use `Copy-Object` instead of `Copy-WinGetManifestValue`, and `Test-ObjectValueEqual` instead of `Test-WinGetManifestValueEqual`. Both live in `Libraries/Data/Conversion.psm1`; the duplicate schema-local implementations have also been removed. Copying preserves explicit nulls, nested empty arrays, ordered dictionaries, dates and scriptblocks without a JSON round trip. It is a bounded data copier, not a clone facility for arbitrary mutable .NET resources. Equality is case-sensitive, ignores dictionary key ordering and preserves array ordering.
+Use `Copy-Object` and `Test-ObjectValueEqual` from `Libraries/Data/Conversion.psm1`. They replace `Copy-WinGetManifestValue` and `Test-WinGetManifestValueEqual`. Copying preserves explicit nulls, nested empty arrays, ordered dictionaries, dates, and scriptblocks without a JSON round trip. It supports bounded data structures only and cannot clone arbitrary mutable .NET resources. Equality is case-sensitive, ignores dictionary key order, and preserves array order.
 
-Manifest updates own their downloads, hashes, extracted ZIP entries and parser results for one operation. Cache keys include file identity and all supplied parser options, including architecture, scope and command line. Reusing another installer's authored ARP fields by URL has been removed. Each entry applies cached parser facts to its own existing fields and diagnostic policy. Cleanup in `finally` removes operation-created files only; files supplied through `InstallerFiles` remain caller-owned. The internal metadata updater no longer accepts the obsolete `Installers` argument.
+Each manifest-update operation owns its downloads, hashes, extracted ZIP entries, and parser results. Cache keys include file identity and every supplied parser option, including architecture, scope, and command line. Each entry applies cached parser facts to its own authored fields and diagnostic policy. Entries never share authored ARP values solely by URL. Cleanup in `finally` removes only operation-created files. Files supplied through `InstallerFiles` remain caller-owned. The internal metadata updater does not accept an `Installers` argument.
 
 Submission reads remote reference manifests at one captured commit and carries that revision into branch creation. Existing branch-head conflict, identical-PR and empty-change checks remain in place.
 
 ### Installer Analysis
 
-Large families use locally imported implementation modules. CreateInstall separates Gentee decoding, operation evidence, and GEA archives; DeployMaster separates classic and modern media; InstallBuilder separates project semantics from Metakit/CookFS payloads. Their original family modules retain public command ownership and result composition. Parsed programs, layouts, and catalogs flow through explicit parameters rather than mutable cross-module state.
+Large families use locally imported implementation modules. CreateInstall separates Gentee decoding, operation evidence, and GEA archives. DeployMaster separates classic and modern media. InstallBuilder separates project semantics from Metakit/CookFS payloads. Family modules own public commands and compose results. Explicit parameters carry parsed programs, layouts, and catalogs between modules.
 
-`Get-AKInstallerInfo` and `Expand-AKInstaller` cover classic GZip, legacy protected-ZIP/XOR, and modern protected-ZIP/RC4 AKInstaller media, current and historical encrypted AKInstallerMSI prerequisite wrappers, and direct embedded-MSI output. Native ARP identity comes from explicit compiled registry rows; MSI-wrapper identity comes from the selected nested MSI rather than the outer executable. Exact WinGet analysis maps the vendor's actionable outer bootstrapper outcomes to `ExpectedReturnCodes` while retaining generic failure code 1603 only as parser evidence.
+`Get-AKInstallerInfo` and `Expand-AKInstaller` cover classic GZip, legacy protected-ZIP/XOR, and modern protected-ZIP/RC4 AKInstaller media, current and historical encrypted AKInstallerMSI prerequisite wrappers, and direct embedded-MSI output. Native ARP identity comes from explicit compiled registry rows. MSI-wrapper identity comes from the selected nested MSI. Exact WinGet analysis maps the vendor's actionable outer bootstrapper outcomes to `ExpectedReturnCodes` while retaining generic failure code 1603 only as parser evidence.
 
-`Get-DellUpdatePackageInfo`, `Test-DellUpdatePackage`, and `Expand-DellUpdatePackage` support Dell DUPFramework ZIP/7z wrappers, including catalog-derived framework 3.0/MUP 2.1 media. Mup.xml selects the vendor executable; its nested parser supplies ARP and scope rather than the outer release ID or inventory key. Selection preserves actual archive filename spelling for case-sensitive staging directories. Direct MSI metadata analysis stages only that database; EXE routes retain support files. Configuration, package metadata, vendor return mappings, supported architectures and localized revision history remain separate evidence. Extraction is bounded and never executes the wrapper's `/e` command. WinGet analysis uses the selected nested family's defaults through `/passthrough` without merging embedded MUP arguments. The original switches and vendor command remain available as an `EmbeddedMup` entry in `SuggestedManifestVariants` for focused fallback after a failed VM test; incomplete or unsupported nested routes retain `/s`. Both routes use DUP return codes. `-CommandLine` accepts an explicit `/passthrough` command, preserving the vendor tail instead of applying MUP defaults; unattended support then requires validation of that exact command. Authoring overrides and manifest updates forward authored switches into this analysis without automatically replacing existing commands. Unsupported hardware, opaque vendor launchers and distinct legacy SVMSEZ/BIOS containers remain explicit gaps.
+`Get-DellUpdatePackageInfo`, `Test-DellUpdatePackage`, and `Expand-DellUpdatePackage` support Dell DUPFramework ZIP/7z wrappers, including catalog-derived framework 3.0/MUP 2.1 media. Mup.xml selects the vendor executable. The nested parser supplies ARP and scope. Selection preserves actual archive filename spelling for case-sensitive staging directories. Direct MSI metadata analysis stages only that database. EXE routes retain support files. Configuration, package metadata, vendor return mappings, supported architectures and localized revision history remain separate evidence. Extraction is bounded and never executes the wrapper's `/e` command. WinGet analysis uses the selected nested family's defaults through `/passthrough` without merging embedded MUP arguments. The original switches and vendor command remain available as an `EmbeddedMup` entry in `SuggestedManifestVariants` for focused fallback after a failed VM test. Incomplete or unsupported nested routes retain `/s`. Both routes use DUP return codes. `-CommandLine` accepts an explicit `/passthrough` command, preserving the vendor tail. Validate unattended support with that exact command. Authoring overrides and manifest updates forward authored switches into this analysis without automatically replacing existing commands. Unsupported hardware, opaque vendor launchers and distinct legacy SVMSEZ/BIOS containers remain explicit gaps.
 
-TigerSetup formats 1-3 are handled by `Get-TigerSetupInfo`, `Test-TigerSetupInstaller` and `Expand-TigerSetupInstaller`. A physical-format catalog selects ZIP versus solid Zstd, raw versus compressed Protobuf, and generation-specific footer/schema validation. Resource validation precedes scope-specific ARP and system-effect projection; authored `--install-root` overrides describe fresh-install evidence. Extraction preserves empty directories/files, avoids unrelated decoding for narrow selectors, verifies payloads and stages output before atomic per-file publication. Format-3 reconstructed uninstallers and rich ARP/association/PATH evidence have VM validation in both scopes, including limited-token user installation. Historical 0.5.2-0.11.0 source profiles have synthetic coverage, while 0.12.0-0.14.0 published artifacts are cached real regressions. [The focused workflow](../../.agents/skills/analyze-winget-installer/references/families/tiger-setup/workflow.md) covers commands and remaining artifact-specific VM checks.
+TigerSetup formats 1-3 are handled by `Get-TigerSetupInfo`, `Test-TigerSetupInstaller` and `Expand-TigerSetupInstaller`. A physical-format catalog selects ZIP versus solid Zstd, raw versus compressed Protobuf, and generation-specific footer/schema validation. Resource validation precedes scope-specific ARP and system-effect projection. Authored `--install-root` overrides describe fresh-install evidence. Extraction preserves empty directories/files, avoids unrelated decoding for narrow selectors, verifies payloads and stages output before atomic per-file publication. Format-3 reconstructed uninstallers and rich ARP/association/PATH evidence have VM validation in both scopes, including limited-token user installation. Historical 0.5.2-0.11.0 source profiles have synthetic coverage, while 0.12.0-0.14.0 published artifacts are cached real regressions. [The focused workflow](../../.agents/skills/analyze-winget-installer/references/families/tiger-setup/workflow.md) covers commands and remaining artifact-specific VM checks.
 
 Shared mechanics stay in the existing infrastructure and data modules: `Import-InstallerManagedAssembly` also accepts a literal provider path, `Read-BinaryInteger` accepts either a stream or byte buffer, and the data modules provide bounded text/XML readers and first-present dictionary lookup. Family-specific encoding choices, record bounds, and failure recovery remain at the call site.
 
-`Get-InstallerAnalysis` detects file and installer families from structured content and magic bytes without applying package-provider policy or returning manifest suggestions. `Get-WinGetInstallerAnalysis` projects the same evidence into schema-valid `SuggestedManifestFields`, complete `SuggestedManifestVariants`, and separate `SuggestedNextSteps`. Generic EXE families keep their identity in `Family` and use `InstallerType: exe`; YAML family comments are not runtime values. `DetectedFamilies` contains only structurally confirmed or successfully parsed families, while `RoutingHints` and `RejectedCandidates` retain heuristic diagnostics without promoting them to detections. `FamilyCandidates` remains a confirmed-only compatibility projection.
+`Get-InstallerAnalysis` detects file and installer families from structured content and magic bytes without applying package-provider policy or returning manifest suggestions. `Get-WinGetInstallerAnalysis` projects the same evidence into schema-valid `SuggestedManifestFields`, complete `SuggestedManifestVariants`, and separate `SuggestedNextSteps`. Generic EXE families keep their identity in `Family` and use `InstallerType: exe`. YAML family comments are not runtime values. `DetectedFamilies` contains only structurally confirmed or successfully parsed families, while `RoutingHints` and `RejectedCandidates` retain heuristic diagnostics without promoting them to detections. `FamilyCandidates` remains a confirmed-only compatibility projection.
 
 Some implementations are maintained in the separately licensed InstallerParsers submodule. [`InstallerBridge.psm1`](Libraries/Infrastructure/InstallerBridge.psm1) invokes its JSON CLI in a child PowerShell process and returns deserialized evidence. It does not import GPL parser code into PackageModule's process module scope.
 
-Each aggregate parser constructs the canonical identity/ARP envelope directly and returns context-neutral `Diagnostics` plus `UnresolvedFields`; parsers do not write log messages directly. A diagnostic records its stable `Id`, `Source`, `Message`, `Kind`, affected areas and fields, and optional evidence. `FullAnalysis`, `Detection`, `ManifestAuthoring`, `ManifestUpdate`, and `Extraction` resolve that evidence to a log level and blocking decision only when it enters a workflow. This keeps family-specific ARP decisions in the parser that understands the format and prevents a partial manifest update from promoting unrelated parser limitations.
+Each aggregate parser constructs the canonical identity/ARP envelope directly and returns context-neutral `Diagnostics` plus `UnresolvedFields`. Parsers do not write log messages directly. A diagnostic records its stable `Id`, `Source`, `Message`, `Kind`, affected areas and fields, and optional evidence. `FullAnalysis`, `Detection`, `ManifestAuthoring`, `ManifestUpdate`, and `Extraction` resolve that evidence to a log level and blocking decision only when it enters a workflow. This keeps family-specific ARP decisions in the parser that understands the format and prevents a partial manifest update from promoting unrelated parser limitations.
 
-Public installer expansion functions resolve source and destination paths against PowerShell's filesystem location before passing them to .NET or a parser child process. Their optional `Name` selector defaults to `*`, so omitting it expands every catalogued payload within the parser's entry and byte limits. Extractors that can produce multiple files accept `CollisionAction Prompt|Error|Skip|Overwrite|Rename`; `Prompt` is the interactive default and offers `Rename` as its preselected choice. Functions and unattended automation that compose extractors pass `Rename` explicitly, allocating deterministic names such as `payload (1).dll` without opening a prompt.
+Public installer expansion functions resolve source and destination paths against PowerShell's filesystem location before passing them to .NET or a parser child process. Their optional `Name` selector defaults to `*`, so omitting it expands every catalogued payload within the parser's entry and byte limits. Extractors that can produce multiple files accept `CollisionAction Prompt|Error|Skip|Overwrite|Rename`. `Prompt` is the interactive default and offers `Rename` as its preselected choice. Functions and unattended automation that compose extractors pass `Rename` explicitly, allocating deterministic names such as `payload (1).dll` without opening a prompt.
 
 Manifest updates run a known manifest-declared parser before generic detection. If metadata parsing fails, structural evidence classifies the result as matched, mismatched, or indeterminate. Only a definitive incompatible format produces a blocking diagnostic and throws. Matched or indeterminate failures preserve existing fields, and diagnostics unrelated to fields being refreshed stay verbose. The update buffers diagnostics from all installer entries, deduplicates them, and writes them once after processing the manifest.
 
-Submission can bypass this parser stage globally with `-SkipInstallerAnalysis` or per task with `SkipInstallerAnalysis: true` in `Config.yaml`. The bypass preserves existing installer metadata and skips nested payload extraction, family detection, and static parsers; downloads required for SHA-256, release-date handling, manifest formatting, validation, and repository submission still run normally.
+Bypass the parser stage globally with `-SkipInstallerAnalysis` or per task with `SkipInstallerAnalysis: true` in `Config.yaml`. This preserves existing installer metadata and skips nested extraction, family detection, and static parsing. SHA-256 downloads, release-date handling, formatting, validation, and submission still run.
 
 Use the [`analyze-winget-installer` skill](../../.agents/skills/analyze-winget-installer/SKILL.md) for the supported workflow, parser routing, manifest interpretation, and VM-only validation rules.
 
 ### WinGet Manifests
 
-Manifest processing is separated into explicit layers:
+Manifest processing uses these modules.
 
 | Module | Responsibility |
 | --- | --- |
@@ -148,9 +144,9 @@ $Manifest = Add-WinGetManifestInstaller -Manifest $Manifest -Suggestion $Suggest
 Save-WinGetManifest -Manifest $Manifest -Path C:\Manifests\Vendor.Package\1.2.3
 ```
 
-The logical model stores authored values, not WinGet-generated default switches or return codes. Complete-manifest serialization first removes a common `InstallerLocale` and redundant ProductCode, InstallerType, name, and publisher fields from a sole Apps & Features entry, then compacts values shared by every installer back to manifest level while preserving installer-level overrides, recursive dictionary atoms, and atomic arrays. The isolated `Format-WinGetManifest` path remains non-destructive because it has no locale-document context.
+The logical model stores authored values only. WinGet-generated switches and return codes remain derived evidence. Serialization removes a common `InstallerLocale` and redundant ProductCode, InstallerType, name, and publisher fields from a sole Apps & Features entry. It then moves values shared by every installer to the manifest level, preserving installer overrides, recursive dictionary atoms, and atomic arrays. `Format-WinGetManifest` has no locale-document context and preserves every field.
 
-`Utilities\WinGetManifest.ps1` exposes `new`, installer/locale/value add-set-remove operations, `validate`, and `show` for standalone workflows. Mutating commands stage and validate a complete multi-file set before replacing the target directory; they do not submit packages or execute installers.
+`Utilities\WinGetManifest.ps1` provides `new`, installer/locale/value add-set-remove operations, `validate`, and `show` for standalone use. Mutating commands stage and validate a complete multi-file set before replacing the target directory. They never submit packages or execute installers.
 
 ### Supporting Services
 
@@ -165,8 +161,7 @@ The logical model stores authored values, not WinGet-generated default switches 
 
 ### Playwright
 
-Use the scoped API so task completion and runner timeouts always release the
-process-wide browser lease:
+Use the scoped API to release the process-wide browser lease on task completion or runner timeout.
 
 ```powershell
 $Html = Use-PlaywrightPage -Headless {
@@ -177,14 +172,7 @@ $Html = Use-PlaywrightPage -Headless {
 }
 ```
 
-The default Chromium channel is installed `msedge`, while `-Stealth` uses the
-Apache-2.0 [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)
-driver and defaults to installed `chrome`. Patchright is restored from
-[patchright-dotnet](https://github.com/DevEnterpriseSoftware/patchright-dotnet)
-and supports Chromium only. `Install-PlaywrightBrowser -Browser Chromium`
-explicitly installs its bundled browser when an installed channel is unsuitable.
-Media and YouTube requests are blocked by default; pass `-BlockUrlPattern @()`
-to disable that filter.
+The default Chromium channel is installed `msedge`. `-Stealth` uses the Apache-2.0 [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) driver with installed `chrome` by default. Patchright is restored from [patchright-dotnet](https://github.com/DevEnterpriseSoftware/patchright-dotnet) and supports Chromium only. Use `Install-PlaywrightBrowser -Browser Chromium` when an installed channel is unsuitable. Media and YouTube requests are blocked by default. Pass `-BlockUrlPattern @()` to disable the filter.
 
 The scoped API exposes the compatible controls used by
 [Scrapling StealthyFetcher](https://github.com/D4Vinci/Scrapling), including
@@ -215,11 +203,7 @@ Chromium driver supplies the anti-detection behavior. Dumplings does not claim
 Scrapling's adaptive selector model, proxy rotation, ad-list bundle, canvas noise
 flag, or multi-page pool.
 
-Do not pass PowerShell scriptblocks to Playwright `RouteAsync`, event handlers,
-`ExposeBindingAsync`, or similar callback APIs. Playwright invokes them
-asynchronously, potentially without the originating PowerShell runspace. Dumplings
-keeps route callbacks in compiled C# and uses `Wait-PlaywrightTask` at the
-synchronous PowerShell boundary to avoid callback hangs.
+Do not pass PowerShell scriptblocks to Playwright `RouteAsync`, event handlers, `ExposeBindingAsync`, or similar callback APIs. Playwright may invoke them without the originating PowerShell runspace, causing hangs. Dumplings uses compiled C# route callbacks and waits synchronously with `Wait-PlaywrightTask`.
 
 ## Directory Layout
 
@@ -240,7 +224,7 @@ PackageModule/
 `-- Utilities/          # standalone maintenance and validation scripts
 ```
 
-See [`Assets/README.md`](Assets/README.md) before adding or moving runtime assets. Do not load assets through recursive discovery; their owning module determines version and load order.
+See [`Assets/README.md`](Assets/README.md) before adding or moving runtime assets. Each owning module selects asset versions and load order. Do not discover assets recursively.
 
 ## Design And Security
 
@@ -272,7 +256,7 @@ Run ScriptAnalyzer on modified PowerShell modules and use the repository's accep
 Invoke-ScriptAnalyzer .\Modules\PackageModule\Libraries\WinGet\WinGetManifestValidation.psm1
 ```
 
-Tests are grouped under `Infrastructure`, `Installers`, `Services`, `Tasks`, and `WinGet`; shared setup and synthetic builders live under non-discoverable `Tests/Support`. Downloaded fixtures use canonical paths below `../Dumplings-TestFixtures/Installers`, curated media uses `Builders`, and synthetic or extracted output uses `$TestDrive`. Tests must not execute installers or depend on user `Downloads` and temporary folders.
+Tests are grouped under `Infrastructure`, `Installers`, `Services`, `Tasks`, and `WinGet`. Shared setup and synthetic builders live under non-discoverable `Tests/Support`. Downloaded fixtures use `../Dumplings-TestFixtures/Installers`, curated media uses `Builders`, and synthetic or extracted output uses `$TestDrive`. Tests must not execute installers or depend on user `Downloads` and temporary folders.
 
 ## Third-Party Components
 

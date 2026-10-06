@@ -111,7 +111,7 @@ function Get-Install4jScanText {
   $OriginalPosition = if ($Stream.CanSeek) { $Stream.Position } else { 0L }
   try {
     # Collect only the launcher prefix, file tail, and a bounded overlay window. This fallback is
-    # intentionally secondary to the structured startup and embedded-file tables.
+    # secondary to the structured startup and embedded-file tables.
     foreach ($Range in @(
         [pscustomobject]@{ Offset = [long]0; Count = [int][Math]::Min(4194304, $File.Length) },
         [pscustomobject]@{ Offset = [long][Math]::Max(0, $File.Length - 4194304); Count = [int][Math]::Min(4194304, $File.Length) }

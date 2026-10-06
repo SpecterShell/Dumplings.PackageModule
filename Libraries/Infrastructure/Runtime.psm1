@@ -85,10 +85,9 @@ function Import-InstallerManagedAssembly {
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
 
-    # Another module can load a compatible DTF/SharpCompress dependency from a
-    # different path before PowerShell has cached its public types. Reuse that
-    # assembly by identity rather than asking Add-Type to load the same strong
-    # name into the default AssemblyLoadContext a second time.
+    # A compatible dependency may already be loaded from another path before
+    # PowerShell caches its public types. Reuse its identity to avoid loading
+    # the same strong name twice into the default AssemblyLoadContext.
     $LoadedAssembly = [AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -ceq $SimpleAssemblyName } | Select-Object -First 1
     if ($LoadedAssembly) {
       if (-not $LoadedAssembly.GetType($TypeName, $false, $false)) {

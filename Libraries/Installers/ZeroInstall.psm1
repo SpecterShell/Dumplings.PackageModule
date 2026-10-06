@@ -707,7 +707,7 @@ function Assert-ZeroInstallSafeIdentifier {
   param ([AllowNull()][string]$Value, [Parameter(Mandatory)][string]$Field)
 
   # ZeroInstall.Model.XmlUnknown.EnsureAttributeSafeID permits only this
-  # deliberately narrow set before registry paths or association IDs are built.
+  # narrow set before registry paths or association IDs are built.
   if ([string]::IsNullOrEmpty($Value) -or $Value -cnotmatch '^[a-zA-Z0-9 ._+\-]+$') {
     throw "The Zero Install $Field is missing or contains characters outside the safe identifier grammar."
   }
@@ -2155,7 +2155,7 @@ function Expand-ZeroInstallArchiveStep {
     $ArchivePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
     # ZIP central-directory attributes carry Unix executable and symlink bits.
-    # SharpCompress intentionally normalizes those attributes away on its
+    # SharpCompress normalizes those attributes away on its
     # sequential IEntry surface, so use the platform ZIP reader for this one
     # format and retain SharpCompress for nested/compressed TAR and other media.
     if ([string]$Step.Type -ieq 'application/zip' -or [string]$Step.Href -match '(?i)\.(zip|nupkg|msix)$') {

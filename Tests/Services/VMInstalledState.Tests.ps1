@@ -14,7 +14,10 @@ BeforeAll {
 
   function Get-VM {}
   function Get-VMIntegrationService {}
-  function Copy-VMFile {}
+  function Copy-VMFile {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Pester binds these stub parameters for mock invocation filters.')]
+    param ([string]$VMName, [string]$SourcePath, [string]$DestinationPath, [string]$FileSource, [switch]$CreateFullPath, [switch]$Force)
+  }
 
   function Get-VMTestSnapshot {
     param(
@@ -197,7 +200,9 @@ Describe 'Hyper-V installed-state host controller' {
     $Result = & $Script:HostScript -Action Stage -VMName TestVM
 
     $Result.GuestScriptPath | Should -Be 'C:\DumplingsValidation\Get-WinGetVMInstalledState.ps1'
-    Should -Invoke Copy-VMFile -Times 1 -Exactly
+    $Result.GuestWaitScriptPath | Should -Be 'C:\DumplingsValidation\Wait-WinGetVMProcess.ps1'
+    Should -Invoke Copy-VMFile -Times 2 -Exactly
+    Should -Invoke Copy-VMFile -Times 1 -Exactly -ParameterFilter { $DestinationPath -eq 'C:\DumplingsValidation\Wait-WinGetVMProcess.ps1' }
   }
 
   It 'retrieves capture JSON through mocked PowerShell Direct' {

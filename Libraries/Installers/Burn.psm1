@@ -707,7 +707,7 @@ function Expand-BurnInstaller {
       }
 
       # Decode each physical cabinet once. The shared helper deduplicates source
-      # entries that intentionally project to several logical aliases.
+      # entries that project to several logical aliases.
       foreach ($ContainerIndex in @($Selected.ContainerIndex | Sort-Object -Unique)) {
         $ContainerSelection = @($Selected | Where-Object ContainerIndex -EQ $ContainerIndex)
         if ($ContainerSelection.Count -eq 0) { continue }

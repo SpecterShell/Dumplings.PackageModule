@@ -52,7 +52,7 @@ function Get-MsiInstallShieldProjectTypeFromStaticTableInfo {
   # ISVerifyScriptingRuntime is added by InstallShield to InstallScript MSI
   # projects. Older and script-heavy projects may additionally expose one of
   # the InstallScript table families below. Generic IS-prefixed tables such as
-  # ISSetupType are intentionally excluded because Basic MSI uses them too.
+  # ISSetupType are excluded because Basic MSI uses them too.
   $InstallScriptTables = [string[]]@($StaticTableInfo.Tables | Where-Object {
       $_ -in @('ISInstallScriptAction', 'ISScriptFile') -or $_ -like 'ISInstallScript*'
     } | Sort-Object -Unique)

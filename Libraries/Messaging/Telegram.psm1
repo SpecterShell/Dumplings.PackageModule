@@ -428,9 +428,8 @@ function Send-TelegramMessage {
     $null = $AsPlainText.IsPresent
     if ($null -eq $Session) { $Session = [System.Collections.Generic.List[System.Tuple[string, long]]]::new() }
 
-    # Materialize the complete conditional output as an array. PowerShell unwraps a one-item array
-    # emitted by an individual branch into a scalar string; indexing that scalar would send only its
-    # first character (normally "*" for PackageTask Markdown) to Telegram.
+    # Wrap the complete conditional output in an array. Otherwise PowerShell can
+    # unwrap a single string, and indexing it sends only its first character.
     [string[]]$Messages = @(
       if ([string]::IsNullOrWhiteSpace($Message)) {
         # An empty desired state removes every message currently owned by this session.

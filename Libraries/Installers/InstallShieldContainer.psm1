@@ -1507,7 +1507,7 @@ function Expand-InstallShieldCabinetSupport {
     Shortcuts         = [object[]]$Shortcuts.ToArray()
     ExtractedFiles    = [string[]]$ExtractedFiles.ToArray()
     ExpandedBytes     = $ExpandedBytes
-    Diagnostics          = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
+    Diagnostics       = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1759,7 +1759,7 @@ function Get-InstallShieldMsiPayloadSelection {
   $Warnings = [System.Collections.Generic.List[string]]::new()
   $MsiFile = [IO.FileInfo[]]@($MsiFile | Where-Object { $null -ne $_ })
   # The root Setup.ini is the bootstrapper's primary configuration. A sole
-  # nested copy is accepted, but multiple copies are deliberately ambiguous.
+  # nested copy is accepted, but multiple copies are ambiguous.
   $SelectionRoot = Resolve-InstallerFileSystemPath -Path $SelectionRoot -PathType Container
   $SetupIniFiles = if ($SetupIniFile) {
     @($SetupIniFile)
@@ -1854,7 +1854,7 @@ function Get-InstallShieldMsiPayloadSelection {
     SelectedMsiPath         = $null -eq $Selected ? $null : $Selected.RelativePath
     SelectedMsiResolvedPath = $null -eq $Selected ? $null : $Selected.File.FullName
     Configuration           = $Configuration
-    Diagnostics                = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Warnings)) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
+    Diagnostics             = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Warnings)) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -2092,7 +2092,7 @@ function Get-InstallShieldMsiInfo {
         WritesAppsAndFeaturesEntry          = $MsiInfo.WritesAppsAndFeaturesEntry
         AppsAndFeaturesProductCode          = $MsiInfo.AppsAndFeaturesProductCode
         AppsAndFeaturesInstallerType        = $MsiInfo.AppsAndFeaturesInstallerType
-        Diagnostics                            = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@($MsiInfo.Diagnostics)) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
+        Diagnostics                         = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@($MsiInfo.Diagnostics)) -Source 'InstallShieldContainer' -Kind Incomplete -Areas Metadata)
         UnresolvedFields                    = [string[]]@($MsiInfo.UnresolvedFields)
         Name                                = $MsiFile.Name
         SelectedMsiPath                     = $Installer.MsiPayloadSelection.SelectedMsiPath ?? [System.IO.Path]::GetRelativePath($Installer.ExtractedPath, $MsiFile.FullName)

@@ -608,7 +608,7 @@ function Controller() {
   It 'Should detect a user-only electron-builder NSIS installer through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'Aircall-Workspace-1.15.13-x64.exe' -Url 'https://download-electron.aircall.io/aircall-workspace/Aircall-Workspace-1.15.13-x64.exe'
     $IsElectronBuilder = Test-ElectronBuilder -Path $Fixture
-    $Info = Get-ElectronBuilderNSISInfo -Path $Fixture
+    $Info = Get-ElectronBuilderNSISInfo -Path $Fixture -Architecture x64
 
     $IsElectronBuilder | Should -BeTrue
     $Info.IsElectronBuilder | Should -BeTrue
@@ -619,12 +619,24 @@ function Controller() {
     $Info.ProductCode | Should -Be '3ec9d337-6374-5d93-9484-d59100254d53'
     $Info.DisplayVersion | Should -Be '1.15.13'
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-64.7z'
+    @($Info.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch') | Should -HaveCount 0
+
+    $MismatchingInfo = Get-ElectronBuilderNSISInfo -Path $Fixture -Architecture x86
+    $Diagnostic = @($MismatchingInfo.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch')
+    $Diagnostic | Should -HaveCount 1
+    $Diagnostic[0].Evidence.RequestedArchitecture | Should -Be 'x86'
+    $Diagnostic[0].Evidence.SupportedArchitectures | Should -Be @('x64')
+
+    $Metadata = Get-NSISInfo -Path $Fixture -Architecture x86
+    $Metadata.IsElectronBuilder | Should -BeTrue
+    $Metadata.SupportedArchitectures | Should -Be @('x64')
+    @($Metadata.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch') | Should -HaveCount 1
   }
 
   It 'Should detect a universal dual-scope electron-builder NSIS installer through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'Obsidian-1.12.7.exe' -Url 'https://github.com/obsidianmd/obsidian-releases/releases/download/v1.12.7/Obsidian-1.12.7.exe'
     $IsElectronBuilder = Test-ElectronBuilder -Path $Fixture
-    $Info = Get-ElectronBuilderNSISInfo -Path $Fixture
+    $Info = Get-ElectronBuilderNSISInfo -Path $Fixture -Architecture arm64
 
     $IsElectronBuilder | Should -BeTrue
     $Info.IsElectronBuilder | Should -BeTrue
@@ -637,6 +649,7 @@ function Controller() {
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-arm64.7z'
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-64.7z'
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-32.7z'
+    @($Info.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch') | Should -HaveCount 0
   }
 
   It 'Should return scoped AionUi ARP identity through the Apache-2.0 bridge' {

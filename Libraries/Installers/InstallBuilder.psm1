@@ -20,7 +20,7 @@
 
 # Apply default function parameters
 
-# InstallBuilder Public layer. Internal modules are imported locally; public commands stay in the facade.
+# Public InstallBuilder commands. Implementation modules are imported locally.
 Import-Module (Join-Path $PSScriptRoot 'InstallBuilderPayload.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'InstallBuilderProject.psm1') -ErrorAction Stop
 
@@ -940,7 +940,7 @@ function Expand-InstallBuilderInstaller {
             $Written = $LegacyArchive.CopyEntry([int]$Entry.Index, $Destination, $MaximumExpandedBytes - $TotalWritten)
             $TotalWritten += $Written
           } catch {
-            # Close the partial output before deleting it; the stream deliberately denies sharing.
+            # The stream denies sharing, so close it before deleting partial output.
             $Destination.Dispose()
             $Destination = $null
             Remove-Item -LiteralPath $Target.Path -Force -ErrorAction SilentlyContinue

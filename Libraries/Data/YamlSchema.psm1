@@ -1,6 +1,5 @@
 # Generic JSON Schema processing for PowerShell objects serialized as YAML.
-# The module intentionally performs no YAML parsing and never accesses the
-# network unless the caller explicitly supplies -AllowNetworkReference.
+# Callers supply parsed objects. Network access requires -AllowNetworkReference.
 
 Set-StrictMode -Version 3
 
@@ -286,7 +285,7 @@ function Invoke-YamlSchemaNodeValidation {
   }
 
   # Determine the JSON type represented by the PowerShell value. Integer is a
-  # valid number, while strings are deliberately never coerced here.
+  # valid number, while strings are never coerced here.
   $AllowedTypes = @($Schema.Contains('type') ? $Schema['type'] : @())
   if ($AllowedTypes.Count -gt 0) {
     $ActualType = if ($null -eq $InputObject) { 'null' }

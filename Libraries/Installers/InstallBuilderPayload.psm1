@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Internal InstallBuilder implementation. See InstallBuilder.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# InstallBuilder Payload layer. Internal modules are imported locally; public commands stay in the facade.
+# InstallBuilder payload implementation, imported locally by the public facade.
 Import-Module (Join-Path $PSScriptRoot 'InstallBuilderProject.psm1') -ErrorAction Stop
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }

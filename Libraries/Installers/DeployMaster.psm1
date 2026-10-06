@@ -48,7 +48,7 @@
 
 # Apply default function parameters
 
-# DeployMaster Public layer. Internal modules are imported locally; public commands stay in the facade.
+# Public DeployMaster commands. Implementation modules are imported locally.
 Import-Module (Join-Path $PSScriptRoot 'DeployMasterModern.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'DeployMasterClassic.psm1') -ErrorAction Stop
 

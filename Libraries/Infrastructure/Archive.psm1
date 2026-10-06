@@ -341,9 +341,9 @@ function Export-InstallerArchiveSelection {
     # SharpCompress's reader retains the block decoder and skips directories or
     # collision-skipped entries while advancing through the physical catalog.
     if ($Name -ceq '*' -and $Archive.Type -eq [SharpCompress.Common.ArchiveType]::SevenZip) {
-      # The reader disposes its archive volume. Only use it when the archive's
-      # existing ownership policy protects that stream; file-owned archives
-      # must remain reusable. ReaderOptions is protected in bundled SharpCompress.
+      # The reader disposes its archive volume, so use it only with a protected
+      # borrowed stream. Keep file-owned archives reusable. ReaderOptions is
+      # protected in bundled SharpCompress.
       $OptionsProperty = $Archive.GetType().GetProperty('ReaderOptions', [Reflection.BindingFlags]'Instance,NonPublic')
       if ($OptionsProperty -and $OptionsProperty.GetValue($Archive).LeaveStreamOpen) { $Reader = $Archive.ExtractAllEntries() }
     }
@@ -362,8 +362,8 @@ function Export-InstallerArchiveSelection {
         continue
       }
       $Remaining = $MaximumExpandedBytes - $ExpandedBytes
-      # Empty entries consume no budget; their stream is still checked against
-      # the declared size so a forged zero length cannot bypass this limit.
+      # Check empty entries against their declared size too. A forged zero
+      # length must not bypass the output limit.
       if ($Remaining -lt 0 -or $Entry.Size -gt $Remaining) { throw "The archive selection exceeds the $MaximumExpandedBytes-byte output limit." }
       $EntryStream = $null
       try {

@@ -38,7 +38,7 @@
 
 # Apply default function parameters
 
-# CreateInstall Public layer. Internal modules are imported locally; public commands stay in the facade.
+# Public CreateInstall commands. Implementation modules are imported locally.
 Import-Module (Join-Path $PSScriptRoot 'CreateInstallArchive.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'CreateInstallGentee.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'CreateInstallOperations.psm1') -ErrorAction Stop

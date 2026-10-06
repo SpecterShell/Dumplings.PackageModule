@@ -45,7 +45,8 @@ function Get-NSISInfo {
   .PARAMETER Path
     The path to the NSIS installer
   .PARAMETER Architecture
-    The target Windows architecture used when the installer selects architecture-specific ARP metadata
+    The installer-entry architecture used to resolve architecture-specific ARP metadata
+    and check electron-builder's compiled application payloads.
   .PARAMETER Scope
     The target installation scope used when the installer selects scope-specific ARP metadata
   .PARAMETER Environment
@@ -159,17 +160,23 @@ function Get-ElectronBuilderNSISInfo {
     Get static electron-builder traits from a Nullsoft installer through the separate GPL parser module
   .PARAMETER Path
     The path to the NSIS installer
+  .PARAMETER Architecture
+    Installer-entry architecture to compare with the compiled application payloads.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The path to the NSIS installer')]
-    [string]$Path
+    [string]$Path,
+    [ValidateSet('x86', 'x64', 'arm64')]
+    [string]$Architecture
   )
 
   process {
-    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetElectronBuilderInfo' -Argument @{
+    $Arguments = @{
       Path = (Get-Item -Path $Path -Force).FullName
     }
+    if ($PSBoundParameters.ContainsKey('Architecture')) { $Arguments.Architecture = $Architecture }
+    Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'NSIS.GetElectronBuilderInfo' -Argument $Arguments
   }
 }
 

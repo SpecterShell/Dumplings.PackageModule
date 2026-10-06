@@ -158,6 +158,32 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       Should -Invoke Get-WinGetInstallerAnalysis -Exactly 0
     }
 
+    It 'Warns about an electron-builder architecture mismatch without changing the entry architecture' {
+      Mock Get-NSISInfo {
+        [pscustomobject]@{
+          InstallerType              = 'nullsoft'
+          ProductCode                = 'ElectronBuilder.Product'
+          WritesAppsAndFeaturesEntry = $true
+          Diagnostics                = @(
+            New-InstallerDiagnostic -Id 'NSIS.ElectronBuilder.ArchitectureMismatch' -Source NSIS -Message 'The electron-builder installer packages x64, not the requested x86 architecture.' -Kind Mismatch -Areas Metadata, Installability -AffectedFields Architecture
+          )
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x86'
+        InstallerType = 'nullsoft'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Old.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.Architecture | Should -Be 'x86'
+      $Result.ProductCode | Should -Be 'ElectronBuilder.Product'
+      @($Script:LogMessages | Where-Object { $_.Message -match 'NSIS.ElectronBuilder.ArchitectureMismatch' -and $_.Level -eq 'Warning' }) | Should -HaveCount 1
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x86' }
+    }
+
     It 'Uses each installer entry architecture when one NSIS URL exposes different ProductCodes' {
       Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
       Mock Get-NSISInfo {
@@ -899,6 +925,19 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
 
       $Result.ProductCode | Should -Be 'Inno.Product'
       $Script:LogMessages.Message | Should -Contain '[Inno.Parser.Caveat] Inno: Inno parser caveat'
+      Should -Invoke Get-InnoInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x64' }
+    }
+
+    It 'Omits unsupported Inno diagnostic target architectures: <Architecture>' -ForEach @(
+      @{ Architecture = 'neutral' }
+      @{ Architecture = 'arm' }
+    ) {
+      Mock Get-InnoInfo { [pscustomobject]@{ InstallerType = 'Inno'; Diagnostics = @() } }
+
+      $Result = Get-WinGetKnownInstallerManifestInfo -Path $Script:InstallerPath -InstallerType inno -Architecture $Architecture
+
+      $Result.ParserName | Should -Be 'Inno Setup'
+      Should -Invoke Get-InnoInfo -Exactly 1 -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Architecture') }
     }
 
     It 'Logs identical parser diagnostics once across scope-specific installer entries' {

@@ -314,7 +314,7 @@ function Read-ChromiumInstallConstantsRecord {
   if ($Index -gt 31) { return $null }
 
   # The first identity fields have remained ordered across the supported 32-bit and 64-bit
-  # InstallConstants layouts. Later GUID/icon fields are deliberately not interpreted here.
+  # InstallConstants layouts. Later GUID/icon fields are not interpreted here.
   $PointerBase = $PointerSize -eq 8 ? 16 : 8
   $Pointers = [uint64[]]::new(9)
   for ($Field = 0; $Field -lt $Pointers.Length; $Field++) {

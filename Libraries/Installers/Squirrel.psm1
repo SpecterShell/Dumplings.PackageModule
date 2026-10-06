@@ -710,7 +710,7 @@ function ConvertTo-SquirrelInfo {
     $null
   }
 
-  # Rust Velopack deliberately writes only the three numeric SemVer components
+  # Rust Velopack writes only the three numeric SemVer components
   # to DisplayVersion. Preserve the complete nuspec version separately for
   # update/version evidence.
   $PackageVersion = [string]$Nuspec.Version

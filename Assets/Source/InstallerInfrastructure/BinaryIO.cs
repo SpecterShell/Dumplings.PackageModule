@@ -198,8 +198,8 @@ namespace Dumplings.InstallerInfrastructure
             if (size != 1 && size != 2 && size != 4 && size != 8) throw new ArgumentOutOfRangeException(nameof(size));
             if (offset < 0 || offset > bytes.LongLength - size) throw new EndOfStreamException("Binary integer read is outside the buffer.");
             ReadOnlySpan<byte> data = bytes.AsSpan((int)offset, size);
-            // Separate returns preserve the exact signed/unsigned CLR type; a numeric conditional
-            // expression would otherwise widen or change signedness before boxing.
+            // Return each CLR type separately. Numeric conditional expressions
+            // can widen values or change signedness before boxing.
             switch (size)
             {
                 case 1:

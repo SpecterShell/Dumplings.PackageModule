@@ -1,6 +1,6 @@
 # WinGet manifest YAML parsing, document sets, formatting, and serialization.
 #
-# Parsing and model construction are deliberately separate from update logic.
+# Parsing and model construction are separate from update logic.
 # This mirrors winget-cli's parser/populator boundary and winget-create's
 # explicit serialization boundary: https://github.com/microsoft/winget-create
 

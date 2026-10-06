@@ -329,7 +329,7 @@ function Invoke-WinGetSubmissionCandidateBranchCleanup {
     $null = Remove-WinGetGitHubBranch -Name $BranchName -RepoOwner $RepoOwner -RepoName $RepoName
     $Task.Log("Removed unused candidate branch ${RepoOwner}:${BranchName}", 'Verbose')
   } catch {
-    # Submission is intentionally aborted even if cleanup fails. Report the
+    # Abort submission even if cleanup fails. Report the
     # orphaned branch without replacing the more important no-op decision.
     $Task.Log("Failed to remove unused candidate branch ${RepoOwner}:${BranchName}: ${_}", 'Warning')
   }
@@ -548,7 +548,7 @@ function Send-WinGetManifest {
       }
       if ($PullRequests) {
         # A null or absent preference preserves the legacy all-other-users
-        # behavior. An explicitly empty YAML list intentionally blocks nobody.
+        # behavior. An explicitly empty YAML list blocks nobody.
         $ConfiguredBlockingUsers = $Global:DumplingsPreference['WinGetBlockingPullRequestUsers']
         $UseConfiguredBlockingUsers = $null -ne $ConfiguredBlockingUsers
         $PullRequestInfo = Get-WinGetPullRequestConflictInfo -PullRequest $PullRequests -TokenUsername $Script:GitHubTokenUsername -BlockingUsername @($ConfiguredBlockingUsers) -UseConfiguredBlockingUsers:$UseConfiguredBlockingUsers
@@ -618,7 +618,7 @@ function Send-WinGetManifest {
     }
 
     # Create a new branch in the origin repo
-    # The new branch is based on the default branch of the origin repo instead of the one of the upstream repo
+    # Base the new branch on the origin repository's default branch.
     # This is to mitigate the occasional and weird issue of "ref not found" when creating a branch based on the upstream default branch
     # The origin repo should be synced as early as possible to avoid conflicts with other commits
     $SourceArguments = @{}
@@ -692,9 +692,8 @@ function Send-WinGetManifest {
             $ExistingChanges = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $ExistingPullRequest.number -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
             $ChangesAreIdentical = Test-WinGetGitHubFileChangeEquality -ReferenceChange $ExistingChanges -DifferenceChange $CandidateChanges
           } catch {
-            # A transient or malformed GitHub response cannot establish exact
-            # equality. Continue the historical replace-and-close workflow
-            # rather than abandoning a valid candidate branch.
+            # If the response cannot establish equality, continue replacement
+            # submission and close the old PR through the normal workflow.
             $Task.Log("Unable to compare candidate changes exactly with existing pull request #$($ExistingPullRequest.number). Normal replacement submission will continue: ${_}", 'Warning')
             continue
           }

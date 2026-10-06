@@ -909,7 +909,7 @@ function Get-WinGetGitHubPullRequestFile {
 
   $Files = [System.Collections.Generic.List[object]]::new()
   for ($Page = 1; $Page -le 30; $Page++) {
-    # Invoke-RestMethod deliberately returns a JSON array as one pipeline
+    # Invoke-RestMethod returns a JSON array as one pipeline
     # object. Wrapping that call in @() therefore creates a nested Object[] and
     # makes the complete page look like one file without filename/status
     # properties. Assignment preserves the JSON array itself, which foreach

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Internal DeployMaster implementation. See DeployMaster.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# DeployMaster Modern layer. Internal modules are imported locally; public commands stay in the facade.
+# DeployMaster modern implementation, imported locally by the public facade.
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -269,7 +269,7 @@ function Get-DeployMasterPackageHeader {
   $ScopeInfo = Get-DeployMasterScopeInfo -Value $Candidate.ScopeValue
   # Current media compiles either expiration mode into one final calendar date. The adjacent
   # UTF-16 message is stored directly between the runtime core and the normal language text.
-  # Both source modes intentionally converge here, so do not infer whether the project used a
+  # Both source modes converge here, so do not infer whether the project used a
   # fixed date or a number of days after the release date.
   $LayoutShift = [int]$Candidate.Profile.Shift
   $ExpirationYear = [uint16](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x32 + $LayoutShift) -Size 2)

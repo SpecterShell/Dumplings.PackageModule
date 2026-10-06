@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Internal CreateInstall implementation. See CreateInstall.psm1 for format sources and the binary layout.
-# Parsed operation contexts are passed explicitly; no caller-owned stream is retained globally.
+# Pass parsed contexts explicitly and keep caller-owned streams local.
 
-# CreateInstall Operations layer. Internal modules are imported locally; public commands stay in the facade.
+# CreateInstall operations implementation, imported locally by the public facade.
 Import-Module (Join-Path $PSScriptRoot 'CreateInstallGentee.psm1') -ErrorAction Stop
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
@@ -823,7 +823,7 @@ function Get-CreateInstallServiceEvidence {
   # The Start/Stop and Delete project commands are generated inline. Identify their target helpers
   # by exact service-control API imports, then accept only calls from zero-parameter generated event
   # functions with the source-defined condition/name literal pair. Calls between runtime helpers are
-  # deliberately excluded because their arguments are computed values rather than project fields.
+  # excluded because their arguments are computed values rather than project fields.
   foreach ($Route in @(
       [pscustomobject]@{ Profile = 'ServiceStart1'; Operation = 'Start' }
       [pscustomobject]@{ Profile = 'ServiceStop1'; Operation = 'Stop' }
@@ -957,7 +957,7 @@ function Get-CreateInstallGenteeExpressionEvidence {
   $FunctionMatches = if ($IsFunction) { @($Functions.Values | Where-Object { $_.Record.Name -ceq $FunctionName }) } else { @() }
   $Function = $FunctionMatches.Count -eq 1 ? $FunctionMatches[0] : $null
 
-  # The command list is intentionally bounded. It gives an agent enough static evidence to trace
+  # The command list is bounded. It gives an agent enough static evidence to trace
   # small generated if-functions without turning Get-*Info into an unbounded bytecode dump.
   $FunctionEvidence = $null
   $LiteralStrings = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)

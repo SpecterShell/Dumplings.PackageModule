@@ -16,7 +16,7 @@ $INVISIBLE_EXCEPT_NEWLINE = '\f\t\v\u0085\p{Z}'
 # Control characters rejected by WinGet's YAML parser. Tab, LF, and CR are allowed.
 $WINGET_UNSUPPORTED_CONTROL_CHARACTERS = '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
 # Blank and invisible characters that should behave as ordinary spaces in manifest text.
-# ZWNJ and ZWJ are intentionally excluded because they affect script shaping and emoji sequences.
+# ZWNJ and ZWJ are excluded because they affect script shaping and emoji sequences.
 $UNICODE_BLANK_OR_INVISIBLE_CHARACTERS = '[\t\u0080-\u0084\u0086-\u009F\u00A0\u00AD\u034F\u061C\u115F\u1160\u1680\u17B4\u17B5\u180E\u2000-\u200B\u200E\u200F\u202A-\u202F\u205F\u2060-\u2064\u2066-\u206F\u2800\u3000\u3164\uFEFF\uFFA0\uFFF9-\uFFFB]'
 
 # Dot based ellipsis after CJK characters. They should be replace by character based ellipsis "……"

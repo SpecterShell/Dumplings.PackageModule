@@ -267,7 +267,9 @@ function Get-WinGetKnownInstallerManifestInfo {
         return [pscustomobject]@{ ParserName = 'NSIS'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Diagnostics = (& $DiagnosticsFor $Info) }
       }
       'inno' {
-        $Info = Get-InnoInfo -Path $Path
+        $Arguments = @{ Path = $Path }
+        if ($Architecture -in @('x86', 'x64', 'arm64')) { $Arguments.Architecture = $Architecture }
+        $Info = Get-InnoInfo @Arguments
         return [pscustomobject]@{ ParserName = 'Inno Setup'; DetectedInstallerType = (& $InstallerTypeFor $Info); InputObject = @($Info); Diagnostics = (& $DiagnosticsFor $Info) }
       }
       { $_ -cin @('msix', 'appx') } {
@@ -723,7 +725,7 @@ function Set-WinGetInstallerManifestMetadata {
   }
 
   # ProductCode remains parser-owned whenever the authored entry already
-  # contains it. ElevationRequirement is deliberately excluded: package updates
+  # contains it. ElevationRequirement is excluded: package updates
   # must preserve author-selected behavior, including different requirements
   # for separate scope entries that share one installer artifact.
   if ($Installer.Contains('ProductCode') -and -not $InstallerEntry.Contains('ProductCode') -and -not $UnresolvedFields.Contains('ProductCode')) {
@@ -1084,7 +1086,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
       }
       $Installer.InstallerSha256 = $Operation.Hashes[$ArtifactKey]
 
-      # Extract only the selected nested installer instead of expanding a potentially giant ZIP archive.
+      # Extract only the selected nested installer to bound ZIP expansion.
       # This extraction exists solely for static analysis and is omitted when the caller opts out.
       $EffectiveInstallerType = $Installer.Contains('NestedInstallerType') ? $Installer.NestedInstallerType : $Installer.InstallerType
       $EffectiveInstallerPath = if ($SkipInstallerAnalysis) {
@@ -1196,7 +1198,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
         }
       } elseif ($EffectiveInstallerType -ceq 'exe' -and -not $SkipInstallerAnalysis) {
         # Generic EXE families remain best effort because static detection can be
-        # ambiguous and the manifest intentionally does not declare a known type.
+        # ambiguous and the manifest does not declare a known type.
         try {
           $ParserInfoArguments = @{
             Path         = $EffectiveInstallerPath

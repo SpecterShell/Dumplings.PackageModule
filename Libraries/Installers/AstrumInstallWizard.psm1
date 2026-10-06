@@ -936,9 +936,8 @@ function Read-AstrumConfiguration {
   $Variables = [Collections.Generic.List[object]]::new()
   $Count = Read-AstrumConfigurationCount -Reader $Reader -TableName 'variable'
   for ($Index = 0; $Index -lt $Count; $Index++) {
-    # The project XML calls these fields type, get-from, default-value, location1..3, and flags.
-    # Keep that model here instead of the earlier generic Flags/Operation names, which swapped the
-    # source enum and option bit mask and made runtime-backed variables look like operations.
+    # Use the XML field names: type, get-from, default-value, location1..3, and
+    # flags. Keep the source enum distinct from the option bit mask.
     $Name = Read-AstrumConfigurationString $Reader
     $TypeCode = Read-AstrumConfigurationUInt32 $Reader
     $SourceCode = Read-AstrumConfigurationUInt32 $Reader
@@ -1903,7 +1902,7 @@ function Get-AstrumInstallWizardInfo {
       $ExecutionLevel = Get-PERequestedExecutionLevel -Path $ResolvedContainer.AnalysisPath
       $OuterArchitecture = Get-PEArchitectureInfo -Path $ResolvedContainer.AnalysisPath
       $RuntimeCommandLineEvidence = Get-AstrumRuntimeCommandLineEvidence -Stream $Context.Stream
-      # Astrum's x64-compliance option deliberately selects the native 64-bit registry view even
+      # Astrum's x64-compliance option selects the native 64-bit registry view even
       # though the 2.29 setup runtime itself remains a 32-bit PE.
       $RegistryView = if ($Configuration.X64ComplianceMode) { '64-bit' } elseif ($OuterArchitecture.NativeArchitecture -eq 'x86') { '32-bit' } elseif ($OuterArchitecture.NativeArchitecture -in 'x64', 'arm64') { '64-bit' } else { 'default' }
       $InstallLocation = ConvertTo-AstrumManifestPath -Value $Configuration.InstallPath -Configuration $Configuration -RegistryView $RegistryView

@@ -1374,9 +1374,8 @@ function Get-InstallForgeInfo {
     if ($FinishAction.Launch -and $FinishActionUnresolvedProperties.Count -gt 0) {
       $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallForge.FinishAction.RuntimeValueUnresolved' -Source InstallForge -Message "The enabled finish action depends on runtime-only value(s) in: $($FinishActionUnresolvedProperties -join ', ')." -Kind Incomplete -Areas Installability, Security -Evidence ([ordered]@{ Properties = [string[]]$FinishActionUnresolvedProperties })))
     }
-    # A complete one-architecture payload is authoritative. Mixed or partially
-    # analyzed payloads deliberately suppress the architecture scalar instead of
-    # leaking the architecture of InstallForge's outer setup stub into WinGet.
+    # Set architecture only from a complete, single-architecture payload.
+    # Leave it unresolved for mixed or partially analyzed payloads.
     $Architecture = if ($PayloadEvidence.PayloadArchitectureComplete -and $PayloadEvidence.Architectures.Count -eq 1) {
       $PayloadEvidence.Architectures[0]
     } elseif ($PayloadEvidence.AnalysisRoute -eq 'None') {

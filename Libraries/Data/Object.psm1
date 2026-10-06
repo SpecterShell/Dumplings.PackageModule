@@ -192,8 +192,7 @@ function ConvertFrom-Ini {
       switch -Regex ($Text) {
         $SectionRegex {
           $Section = $Matches[1]
-          # Repeated sections contribute additional keys to the same case-insensitive
-          # dictionary instead of discarding values parsed from the earlier occurrence.
+          # Merge repeated sections into the same case-insensitive dictionary.
           if (-not $Object.Contains($Section)) { $Object[$Section] = [ordered]@{} }
           $CommentCount = 0
           continue

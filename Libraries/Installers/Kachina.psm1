@@ -39,7 +39,7 @@
 #
 # Index offsets point to record content relative to the first appended record. The parser validates
 # every available index entry against the sequential record stream but retains appended records that
-# are intentionally absent from the index.
+# are absent from the index.
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
