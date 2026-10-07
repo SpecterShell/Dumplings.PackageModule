@@ -662,14 +662,18 @@ function Send-WinGetManifest {
     # The exact commit is compared because the compare endpoint can briefly lag
     # behind the branch created above and report a false empty diff.
     $Task.Log('Checking the final candidate branch for effective changes', 'Verbose')
+    $CandidateComparisonSucceeded = $false
+    $CandidateChanges = @()
     try {
       $CandidateChanges = @(Get-WinGetSubmissionCandidateChange -Base "${UpstreamRepoOwner}:${UpstreamRepoBranch}" -Head $NewCommitSha -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
+      $CandidateComparisonSucceeded = $true
     } catch {
-      Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
-      throw
+      # A failed comparison cannot establish an empty or identical diff. Keep
+      # the uploaded branch and let normal pull-request creation proceed.
+      $Task.Log("Failed to check the candidate branch for effective changes. Submission will continue without empty-change or exact duplicate pull-request checks: ${_}", 'Warning')
     }
 
-    if ($CandidateChanges.Count -eq 0) {
+    if ($CandidateComparisonSucceeded -and $CandidateChanges.Count -eq 0) {
       $Task.Log("The candidate branch has no changes compared with ${UpstreamRepoOwner}/${UpstreamRepoName}:${UpstreamRepoBranch}. No pull request is necessary.", 'Info')
       Invoke-WinGetSubmissionCandidateBranchCleanup -Task $Task -BranchName $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName
       return
@@ -679,7 +683,7 @@ function Send-WinGetManifest {
     # policy would close them. Keeping an identical PR preserves its completed or
     # in-progress validation results and avoids submitting a redundant branch.
     $ShouldCloseSelfPullRequests = $SelfPullRequests -and -not ($Global:DumplingsPreference['KeepOldPRs'] -or $Task.Config['KeepOldPRs'])
-    if ($ShouldCloseSelfPullRequests) {
+    if ($ShouldCloseSelfPullRequests -and $CandidateComparisonSucceeded) {
       # GitHub caps the compare endpoint's file collection at 300. A full page
       # cannot prove that more files were not omitted. Exact duplicate detection
       # is an optimization, so preserve the normal replacement workflow instead

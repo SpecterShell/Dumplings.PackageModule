@@ -7,6 +7,7 @@ BeforeAll {
   $Script:DumplingsModuleRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsTestRoot '..'))
   $Script:DumplingsModulesRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModuleRoot '..'))
   $Script:DumplingsRepositoryRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsModulesRoot '..'))
+  . (Join-Path $Script:DumplingsModuleRoot 'Index.ps1')
   . (Join-Path $Script:DumplingsTestRoot 'Support\TestFixture.ps1')
   . (Resolve-DumplingsTestModulePath 'Tests\Support\Import-DataInfrastructure.ps1')
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\WinGet\WinGetGitHubRepo.psm1') -Force
@@ -276,6 +277,135 @@ Describe 'Get-WinGetSubmissionCandidateChange' -Tag Unit {
     { Get-WinGetSubmissionCandidateChange -Base 'microsoft:master' -Head ('a' * 40) -RepoOwner microsoft -RepoName winget-pkgs -MaxAttempts 3 -MaxRetryDelaySeconds 0 } |
       Should -Throw '*boom*'
     $Script:CompareAttempts | Should -Be 3
+  }
+}
+
+Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
+  BeforeAll {
+    $Script:SavedPreference = Get-Variable -Name DumplingsPreference -Scope Global -ErrorAction Ignore
+    $Script:SavedOutput = Get-Variable -Name DumplingsOutput -Scope Global -ErrorAction Ignore
+  }
+
+  BeforeEach {
+    $Global:DumplingsPreference = @{ WinGetOriginRepoOwner = 'DumplingsBot' }
+    $Global:DumplingsOutput = $TestDrive
+    $Script:SubmissionTask = [pscustomobject]@{
+      Config         = @{ WinGetPackageIdentifier = 'Vendor.Package'; RemoveLastVersion = $false }
+      CurrentState   = [ordered]@{
+        Version   = '2.0'
+        Installer = @([ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/setup-v2.exe' })
+        Locale    = @()
+      }
+      InstallerFiles = [ordered]@{}
+      Logs           = [Collections.Generic.List[object]]::new()
+    }
+    $Script:SubmissionTask | Add-Member -MemberType ScriptMethod -Name Log -Value {
+      param($Message, $Level)
+      $this.Logs.Add([pscustomobject]@{ Message = $Message; Level = $Level })
+    }
+    $Script:ExistingPullRequest = Get-TestPullRequest -Author DumplingsBot -Number 42
+    $Script:ExistingPullRequest.title = 'New version: Vendor.Package version 2.0'
+    $Script:CandidateChange = Get-TestFileChange -FileName 'manifests/v/Vendor/Package/2.0/Vendor.Package.yaml' -Status added -Sha ('c' * 40)
+
+    # Isolate the submission orchestration from source reads, parsing, validation,
+    # and GitHub writes. The real comparison helper still exercises its retries.
+    Mock Get-WinGetLocalRepoPath -ModuleName WinGetSubmission { $null }
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetSubmission { @{ object = @{ sha = 'a' * 40 } } }
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { '1.0' }
+    Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetSubmission { @{ login = 'DumplingsBot' } }
+    Mock Find-WinGetGitHubPullRequest -ModuleName WinGetSubmission { @{ items = @() } }
+    Mock Read-WinGetGitHubManifests -ModuleName WinGetSubmission { 'reference manifests' }
+    Mock ConvertFrom-WinGetManifestYaml -ModuleName WinGetSubmission { @{ Installers = @() } }
+    Mock Update-WinGetManifest -ModuleName WinGetSubmission { @{ Installers = @() } }
+    Mock ConvertTo-WinGetManifestYaml -ModuleName WinGetSubmission { @{ Version = 'candidate manifest'; Locale = @{} } }
+    Mock Add-WinGetLocalManifests -ModuleName WinGetSubmission {}
+    Mock Test-WinGetManifest -ModuleName WinGetSubmission {}
+    Mock New-WinGetGitHubBranch -ModuleName WinGetSubmission { @{ object = @{ sha = 'a' * 40 } } }
+    Mock Add-WinGetGitHubManifests -ModuleName WinGetSubmission { 'b' * 40 }
+    Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission { @{ files = @($Script:CandidateChange) } }
+    Mock Get-WinGetGitHubPullRequestFile -ModuleName WinGetSubmission { $Script:CandidateChange }
+    Mock Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission {}
+    Mock New-WinGetGitHubPullRequest -ModuleName WinGetSubmission {
+      @{ number = 43; title = 'New version: Vendor.Package version 2.0'; html_url = 'https://example.test/pr/43' }
+    }
+    Mock Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission {}
+    Mock Start-Sleep -ModuleName WinGetSubmission {}
+  }
+
+  It 'warns after exhausted comparison retries and still creates a pull request' {
+    Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission { throw 'GitHub temporarily unavailable' }
+
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Not -Throw
+
+    Should -Invoke Get-WinGetGitHubComparison -ModuleName WinGetSubmission -Exactly 6
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1
+    Should -Invoke Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission -Exactly 0
+    $Warnings = @($Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' }))
+    $Warnings | Should -HaveCount 1
+    $Warnings[0].Message | Should -BeLike '*Failed to compare the candidate changes*GitHub temporarily unavailable*'
+    $Warnings[0].Message | Should -BeLike '*continue without empty-change or exact duplicate pull-request checks*'
+  }
+
+  It 'skips exact duplicate checks when the candidate comparison failed and closes old PRs after replacement' {
+    Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission { throw 'comparison failed' }
+    Mock Find-WinGetGitHubPullRequest -ModuleName WinGetSubmission { @{ items = @($Script:ExistingPullRequest) } }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke Get-WinGetGitHubPullRequestFile -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1
+    Should -Invoke Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $PullRequestNumber -eq 42 }
+    Should -Invoke Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'still removes a candidate branch when the comparison confirms no changes' {
+    Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission { @{ files = @() } }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke Get-WinGetGitHubComparison -ModuleName WinGetSubmission -Exactly 6
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission -Exactly 1
+  }
+
+  It 'still preserves an existing PR when both comparisons establish identical changes' {
+    Mock Find-WinGetGitHubPullRequest -ModuleName WinGetSubmission { @{ items = @($Script:ExistingPullRequest) } }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke Get-WinGetGitHubPullRequestFile -ModuleName WinGetSubmission -Exactly 1
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission -Exactly 1
+    $Script:SubmissionTask.Logs.Message | Should -Contain 'Existing pull request #42 contains exactly the same changes. Preserving it and aborting redundant submission: https://github.com/microsoft/winget-pkgs/pull/42'
+  }
+
+  It 'warns and submits when only the existing PR file comparison fails' {
+    Mock Find-WinGetGitHubPullRequest -ModuleName WinGetSubmission { @{ items = @($Script:ExistingPullRequest) } }
+    Mock Get-WinGetGitHubPullRequestFile -ModuleName WinGetSubmission { throw 'PR files temporarily unavailable' }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1
+    Should -Invoke Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $PullRequestNumber -eq 42 }
+    $Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike '*Normal replacement submission will continue*PR files temporarily unavailable*'
+  }
+
+  It 'still throws a PR creation failure and leaves existing PRs open' {
+    Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission { throw 'comparison failed' }
+    Mock Find-WinGetGitHubPullRequest -ModuleName WinGetSubmission { @{ items = @($Script:ExistingPullRequest) } }
+    Mock New-WinGetGitHubPullRequest -ModuleName WinGetSubmission { throw 'PR creation failed' }
+
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*PR creation failed*'
+
+    Should -Invoke Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  AfterAll {
+    if ($Script:SavedPreference) { $Global:DumplingsPreference = $Script:SavedPreference.Value }
+    else { Remove-Variable -Name DumplingsPreference -Scope Global -ErrorAction Ignore }
+    if ($Script:SavedOutput) { $Global:DumplingsOutput = $Script:SavedOutput.Value }
+    else { Remove-Variable -Name DumplingsOutput -Scope Global -ErrorAction Ignore }
   }
 }
 

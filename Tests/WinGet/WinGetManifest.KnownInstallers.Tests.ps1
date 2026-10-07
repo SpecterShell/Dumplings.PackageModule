@@ -940,7 +940,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       Should -Invoke Get-InnoInfo -Exactly 1 -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Architecture') }
     }
 
-    It 'Logs identical parser diagnostics once across scope-specific installer entries' {
+    It 'Logs identical parser diagnostics once per scope-specific installer entry' {
       Mock Get-NSISInfo {
         [pscustomobject]@{
           InstallerType              = 'Nullsoft'
@@ -975,9 +975,11 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result = @(Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger)
 
       $Result.Count | Should -Be 2
-      @($Script:LogMessages.Where({ $_.Message -ceq '[NSIS.NestedPayload.Warning] NSIS: Nested payload warning' })).Count | Should -Be 1
-      @($Script:LogMessages.Where({ $_.Message -like '*NSIS reports that the outer installer does not write a visible Apps & Features entry*' })).Count | Should -Be 1
-      @($Script:LogMessages.Where({ $_.Level -ceq 'Verbose' -and $_.Message -like 'Updating installer #*' })).Count | Should -Be 2
+      foreach ($Index in 1, 2) {
+        @($Script:LogMessages.Where({ $_.Message -ceq "[Installer #$Index/2] [NSIS.NestedPayload.Warning] NSIS: Nested payload warning" })).Count | Should -Be 1
+      }
+      @($Script:LogMessages.Where({ $_.Message -like '*NSIS reports that the outer installer does not write a visible Apps & Features entry*' })).Count | Should -Be 2
+      @($Script:LogMessages.Where({ $_.Level -ceq 'Verbose' -and $_.Message -match '^\[Installer #\d/2\] Updating installer #' })).Count | Should -Be 2
       Should -Invoke Get-NSISInfo -Exactly 2
     }
 

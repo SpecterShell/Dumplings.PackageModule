@@ -968,9 +968,9 @@ function Get-WinGetManifestUpdateAffectedField {
 function Add-WinGetManifestUpdateDiagnostic {
   <#
   .SYNOPSIS
-    Resolve diagnostics for one installer entry and append them to a manifest-wide buffer.
+    Resolve diagnostics for one installer entry and append them to its diagnostic buffer.
   .PARAMETER Collection
-    Shared collection flushed after all installer entries are processed.
+    Collection of resolved diagnostics for the installer entry.
   .PARAMETER Diagnostic
     Context-neutral or previously resolved diagnostics.
   .PARAMETER Installer
@@ -1011,7 +1011,7 @@ function Update-WinGetInstallerManifestInstallerMetadata {
   .PARAMETER SkipInstallerAnalysis
     Skip nested payload extraction, installer-family detection, and static metadata parsers
   .PARAMETER DiagnosticCollection
-    Manifest-wide resolved installer diagnostic buffer.
+    Resolved diagnostics for this installer entry. Omit to render them through Logger.
   #>
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The installer to update')]
@@ -1312,6 +1312,31 @@ function Get-WinGetInstallerEntryCandidate {
   $Candidates | Sort-Object
 }
 
+function New-WinGetInstallerEntryLogger {
+  <#
+  .SYNOPSIS
+    Attribute installer messages to their one-based position in the output manifest.
+  .PARAMETER Logger
+    Parent logger whose Invoke method accepts a message and level.
+  .PARAMETER Index
+    One-based position of the installer being processed.
+  .PARAMETER Count
+    Total number of output installer entries for this update or replacement.
+  .OUTPUTS
+    A scriptblock that preserves log levels and suppresses logger pipeline output.
+  #>
+  [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Logger', Justification = 'Captured by the returned logging closure.')]
+  param (
+    [Parameter(Mandatory)]$Logger,
+    [Parameter(Mandatory)][int]$Index,
+    [Parameter(Mandatory)][int]$Count
+  )
+
+  # Capture the parent and position so later entries cannot change this context.
+  $Prefix = "[Installer #${Index}/${Count}]"
+  return { param($Message, $Level) $null = $Logger.Invoke("$Prefix $Message", $Level) }.GetNewClosure()
+}
+
 function Update-WinGetInstallerManifestInstallers {
   <#
   .SYNOPSIS
@@ -1344,15 +1369,12 @@ function Update-WinGetInstallerManifestInstallers {
   $OwnOperation = $null -eq $Operation
   if ($OwnOperation) { $Operation = New-WinGetManifestUpdateContext }
   try {
-    # Parser diagnostics are resolved per effective entry, then deduplicated and
-    # rendered once after the complete manifest update.
-    $InstallerLogger = $Logger
-    $InstallerDiagnostics = [System.Collections.Generic.List[object]]::new()
     $iteration = 0
     $Installers = [Collections.Generic.List[Collections.IDictionary]]::new()
     $EntryIndex = New-WinGetInstallerEntryIndex -Entries $InstallerEntries
     foreach ($OldInstaller in $OldInstallers) {
       $iteration += 1
+      $InstallerLogger = New-WinGetInstallerEntryLogger -Logger $Logger -Index $iteration -Count $OldInstallers.Count
       $InstallerLogger.Invoke("Updating installer #${iteration}/$($OldInstallers.Count) [$($OldInstaller['InstallerLocale']), $($OldInstaller['Architecture']), $($OldInstaller['InstallerType']), $($OldInstaller['NestedInstallerType']), $($OldInstaller['Scope'])]", 'Verbose')
 
       # Apply inputs
@@ -1433,15 +1455,12 @@ function Update-WinGetInstallerManifestInstallers {
         }
       }
 
-      $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Operation $Operation -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -DiagnosticCollection $InstallerDiagnostics -Logger $InstallerLogger
+      # Render deduplicated diagnostics per entry, even when parser evidence is cached.
+      $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $OldInstaller -InstallerEntry $MatchingInstallerEntry -Operation $Operation -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $InstallerLogger
 
       # Add the updated installer to the new installers array
       $Installers.Add($Installer)
     }
-
-
-    $null = Write-InstallerDiagnostics -Diagnostic $InstallerDiagnostics.ToArray() -Scenario ManifestUpdate -Logger $Logger
-
     return $Installers
   } finally { if ($OwnOperation) { Close-WinGetManifestUpdateContext $Operation } }
 }
@@ -1478,12 +1497,11 @@ function Set-WinGetInstallerManifestInstallers {
   $OwnOperation = $null -eq $Operation
   if ($OwnOperation) { $Operation = New-WinGetManifestUpdateContext }
   try {
-    $InstallerLogger = $Logger
-    $InstallerDiagnostics = [System.Collections.Generic.List[object]]::new()
     $iteration = 0
     $Installers = [Collections.Generic.List[Collections.IDictionary]]::new()
     foreach ($InstallerEntry in $InstallerEntries) {
       $iteration += 1
+      $InstallerLogger = New-WinGetInstallerEntryLogger -Logger $Logger -Index $iteration -Count $InstallerEntries.Count
       $InstallerLogger.Invoke("Applying installer entry #${iteration}/$($InstallerEntries.Count)", 'Verbose')
 
       # Find matching installer
@@ -1550,15 +1568,11 @@ function Set-WinGetInstallerManifestInstallers {
         }
       }
 
-      $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Operation $Operation -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -DiagnosticCollection $InstallerDiagnostics -Logger $InstallerLogger
+      $Installer = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller $MatchingInstaller -InstallerEntry $InstallerEntry -Operation $Operation -InstallerFiles $InstallerFiles -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $InstallerLogger
 
       # Add the updated installer to the new installers array
       $Installers.Add($Installer)
     }
-
-
-    $null = Write-InstallerDiagnostics -Diagnostic $InstallerDiagnostics.ToArray() -Scenario ManifestUpdate -Logger $Logger
-
     return $Installers
   } finally { if ($OwnOperation) { Close-WinGetManifestUpdateContext $Operation } }
 }

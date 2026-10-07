@@ -218,10 +218,14 @@ class PackageTask : DumplingsTaskBase {
           if (-not [string]::IsNullOrWhiteSpace($Identity)) { $null = $TrustedIdentities.Add($Identity) }
         }
         if ($TrustedIdentities.Count -gt 0) {
+          $InstallerIndex = 0
+          $PreviousIdentities = "'" + ($TrustedIdentities -join "', '") + "'"
+          $IdentityLabel = $TrustedIdentities.Count -eq 1 ? 'identity' : 'identities'
           foreach ($InstallerEntry in $this.CurrentState.Installer) {
+            $InstallerIndex += 1
             $Identity = Get-InstallerSourceIdentity -Uri $InstallerEntry['InstallerUrl']
             if (-not [string]::IsNullOrWhiteSpace($Identity) -and -not $TrustedIdentities.Contains($Identity)) {
-              $this.Log("The installer source identity '${Identity}' changed from the trusted history: $($TrustedIdentities -join ', ')", 'Warning')
+              $this.Log("[Installer #${InstallerIndex}/$($this.CurrentState.Installer.Count)] The installer source ${IdentityLabel} ${PreviousIdentities} changed to '${Identity}'", 'Warning')
             }
           }
         }
