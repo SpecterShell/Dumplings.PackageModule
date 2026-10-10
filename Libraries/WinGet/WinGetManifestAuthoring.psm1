@@ -334,9 +334,8 @@ function Get-WinGetAuthoringAnalysisProjection {
   $Architecture = ConvertTo-WinGetAuthoringArchitecture -Architecture ([string](Get-WinGetAuthoringPropertyValue -Source $Sources -Name @('PackageArchitecture', 'Architecture', 'RecommendedWinGetArchitecture')))
   $SupportedArchitectures = @(
     @(Get-WinGetAuthoringPropertyValue -Source $Sources -Name @('RecommendedWinGetArchitectures', 'SupportedArchitectures')) |
-      ForEach-Object { ConvertTo-WinGetAuthoringArchitecture -Architecture ([string]$_) } |
-      Where-Object { $_ } |
-      Select-Object -Unique
+    ForEach-Object { ConvertTo-WinGetAuthoringArchitecture -Architecture ([string]$_) } |
+    Where-Object { $_ } | Select-Object -Unique
   )
   $SupportsSilentInstallation = Get-WinGetAuthoringPropertyValue -Source $Sources -Name SupportsSilentInstallation
   if ($null -ne $SupportsSilentInstallation -and -not [bool]$SupportsSilentInstallation) {
@@ -735,6 +734,114 @@ function Get-WinGetInstallerManifestSuggestion {
   } finally {
     if ($NestedTemporaryFolder) { Remove-Item -LiteralPath $NestedTemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue }
     if ($TemporaryFolder) { Remove-Item -LiteralPath $TemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+function Get-WinGetInstallerEvidence {
+  <#
+  .SYNOPSIS
+    Read the installer evidence that manifest attribution fields are derived from
+  .DESCRIPTION
+    Downloads the installer a manifest entry references through WinGet-compatible
+    transports, verifies the downloaded file against the recorded hash, and reads the
+    values behind the Author (signer common name), Publisher (version-resource company
+    name), and Copyright (version-resource legal copyright) fields. The installer is
+    never executed. The temporary file is removed after the evidence is read; Path
+    identifies it for messages only.
+  .PARAMETER InstallerUrl
+    Public installer URL recorded by the manifest entry.
+  .PARAMETER InstallerSha256
+    SHA256 recorded by the manifest entry; the download must match it.
+  .PARAMETER Context
+    Optional prefix for failure messages, for example the version being rewritten.
+  .PARAMETER Language
+    Also read the first language id from the PE translation table as a BCP-47 culture
+    name under Language. Callers that use the installer to choose the default
+    localization require a stated language, so an installer without one fails.
+  .OUTPUTS
+    Ordered dictionary with Path, LegalCopyright, Publisher, SignatureStatus, Author,
+    and, with Language, the culture name.
+  #>
+  [OutputType([System.Collections.IDictionary])]
+  param (
+    [Parameter(Mandatory)][uri]$InstallerUrl,
+    [Parameter(Mandatory)][string]$InstallerSha256,
+    [string]$Context,
+    [switch]$Language
+  )
+
+  $Prefix = $Context ? "${Context}: " : ''
+  $TemporaryFolder = New-TempFolder
+  try {
+    $FileName = [IO.Path]::GetFileName($InstallerUrl.AbsolutePath)
+    if ([string]::IsNullOrWhiteSpace($FileName)) { $FileName = 'installer.bin' }
+    $InstallerPath = Join-Path $TemporaryFolder $FileName
+    $null = Invoke-WinGetInstallerDownload -Uri $InstallerUrl -DestinationPath $InstallerPath
+
+    # The hash check keeps the evidence tied to the exact package the manifest references.
+    foreach ($Actual in (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash.ToUpperInvariant()) { ([string]$InstallerSha256).ToUpperInvariant() | ForEach-Object { if ($Actual -ne $_) { throw "${Prefix}downloaded installer hash $Actual does not match InstallerSha256 $_" } } }
+
+    $Evidence = [ordered]@{ Path = $InstallerPath }
+    if ($Language) {
+      # VersionInfo.Language renders the id as a name localized to whatever UI language
+      # the running machine uses, so read the id from the PE translation table instead
+      # and let CultureInfo name the locale.
+      if (-not ('Dumplings.WinGet.InstallerLanguage' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Dumplings.WinGet
+{
+  public static class InstallerLanguage
+  {
+    [DllImport("version.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int GetFileVersionInfoSize(string lptstrFilename, out int lpdwHandle);
+
+    [DllImport("version.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetFileVersionInfo(string lptstrFilename, int dwHandle, int dwLen, byte[] lpData);
+
+    [DllImport("version.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool VerQueryValue(byte[] pBlock, string lpSubBlock, out IntPtr lplpBuffer, out int puLen);
+
+    public static int[] Ids(string path)
+    {
+      int handle;
+      int size = GetFileVersionInfoSize(path, out handle);
+      if (size == 0) return new int[0];
+      byte[] data = new byte[size];
+      if (!GetFileVersionInfo(path, 0, size, data)) return new int[0];
+      IntPtr buffer;
+      int length;
+      if (!VerQueryValue(data, @"\VarFileInfo\Translation", out buffer, out length)) return new int[0];
+      int[] ids = new int[length / 4];
+      for (int index = 0; index < ids.Length; index++) ids[index] = Marshal.ReadInt16(buffer, index * 4) & 0xFFFF;
+      return ids;
+    }
+  }
+}
+'@
+      }
+      $LanguageId = [Dumplings.WinGet.InstallerLanguage]::Ids($InstallerPath) | Select-Object -First 1
+      if (-not $LanguageId) { throw "${Prefix}installer '$FileName' declares no language" }
+      $Evidence['Language'] = [System.Globalization.CultureInfo]::GetCultureInfo([int]$LanguageId).Name
+    }
+
+    # Named after the manifest fields they back: the signer common name is the Author,
+    # CompanyName is the Add/Remove Programs Publisher, and LegalCopyright backs Copyright.
+    foreach ($VersionInfo in [System.Diagnostics.FileVersionInfo]::GetVersionInfo($InstallerPath)) {
+      @(
+        'LegalCopyright' | ForEach-Object { @{ Evidence = $_; VersionInfo = $_ } }
+        @{ Evidence = 'Publisher'; VersionInfo = 'CompanyName' }
+      ) | ForEach-Object { $Evidence[$_['Evidence']] = $VersionInfo.($_['VersionInfo']) }
+    }
+    Get-AuthenticodeSignature -LiteralPath $InstallerPath | ForEach-Object {
+      $Evidence['SignatureStatus'] = $_.Status
+      $_.SignerCertificate | ForEach-Object { $Evidence['Author'] = $_ ? $_.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) : $null }
+    }
+    return $Evidence
+  } finally {
+    Remove-Item -LiteralPath $TemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -1351,6 +1458,11 @@ function Save-WinGetManifest {
     Complete logical manifest model.
   .PARAMETER Path
     Leaf package-version directory to replace.
+  .PARAMETER InstallerManifestYaml
+    Exact installer manifest text written in place of the serialized installer document.
+    Callers rewriting a published set pass the published text here so the installer
+    manifest stays byte-identical while the staged set is validated and moved as one
+    piece.
   .PARAMETER ErrorOnWarning
     Treat validation warnings as blocking failures.
   .PARAMETER PassThru
@@ -1361,6 +1473,7 @@ function Save-WinGetManifest {
   param (
     [Parameter(Mandatory, ValueFromPipeline)]$Manifest,
     [Parameter(Mandatory)][string]$Path,
+    [string]$InstallerManifestYaml,
     [switch]$ErrorOnWarning,
     [switch]$PassThru
   )
@@ -1417,6 +1530,7 @@ function Save-WinGetManifest {
       $null = New-Item -Path $ParentPath -ItemType Directory -Force
       $Bundle = ConvertTo-WinGetManifestYaml -Manifest $OptimizedManifest
       Add-WinGetLocalManifests -PackageIdentifier ([string]$OptimizedManifest.PackageIdentifier) -Path $StagePath -Manifest $Bundle
+      if ($InstallerManifestYaml) { [IO.File]::WriteAllText((Join-Path $StagePath "$([string]$OptimizedManifest.PackageIdentifier).installer.yaml"), $InstallerManifestYaml) }
       $PhysicalValidation = Get-WinGetManifestValidationResult -Path $StagePath
       foreach ($Warning in $PhysicalValidation.Warnings) { Write-Warning "[$($Warning.Id)] $($Warning.Message)" }
       if ($PhysicalValidation.HasErrors -or ($ErrorOnWarning -and $PhysicalValidation.HasWarnings)) {
@@ -1448,4 +1562,4 @@ function Save-WinGetManifest {
   }
 }
 
-Export-ModuleMember -Function ConvertTo-WinGetAuthoringDictionary, New-WinGetManifest, Get-WinGetInstallerManifestSuggestion, Add-WinGetManifestInstaller, Set-WinGetManifestInstaller, Remove-WinGetManifestInstaller, Add-WinGetManifestLocale, Set-WinGetManifestLocale, Remove-WinGetManifestLocale, Set-WinGetManifestValue, Remove-WinGetManifestValue, Save-WinGetManifest
+Export-ModuleMember -Function ConvertTo-WinGetAuthoringDictionary, New-WinGetManifest, Get-WinGetInstallerManifestSuggestion, Get-WinGetInstallerEvidence, Add-WinGetManifestInstaller, Set-WinGetManifestInstaller, Remove-WinGetManifestInstaller, Add-WinGetManifestLocale, Set-WinGetManifestLocale, Remove-WinGetManifestLocale, Set-WinGetManifestValue, Remove-WinGetManifestValue, Save-WinGetManifest

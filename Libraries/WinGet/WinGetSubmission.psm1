@@ -476,6 +476,8 @@ function Send-WinGetManifest {
     3. Validate new manifests.
     4. Upload new manifests to origin.
     5. Create pull requests in upstream.
+    The reference manifests are those of the submitted version itself when that version already exists in
+    the repository, and those of the newest existing version otherwise.
   .PARAMETER Task
     The task object to be handled
   .PARAMETER SkipInstallerAnalysis
@@ -513,7 +515,13 @@ function Send-WinGetManifest {
       $ReferenceRevision = (Get-WinGetGitHubBranch -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch).object.sha
       if ([string]::IsNullOrWhiteSpace($ReferenceRevision)) { throw 'The reference branch did not return a commit SHA.' }
     }
-    $RefPackageVersion = ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath)) | Select-Object -Last 1
+    $RefPackageVersions = @($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath))
+    # A version that is already in the repository is updated in place, so it is its own reference. A
+    # version that is not there yet is modeled after the newest existing version, which is the only
+    # manifest available for it. Generating an existing version from a newer one would carry that
+    # newer version's metadata into older manifests.
+    $RefPackageVersion = @($RefPackageVersions | Where-Object -FilterScript { $_ -ceq $NewPackageVersion }) | Select-Object -First 1
+    if (-not $RefPackageVersion) { $RefPackageVersion = $RefPackageVersions | Select-Object -Last 1 }
     if (-not $RefPackageVersion) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
 
     $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName
@@ -523,7 +531,9 @@ function Send-WinGetManifest {
     else {
       switch (([WinGetVersion]$NewPackageVersion).CompareTo([WinGetVersion]$RefPackageVersion)) {
         { $_ -gt 0 } { 'New version'; continue }
-        0 { 'Update'; continue }
+        # A version that is already in the repository is rewritten in place, so it is a metadata
+        # change and takes the commit type the authoring script uses for that.
+        0 { 'Metadata'; continue }
         { $_ -lt 0 } { 'Add version'; continue }
       }
     }
@@ -603,7 +613,11 @@ function Send-WinGetManifest {
     }
     $TrackingArguments = @{}
     if ($Task.PSObject.Properties['InstallerFileEvidence']) { $TrackingArguments.InstallerFileEvidence = $Task.InstallerFileEvidence }
-    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles @TrackingArguments -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -SkipInstallerAnalysis:$SkipInstallerAnalysis -Logger $Task.Log
+    # The reference manifests describe the submitted version itself when that version is already
+    # published, and such a submission must not rewrite the authored metadata or the schema of the
+    # manifests it replaces.
+    $PreserveAuthoredMetadata = $RefPackageVersion -ceq $NewPackageVersion
+    $NewManifest = Update-WinGetManifest -Manifest $RefManifest -NewPackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -InstallerEntries $Task.CurrentState.Installer -LocaleEntries $Task.CurrentState.Locale -InstallerFiles $Task.InstallerFiles @TrackingArguments -ReplaceInstallers:$Task.Config['WinGetReplaceMode'] -SkipInstallerAnalysis:$SkipInstallerAnalysis -PreserveAuthoredMetadata:$PreserveAuthoredMetadata -Logger $Task.Log
     $NewManifests = $NewManifest | ConvertTo-WinGetManifestYaml
     #endregion
 
@@ -715,6 +729,12 @@ function Send-WinGetManifest {
     $NewPullRequestBody = (Test-Path -Path 'Env:\GITHUB_ACTIONS') ? `
       "Automated by [🥟 ${Env:GITHUB_REPOSITORY_OWNER}/Dumplings](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings) in workflow run [#${Env:GITHUB_RUN_NUMBER}](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings/actions/runs/${Env:GITHUB_RUN_ID})." : `
       "Created by [🥟 Dumplings](https://github.com/${OriginRepoOwner}/Dumplings)."
+    # The issues the submission resolves, so the merge closes them. They have to be named when the
+    # pull request is created, because that is the body the merge reads. A task setting or the
+    # command line preference (-WinGetResolveIssues "123,456") supplies them, like the authoring
+    # script's own resolved issues prompt.
+    $ResolvedIssues = @(@($Task.Config['WinGetResolveIssues'] ?? $Global:DumplingsPreference['WinGetResolveIssues']) | ForEach-Object -Process { ([string]$_ -split '[,;\s]+') } | Where-Object -FilterScript { $_ })
+    if ($ResolvedIssues) { $NewPullRequestBody += "`n`n$($ResolvedIssues | ForEach-Object -Process { "Resolves #$_" } | Join-String -Separator "`n")" }
     $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 
