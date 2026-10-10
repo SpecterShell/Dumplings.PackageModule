@@ -427,6 +427,63 @@ Describe 'Get-WinGetInstallerManifestSuggestion' -Tag Unit {
   }
 }
 
+Describe 'Get-WinGetInstallerEvidence' -Tag Unit {
+  BeforeAll {
+    # A real signed system binary supplies deterministic version resources; the download
+    # itself is mocked so the test never leaves the machine.
+    $Script:EvidenceSource = Join-Path $env:SystemRoot 'System32\cmd.exe'
+  }
+
+  It 'downloads, verifies, and reads the installer evidence' {
+    Mock Invoke-WinGetInstallerDownload -ModuleName WinGetManifestAuthoring {
+      Copy-Item -LiteralPath $Script:EvidenceSource -Destination $DestinationPath
+      [pscustomobject]@{ Success = $true; DestinationPath = $DestinationPath; ResponseHeaders = '' }
+    }
+
+    $Evidence = Get-WinGetInstallerEvidence -InstallerUrl 'https://example.test/cmd.exe' -InstallerSha256 (Get-FileHash -LiteralPath $Script:EvidenceSource -Algorithm SHA256).Hash
+
+    (Split-Path -Leaf $Evidence.Path) | Should -Be 'cmd.exe'
+    foreach ($ExpectedVersionInfo in [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Script:EvidenceSource)) {
+      $Evidence.LegalCopyright | Should -Be $ExpectedVersionInfo.LegalCopyright
+      $Evidence.Publisher | Should -Be $ExpectedVersionInfo.CompanyName
+    }
+    foreach ($ExpectedSignature in Get-AuthenticodeSignature -LiteralPath $Script:EvidenceSource) {
+      $Evidence.SignatureStatus | Should -Be $ExpectedSignature.Status
+      $Evidence.Author | Should -Be ($ExpectedSignature.SignerCertificate ? $ExpectedSignature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) : $null)
+    }
+    Test-Path -LiteralPath $Evidence.Path | Should -BeFalse
+  }
+
+  It 'reads the installer language when requested' {
+    Mock Invoke-WinGetInstallerDownload -ModuleName WinGetManifestAuthoring {
+      Copy-Item -LiteralPath $Script:EvidenceSource -Destination $DestinationPath
+      [pscustomobject]@{ Success = $true; DestinationPath = $DestinationPath; ResponseHeaders = '' }
+    }
+
+    $Evidence = Get-WinGetInstallerEvidence -InstallerUrl 'https://example.test/cmd.exe' -InstallerSha256 (Get-FileHash -LiteralPath $Script:EvidenceSource -Algorithm SHA256).Hash -Language
+
+    $Evidence.Language | Should -Match '^[a-z]{2,3}(-[A-Za-z0-9]+)*$'
+  }
+
+  It 'rejects a download whose hash does not match the manifest entry' {
+    Mock Invoke-WinGetInstallerDownload -ModuleName WinGetManifestAuthoring {
+      [IO.File]::WriteAllBytes($DestinationPath, [byte[]](1, 2, 3))
+      [pscustomobject]@{ Success = $true; DestinationPath = $DestinationPath; ResponseHeaders = '' }
+    }
+
+    { Get-WinGetInstallerEvidence -InstallerUrl 'https://example.test/app.exe' -InstallerSha256 ('A' * 64) -Context 'Contoso.App 1.2.3' } | Should -Throw '*Contoso.App 1.2.3: downloaded installer hash*'
+  }
+
+  It 'fails when the installer declares no language' {
+    Mock Invoke-WinGetInstallerDownload -ModuleName WinGetManifestAuthoring {
+      [IO.File]::WriteAllBytes($DestinationPath, [byte[]](1, 2, 3))
+      [pscustomobject]@{ Success = $true; DestinationPath = $DestinationPath; ResponseHeaders = '' }
+    }
+
+    { Get-WinGetInstallerEvidence -InstallerUrl 'https://example.test/plain.bin' -InstallerSha256 (Get-FileHash -InputStream ([IO.MemoryStream]::new([byte[]](1, 2, 3))) -Algorithm SHA256).Hash -Language } | Should -Throw '*declares no language*'
+  }
+}
+
 Describe 'Save-WinGetManifest and CLI' -Tag Unit {
   It 'atomically writes, replaces stale locales, and reads the saved model' {
     $Path = Join-Path $TestDrive 'saved-manifests'
