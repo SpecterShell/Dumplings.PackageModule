@@ -1444,6 +1444,11 @@ function Save-WinGetManifest {
     Complete logical manifest model.
   .PARAMETER Path
     Leaf package-version directory to replace.
+  .PARAMETER InstallerManifestYaml
+    Exact installer manifest text written in place of the serialized installer document.
+    Callers rewriting a published set pass the published text here so the installer
+    manifest stays byte-identical while the staged set is validated and moved as one
+    piece.
   .PARAMETER ErrorOnWarning
     Treat validation warnings as blocking failures.
   .PARAMETER PassThru
@@ -1454,6 +1459,7 @@ function Save-WinGetManifest {
   param (
     [Parameter(Mandatory, ValueFromPipeline)]$Manifest,
     [Parameter(Mandatory)][string]$Path,
+    [string]$InstallerManifestYaml,
     [switch]$ErrorOnWarning,
     [switch]$PassThru
   )
@@ -1510,6 +1516,7 @@ function Save-WinGetManifest {
       $null = New-Item -Path $ParentPath -ItemType Directory -Force
       $Bundle = ConvertTo-WinGetManifestYaml -Manifest $OptimizedManifest
       Add-WinGetLocalManifests -PackageIdentifier ([string]$OptimizedManifest.PackageIdentifier) -Path $StagePath -Manifest $Bundle
+      if ($InstallerManifestYaml) { [IO.File]::WriteAllText((Join-Path $StagePath "$([string]$OptimizedManifest.PackageIdentifier).installer.yaml"), $InstallerManifestYaml) }
       $PhysicalValidation = Get-WinGetManifestValidationResult -Path $StagePath
       foreach ($Warning in $PhysicalValidation.Warnings) { Write-Warning "[$($Warning.Id)] $($Warning.Message)" }
       if ($PhysicalValidation.HasErrors -or ($ErrorOnWarning -and $PhysicalValidation.HasWarnings)) {

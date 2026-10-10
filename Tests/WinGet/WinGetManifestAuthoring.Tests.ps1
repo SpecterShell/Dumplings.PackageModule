@@ -547,4 +547,22 @@ Describe 'Save-WinGetManifest and CLI' -Tag Unit {
     $Validated = & $CliPath validate -Path $Path -PassThru
     $Validated.IsValid | Should -BeTrue
   }
+
+  It 'writes the exact installer manifest text when InstallerManifestYaml is given' {
+    foreach ($Path in Join-Path $TestDrive 'installer-override') {
+      New-AuthoringTestModel | ForEach-Object {
+        foreach ($Text in "$((ConvertTo-WinGetManifestYaml $_).Installer)`n# Published installer manifest, kept byte-identical by the rewrite.`n") {
+          (Save-WinGetManifest -Manifest $_ -Path $Path -InstallerManifestYaml $Text -PassThru).Written | Should -BeTrue
+          (Get-Content -LiteralPath (Join-Path $Path 'Contoso.AuthoringTest.installer.yaml') -Raw) | Should -Be $Text
+        }
+      }
+    }
+  }
+
+  It 'validates the given installer manifest text before moving the set' {
+    Join-Path $TestDrive 'installer-override-invalid' | ForEach-Object {
+      { New-AuthoringTestModel | Save-WinGetManifest -Path $_ -InstallerManifestYaml '# only a comment' } | Should -Throw '*validation failed*'
+      Test-Path -LiteralPath $_ | Should -BeFalse
+    }
+  }
 }
