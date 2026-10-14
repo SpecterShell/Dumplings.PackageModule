@@ -111,6 +111,8 @@ function Get-WinGetGitHubPackageVersion {
     The branch name of the repository
   .PARAMETER RootPath
     The path to the root folder of the manifests repository
+  .PARAMETER AllowMissing
+    Return no versions for HTTP 404. Authentication and transport failures still throw.
   #>
   [OutputType([string[]])]
   param (
@@ -123,14 +125,27 @@ function Get-WinGetGitHubPackageVersion {
     [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
     [string]$RepoBranch,
     [Parameter(Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
-    [string]$RootPath
+    [string]$RootPath,
+    [switch]$AllowMissing
   )
 
   process {
     $Prefix = Get-WinGetGitHubPackagePath -PackageIdentifier $PackageIdentifier -RootPath $RootPath
 
     # https://docs.github.com/rest/git/trees#get-a-tree
-    $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/trees/${RepoBranch}:${Prefix}?recursive=true"
+    try {
+      $Response = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/git/trees/${RepoBranch}:${Prefix}?recursive=true"
+    } catch {
+      # The GitHub proxy retains the original HTTP exception as its inner exception.
+      # Only a confirmed missing path may activate the pending-package fallback.
+      for ($Exception = $_.Exception; $Exception; $Exception = $Exception.InnerException) {
+        $ResponseProperty = $Exception.PSObject.Properties['Response']
+        $StatusProperty = $Exception.PSObject.Properties['StatusCode']
+        $Status = if ($ResponseProperty -and $ResponseProperty.Value) { $ResponseProperty.Value.StatusCode } elseif ($StatusProperty) { $StatusProperty.Value }
+        if ($AllowMissing -and $null -ne $Status -and [int]$Status -eq 404) { return }
+      }
+      throw
+    }
     $Response.tree |
       ForEach-Object -Process { if ($_.type -eq 'blob' -and $_.path -match "^([^/]+)/$([regex]::Escape($PackageIdentifier))\.yaml$") { $Matches[1] } } |
       Sort-Object -Property { [WinGetVersion]$_ } -Stable
@@ -547,6 +562,8 @@ function Invoke-WinGetGitHubCommitMutation {
     Human-readable operation description used in diagnostics.
   .PARAMETER MaximumAttempts
     Maximum number of explicit mutation attempts.
+  .PARAMETER RequireUnchangedHead
+    Reject an unrelated branch advance instead of replaying changes onto it. Used for existing PR branches.
   .OUTPUTS
     The OID of the created or reconciled commit.
   #>
@@ -574,7 +591,8 @@ function Invoke-WinGetGitHubCommitMutation {
     [string]$Operation,
     [Parameter(HelpMessage = 'The maximum number of explicit mutation attempts')]
     [ValidateRange(1, 10)]
-    [int]$MaximumAttempts = 3
+    [int]$MaximumAttempts = 3,
+    [switch]$RequireUnchangedHead
   )
 
   $Mutation = @'
@@ -633,6 +651,10 @@ mutation CreateCommitOnBranch($input: CreateCommitOnBranchInput!) {
           return $CurrentHeadOid
         }
 
+        if ($RequireUnchangedHead) {
+          throw 'The referenced pull-request branch advanced. Refusing to overwrite concurrent changes; rerun against its new head.'
+        }
+
         # Another operation advanced this task branch. Preserve that work and
         # retry the requested file changes against the actual current head.
         $AttemptHeadOid = $CurrentHeadOid
@@ -646,6 +668,40 @@ mutation CreateCommitOnBranch($input: CreateCommitOnBranchInput!) {
     }
 
     Start-Sleep -Seconds 1
+  }
+}
+
+function ConvertTo-WinGetGitHubManifestFileAddition {
+  <#
+  .SYNOPSIS
+    Build deterministic GraphQL file additions from a raw manifest bundle.
+  .PARAMETER Manifest
+    Bundle containing Version, Installer, and locale YAML strings.
+  .PARAMETER PackageIdentifier
+    Identifier used for physical manifest filenames.
+  .PARAMETER Prefix
+    Repository-relative version directory, without a trailing slash.
+  .OUTPUTS
+    File additions with repository paths and base64-encoded UTF-8, LF-normalized content.
+  #>
+  param (
+    [Parameter(Mandatory)][System.Collections.IDictionary]$Manifest,
+    [Parameter(Mandatory)][string]$PackageIdentifier,
+    [Parameter(Mandatory)][string]$Prefix
+  )
+
+  $Manifests = [ordered]@{}
+  if (-not $Manifest['Version']) { throw 'The version manifest is null or empty.' }
+  $Manifests["${PackageIdentifier}.yaml"] = $Manifest['Version']
+  if ($Manifest['Installer']) { $Manifests["${PackageIdentifier}.installer.yaml"] = $Manifest['Installer'] }
+  if ($Manifest['Locale']) {
+    foreach ($Entry in $Manifest['Locale'].GetEnumerator()) { $Manifests["${PackageIdentifier}.locale.$($Entry.Key).yaml"] = $Entry.Value }
+  }
+  foreach ($Entry in $Manifests.GetEnumerator()) {
+    [ordered]@{
+      path     = "${Prefix}/$($Entry.Key)"
+      contents = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Entry.Value.ReplaceLineEndings("`n")))
+    }
   }
 }
 
@@ -675,6 +731,10 @@ function Add-WinGetGitHubManifests {
     The manifest(s) to add
   .PARAMETER CommitMessage
     The message of the commit
+  .PARAMETER RemovePath
+    Exact manifest paths under this package to delete in the same atomic commit.
+  .PARAMETER RequireUnchangedHead
+    Do not replay changes after an unrelated branch advance.
   .OUTPUTS
     The SHA of the commit created in the remote repository.
   #>
@@ -701,33 +761,29 @@ function Add-WinGetGitHubManifests {
     [System.Collections.IDictionary[]]$Manifest,
     [Parameter(Mandatory, HelpMessage = 'The message of the commit')]
     [ValidateNotNullOrWhiteSpace()]
-    [string]$CommitMessage
+    [string]$CommitMessage,
+    [Parameter(ParameterSetName = 'RootPath')]
+    [string[]]$RemovePath = @(),
+    [switch]$RequireUnchangedHead
   )
 
   process {
     $Prefix = $PSCmdlet.ParameterSetName -eq 'Path' ? $Path : (Get-WinGetGitHubPackagePath -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RootPath $RootPath)
 
-    # The manifests to write
-    $Manifests = [ordered]@{}
-
-    # Add version manifest to write
-    if (-not $Manifest.Version) { throw 'The version manifest is null or empty.' }
-    $Manifests["${PackageIdentifier}.yaml"] = $Manifest.Version
-
-    # Add installer manifest to write if it exists
-    if ($Manifest.Installer) { $Manifests["${PackageIdentifier}.installer.yaml"] = $Manifest.Installer }
-
-    # Add locale manifests to write if they exist
-    $Manifest.Locale.GetEnumerator() | ForEach-Object -Process { $Manifests["${PackageIdentifier}.locale.$($_.Key).yaml"] = $_.Value }
-
-    # Build typed GraphQL variables rather than interpolating paths, content,
-    # and commit messages into query syntax.
-    $Additions = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
-    foreach ($ManifestEntry in $Manifests.GetEnumerator()) {
-      $Additions.Add([ordered]@{
-          path     = "${Prefix}/$($ManifestEntry.Key)"
-          contents = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($ManifestEntry.Value.ReplaceLineEndings("`n")))
-        })
+    if ($Manifest.Count -ne 1) { throw 'One raw manifest bundle is required per commit.' }
+    $Additions = @(ConvertTo-WinGetGitHubManifestFileAddition -Manifest $Manifest[0] -PackageIdentifier $PackageIdentifier -Prefix $Prefix)
+    $FileChanges = [ordered]@{ additions = $Additions }
+    if ($RemovePath.Count) {
+      $PackagePrefix = (Get-WinGetGitHubPackagePath -PackageIdentifier $PackageIdentifier -RootPath $RootPath) + '/'
+      $Deletions = [Collections.Generic.List[System.Collections.IDictionary]]::new()
+      foreach ($Deletion in @($RemovePath | Select-Object -Unique)) {
+        if (-not $Deletion.StartsWith($PackagePrefix, [StringComparison]::Ordinal) -or $Deletion.Split('/') -contains '..' -or $Deletion.Split('/') -contains '.' -or -not $Deletion.EndsWith('.yaml', [StringComparison]::Ordinal)) {
+          throw "Refusing to delete a path outside the package's manifest files: $Deletion"
+        }
+        if ($Deletion -cin $Additions.path) { throw "A manifest cannot be added and deleted in the same commit: $Deletion" }
+        $Deletions.Add([ordered]@{ path = $Deletion })
+      }
+      $FileChanges.deletions = $Deletions.ToArray()
     }
 
     return Invoke-WinGetGitHubCommitMutation `
@@ -736,7 +792,8 @@ function Add-WinGetGitHubManifests {
       -RepoBranch $RepoBranch `
       -ExpectedHeadOid $RepoSha `
       -CommitMessage $CommitMessage `
-      -FileChanges ([ordered]@{ additions = $Additions.ToArray() }) `
+      -FileChanges $FileChanges `
+      -RequireUnchangedHead:$RequireUnchangedHead `
       -Operation "the manifest commit for ${RepoOwner}/${RepoName}:${RepoBranch}"
   }
 }
@@ -863,18 +920,58 @@ function Find-WinGetGitHubPullRequest {
     Find pull requests in a GitHub repository
   .PARAMETER Query
     The search query for finding pull requests
-  .PARAMETER RepoOwner
-    The owner of the repository
-  .PARAMETER RepoName
-    The name of the repository
+  .PARAMETER MaximumResults
+    Maximum search results in the first page. The default preserves GitHub's 30-result page size.
   #>
   [OutputType([pscustomobject[]])]
   param (
     [Parameter(Position = 0, Mandatory, HelpMessage = 'The search query for finding pull requests')]
-    [string]$Query
+    [string]$Query,
+    [ValidateRange(1, 100)][int]$MaximumResults = 30
   )
 
-  return (Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=$([Uri]::EscapeDataString($Query))")
+  return (Invoke-GitHubApi -Uri "https://api.github.com/search/issues?q=$([Uri]::EscapeDataString($Query))&per_page=${MaximumResults}")
+}
+
+function Get-WinGetGitHubPullRequest {
+  <#
+  .SYNOPSIS
+    Read authoritative PR state, author, base, head, and changed-file count.
+  .PARAMETER PullRequestNumber
+    Pull request number in the upstream repository.
+  .PARAMETER RepoOwner
+    Owner of the upstream repository.
+  .PARAMETER RepoName
+    Name of the upstream repository.
+  #>
+  param (
+    [Parameter(Mandatory)][ValidateRange(1, [int]::MaxValue)][int]$PullRequestNumber,
+    [Parameter(Mandatory)][string]$RepoOwner,
+    [Parameter(Mandatory)][string]$RepoName
+  )
+  Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}"
+}
+
+function Set-WinGetGitHubPullRequestTitle {
+  <#
+  .SYNOPSIS
+    Update a PR title without replacing its body or review metadata.
+  .PARAMETER PullRequestNumber
+    Pull request number in the upstream repository.
+  .PARAMETER Title
+    New title for the submitted version.
+  .PARAMETER RepoOwner
+    Owner of the upstream repository.
+  .PARAMETER RepoName
+    Name of the upstream repository.
+  #>
+  param (
+    [Parameter(Mandatory)][int]$PullRequestNumber,
+    [Parameter(Mandatory)][string]$Title,
+    [Parameter(Mandatory)][string]$RepoOwner,
+    [Parameter(Mandatory)][string]$RepoName
+  )
+  Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}" -Method Patch -Body @{ title = $Title }
 }
 
 function Get-WinGetGitHubPullRequestFile {

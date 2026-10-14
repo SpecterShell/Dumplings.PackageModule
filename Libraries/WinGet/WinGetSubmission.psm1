@@ -506,20 +506,46 @@ function Send-WinGetManifest {
     if (-not (Test-YamlObject -InputObject $NewPackageIdentifier -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageIdentifier)) { throw "The PackageIdentifier `"${NewPackageIdentifier}`" is invalid" }
     [string]$NewPackageVersion = $Task.CurrentState.Contains('RealVersion') ? $Task.CurrentState.RealVersion : $Task.CurrentState.Version
     if (-not (Test-YamlObject -InputObject $NewPackageVersion -Schema (Get-WinGetManifestSchema -ManifestType version).properties.PackageVersion)) { throw "The PackageVersion `"${NewPackageVersion}`" is invalid" }
+    $PendingFallbackSetting = $Task.Config['WinGetPendingPackageFallback'] ?? $Global:DumplingsPreference['WinGetPendingPackageFallback'] ?? $false
+    if ($PendingFallbackSetting -isnot [bool]) { throw 'WinGetPendingPackageFallback must be a YAML boolean, not a quoted string or number.' }
+    $PendingFallbackEnabled = $PendingFallbackSetting
+    $PendingReference = $null
+    $PendingAction = $null
     # Version discovery, document reads, and branch creation must describe the
     # same source revision even when other tasks advance the origin branch.
     $ReferenceRevision = $null
-    if (-not ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath))) {
+    $HasLocalRepo = $LocalRepoPath -and (Test-Path -Path $LocalRepoPath)
+    if (-not $HasLocalRepo) {
       $ReferenceRevision = (Get-WinGetGitHubBranch -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch).object.sha
       if ([string]::IsNullOrWhiteSpace($ReferenceRevision)) { throw 'The reference branch did not return a commit SHA.' }
     }
-    $RefPackageVersion = ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath) ? (Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath) : (Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath)) | Select-Object -Last 1
-    if (-not $RefPackageVersion) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
+    $ReferenceVersions = if ($HasLocalRepo) {
+      $PackagePath = Get-WinGetLocalPackagePath -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath
+      if (-not $PendingFallbackEnabled -or (Test-Path -LiteralPath $PackagePath -PathType Container)) {
+        Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath
+      }
+    } else {
+      Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath -AllowMissing:$PendingFallbackEnabled
+    }
+    $RefPackageVersion = @($ReferenceVersions) | Select-Object -Last 1
+    if (-not $RefPackageVersion) {
+      if (-not $PendingFallbackEnabled) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
+      if ($NewPackageIdentifier -cne $RefPackageIdentifier) { throw 'Pending-package fallback cannot change the package identifier.' }
+      $PendingAction = [string]($Task.Config['WinGetPendingPackageAction'] ?? $Global:DumplingsPreference['WinGetPendingPackageAction'] ?? 'UpdatePullRequest')
+      if ($PendingAction -notin @('UpdatePullRequest', 'NewPullRequest')) { throw "Invalid WinGetPendingPackageAction: '$PendingAction'" }
+      $TrustedUsers = @($Task.Config['WinGetPendingPackageTrustedUsers'] ?? $Global:DumplingsPreference['WinGetPendingPackageTrustedUsers'] ?? @())
+      if (-not $TrustedUsers.Count) { throw 'Pending-package fallback requires WinGetPendingPackageTrustedUsers.' }
+      $SearchLimit = [int]($Task.Config['WinGetPendingPackageSearchLimit'] ?? $Global:DumplingsPreference['WinGetPendingPackageSearchLimit'] ?? 30)
+      $PendingReference = Get-WinGetPendingPackageReference -Task $Task -PackageIdentifier $RefPackageIdentifier -TrustedUser $TrustedUsers -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName -RepoBranch $UpstreamRepoBranch -RootPath $RootPath -SearchLimit $SearchLimit
+      $RefPackageVersion = $PendingReference.PackageVersion
+      if (([WinGetVersion]$NewPackageVersion).CompareTo([WinGetVersion]$RefPackageVersion) -lt 0) { throw "Refusing to downgrade pending version ${RefPackageVersion} to ${NewPackageVersion}." }
+      $Task.Log("Using pending-package PR #$($PendingReference.PullRequest.number), version ${RefPackageVersion}, head $($PendingReference.HeadSha): $($PendingReference.PullRequest.html_url). Action: ${PendingAction}.", 'Info')
+    }
 
     $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName
     $NewBranchName = "${NewPackageIdentifier}-${NewPackageVersion}-$(Get-Random)" -replace '[\~,\^,\:,\\,\?,\@\{,\*,\[,\s]{1,}|[.lock|/|\.]*$|^\.{1,}|\.\.', ''
     $NewCommitType = if ($Global:DumplingsPreference['NewCommitType']) { $Global:DumplingsPreference.NewCommitType }
-    elseif ($NewPackageIdentifier -cne $RefPackageIdentifier) { 'New package' }
+    elseif ($PendingReference -or $NewPackageIdentifier -cne $RefPackageIdentifier) { 'New package' }
     else {
       switch (([WinGetVersion]$NewPackageVersion).CompareTo([WinGetVersion]$RefPackageVersion)) {
         { $_ -gt 0 } { 'New version'; continue }
@@ -542,7 +568,7 @@ function Send-WinGetManifest {
     else {
       $Task.Log('Checking existing pull requests in the upstream repo', 'Verbose')
       try {
-        $PullRequests = (Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/'))/${NewPackageVersion} in:path is:open").items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($NewPackageVersion))(\s|$)" }
+        $PullRequests = (Find-WinGetGitHubPullRequest -Query "is:pr repo:${UpstreamRepoOwner}/${UpstreamRepoName} $($NewPackageIdentifier.Replace('.', '/'))/${NewPackageVersion} in:path is:open").items | Where-Object -FilterScript { $_.title -match "(\s|^)$([regex]::Escape($NewPackageIdentifier))(\s|$)" -and $_.title -match "(\s|^)$([regex]::Escape($NewPackageVersion))(\s|$)" -and (-not $PendingReference -or $_.number -ne $PendingReference.PullRequest.number) }
       } catch {
         $Task.Log("Failed to check existing pull requests in the upstream repo: ${_}", 'Warning')
       }
@@ -576,7 +602,9 @@ function Send-WinGetManifest {
           $PullRequestsMessage += "`nThe process will be terminated"
           throw $PullRequestsMessage
         } else {
-          if ($SelfPullRequests) { $PullRequestsMessage += "`nThe existing pull requests created by the token user will be closed" }
+          if ($SelfPullRequests) {
+            $PullRequestsMessage += ($PendingAction -eq 'UpdatePullRequest') ? "`nOther pull requests created by the token user will remain open during this in-place update" : "`nThe existing pull requests created by the token user will be closed"
+          }
           if ($IgnoredPullRequests) { $PullRequestsMessage += "`nThe non-blocking pull requests will be ignored" }
           $Task.Log($PullRequestsMessage, 'Info')
         }
@@ -591,7 +619,9 @@ function Send-WinGetManifest {
       $Task.CurrentState.Installer | ForEach-Object -Process { $_.ReleaseDate = $_.Contains('ReleaseDate') ? $_ -is [datetime] -or $_ -is [System.DateTimeOffset] ? $_.ToUniversalTime().ToString('yyyy-MM-dd') : ($_ | Get-Date -Format 'yyyy-MM-dd') : $ReleaseDate }
     }
     # Read the manifests
-    if ($LocalRepoPath -and (Test-Path -Path $LocalRepoPath)) {
+    if ($PendingReference) {
+      $RefManifest = $PendingReference.Manifest
+    } elseif ($HasLocalRepo) {
       $Task.Log("Reading existing manifests from local repo at $LocalRepoPath", 'Verbose')
       $RefManifest = Read-WinGetLocalManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RootPath $LocalRepoPath | ConvertFrom-WinGetManifestYaml
     } else {
@@ -617,6 +647,18 @@ function Send-WinGetManifest {
       return
     }
 
+    if ($PendingReference) {
+      # In-place updates also reconcile the title when manifests are unchanged.
+      if ($PendingAction -eq 'UpdatePullRequest') {
+        Update-WinGetPendingPackagePullRequest -Task $Task -Reference $PendingReference -Content $NewManifests -PackageVersion $NewPackageVersion -Title $NewCommitName -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName -RootPath $RootPath
+        return
+      }
+      if (Test-WinGetPendingPackageContentEquality -Reference $PendingReference -Content $NewManifests -PackageVersion $NewPackageVersion -RootPath $RootPath) {
+        $Task.Log("Pending PR #$($PendingReference.PullRequest.number) already contains these manifests. Preserving it without a new commit or PR.", 'Info')
+        return
+      }
+    }
+
     # Create a new branch in the origin repo
     # Base the new branch on the origin repository's default branch.
     # This is to mitigate the occasional and weird issue of "ref not found" when creating a branch based on the upstream default branch
@@ -635,7 +677,11 @@ function Send-WinGetManifest {
     $RemoveLastVersionReason = $null
     $RemoveLastVersionIsInferred = $false
     $RemoveLastVersionChangeApplied = $false
-    if ($Task.Config.Contains('RemoveLastVersion')) {
+    if ($PendingReference) {
+      # New-PR mode uses the pending manifests as a template on the normal
+      # origin base. The unmerged version is not present there to remove.
+      $Task.Log('The reference version exists only in a pending PR; no previous-version removal will be added to the new PR.', 'Verbose')
+    } elseif ($Task.Config.Contains('RemoveLastVersion')) {
       if ($Task.Config.RemoveLastVersion) { $RemoveLastVersionReason = 'This task is configured to remove the last version' }
       # If RemoveLastVersion is set to 'false', do not remove the last version
     } elseif (($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($RefPackageVersion -cne $NewPackageVersion) -and (Test-WinGetInstallerUrlIntersection -ReferenceInstaller $RefManifest.Installers -DifferenceInstaller $NewManifest.Installers)) {
@@ -715,6 +761,9 @@ function Send-WinGetManifest {
     $NewPullRequestBody = (Test-Path -Path 'Env:\GITHUB_ACTIONS') ? `
       "Automated by [🥟 ${Env:GITHUB_REPOSITORY_OWNER}/Dumplings](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings) in workflow run [#${Env:GITHUB_RUN_NUMBER}](https://github.com/${Env:GITHUB_REPOSITORY_OWNER}/Dumplings/actions/runs/${Env:GITHUB_RUN_ID})." : `
       "Created by [🥟 Dumplings](https://github.com/${OriginRepoOwner}/Dumplings)."
+    if ($PendingReference) {
+      $NewPullRequestBody += "`n`nReference manifests: $($PendingReference.PullRequest.html_url), version ${RefPackageVersion}, commit $($PendingReference.HeadSha). The referenced PR remains open."
+    }
     $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 

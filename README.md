@@ -75,6 +75,8 @@ Each manifest-update operation owns its downloads, hashes, extracted ZIP entries
 
 Submission reads remote reference manifests at one captured commit and carries that revision into branch creation. Confirmed identical PRs and empty changes stop redundant submission. If a comparison fails after retries, submission logs a warning and continues without those checks.
 
+Missing packages still fail by default. Set `WinGetPendingPackageFallback: true` with an explicit `WinGetPendingPackageTrustedUsers` allowlist to select a validated, addition-only open, unmerged PR as the reference. `WinGetPendingPackageAction` defaults to `UpdatePullRequest`, which atomically replaces the pending version on an unchanged, writable PR branch and updates its title. Identical manifests can still repair a stale title without another commit. `NewPullRequest` instead uses the pending manifests as a template on the normal origin base and leaves the source PR open. Task configuration overrides the global defaults. See the [pending-package workflow](../../.agents/skills/author-winget-manifest/references/submission/pending-packages.md) for search limits, permissions, dry runs, and rejected PR shapes. Existing packages do not use this fallback.
+
 ### Installer Analysis
 
 Large families use locally imported implementation modules. CreateInstall separates Gentee decoding, operation evidence, and GEA archives. DeployMaster separates classic and modern media. InstallBuilder separates project semantics from Metakit/CookFS payloads. Family modules own public commands and compose results. Explicit parameters carry parsed programs, layouts, and catalogs between modules.
@@ -115,6 +117,7 @@ Manifest processing uses these modules.
 | `WinGetManifestUpdate.psm1` | Installer download, matching, parser metadata, and safe updates to existing authored fields. |
 | `WinGetManifestAuthoring.psm1` | Immutable manifest creation/editing, conservative installer suggestions, and atomic local persistence. |
 | `WinGetSubmission.psm1` | Repository acquisition, manifest generation, validation, duplicate-PR policy, and submission. |
+| `WinGetPendingPackage.psm1` | Opt-in trusted PR references and guarded in-place updates for unmerged new packages. |
 | `SourceIdentity.psm1` | Forge- and storage-aware installer source identity normalization used by task state comparison to detect domain changes. |
 
 Primary entry points include:

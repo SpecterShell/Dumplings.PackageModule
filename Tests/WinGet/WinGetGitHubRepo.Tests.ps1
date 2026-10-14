@@ -44,6 +44,38 @@ Describe 'Add-WinGetGitHubManifests' -Tag Unit {
     $Result | Should -Be ('b' * 40)
     $Script:GraphQLMaximumRetryCount | Should -Be 0
   }
+
+  It 'combines replacement manifests and pending-version deletions in one guarded commit' {
+    Mock Invoke-WinGetGitHubCommitMutation -ModuleName WinGetGitHubRepo { 'b' * 40 }
+    $Content = [ordered]@{ Version = "version`r`n"; Installer = 'installer'; Locale = [ordered]@{} }
+    $null = Add-WinGetGitHubManifests -PackageIdentifier Vendor.Package -PackageVersion '2.0' -RepoOwner Bot -RepoName winget-pkgs -RepoBranch pending -RepoSha ('a' * 40) -RootPath manifests -Manifest $Content -RemovePath 'manifests/v/Vendor/Package/1.0/Vendor.Package.yaml' -RequireUnchangedHead -CommitMessage Test
+    Should -Invoke Invoke-WinGetGitHubCommitMutation -ModuleName WinGetGitHubRepo -Exactly 1 -ParameterFilter {
+      $RequireUnchangedHead -and $FileChanges.additions.Count -eq 2 -and $FileChanges.deletions.Count -eq 1 -and $FileChanges.deletions[0].path -eq 'manifests/v/Vendor/Package/1.0/Vendor.Package.yaml'
+    }
+  }
+
+  It 'rejects deletion outside the package or overlapping additions: <Path>' -ForEach @(
+    @{ Path = 'README.md' }
+    @{ Path = 'manifests/v/Vendor/Package/../Other.yaml' }
+    @{ Path = 'manifests/v/Vendor/Package/2.0/Vendor.Package.yaml' }
+  ) {
+    Mock Invoke-WinGetGitHubCommitMutation -ModuleName WinGetGitHubRepo { throw 'Must not mutate' }
+    { Add-WinGetGitHubManifests -PackageIdentifier Vendor.Package -PackageVersion '2.0' -RepoOwner Bot -RepoName winget-pkgs -RepoBranch pending -RepoSha ('a' * 40) -RootPath manifests -Manifest ([ordered]@{ Version = 'version'; Locale = @{} }) -RemovePath $Path -CommitMessage Test } | Should -Throw
+    Should -Invoke Invoke-WinGetGitHubCommitMutation -ModuleName WinGetGitHubRepo -Exactly 0
+  }
+}
+
+Describe 'Missing GitHub package detection' -Tag Unit {
+  It 'returns no versions for confirmed 404 only when explicitly permitted' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { throw [InvalidOperationException]::new('GitHub 404', [Net.Http.HttpRequestException]::new('missing', $null, [Net.HttpStatusCode]::NotFound)) }
+    @(Get-WinGetGitHubPackageVersion -PackageIdentifier Vendor.Package -RepoOwner Bot -RepoName winget-pkgs -RepoBranch ('a' * 40) -RootPath manifests -AllowMissing) | Should -BeNullOrEmpty
+    { Get-WinGetGitHubPackageVersion -PackageIdentifier Vendor.Package -RepoOwner Bot -RepoName winget-pkgs -RepoBranch ('a' * 40) -RootPath manifests } | Should -Throw '*404*'
+  }
+
+  It 'does not hide non-missing HTTP failures: <Status>' -ForEach @(@{ Status = 401 }, @{ Status = 403 }, @{ Status = 429 }, @{ Status = 500 }) {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { throw [Net.Http.HttpRequestException]::new('API failed', $null, [Net.HttpStatusCode]$Status) }
+    { Get-WinGetGitHubPackageVersion -PackageIdentifier Vendor.Package -RepoOwner Bot -RepoName winget-pkgs -RepoBranch ('a' * 40) -RootPath manifests -AllowMissing } | Should -Throw '*API failed*'
+  }
 }
 
 Describe 'Invoke-WinGetGitHubCommitMutation' -Tag Unit {
@@ -115,6 +147,16 @@ Describe 'Invoke-WinGetGitHubCommitMutation' -Tag Unit {
     $Script:ObservedExpectedHeads | Should -Be @($Script:OldHead, $Script:NewHead)
     Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 2 -Exactly -ParameterFilter { $Uri.AbsolutePath -eq '/graphql' -and $MaximumRetryCount -eq 0 }
   }
+
+  It 'refuses to replay a pending-PR mutation over an unrelated commit' {
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetGitHubRepo { @{ object = @{ sha = $Script:NewHead } } }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      if ($Uri.AbsolutePath -eq '/graphql') { throw 'Expected head mismatch' }
+      @{ message = 'Human review fix'; parents = @(@{ sha = $Script:OldHead }) }
+    }
+    { Invoke-WinGetGitHubCommitMutation -RepoOwner Bot -RepoName winget-pkgs -RepoBranch pending -ExpectedHeadOid $Script:OldHead -CommitMessage Test -FileChanges @{ additions = @() } -Operation Test -RequireUnchangedHead } | Should -Throw '*Refusing to overwrite concurrent changes*'
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Exactly 1 -ParameterFilter { $Uri.AbsolutePath -eq '/graphql' }
+  }
 }
 
 Describe 'Remove-WinGetGitHubManifests' -Tag Unit {
@@ -148,6 +190,16 @@ Describe 'Get-WinGetGitHubComparison' -Tag Unit {
     $Result.status | Should -Be ahead
     Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly
     $Script:GitHubApiUri | Should -Be 'https://api.github.com/repos/microsoft/winget-pkgs/compare/microsoft%3Amaster...DumplingsBot%3APackage%2F1.0%20branch'
+  }
+}
+
+Describe 'Set-WinGetGitHubPullRequestTitle' -Tag Unit {
+  It 'patches only the title on the selected upstream PR' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {}
+    $null = Set-WinGetGitHubPullRequestTitle -PullRequestNumber 42 -Title 'New package: Vendor.Package version 2.0' -RepoOwner microsoft -RepoName winget-pkgs
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Exactly 1 -ParameterFilter {
+      $Uri.AbsoluteUri -ceq 'https://api.github.com/repos/microsoft/winget-pkgs/pulls/42' -and $Method -eq 'Patch' -and $Body.Count -eq 1 -and $Body.title -ceq 'New package: Vendor.Package version 2.0'
+    }
   }
 }
 

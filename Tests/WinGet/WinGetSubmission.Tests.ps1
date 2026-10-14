@@ -330,6 +330,131 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
     }
     Mock Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission {}
     Mock Start-Sleep -ModuleName WinGetSubmission {}
+    Mock Get-WinGetPendingPackageReference -ModuleName WinGetSubmission { throw 'Pending fallback must not run without opt-in and a missing package.' }
+    Mock Update-WinGetPendingPackagePullRequest -ModuleName WinGetSubmission {}
+    Mock Test-WinGetPendingPackageContentEquality -ModuleName WinGetSubmission { $false }
+  }
+
+  It 'keeps the missing-package error when fallback is disabled' {
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { $null }
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*Could not find any version*'
+    Should -Invoke Get-WinGetPendingPackageReference -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke New-WinGetGitHubBranch -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'rejects string-valued opt-in settings instead of treating quoted false as true' {
+    $Script:SubmissionTask.Config.WinGetPendingPackageFallback = 'false'
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*must be a YAML boolean*'
+    Should -Invoke Get-WinGetPendingPackageReference -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'does not search PR templates for an existing package even when globally enabled' {
+    $Global:DumplingsPreference.WinGetPendingPackageFallback = $true
+    Send-WinGetManifest -Task $Script:SubmissionTask
+    Should -Invoke Get-WinGetPendingPackageReference -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'lets a task disable a globally enabled fallback' {
+    $Global:DumplingsPreference.WinGetPendingPackageFallback = $true
+    $Script:SubmissionTask.Config.WinGetPendingPackageFallback = $false
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { $null }
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*Could not find any version*'
+    Should -Invoke Get-WinGetPendingPackageReference -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'requires an explicit trusted-user list before fallback discovery' {
+    $Script:SubmissionTask.Config.WinGetPendingPackageFallback = $true
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { $null }
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*requires WinGetPendingPackageTrustedUsers*'
+  }
+
+  It 'uses the selected PR model and defaults to updating that PR: <Action>' -ForEach @(
+    @{ Action = 'UpdatePullRequest'; Dry = $false; Local = $false }
+    @{ Action = 'NewPullRequest'; Dry = $false; Local = $false }
+    @{ Action = 'UpdatePullRequest'; Dry = $true; Local = $false }
+    @{ Action = 'UpdatePullRequest'; Dry = $false; Local = $true }
+  ) {
+    $Script:SubmissionTask.Config.WinGetPendingPackageFallback = $true
+    $Script:SubmissionTask.Config.WinGetPendingPackageTrustedUsers = @('TrustedBot')
+    if ($Action -eq 'NewPullRequest') { $Script:SubmissionTask.Config.WinGetPendingPackageAction = $Action }
+    $Global:DumplingsPreference.Dry = $Dry
+    $Script:PendingPullRequest = Get-TestPullRequest -Author TrustedBot -Number 40
+    $Script:PendingPullRequest.title = 'New package: Vendor.Package version 2.0'
+    $Script:PendingReference = [pscustomobject]@{
+      PullRequest = $Script:PendingPullRequest; PackageVersion = '1.0'; HeadSha = 'd' * 40
+      Manifest = @{ Installers = @(); PackageIdentifier = 'Vendor.Package' }
+    }
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { $null }
+    Mock Get-WinGetPendingPackageReference -ModuleName WinGetSubmission { $Script:PendingReference }
+    Mock Find-WinGetGitHubPullRequest -ModuleName WinGetSubmission { @{ items = @($Script:PendingPullRequest) } }
+    Mock Remove-WinGetGitHubManifests -ModuleName WinGetSubmission { throw 'A pending template must not produce upstream deletions.' }
+    $Script:SubmissionTask.Config.RemoveLastVersion = $true
+    if ($Local) {
+      Mock Get-WinGetLocalRepoPath -ModuleName WinGetSubmission { $TestDrive }
+      Mock Get-WinGetLocalPackageVersion -ModuleName WinGetSubmission { throw 'The absent local package must not be read.' }
+    }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke Read-WinGetGitHubManifests -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke Test-WinGetManifest -ModuleName WinGetSubmission -Exactly 1
+    Should -Invoke Get-WinGetPendingPackageReference -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $TrustedUser.Count -eq 1 -and $TrustedUser[0] -eq 'TrustedBot' }
+    $UpdateCount = (-not $Dry -and $Action -eq 'UpdatePullRequest') ? 1 : 0
+    $NewCount = (-not $Dry -and $Action -eq 'NewPullRequest') ? 1 : 0
+    Should -Invoke Update-WinGetPendingPackagePullRequest -ModuleName WinGetSubmission -Exactly $UpdateCount
+    Should -Invoke New-WinGetGitHubBranch -ModuleName WinGetSubmission -Exactly $NewCount
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly $NewCount
+    Should -Invoke Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke Remove-WinGetGitHubManifests -ModuleName WinGetSubmission -Exactly 0
+    if ($NewCount) {
+      Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $Body -like '*Reference manifests:*pull/40*referenced PR remains open*' }
+    }
+  }
+
+  It 'refuses downgrading a newer pending manifest' {
+    $Script:SubmissionTask.Config.WinGetPendingPackageFallback = $true
+    $Script:SubmissionTask.Config.WinGetPendingPackageTrustedUsers = @('TrustedBot')
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { $null }
+    Mock Get-WinGetPendingPackageReference -ModuleName WinGetSubmission { @{ PackageVersion = '3.0' } }
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*Refusing to downgrade*'
+    Should -Invoke Update-WinGetManifest -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'lets an explicit empty task allowlist disable inherited trust' {
+    $Global:DumplingsPreference.WinGetPendingPackageFallback = $true
+    $Global:DumplingsPreference.WinGetPendingPackageTrustedUsers = @('TrustedBot')
+    $Script:SubmissionTask.Config.WinGetPendingPackageTrustedUsers = @()
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { $null }
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*requires WinGetPendingPackageTrustedUsers*'
+    Should -Invoke Get-WinGetPendingPackageReference -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'handles matching manifests in <_> mode without creating another PR' -ForEach @('UpdatePullRequest', 'NewPullRequest') {
+    $Script:SubmissionTask.Config.WinGetPendingPackageFallback = $true
+    $Script:SubmissionTask.Config.WinGetPendingPackageTrustedUsers = @('TrustedBot')
+    $Script:SubmissionTask.Config.WinGetPendingPackageAction = $_
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { $null }
+    Mock Get-WinGetPendingPackageReference -ModuleName WinGetSubmission {
+      @{ PackageVersion = '2.0'; HeadSha = 'd' * 40; Manifest = @{ Installers = @() }; PullRequest = @{ number = 40; html_url = 'https://example.test/pr/40' } }
+    }
+    Mock Test-WinGetPendingPackageContentEquality -ModuleName WinGetSubmission { $true }
+    Send-WinGetManifest -Task $Script:SubmissionTask
+    $UpdateCount = ($_ -eq 'UpdatePullRequest') ? 1 : 0
+    Should -Invoke Update-WinGetPendingPackagePullRequest -ModuleName WinGetSubmission -Exactly $UpdateCount -ParameterFilter { $Title -ceq 'New package: Vendor.Package version 2.0' }
+    Should -Invoke New-WinGetGitHubBranch -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'does not silently create a new PR when an in-place update fails' {
+    $Script:SubmissionTask.Config.WinGetPendingPackageFallback = $true
+    $Script:SubmissionTask.Config.WinGetPendingPackageTrustedUsers = @('TrustedBot')
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { $null }
+    Mock Get-WinGetPendingPackageReference -ModuleName WinGetSubmission {
+      @{ PackageVersion = '1.0'; HeadSha = 'd' * 40; Manifest = @{ Installers = @() }; PullRequest = @{ number = 40; html_url = 'https://example.test/pr/40' } }
+    }
+    Mock Update-WinGetPendingPackagePullRequest -ModuleName WinGetSubmission { throw 'No push permission' }
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*No push permission*'
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
   }
 
   It 'warns after exhausted comparison retries and still creates a pull request' {

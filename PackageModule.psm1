@@ -104,6 +104,7 @@ $ModulePaths = @(
   'Libraries\WinGet\WinGetManifestValidation.psm1'
   'Libraries\WinGet\WinGetManifestUpdate.psm1'
   'Libraries\WinGet\WinGetManifestAuthoring.psm1'
+  'Libraries\WinGet\WinGetPendingPackage.psm1'
   'Libraries\WinGet\WinGetSubmission.psm1'
 )
 
