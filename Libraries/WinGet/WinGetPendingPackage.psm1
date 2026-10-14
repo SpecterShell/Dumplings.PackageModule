@@ -148,6 +148,54 @@ function Test-WinGetPendingPackageContentEquality {
   return Test-ObjectValueEqual -Left @($OldFiles | Sort-Object path) -Right @($NewFiles | Sort-Object path)
 }
 
+function Get-WinGetPendingPackageAuthorToken {
+  <#
+  .SYNOPSIS
+    Resolve and verify an optional credential for a pending PR author.
+  .DESCRIPTION
+    Reads only Core's loaded GitHubPullRequestAuthorTokens secret map. It never
+    opens Secret.yaml or changes the default API credential. No mapping returns
+    no output. Configured credentials must authenticate as the requested author.
+  .PARAMETER Author
+    Login from the rechecked upstream PR, matched case-insensitively.
+  .OUTPUTS
+    The configured string or SecureString token, or no output when unconfigured.
+    Callers must pass this value directly to the API and never log it.
+  #>
+  param ([Parameter(Mandatory)][string]$Author)
+
+  # Independent PackageModule callers may have no Core secret storage.
+  $SecretVariable = Get-Variable -Name DumplingsSecret -Scope Global -ErrorAction SilentlyContinue
+  if (-not $SecretVariable -or $null -eq $SecretVariable.Value) { return }
+  $Secrets = $SecretVariable.Value
+  if ($Secrets -isnot [System.Collections.IDictionary]) { throw 'DumplingsSecret must be a dictionary.' }
+  if ('GitHubPullRequestAuthorTokens' -notin $Secrets.Keys) { return }
+  $Tokens = $Secrets['GitHubPullRequestAuthorTokens']
+  if ($Tokens -isnot [System.Collections.IDictionary]) { throw 'GitHubPullRequestAuthorTokens must be a dictionary of GitHub logins to tokens.' }
+
+  # Do not rely on the dictionary's comparer. Standalone callers may supply a
+  # case-sensitive map, including ambiguous keys that differ only by casing.
+  $Keys = @($Tokens.Keys | Where-Object { $_ -is [string] -and $_ -ieq $Author })
+  if (-not $Keys.Count) { return }
+  if ($Keys.Count -ne 1) { throw "GitHubPullRequestAuthorTokens has ambiguous entries for '${Author}'." }
+  $Token = $Tokens[$Keys[0]]
+  if (($Token -isnot [string] -and $Token -isnot [securestring]) -or ($Token -is [string] -and [string]::IsNullOrWhiteSpace($Token)) -or ($Token -is [securestring] -and $Token.Length -eq 0)) {
+    throw "The GitHub PR author token for '${Author}' must be a nonempty string or SecureString."
+  }
+
+  # Validate identity before any branch commit. Replace probe failures with a
+  # safe message because an underlying exception could include the credential.
+  try {
+    $User = Get-WinGetGitHubApiTokenUser -Token $Token -ErrorAction Stop
+  } catch {
+    throw "Could not validate the configured GitHub PR author token for '${Author}'. Check the credential and GitHub API access. No changes were made."
+  }
+  if ([string]$User.login -ine $Author) {
+    throw "The configured GitHub PR author token for '${Author}' authenticates as a different account. No changes were made."
+  }
+  return $Token
+}
+
 function Update-WinGetPendingPackagePullRequest {
   <#
   .SYNOPSIS
@@ -157,7 +205,8 @@ function Update-WinGetPendingPackagePullRequest {
     new manifests and obsolete pending paths in one commit. Concurrent human
     changes are never rebased over. Identical manifests skip the commit but can
     repair a stale title. Title failures throw after reporting that the manifests
-    are already present. No PR is created or closed.
+    are already present. Optional author credentials apply only to title edits
+    and are verified before committing. No PR is created or closed.
   .PARAMETER Task
     Task used to log completed updates and unchanged manifests.
   .PARAMETER Reference
@@ -195,6 +244,12 @@ function Update-WinGetPendingPackagePullRequest {
   if ($CurrentFiles.Count -ne $Reference.Paths.Count -or $CurrentFiles.Where({ $_.status -cne 'added' -or $_.filename -cnotin $Reference.Paths }).Count) {
     throw "PR #${Number} no longer has the captured addition-only file delta. Rerun before updating it."
   }
+  $NeedsTitleUpdate = $Current.title -cne $Title
+  $TitleArguments = @{}
+  if ($NeedsTitleUpdate) {
+    $AuthorToken = Get-WinGetPendingPackageAuthorToken -Author $Current.user.login
+    if ($null -ne $AuthorToken) { $TitleArguments.Token = $AuthorToken }
+  }
   # Content and title are separate GitHub writes. A retry after a title failure
   # must repair that title without committing the same manifests again.
   $NeedsManifestCommit = -not (Test-WinGetPendingPackageContentEquality -Reference $Reference -Content $Content -PackageVersion $PackageVersion -RootPath $RootPath)
@@ -212,13 +267,14 @@ function Update-WinGetPendingPackagePullRequest {
     $CommitMessage = "${Title} (pending PR #${Number}; $([guid]::NewGuid()))"
     $null = Add-WinGetGitHubManifests -PackageIdentifier $Identifier -PackageVersion $PackageVersion -RepoOwner $Reference.RepoOwner -RepoName $Reference.RepoName -RepoBranch $Reference.RepoBranch -RepoSha $Reference.HeadSha -RootPath $RootPath -Manifest $Content -RemovePath $RemovePaths -RequireUnchangedHead -CommitMessage $CommitMessage
   }
-  if ($Current.title -cne $Title) {
+  if ($NeedsTitleUpdate) {
     try {
-      $null = Set-WinGetGitHubPullRequestTitle -PullRequestNumber $Number -Title $Title -RepoOwner $RepoOwner -RepoName $RepoName -ErrorAction Stop
+      $null = Set-WinGetGitHubPullRequestTitle -PullRequestNumber $Number -Title $Title -RepoOwner $RepoOwner -RepoName $RepoName @TitleArguments -ErrorAction Stop
     } catch {
       # Keep the committed manifests. Report the partial outcome so a rerun
       # retries only the title rather than treating the override as complete.
-      throw "PR #${Number} contains the requested manifests, but updating its title failed: $_. Rerun to retry the title without another manifest commit."
+      $Details = $TitleArguments.ContainsKey('Token') ? 'Check the configured author token and its PR-edit permissions or GitHub API access' : [string]$_
+      throw "PR #${Number} contains the requested manifests, but updating its title failed: ${Details}. Rerun to retry the title without another manifest commit."
     }
   }
   if ($NeedsManifestCommit) {

@@ -964,14 +964,20 @@ function Set-WinGetGitHubPullRequestTitle {
     Owner of the upstream repository.
   .PARAMETER RepoName
     Name of the upstream repository.
+  .PARAMETER Token
+    Optional string or SecureString credential for this title update only.
+    When omitted, Invoke-GitHubApi uses the normal Dumplings token.
   #>
   param (
     [Parameter(Mandatory)][int]$PullRequestNumber,
     [Parameter(Mandatory)][string]$Title,
     [Parameter(Mandatory)][string]$RepoOwner,
-    [Parameter(Mandatory)][string]$RepoName
+    [Parameter(Mandatory)][string]$RepoName,
+    [Parameter()][object]$Token
   )
-  Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}" -Method Patch -Body @{ title = $Title }
+  $TokenArguments = @{}
+  if ($PSBoundParameters.ContainsKey('Token')) { $TokenArguments.Token = $Token }
+  Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}" -Method Patch -Body @{ title = $Title } @TokenArguments
 }
 
 function Get-WinGetGitHubPullRequestFile {
@@ -1069,10 +1075,18 @@ function Open-WinGetGitHubPullRequest {
 function Get-WinGetGitHubApiTokenUser {
   <#
   .SYNOPSIS
-    Get the user information of the provided GitHub API token
+    Read the account authenticated by a GitHub API token.
+  .PARAMETER Token
+    Optional string or SecureString credential to inspect without changing the
+    normal Dumplings token. When omitted, use the default credential.
+  .OUTPUTS
+    GitHub user response containing the authenticated account's login.
   #>
+  param ([Parameter()][object]$Token)
 
-  return (Invoke-GitHubApi -Uri 'https://api.github.com/user')
+  $TokenArguments = @{}
+  if ($PSBoundParameters.ContainsKey('Token')) { $TokenArguments.Token = $Token }
+  return (Invoke-GitHubApi -Uri 'https://api.github.com/user' @TokenArguments)
 }
 
 Export-ModuleMember -Function '*' -Variable 'DumplingsWinGetGitHubRepoDefaultOwner', 'DumplingsWinGetGitHubRepoDefaultName', 'DumplingsWinGetGitHubRepoDefaultBranch', 'DumplingsWinGetGitHubRepoDefaultRootPath'

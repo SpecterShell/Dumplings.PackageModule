@@ -201,6 +201,28 @@ Describe 'Set-WinGetGitHubPullRequestTitle' -Tag Unit {
       $Uri.AbsoluteUri -ceq 'https://api.github.com/repos/microsoft/winget-pkgs/pulls/42' -and $Method -eq 'Patch' -and $Body.Count -eq 1 -and $Body.title -ceq 'New package: Vendor.Package version 2.0'
     }
   }
+
+  It 'forwards an explicit credential only to the title request' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {}
+    $null = Set-WinGetGitHubPullRequestTitle -PullRequestNumber 42 -Title 'New package: Vendor.Package version 2.0' -RepoOwner microsoft -RepoName winget-pkgs -Token 'test-author-token'
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Exactly 1 -ParameterFilter {
+      $Token -ceq 'test-author-token' -and $Method -eq 'Patch' -and $Body.Count -eq 1 -and $Body.title -ceq 'New package: Vendor.Package version 2.0'
+    }
+  }
+}
+
+Describe 'Get-WinGetGitHubApiTokenUser' -Tag Unit {
+  It 'uses the default credential when no token is supplied' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { @{ login = 'DefaultBot' } }
+    (Get-WinGetGitHubApiTokenUser).login | Should -BeExactly 'DefaultBot'
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Exactly 1 -ParameterFilter { $Uri.AbsoluteUri -ceq 'https://api.github.com/user' -and $null -eq $Token }
+  }
+
+  It 'reads the account authenticated by an explicit credential' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { @{ login = 'TrustedAuthor' } }
+    (Get-WinGetGitHubApiTokenUser -Token 'test-author-token').login | Should -BeExactly 'TrustedAuthor'
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Exactly 1 -ParameterFilter { $Uri.AbsoluteUri -ceq 'https://api.github.com/user' -and $Token -ceq 'test-author-token' }
+  }
 }
 
 Describe 'Get-WinGetGitHubPullRequestFile' -Tag Unit {

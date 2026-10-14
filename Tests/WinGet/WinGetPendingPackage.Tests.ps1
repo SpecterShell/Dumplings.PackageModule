@@ -170,7 +170,20 @@ Describe 'Trusted pending-package reference selection' -Tag Unit {
 }
 
 Describe 'Pending PR updates and exact-content comparison' -Tag Unit {
+  BeforeAll {
+    $Variable = Get-Variable -Name DumplingsSecret -Scope Global -ErrorAction SilentlyContinue
+    $Script:HadDumplingsSecret = $null -ne $Variable
+    $Script:OriginalDumplingsSecret = $Variable ? $Variable.Value : $null
+  }
+
+  AfterAll {
+    if ($Script:HadDumplingsSecret) { $Global:DumplingsSecret = $Script:OriginalDumplingsSecret }
+    else { Remove-Variable -Name DumplingsSecret -Scope Global -ErrorAction SilentlyContinue }
+  }
+
   BeforeEach {
+    # All credential tests use in-memory fake secrets; never load Secret.yaml.
+    $Global:DumplingsSecret = [ordered]@{}
     $Script:Task = New-TestPendingTask
     $Script:Content = New-TestPendingContent
     $Script:Reference = [pscustomobject]@{
@@ -185,6 +198,7 @@ Describe 'Pending PR updates and exact-content comparison' -Tag Unit {
     Mock Invoke-GitHubApi -ModuleName WinGetPendingPackage { @{ permissions = @{ push = $true } } }
     Mock Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage { 'c' * 40 }
     Mock Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage {}
+    Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage { throw 'Unexpected author-token probe.' }
   }
 
   It 'atomically adds the new version and removes only the captured pending paths' {
@@ -214,6 +228,138 @@ Describe 'Pending PR updates and exact-content comparison' -Tag Unit {
   It 'reports partial success when title editing fails after the manifest commit succeeds' {
     Mock Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage { throw 'Title permission denied' }
     { Update-WinGetPendingPackagePullRequest @Script:Parameters } | Should -Throw '*contains the requested manifests*updating its title failed*'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1
+  }
+
+  It 'retains the normal credential when no author mapping exists: <_>' -ForEach @('standalone', 'null-storage', 'empty-map', 'other-author') {
+    switch ($_) {
+      standalone { Remove-Variable -Name DumplingsSecret -Scope Global }
+      null-storage { $Global:DumplingsSecret = $null }
+      empty-map { $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{} }
+      other-author { $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{ OtherAuthor = 'unused-author-token' } }
+    }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters
+    Should -Invoke Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $null -eq $Token }
+  }
+
+  It 'selects the author token case-insensitively and verifies it before committing' {
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens.Add('trustedbot', 'test-author-token')
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens.Add('OtherAuthor', 'unused-author-token')
+    $Script:CredentialEvents = [Collections.Generic.List[string]]::new()
+    Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage { $Script:CredentialEvents.Add('identity'); @{ login = 'TRUSTEDBOT' } }
+    Mock Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage { $Script:CredentialEvents.Add('commit'); 'c' * 40 }
+    Mock Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage { $Script:CredentialEvents.Add('title') }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters
+    $Script:CredentialEvents | Should -Be @('identity', 'commit', 'title')
+    Should -Invoke Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $Token -ceq 'test-author-token' }
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $Token -ceq 'test-author-token' }
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $null -eq $Token }
+  }
+
+  It 'accepts a SecureString author credential without converting it to plain text' {
+    $Script:AuthorToken = [securestring]::new()
+    $Script:AuthorToken.AppendChar('x')
+    $Script:AuthorToken.MakeReadOnly()
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{ TrustedBot = $Script:AuthorToken }
+    Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage { @{ login = 'TrustedBot' } }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters
+    Should -Invoke Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { [object]::ReferenceEquals($Token, $Script:AuthorToken) }
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { [object]::ReferenceEquals($Token, $Script:AuthorToken) }
+  }
+
+  It 'does not change the shared default credential' {
+    $OldToken = $env:GH_DUMPLINGS_TOKEN
+    try {
+      $env:GH_DUMPLINGS_TOKEN = 'test-normal-bot-token'
+      $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{ TrustedBot = 'test-author-token' }
+      Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage { @{ login = 'TrustedBot' } }
+      Update-WinGetPendingPackagePullRequest @Script:Parameters
+      $env:GH_DUMPLINGS_TOKEN | Should -BeExactly 'test-normal-bot-token'
+    } finally { $env:GH_DUMPLINGS_TOKEN = $OldToken }
+  }
+
+  It 'rejects a malformed token map before either write: <_>' -ForEach @('string', 'array', 'null') {
+    $Map = switch ($_) { string { 'test-malformed-secret' }; array { , @('test-malformed-secret') }; null { $null } }
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = $Map
+    { Update-WinGetPendingPackagePullRequest @Script:Parameters } | Should -Throw '*must be a dictionary*'
+    Should -Invoke Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 0
+  }
+
+  It 'rejects an invalid author token before either write: <_>' -ForEach @('null', 'empty', 'whitespace', 'number', 'array', 'dictionary', 'empty-secure-string') {
+    $Value = switch ($_) {
+      null { $null }; empty { '' }; whitespace { ' ' }; number { 42 }
+      array { , @('test-author-token') }; dictionary { @{ token = 'test-author-token' } }
+      empty-secure-string { [securestring]::new() }
+    }
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{ TrustedBot = $Value }
+    { Update-WinGetPendingPackagePullRequest @Script:Parameters } | Should -Throw '*must be a nonempty*'
+    Should -Invoke Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 0
+  }
+
+  It 'rejects ambiguous differently cased author keys' {
+    $Map = [Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+    $Map.Add('TrustedBot', 'test-first-token')
+    $Map.Add('trustedbot', 'test-second-token')
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = $Map
+    { Update-WinGetPendingPackagePullRequest @Script:Parameters } | Should -Throw '*ambiguous entries*'
+    Should -Invoke Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 0
+  }
+
+  It 'rejects the wrong authenticated account before either write' {
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{ TrustedBot = 'test-wrong-account-token' }
+    Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage { @{ login = 'OtherAuthor' } }
+    { Update-WinGetPendingPackagePullRequest @Script:Parameters } | Should -Throw '*authenticates as a different account*'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 0
+  }
+
+  It 'redacts a failed identity probe and does not fall back to the bot' {
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{ TrustedBot = 'test-sensitive-author-token' }
+    Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage { throw 'Identity failed: test-sensitive-author-token' }
+    $Failure = try { Update-WinGetPendingPackagePullRequest @Script:Parameters } catch { $_ }
+    $Failure.Exception.Message | Should -BeLike '*Could not validate*No changes were made*'
+    $Failure.Exception.Message | Should -Not -Match 'test-sensitive-author-token'
+    $Script:Task.Logs | Should -BeNullOrEmpty
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 0
+  }
+
+  It 'redacts mapped-token title failures and preserves the partial-success outcome' {
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{ TrustedBot = 'test-sensitive-author-token' }
+    Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage { @{ login = 'TrustedBot' } }
+    Mock Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage { throw 'Title failed: test-sensitive-author-token' }
+    $Failure = try { Update-WinGetPendingPackagePullRequest @Script:Parameters } catch { $_ }
+    $Failure.Exception.Message | Should -BeLike '*contains the requested manifests*updating its title failed*'
+    $Failure.Exception.Message | Should -Not -Match 'test-sensitive-author-token'
+    $Script:Task.Logs | Should -BeNullOrEmpty
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 1
+  }
+
+  It 'reconciles a stale title with the author credential without another commit' {
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = @{ TrustedBot = 'test-author-token' }
+    Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage { @{ login = 'TrustedBot' } }
+    $Script:Parameters.Content = New-TestPendingContent
+    $Script:Parameters.PackageVersion = '1.0'
+    Update-WinGetPendingPackagePullRequest @Script:Parameters
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $Token -ceq 'test-author-token' }
+  }
+
+  It 'ignores author credentials when the title is already current' {
+    $Global:DumplingsSecret.GitHubPullRequestAuthorTokens = 'unused-malformed-map'
+    Mock Get-WinGetGitHubPullRequest -ModuleName WinGetPendingPackage { New-TestPendingPullRequest -Version '2.0' }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters
+    Should -Invoke Get-WinGetGitHubApiTokenUser -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 0
     Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1
   }
 
