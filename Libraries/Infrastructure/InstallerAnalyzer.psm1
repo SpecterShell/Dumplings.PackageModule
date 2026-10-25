@@ -108,7 +108,7 @@ function Read-InstallerHeader {
     [int]$Count = 4096
   )
 
-  $ReadCount = [Math]::Min($Count, [int]$File.Length)
+  $ReadCount = [int][Math]::Min($Count, [Math]::Min($File.Length, [int]::MaxValue))
   if ($ReadCount -le 0) { return , ([byte[]]::new(0)) }
 
   $Stream = [System.IO.File]::Open($File.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)

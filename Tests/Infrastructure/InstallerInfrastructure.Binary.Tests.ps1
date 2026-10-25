@@ -141,3 +141,32 @@ Describe 'Bounded binary streams' {
     }
   }
 }
+
+Describe 'Read-InstallerHeader' {
+  It 'reads the requested prefix and clamps files larger than Int32.MaxValue' {
+    $SmallPath = Join-Path $Script:TemporaryRoot 'header-small.bin'
+    [IO.File]::WriteAllBytes($SmallPath, [byte[]](1..16))
+    $SmallHeader = InModuleScope InstallerAnalyzer -Parameters @{ File = (Get-Item -LiteralPath $SmallPath) } {
+      param ($File)
+      Read-InstallerHeader -File $File -Count 8
+    }
+    $SmallHeader.Length | Should -Be 8
+    $SmallHeader[0] | Should -Be 1
+
+    # SetLength creates the over-2GB length without allocating data on NTFS.
+    $LargePath = Join-Path $Script:TemporaryRoot 'header-large.bin'
+    $Stream = [IO.File]::Open($LargePath, [IO.FileMode]::CreateNew)
+    try {
+      $Stream.SetLength(([int64][int]::MaxValue + 1024))
+      $Stream.Write([byte[]](9, 8, 7, 6), 0, 4)
+    } finally {
+      $Stream.Dispose()
+    }
+    $LargeHeader = InModuleScope InstallerAnalyzer -Parameters @{ File = (Get-Item -LiteralPath $LargePath) } {
+      param ($File)
+      Read-InstallerHeader -File $File -Count 8
+    }
+    $LargeHeader.Length | Should -Be 8
+    $LargeHeader[0] | Should -Be 9
+  }
+}

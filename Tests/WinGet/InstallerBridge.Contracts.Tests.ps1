@@ -178,6 +178,22 @@ stagingPercentage: 25
     $Info.IsSupported | Should -BeTrue
   }
 
+  It 'Should parse Varin ARM64 UTF-16 commands through the NSIS bridge: <Scope>' -ForEach @(
+    @{ Scope = 'user' }
+    @{ Scope = 'machine' }
+  ) {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/Youzini-afk.Varin/0.9.32/Varin-0.9.32-win-arm64.exe' -Uri 'https://github.com/Youzini-afk/Varin/releases/download/v0.9.32/Varin-0.9.32-win-arm64.exe' -Sha256 '2CF783591B4AF54C14A7F7C809C791DD4316CD8534F894AE13F3C789C8FEF613'
+    $Info = Get-NSISInfo -Path $Fixture -Architecture arm64 -Scope $Scope
+
+    $Info.ProductCode | Should -Be '97ba5f9d-69e7-5ca0-b9bd-16d3f3697f80'
+    $Info.DisplayVersion | Should -Be '0.9.32'
+    $Info.Scope | Should -Be $Scope
+    $Info.SupportedArchitectures | Should -Be @('arm64')
+    $Info.ParserVersionInfo.LogCmdIsEnabled | Should -BeFalse
+    $Info.ParserVersionInfo.HasSemanticAmbiguity | Should -BeFalse
+    $Info.Diagnostics | Should -BeNullOrEmpty
+  }
+
   It 'Should forward target architecture to the NSIS parser bridge' {
     $Fixture = Get-InstallerFixture -Name 'BitComet_2.21_setup.exe' -Url 'https://download.bitcomet.com/achive/BitComet_2.21_setup.exe' -Sha256 '2BB0AC769FE8B75B1B1B8CA42FA55D29D94AAF68480611538DBB4395D05082D2'
 
