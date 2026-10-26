@@ -7,7 +7,7 @@
 Set-StrictMode -Version 3
 
 $Script:WinGetManifestHeader = '# Created with YamlCreate.ps1 Dumplings Mod'
-$Script:WinGetAuthoringManifestVersion = '1.12.0'
+$Script:WinGetAuthoringManifestVersion = (Get-WinGetManifestSchema -ManifestType version -Raw)['properties']['ManifestVersion']['default']
 $Script:WinGetManifestCulture = [Globalization.CultureInfo]::GetCultureInfo('en-US')
 $Script:WinGetIntegerFields = @('InstallerSuccessCodes', 'InstallerReturnCode')
 $Script:WinGetBooleanFields = @(

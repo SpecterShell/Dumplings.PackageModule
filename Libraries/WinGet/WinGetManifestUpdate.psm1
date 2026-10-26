@@ -82,7 +82,7 @@ function Invoke-WinGetUpdateParser {
     return $Result
   } finally { if ($Context.Performance) { $Context.Performance.Record('Parsing', $StartedAt) } }
 }
-$Script:WinGetAuthoringManifestVersion = '1.12.0'
+$Script:WinGetAuthoringManifestVersion = (Get-WinGetManifestSchema -ManifestType version -Raw)['properties']['ManifestVersion']['default']
 
 filter UniqueItems {
   [string]$($_.Split(',').Trim() | Select-Object -Unique)

@@ -6,7 +6,7 @@
 
 Set-StrictMode -Version 3
 
-$Script:WinGetAuthoringManifestVersion = '1.12.0'
+$Script:WinGetAuthoringManifestVersion = (Get-WinGetManifestSchema -ManifestType version -Raw)['properties']['ManifestVersion']['default']
 $Script:WinGetAuthoringArchitectures = @('x86', 'x64', 'arm', 'arm64')
 
 function ConvertTo-WinGetAuthoringDictionary {
@@ -481,7 +481,7 @@ function New-WinGetManifest {
   .PARAMETER Moniker
     Optional package moniker.
   .PARAMETER ManifestVersion
-    WinGet schema version; Dumplings authoring defaults to 1.12.0.
+    WinGet schema version; Dumplings authoring defaults to 1.28.0.
   .EXAMPLE
     $DefaultLocalization = [ordered]@{ PackageLocale = 'en-US'; Publisher = 'Contoso'; PackageName = 'Contoso App'; License = 'MIT'; ShortDescription = 'Contoso App.' }
     $Installer = [ordered]@{ Architecture = 'x64'; InstallerType = 'portable'; InstallerUrl = 'https://example.test/app.exe'; InstallerSha256 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }
