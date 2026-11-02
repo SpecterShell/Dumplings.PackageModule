@@ -365,8 +365,8 @@ function Optimize-WinGetManifest {
   .DESCRIPTION
     The optimization pass deep-copies the logical model before applying rules
     that require effective installer and localization evidence. It removes a
-    common InstallerLocale and redundant fields from a sole Apps & Features
-    entry without changing meaningful ARP overrides.
+    common InstallerLocale, unsupported MSI pre-elevation requirements, and
+    redundant fields from a sole Apps & Features entry.
   .PARAMETER Manifest
     The logical WinGet manifest model to optimize.
   .OUTPUTS
@@ -378,6 +378,20 @@ function Optimize-WinGetManifest {
   process {
     $Installers = @($Manifest.Installers | ForEach-Object { Copy-Object -Value $_ })
     $InstallerDefaults = Copy-Object -Value $Manifest.InstallerDefaults
+
+    # WinGet applies runas to the MSI file rather than msiexec, which Windows
+    # cannot launch that way. This also affects ZIP-contained MSI/WiX routes.
+    # Keep other elevation values and EXE-wrapper requirements unchanged.
+    # https://github.com/SpecterShell/Dumplings/issues/148
+    $HasMsiInstaller = $false
+    foreach ($Installer in $Installers) {
+      if ((Get-WinGetManifestEffectiveInstallerType -Installer $Installer) -notin @('msi', 'wix')) { continue }
+      $HasMsiInstaller = $true
+      if ($Installer['ElevationRequirement'] -ceq 'elevationRequired') { $Installer.Remove('ElevationRequirement') }
+    }
+    if ($HasMsiInstaller -and $InstallerDefaults['ElevationRequirement'] -ceq 'elevationRequired') {
+      $InstallerDefaults.Remove('ElevationRequirement')
+    }
 
     # InstallerLocale is useful only when it distinguishes selectable payloads.
     # A common value also causes WinGet validation to force that locale onto

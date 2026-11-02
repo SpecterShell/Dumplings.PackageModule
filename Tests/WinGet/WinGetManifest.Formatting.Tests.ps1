@@ -85,4 +85,33 @@ Describe 'Format-WinGetManifest' -Tag Unit {
 
     $Result.ProductCode | Should -Be 'Authored.Invalid.ProductCode'
   }
+
+  It 'keeps isolated formatting non-destructive for authored elevation fields' {
+    $Manifest = [ordered]@{
+      PackageIdentifier = 'Example.Package'; PackageVersion = '1.0.0'
+      InstallerType = 'wix'; ElevationRequirement = 'elevationRequired'
+      Installers = @([ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/app.msi'; InstallerSha256 = 'A' * 64 })
+      ManifestType = 'installer'; ManifestVersion = '1.12.0'
+    }
+    (Format-WinGetManifest -Manifest $Manifest).ElevationRequirement | Should -Be elevationRequired
+  }
+}
+
+Describe 'MSI elevation cleanup during manifest updates' -Tag Unit {
+  It 'removes the field even when installer analysis is skipped: <_>' -ForEach @('msi', 'wix') {
+    Mock Invoke-WinGetInstallerDownload -ModuleName WinGetManifestUpdate { throw 'A supplied SHA256 should avoid downloading.' }
+    $Source = [ordered]@{
+      PackageIdentifier = 'Example.Package'; PackageVersion = '1.0.0'; PackageLocale = 'en-US'
+      Publisher = 'Example'; PackageName = 'Example Package'; License = 'MIT'; ShortDescription = 'Test package.'
+      InstallerType = $_; ElevationRequirement = 'elevationRequired'
+      Installers = @([ordered]@{ Architecture = 'x64'; InstallerUrl = 'https://example.test/old.msi'; InstallerSha256 = 'A' * 64 })
+      ManifestType = 'singleton'; ManifestVersion = '1.12.0'
+    }
+    $Model = ConvertFrom-WinGetMergedManifest -Manifest $Source
+    $Result = Update-WinGetManifest -Manifest $Model -PackageVersion '2.0.0' -InstallerEntries @([ordered]@{ InstallerUrl = 'https://example.test/new.msi'; InstallerSha256 = 'B' * 64 }) -SkipInstallerAnalysis -Logger { $null = $args }
+    $Result.Installers[0].Contains('ElevationRequirement') | Should -BeFalse
+    $Result.InstallerDefaults.Contains('ElevationRequirement') | Should -BeFalse
+    $Model.Installers[0].ElevationRequirement | Should -Be elevationRequired
+    Should -Invoke Invoke-WinGetInstallerDownload -ModuleName WinGetManifestUpdate -Exactly 0
+  }
 }

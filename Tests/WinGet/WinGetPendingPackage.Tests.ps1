@@ -128,6 +128,59 @@ Describe 'Trusted pending-package reference selection' -Tag Unit {
     Should -Invoke Find-WinGetGitHubPullRequest -ModuleName WinGetPendingPackage -Exactly 0
   }
 
+  It 'allows normal submission when no newer existing-package PR is eligible' {
+    $Script:Parameters.PublishedPackageVersion = '1.0'
+    $Script:Parameters.AllowMissing = $true
+    Get-WinGetPendingPackageReference @Script:Parameters | Should -BeNullOrEmpty
+    Should -Invoke Read-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+  }
+
+  It 'selects only versions newer than the published package' {
+    $Script:Parameters.PublishedPackageVersion = '1.0'
+    $Script:PullRequests[43] = New-TestPendingPullRequest -Number 43 -Version '2.0'
+    $Script:Versions[43] = '2.0'
+    $Script:Files[43] = @(New-TestPendingFiles -Version '2.0')
+    (Get-WinGetPendingPackageReference @Script:Parameters).PullRequest.number | Should -Be 43
+  }
+
+  It 'accepts one added version and one complete older-version removal' {
+    $Script:Parameters.PublishedPackageVersion = '1.0'
+    $Script:Versions[42] = '2.0'
+    $Script:PullRequests[42].base | Add-Member NoteProperty sha ('a' * 40)
+    $Script:PullRequests[42].changed_files = 6
+    $Removed = @(New-TestPendingFiles | ForEach-Object { $_.status = 'removed'; $_ })
+    $Script:Files[42] = @(New-TestPendingFiles -Version '2.0') + $Removed
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage {
+      New-TestPendingFiles | ForEach-Object { [pscustomobject]@{ path = Split-Path $_.filename -Leaf } }
+    }
+    $Reference = Get-WinGetPendingPackageReference @Script:Parameters
+    $Reference.PackageVersion | Should -Be '2.0'
+    $Reference.Paths | Should -HaveCount 3
+    $Reference.RemovedPaths | Should -HaveCount 3
+    $Reference.RemovedPackageVersion | Should -Be '1.0'
+    Should -Invoke Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RepoBranch -ceq ('a' * 40) -and $PackageVersion -eq '1.0' }
+  }
+
+  It 'rejects invalid existing-package removals: <_>' -ForEach @('partial', 'two-versions', 'unpublished', 'modified', 'renamed') {
+    $Script:Parameters.PublishedPackageVersion = '1.0'
+    $Script:Versions[42] = '2.0'
+    $Script:PullRequests[42].base | Add-Member NoteProperty sha ('a' * 40)
+    $Removed = @(New-TestPendingFiles | ForEach-Object { $_.status = 'removed'; $_ })
+    switch ($_) {
+      partial { $Removed = @($Removed | Select-Object -First 2) }
+      two-versions { $Removed[0].filename = $Removed[0].filename.Replace('/1.0/', '/0.9/') }
+      unpublished { foreach ($File in $Removed) { $File.filename = $File.filename.Replace('/1.0/', '/1.5/') } }
+      modified { $Removed[0].status = 'modified' }
+      renamed { $Removed[0].status = 'renamed' }
+    }
+    $Script:Files[42] = @(New-TestPendingFiles -Version '2.0') + $Removed
+    $Script:PullRequests[42].changed_files = $Script:Files[42].Count
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage {
+      New-TestPendingFiles | ForEach-Object { [pscustomobject]@{ path = Split-Path $_.filename -Leaf } }
+    }
+    { Get-WinGetPendingPackageReference @Script:Parameters } | Should -Throw '*No trusted open PR*'
+  }
+
   It 'does not treat incomplete or failed search results as an absent package' {
     Mock Find-WinGetGitHubPullRequest -ModuleName WinGetPendingPackage { @{ incomplete_results = $true } }
     { Get-WinGetPendingPackageReference @Script:Parameters } | Should -Throw '*incomplete*'
@@ -229,6 +282,59 @@ Describe 'Pending PR updates and exact-content comparison' -Tag Unit {
     Mock Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage { throw 'Title permission denied' }
     { Update-WinGetPendingPackagePullRequest @Script:Parameters } | Should -Throw '*contains the requested manifests*updating its title failed*'
     Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1
+  }
+
+  It 'preserves captured published-version removals without deleting absent files again' {
+    $Removed = @(New-TestPendingFiles -Version '0.5' | ForEach-Object { $_.status = 'removed'; $_ })
+    $Script:Reference | Add-Member NoteProperty RemovedPaths $Removed.filename
+    $Script:Reference | Add-Member NoteProperty RemovedPackageVersion '0.5'
+    $Script:CapturedRemoved = $Removed
+    Mock Get-WinGetGitHubPullRequestFile -ModuleName WinGetPendingPackage { @(New-TestPendingFiles) + $Script:CapturedRemoved }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.5'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RemovePath.Count -eq 3 -and @($RemovePath | Where-Object { $_ -like '*/0.5/*' }).Count -eq 0 }
+  }
+
+  It 'adds an explicit published removal to the same atomic update' {
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage {
+      New-TestPendingFiles -Version '0.5' | ForEach-Object { [pscustomobject]@{ path = Split-Path $_.filename -Leaf } }
+    }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.5'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RequireUnchangedHead -and $RemovePath.Count -eq 6 -and @($RemovePath | Where-Object { $_ -like '*/0.5/*' }).Count -eq 3 }
+    Should -Invoke Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RepoBranch -ceq (42).ToString('x40') -and $RepoOwner -eq 'TrustedBot' }
+  }
+
+  It 'commits a newly requested removal even when the pending manifest content is identical' {
+    $Script:Parameters.Content = $Script:Content
+    $Script:Parameters.PackageVersion = '1.0'
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage { [pscustomobject]@{ path = 'Vendor.Package.yaml' } }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.5'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RemovePath.Count -eq 1 -and $RemovePath[0] -like '*/0.5/*' }
+  }
+
+  It 'rejects a second published-version removal unless it is only inferred' {
+    $Removed = @(New-TestPendingFiles -Version '0.5' | ForEach-Object { $_.status = 'removed'; $_ })
+    $Script:Reference | Add-Member NoteProperty RemovedPaths $Removed.filename
+    $Script:Reference | Add-Member NoteProperty RemovedPackageVersion '0.5'
+    $Script:CapturedRemoved = $Removed
+    Mock Get-WinGetGitHubPullRequestFile -ModuleName WinGetPendingPackage { @(New-TestPendingFiles) + $Script:CapturedRemoved }
+    { Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.6' } | Should -Throw '*cannot also remove*'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+    Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.6' -WarnOnRemovalFailure
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RemovePath.Count -eq 3 }
+    $Script:Task.Logs.Level | Should -Contain Warning
+  }
+
+  It 'warns for an inferred removal read failure but still updates the manifests' {
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage { throw 'HTTP 500' }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.5' -WarnOnRemovalFailure
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RemovePath.Count -eq 3 }
+    $Script:Task.Logs.Level | Should -Contain Warning
+  }
+
+  It 'fails before writes when an explicit removal cannot be read' {
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage { throw 'HTTP 500' }
+    { Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.5' } | Should -Throw '*HTTP 500*'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
   }
 
   It 'retains the normal credential when no author mapping exists: <_>' -ForEach @('standalone', 'null-storage', 'empty-map', 'other-author') {

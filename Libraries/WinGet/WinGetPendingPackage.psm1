@@ -1,8 +1,7 @@
 #Requires -Version 7.4
 # SPDX-License-Identifier: Apache-2.0
-# Opt-in references for packages awaiting their first merge. GitHub PR metadata
-# identifies the trusted author and immutable head; the complete file delta
-# must prove a single-version addition before any manifest is used or changed.
+# Trusted references to unmerged package versions. The complete PR delta must
+# prove one added version, optionally removing one older published version.
 # API reference: https://docs.github.com/en/rest/pulls/pulls
 
 function Get-WinGetPendingPackageReference {
@@ -10,13 +9,13 @@ function Get-WinGetPendingPackageReference {
   .SYNOPSIS
     Select the highest added manifest version from recent trusted, open PRs.
   .DESCRIPTION
-    Reads only addition-only, single-package, single-version PRs. Content is
-    pinned to a captured SHA and validated locally. Search titles narrow the
-    candidates but never supply the package identity or version.
+    Reads one added version of one package, pinned to a captured SHA and
+    validated locally. Existing-package references may also remove one older
+    published version. Search titles never supply the identity or version.
   .PARAMETER Task
     Task used to log rejected candidates and bounded-search warnings.
   .PARAMETER PackageIdentifier
-    Exact package identifier missing from the configured reference repository.
+    Exact package identifier whose unmerged manifests are being selected.
   .PARAMETER TrustedUser
     Explicit GitHub author allowlist. Empty lists are rejected.
   .PARAMETER RepoOwner
@@ -29,6 +28,11 @@ function Get-WinGetPendingPackageReference {
     Repository-relative manifest root.
   .PARAMETER SearchLimit
     Recent search results examined per trusted account, from 1 through 100.
+  .PARAMETER PublishedPackageVersion
+    Latest published version for existing-package updates. Candidates must be
+    newer. A complete removal of one older published version is allowed.
+  .PARAMETER AllowMissing
+    Return no reference when no eligible PR exists, preserving normal submission.
   .OUTPUTS
     Detached reference containing the PR, pinned content/model, version, and exact changed paths.
   #>
@@ -40,7 +44,9 @@ function Get-WinGetPendingPackageReference {
     [Parameter(Mandatory)][string]$RepoName,
     [Parameter(Mandatory)][string]$RepoBranch,
     [Parameter(Mandatory)][string]$RootPath,
-    [ValidateRange(1, 100)][int]$SearchLimit = 30
+    [ValidateRange(1, 100)][int]$SearchLimit = 30,
+    [string]$PublishedPackageVersion,
+    [switch]$AllowMissing
   )
 
   $TrustedAuthors = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -55,9 +61,9 @@ function Get-WinGetPendingPackageReference {
 
   foreach ($User in $TrustedAuthors) {
     $Search = Find-WinGetGitHubPullRequest -Query "is:pr is:open repo:${RepoOwner}/${RepoName} author:${User} `"${PackageIdentifier}`" in:title sort:updated-desc" -MaximumResults $SearchLimit
-    if ($Search.incomplete_results) { throw 'GitHub returned incomplete pending-package search results. Retry before selecting a reference.' }
+    if ($Search.incomplete_results) { throw 'GitHub returned incomplete PR-reference search results. Retry before selecting a reference.' }
     if ($Search.total_count -gt $SearchLimit) {
-      $Task.Log("Pending-package search for ${User} is limited to the ${SearchLimit} most recently updated PRs. Increase WinGetPendingPackageSearchLimit to inspect more candidates.", 'Warning')
+      $Task.Log("PR-reference search for ${User} is limited to the ${SearchLimit} most recently updated PRs. Increase the configured package search limit to inspect more candidates.", 'Warning')
     }
 
     foreach ($Item in @($Search.items)) {
@@ -68,19 +74,39 @@ function Get-WinGetPendingPackageReference {
         if ($PullRequest.base.ref -cne $RepoBranch -or $PullRequest.base.repo.full_name -ine "${RepoOwner}/${RepoName}") { continue }
         if (-not $PullRequest.head.repo -or $PullRequest.head.sha -notmatch '^[a-fA-F0-9]{40}$' -or $PullRequest.head.repo.full_name -notmatch '^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$') { continue }
 
-        # The entire delta must consist of recognized manifest files in one leaf.
-        # Removed versions, unrelated edits, renames, and partial file lists are unsafe templates.
+        # Preserve published-file edits by declining those PRs as templates.
+        # Only a complete older-version removal may accompany the addition.
         $Files = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $Item.number -RepoOwner $RepoOwner -RepoName $RepoName)
         if ($Files.Count -lt 3 -or $Files.Count -ne $PullRequest.changed_files) { throw 'The complete multi-file addition could not be established.' }
         $Version = $null
         $Paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $RemovedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $RemovedVersion = $null
         foreach ($File in $Files) {
           $Match = [regex]::Match([string]$File.filename, $FilePattern)
-          if ($File.status -cne 'added' -or -not $Match.Success -or -not $Paths.Add([string]$File.filename)) { throw 'The PR is not a pure single-package manifest addition.' }
+          if (-not $Match.Success) { throw 'The PR contains unrelated or unrecognized files.' }
           $FileVersion = $Match.Groups['Version'].Value
           if ($FileVersion -in @('.', '..')) { throw 'The version path is invalid.' }
-          if ($Version -and $Version -cne $FileVersion) { throw 'The PR adds more than one package version.' }
-          $Version = $FileVersion
+          if ($File.status -ceq 'added') {
+            if (-not $Paths.Add([string]$File.filename)) { throw 'The file list contains duplicate additions.' }
+            if ($Version -and $Version -cne $FileVersion) { throw 'The PR adds more than one package version.' }
+            $Version = $FileVersion
+          } elseif ($PublishedPackageVersion -and $File.status -ceq 'removed') {
+            if (-not $RemovedPaths.Add([string]$File.filename)) { throw 'The file list contains duplicate removals.' }
+            if ($RemovedVersion -and $RemovedVersion -cne $FileVersion) { throw 'The PR removes more than one package version.' }
+            $RemovedVersion = $FileVersion
+          } else { throw 'The PR is not a supported single-package manifest addition.' }
+        }
+        if ($Paths.Count -lt 3) { throw 'The PR does not add a complete manifest set.' }
+        if ($PublishedPackageVersion -and [WinGetVersion]$Version -le [WinGetVersion]$PublishedPackageVersion) { continue }
+        if ($RemovedPaths.Count) {
+          if ([WinGetVersion]$RemovedVersion -gt [WinGetVersion]$PublishedPackageVersion -or [WinGetVersion]$RemovedVersion -ge [WinGetVersion]$Version) { throw 'The removed version is not an older published version.' }
+          # Compare with the base tree, including every localization. Removing
+          # only some files would leave an invalid published version behind.
+          if ($PullRequest.base.sha -notmatch '^[a-fA-F0-9]{40}$') { throw 'The PR base did not provide an immutable revision for removal validation.' }
+          $RemovedPrefix = Get-WinGetGitHubPackagePath -PackageIdentifier $PackageIdentifier -PackageVersion $RemovedVersion -RootPath $RootPath
+          $BaseFiles = @(Get-WinGetGitHubManifests -PackageIdentifier $PackageIdentifier -PackageVersion $RemovedVersion -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $PullRequest.base.sha -RootPath $RootPath)
+          if (-not $BaseFiles.Count -or $BaseFiles.Count -ne $RemovedPaths.Count -or @($BaseFiles | Where-Object { -not $RemovedPaths.Contains("${RemovedPrefix}/$($_.path)") }).Count) { throw 'The PR does not remove the complete older manifest set.' }
         }
 
         # File-list endpoints are live. A second read detects movement before
@@ -95,26 +121,28 @@ function Get-WinGetPendingPackageReference {
         if ($Validation.HasErrors) { throw "Reference manifest validation failed: $($Validation.Diagnostics.Where({ $_.Severity -eq 'Error' }).Message -join '; ')" }
 
         $Reference = [pscustomobject]@{
-          PullRequest    = $PullRequest
-          PackageVersion = $Version
-          RepoOwner      = $HeadOwner
-          RepoName       = $HeadRepo
-          RepoBranch     = [string]$PullRequest.head.ref
-          HeadSha        = [string]$PullRequest.head.sha
-          Content        = $Content
-          Manifest       = $Manifest
-          Paths          = [string[]]@($Paths)
+          PullRequest           = $PullRequest
+          PackageVersion        = $Version
+          RepoOwner             = $HeadOwner
+          RepoName              = $HeadRepo
+          RepoBranch            = [string]$PullRequest.head.ref
+          HeadSha               = [string]$PullRequest.head.sha
+          Content               = $Content
+          Manifest              = $Manifest
+          Paths                 = [string[]]@($Paths)
+          RemovedPaths          = [string[]]@($RemovedPaths)
+          RemovedPackageVersion = $RemovedVersion
         }
         $Comparison = if ($Best) { ([WinGetVersion]$Version).CompareTo([WinGetVersion]$Best.PackageVersion) } else { 1 }
         if ($Comparison -gt 0 -or ($Comparison -eq 0 -and ([datetimeoffset]$PullRequest.updated_at -gt [datetimeoffset]$Best.PullRequest.updated_at -or ($PullRequest.updated_at -eq $Best.PullRequest.updated_at -and $PullRequest.number -gt $Best.PullRequest.number)))) {
           $Best = $Reference
         }
       } catch {
-        $Task.Log("Skipping pending-package reference PR #$($Item.number): $_", 'Warning')
+        $Task.Log("Skipping PR reference #$($Item.number): $_", 'Warning')
       }
     }
   }
-  if (-not $Best) { throw "No trusted open PR provides a valid single-version addition for ${PackageIdentifier}." }
+  if (-not $Best -and -not $AllowMissing) { throw "No trusted open PR provides a valid single-version addition for ${PackageIdentifier}." }
   return $Best
 }
 
@@ -123,7 +151,7 @@ function Test-WinGetPendingPackageContentEquality {
   .SYNOPSIS
     Compare generated YAML with the captured PR files using exact LF-normalized bytes.
   .PARAMETER Reference
-    Captured pending-package reference.
+    Captured unmerged-version reference.
   .PARAMETER Content
     Generated raw manifest bundle.
   .PARAMETER PackageVersion
@@ -202,7 +230,8 @@ function Update-WinGetPendingPackagePullRequest {
     Replace a pending version on its existing PR branch and update its title.
   .DESCRIPTION
     Rechecks state and the pinned head, verifies push permission, and combines
-    new manifests and obsolete pending paths in one commit. Concurrent human
+    new manifests, obsolete pending paths, and requested published removals
+    in one commit. Captured published removals are preserved. Concurrent human
     changes are never rebased over. Identical manifests skip the commit but can
     repair a stale title. Title failures throw after reporting that the manifests
     are already present. Optional author credentials apply only to title edits
@@ -223,6 +252,12 @@ function Update-WinGetPendingPackagePullRequest {
     Upstream PR repository name.
   .PARAMETER RootPath
     Repository-relative manifest root.
+  .PARAMETER RemovePackageVersion
+    Published version to remove along with the update. Existing captured
+    removals are preserved, and a second distinct removal is rejected.
+  .PARAMETER WarnOnRemovalFailure
+    Warn and keep the existing removal plan when an inferred removal cannot
+    be applied, matching normal unchanged-URL submission behavior.
   #>
   param (
     [Parameter(Mandatory)]$Task,
@@ -232,7 +267,9 @@ function Update-WinGetPendingPackagePullRequest {
     [Parameter(Mandatory)][string]$Title,
     [Parameter(Mandatory)][string]$RepoOwner,
     [Parameter(Mandatory)][string]$RepoName,
-    [Parameter(Mandatory)][string]$RootPath
+    [Parameter(Mandatory)][string]$RootPath,
+    [string]$RemovePackageVersion,
+    [switch]$WarnOnRemovalFailure
   )
 
   $Number = $Reference.PullRequest.number
@@ -241,8 +278,26 @@ function Update-WinGetPendingPackagePullRequest {
     throw "Referenced PR #${Number} changed or closed. Rerun before updating it."
   }
   $CurrentFiles = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $Number -RepoOwner $RepoOwner -RepoName $RepoName)
-  if ($CurrentFiles.Count -ne $Reference.Paths.Count -or $CurrentFiles.Where({ $_.status -cne 'added' -or $_.filename -cnotin $Reference.Paths }).Count) {
-    throw "PR #${Number} no longer has the captured addition-only file delta. Rerun before updating it."
+  $RemovedPaths = @($Reference.RemovedPaths | Where-Object { $_ })
+  if ($CurrentFiles.Count -ne $Reference.Paths.Count + $RemovedPaths.Count -or $CurrentFiles.Where({ -not (($_.status -ceq 'added' -and $_.filename -cin $Reference.Paths) -or ($_.status -ceq 'removed' -and $_.filename -cin $RemovedPaths)) }).Count) {
+    throw "PR #${Number} no longer has the captured addition/removal file delta. Rerun before updating it."
+  }
+  $AdditionalRemovals = @()
+  if ($RemovePackageVersion) {
+    try {
+      if ($RemovedPaths.Count) {
+        if ($Reference.RemovedPackageVersion -cne $RemovePackageVersion) { throw "The referenced PR already removes version '$($Reference.RemovedPackageVersion)'; it cannot also remove '${RemovePackageVersion}'." }
+      } else {
+        if ([WinGetVersion]$RemovePackageVersion -ge [WinGetVersion]$PackageVersion) { throw 'The published removal must be older than the submitted version.' }
+        $RemovalPrefix = Get-WinGetGitHubPackagePath -PackageIdentifier $Reference.Manifest.PackageIdentifier -PackageVersion $RemovePackageVersion -RootPath $RootPath
+        $RemovalFiles = @(Get-WinGetGitHubManifests -PackageIdentifier $Reference.Manifest.PackageIdentifier -PackageVersion $RemovePackageVersion -RepoOwner $Reference.RepoOwner -RepoName $Reference.RepoName -RepoBranch $Reference.HeadSha -RootPath $RootPath)
+        if (-not $RemovalFiles.Count) { throw 'The published version is not available on the referenced PR branch; update that branch before retrying.' }
+        $AdditionalRemovals = @($RemovalFiles | ForEach-Object { "${RemovalPrefix}/$($_.path)" })
+      }
+    } catch {
+      if (-not $WarnOnRemovalFailure) { throw }
+      $Task.Log("Could not add the inferred published-version removal to PR #${Number}; its existing removal plan is preserved: $_", 'Warning')
+    }
   }
   $NeedsTitleUpdate = $Current.title -cne $Title
   $TitleArguments = @{}
@@ -252,7 +307,7 @@ function Update-WinGetPendingPackagePullRequest {
   }
   # Content and title are separate GitHub writes. A retry after a title failure
   # must repair that title without committing the same manifests again.
-  $NeedsManifestCommit = -not (Test-WinGetPendingPackageContentEquality -Reference $Reference -Content $Content -PackageVersion $PackageVersion -RootPath $RootPath)
+  $NeedsManifestCommit = $AdditionalRemovals.Count -gt 0 -or -not (Test-WinGetPendingPackageContentEquality -Reference $Reference -Content $Content -PackageVersion $PackageVersion -RootPath $RootPath)
   if ($NeedsManifestCommit) {
     if ($Reference.RepoBranch -ceq $Current.head.repo.default_branch) { throw 'Refusing to update a pending PR on its repository default branch. Use NewPullRequest instead.' }
     $Repository = Invoke-GitHubApi -Uri "https://api.github.com/repos/$($Reference.RepoOwner)/$($Reference.RepoName)" -ErrorAction Stop
@@ -261,7 +316,9 @@ function Update-WinGetPendingPackagePullRequest {
     $Identifier = $Reference.Manifest.PackageIdentifier
     $Prefix = Get-WinGetGitHubPackagePath -PackageIdentifier $Identifier -PackageVersion $PackageVersion -RootPath $RootPath
     $Additions = @(ConvertTo-WinGetGitHubManifestFileAddition -Manifest $Content -PackageIdentifier $Identifier -Prefix $Prefix)
-    $RemovePaths = @($Reference.Paths | Where-Object { $_ -cnotin $Additions.path })
+    # Previously removed published files are already absent from the head.
+    # Keep them absent instead of sending invalid duplicate deletions to GitHub.
+    $RemovePaths = @($Reference.Paths | Where-Object { $_ -cnotin $Additions.path }) + $AdditionalRemovals
     # A unique headline distinguishes our own recovered mutation from a
     # concurrent author's commit when an HTTP response is lost.
     $CommitMessage = "${Title} (pending PR #${Number}; $([guid]::NewGuid()))"
@@ -278,7 +335,7 @@ function Update-WinGetPendingPackagePullRequest {
     }
   }
   if ($NeedsManifestCommit) {
-    $Task.Log("Updated pending-package PR #${Number} to version ${PackageVersion}: $($Current.html_url)", 'Info')
+    $Task.Log("Updated referenced PR #${Number} to version ${PackageVersion}: $($Current.html_url)", 'Info')
   } else {
     $Task.Log("Pending PR #${Number} already contains these manifests. Its title is current, and no new commit or PR was needed: $($Current.html_url)", 'Info')
   }

@@ -528,6 +528,8 @@ function Send-WinGetManifest {
       Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath -AllowMissing:$PendingFallbackEnabled
     }
     $RefPackageVersion = @($ReferenceVersions) | Select-Object -Last 1
+    $PublishedPackageVersion = $RefPackageVersion
+    $PackageIsMissing = -not $RefPackageVersion
     if (-not $RefPackageVersion) {
       if (-not $PendingFallbackEnabled) { throw "Could not find any version of the package ${RefPackageIdentifier}" }
       if ($NewPackageIdentifier -cne $RefPackageIdentifier) { throw 'Pending-package fallback cannot change the package identifier.' }
@@ -540,14 +542,31 @@ function Send-WinGetManifest {
       $RefPackageVersion = $PendingReference.PackageVersion
       if (([WinGetVersion]$NewPackageVersion).CompareTo([WinGetVersion]$RefPackageVersion) -lt 0) { throw "Refusing to downgrade pending version ${RefPackageVersion} to ${NewPackageVersion}." }
       $Task.Log("Using pending-package PR #$($PendingReference.PullRequest.number), version ${RefPackageVersion}, head $($PendingReference.HeadSha): $($PendingReference.PullRequest.html_url). Action: ${PendingAction}.", 'Info')
+    } else {
+      $ExistingAction = [string]($Task.Config['WinGetExistingPackageAction'] ?? $Global:DumplingsPreference['WinGetExistingPackageAction'] ?? 'NewPullRequest')
+      if ($ExistingAction -notin @('UpdatePullRequest', 'NewPullRequest')) { throw "Invalid WinGetExistingPackageAction: '$ExistingAction'" }
+      if ($ExistingAction -eq 'UpdatePullRequest' -and $NewPackageIdentifier -ceq $RefPackageIdentifier) {
+        $TrustedUsers = @($Task.Config['WinGetExistingPackageTrustedUsers'] ?? $Global:DumplingsPreference['WinGetExistingPackageTrustedUsers'] ?? @())
+        if (-not $TrustedUsers.Count) { throw 'Existing-package PR updates require WinGetExistingPackageTrustedUsers.' }
+        $SearchLimit = [int]($Task.Config['WinGetExistingPackageSearchLimit'] ?? $Global:DumplingsPreference['WinGetExistingPackageSearchLimit'] ?? 30)
+        $PendingReference = Get-WinGetPendingPackageReference -Task $Task -PackageIdentifier $RefPackageIdentifier -TrustedUser $TrustedUsers -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName -RepoBranch $UpstreamRepoBranch -RootPath $RootPath -SearchLimit $SearchLimit -PublishedPackageVersion $PublishedPackageVersion -AllowMissing
+        if ($PendingReference) {
+          $RefPackageVersion = $PendingReference.PackageVersion
+          if ([WinGetVersion]$NewPackageVersion -lt [WinGetVersion]$RefPackageVersion) { throw "Refusing to downgrade pending version ${RefPackageVersion} to ${NewPackageVersion}." }
+          $PendingAction = 'UpdatePullRequest'
+          $Task.Log("Using existing-package PR #$($PendingReference.PullRequest.number), version ${RefPackageVersion}, head $($PendingReference.HeadSha): $($PendingReference.PullRequest.html_url).", 'Info')
+        } else {
+          $Task.Log('No eligible trusted PR was found; using the published manifests and normal new-PR submission.', 'Verbose')
+        }
+      }
     }
 
     $NewManifestsPath = (New-Item -Path (Join-Path $Global:DumplingsOutput 'WinGet' $NewPackageIdentifier $NewPackageVersion) -ItemType Directory -Force).FullName
     $NewBranchName = "${NewPackageIdentifier}-${NewPackageVersion}-$(Get-Random)" -replace '[\~,\^,\:,\\,\?,\@\{,\*,\[,\s]{1,}|[.lock|/|\.]*$|^\.{1,}|\.\.', ''
     $NewCommitType = if ($Global:DumplingsPreference['NewCommitType']) { $Global:DumplingsPreference.NewCommitType }
-    elseif ($PendingReference -or $NewPackageIdentifier -cne $RefPackageIdentifier) { 'New package' }
+    elseif ($PackageIsMissing -or $NewPackageIdentifier -cne $RefPackageIdentifier) { 'New package' }
     else {
-      switch (([WinGetVersion]$NewPackageVersion).CompareTo([WinGetVersion]$RefPackageVersion)) {
+      switch (([WinGetVersion]$NewPackageVersion).CompareTo([WinGetVersion]$PublishedPackageVersion)) {
         { $_ -gt 0 } { 'New version'; continue }
         0 { 'Update'; continue }
         { $_ -lt 0 } { 'Add version'; continue }
@@ -619,14 +638,16 @@ function Send-WinGetManifest {
       $Task.CurrentState.Installer | ForEach-Object -Process { $_.ReleaseDate = $_.Contains('ReleaseDate') ? $_ -is [datetime] -or $_ -is [System.DateTimeOffset] ? $_.ToUniversalTime().ToString('yyyy-MM-dd') : ($_ | Get-Date -Format 'yyyy-MM-dd') : $ReleaseDate }
     }
     # Read the manifests
-    if ($PendingReference) {
-      $RefManifest = $PendingReference.Manifest
-    } elseif ($HasLocalRepo) {
-      $Task.Log("Reading existing manifests from local repo at $LocalRepoPath", 'Verbose')
-      $RefManifest = Read-WinGetLocalManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RootPath $LocalRepoPath | ConvertFrom-WinGetManifestYaml
-    } else {
-      $RefManifest = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $RefPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath | ConvertFrom-WinGetManifestYaml
+    $PublishedManifest = $null
+    if (-not $PackageIsMissing) {
+      if ($HasLocalRepo) {
+        $Task.Log("Reading existing manifests from local repo at $LocalRepoPath", 'Verbose')
+        $PublishedManifest = Read-WinGetLocalManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $PublishedPackageVersion -RootPath $LocalRepoPath | ConvertFrom-WinGetManifestYaml
+      } else {
+        $PublishedManifest = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $PublishedPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath | ConvertFrom-WinGetManifestYaml
+      }
     }
+    $RefManifest = $PendingReference ? $PendingReference.Manifest : $PublishedManifest
     # Update the manifests
     if ($SkipInstallerAnalysis) {
       $Task.Log('Skipping installer analysis while generating WinGet manifests as configured', 'Info')
@@ -647,10 +668,29 @@ function Send-WinGetManifest {
       return
     }
 
+    # Decide published-version removal from the published model, not the PR
+    # template. Its version and URLs can differ from the version being replaced.
+    $RemoveLastVersionReason = $null
+    $RemoveLastVersionIsInferred = $false
+    $RemoveLastVersionChangeApplied = $false
+    if (-not $PackageIsMissing) {
+      if ($Task.Config.Contains('RemoveLastVersion')) {
+        if ($Task.Config.RemoveLastVersion) { $RemoveLastVersionReason = 'This task is configured to remove the last version' }
+      } elseif ($RefPackageIdentifier -ceq $NewPackageIdentifier -and $PublishedPackageVersion -cne $NewPackageVersion -and (Test-WinGetInstallerUrlIntersection -ReferenceInstaller $PublishedManifest.Installers -DifferenceInstaller $NewManifest.Installers)) {
+        $RemoveLastVersionReason = 'At least one of the installer URLs is unchanged compared with the old manifests while the version is updated'
+        $RemoveLastVersionIsInferred = $true
+      }
+    }
+
     if ($PendingReference) {
       # In-place updates also reconcile the title when manifests are unchanged.
       if ($PendingAction -eq 'UpdatePullRequest') {
-        Update-WinGetPendingPackagePullRequest -Task $Task -Reference $PendingReference -Content $NewManifests -PackageVersion $NewPackageVersion -Title $NewCommitName -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName -RootPath $RootPath
+        $RemovalArguments = @{}
+        if ($RemoveLastVersionReason -and $PublishedPackageVersion -cne $NewPackageVersion) {
+          $RemovalArguments.RemovePackageVersion = $PublishedPackageVersion
+          $RemovalArguments.WarnOnRemovalFailure = $RemoveLastVersionIsInferred
+        }
+        Update-WinGetPendingPackagePullRequest -Task $Task -Reference $PendingReference -Content $NewManifests -PackageVersion $NewPackageVersion -Title $NewCommitName -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName -RootPath $RootPath @RemovalArguments
         return
       }
       if (Test-WinGetPendingPackageContentEquality -Reference $PendingReference -Content $NewManifests -PackageVersion $NewPackageVersion -RootPath $RootPath) {
@@ -674,19 +714,10 @@ function Send-WinGetManifest {
     # Remove old manifests, if
     # 1. The task is configured to remove the last version, or
     # 2. At least one installer URL is unchanged while the version is updated
-    $RemoveLastVersionReason = $null
-    $RemoveLastVersionIsInferred = $false
-    $RemoveLastVersionChangeApplied = $false
     if ($PendingReference) {
       # New-PR mode uses the pending manifests as a template on the normal
       # origin base. The unmerged version is not present there to remove.
       $Task.Log('The reference version exists only in a pending PR; no previous-version removal will be added to the new PR.', 'Verbose')
-    } elseif ($Task.Config.Contains('RemoveLastVersion')) {
-      if ($Task.Config.RemoveLastVersion) { $RemoveLastVersionReason = 'This task is configured to remove the last version' }
-      # If RemoveLastVersion is set to 'false', do not remove the last version
-    } elseif (($RefPackageIdentifier -ceq $NewPackageIdentifier) -and ($RefPackageVersion -cne $NewPackageVersion) -and (Test-WinGetInstallerUrlIntersection -ReferenceInstaller $RefManifest.Installers -DifferenceInstaller $NewManifest.Installers)) {
-      $RemoveLastVersionReason = 'At least one of the installer URLs is unchanged compared with the old manifests while the version is updated'
-      $RemoveLastVersionIsInferred = $true
     }
     if ($RemoveLastVersionReason) {
       if ($RefPackageVersion -cne $NewPackageVersion) {

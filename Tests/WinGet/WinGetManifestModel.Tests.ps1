@@ -88,6 +88,56 @@ Describe 'WinGet logical manifest model' -Tag Unit {
     $Model.Installers[0].Contains('ExpectedReturnCodes') | Should -BeFalse
   }
 
+  It 'removes pre-elevation from <Type>/<Nested> in <Scope> scope without mutating input' -ForEach @(
+    foreach ($Scope in 'user', 'machine') {
+      foreach ($Type in 'msi', 'wix') {
+        @{ Type = $Type; Nested = ''; Scope = $Scope }
+        @{ Type = 'zip'; Nested = $Type; Scope = $Scope }
+      }
+    }
+  ) {
+    $Source = New-TestWinGetSingleton
+    $Source.InstallerType = $Type
+    $Source.ElevationRequirement = 'elevationRequired'
+    $Source.Scope = $Scope
+    if ($Nested) { $Source.NestedInstallerType = $Nested }
+    $Model = ConvertFrom-WinGetMergedManifest -Manifest $Source
+    $Before = ConvertTo-Json $Model -Depth 100 -Compress
+    $Optimized = Optimize-WinGetManifest -Manifest $Model
+    $Optimized.Installers[0].Contains('ElevationRequirement') | Should -BeFalse
+    $Optimized.InstallerDefaults.Contains('ElevationRequirement') | Should -BeFalse
+    $Documents = ConvertTo-WinGetManifestDocumentSet -Manifest $Model
+    $Documents.Installer.Contains('ElevationRequirement') | Should -BeFalse
+    $Documents.Installer.Installers[0].Contains('ElevationRequirement') | Should -BeFalse
+    (ConvertTo-Json $Model -Depth 100 -Compress) | Should -BeExactly $Before
+    (ConvertTo-Json (Optimize-WinGetManifest $Optimized) -Depth 100 -Compress) | Should -BeExactly (ConvertTo-Json $Optimized -Depth 100 -Compress)
+  }
+
+  It 'retains other MSI elevation values: <_>' -ForEach @('elevatesSelf', 'elevationProhibited') {
+    $Source = New-TestWinGetSingleton
+    $Source.ElevationRequirement = $_
+    $Model = ConvertFrom-WinGetMergedManifest -Manifest $Source
+    (Optimize-WinGetManifest $Model).Installers[0].ElevationRequirement | Should -BeExactly $_
+  }
+
+  It 'preserves inherited pre-elevation on EXE and Burn entries in a mixed manifest' {
+    $Source = New-TestWinGetSingleton
+    $Source.ElevationRequirement = 'elevationRequired'
+    $Source.Installers = @(
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'msi' }
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'zip'; NestedInstallerType = 'wix' }
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'exe'; AppsAndFeaturesEntries = @([ordered]@{ InstallerType = 'msi' }) }
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'burn' }
+    )
+    $Model = ConvertFrom-WinGetMergedManifest -Manifest $Source
+    $Optimized = Optimize-WinGetManifest $Model
+    $Optimized.Installers[0].Contains('ElevationRequirement') | Should -BeFalse
+    $Optimized.Installers[1].Contains('ElevationRequirement') | Should -BeFalse
+    $Optimized.Installers[2].ElevationRequirement | Should -Be elevationRequired
+    $Optimized.Installers[3].ElevationRequirement | Should -Be elevationRequired
+    $Optimized.InstallerDefaults.Contains('ElevationRequirement') | Should -BeFalse
+  }
+
   It 'removes InstallerLocale when every installer has the same locale' {
     $Model = New-WinGetManifestModel -PackageIdentifier 'Test.Locale' -PackageVersion '1.0.0' -ManifestVersion '1.12.0' -InstallerDefaults ([ordered]@{ InstallerLocale = 'en-US' }) -Installers @(
       [ordered]@{ Architecture = 'x86'; InstallerType = 'nullsoft'; InstallerLocale = 'en-US'; InstallerUrl = 'https://example.test/x86.exe'; InstallerSha256 = 'A' * 64 }
