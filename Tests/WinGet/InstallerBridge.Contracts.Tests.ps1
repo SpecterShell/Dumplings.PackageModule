@@ -368,6 +368,38 @@ stagingPercentage: 25
     $CombinedInfo.PascalScriptInfo.Functions | Should -HaveCount 223
   }
 
+  It 'Should parse Inno 7.1.1 SoftPerfect metadata through the GPL bridge' {
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\Inno\SoftPerfect.NetWorx\26.10\networx_setup.exe'
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $Fixture -Sha256 'B971005AA79411B7CBF1B864189ACF2DF3822C438C5B60BA17D592F9E71F1D1F')) {
+      Set-ItResult -Skipped -Because 'The pinned NetWorx 26.10 installer is not cached and the vendor URL is versionless.'
+      return
+    }
+    $Info = Get-InnoInfo -Path $Fixture
+    $Info.ProductCode | Should -Be 'NetWorx_is1'
+    $Info.DisplayVersion | Should -Be '26.10'
+    $Info.ParserVersionInfo.CatalogFormatId | Should -Be '710100-u'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
+    $Info.Diagnostics | Should -BeNullOrEmpty
+  }
+
+  It 'Should retain Dissent MSI database architecture when selecting for <Architecture>' -ForEach @(
+    @{ Architecture = 'x86' }
+    @{ Architecture = 'x64' }
+    @{ Architecture = 'arm64' }
+  ) {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers\AdvancedInstaller\diamondburned.Dissent\0.0.41\dissent-windows-amd64.exe' -Uri 'https://github.com/diamondburned/dissent/releases/download/v0.0.41/dissent-windows-amd64.exe' -Sha256 '17F8D7726298AC0075FCEA86A39D5660792D2B55C26EE5BD028FA0CBF0156350'
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Path $Fixture -Architecture $Architecture
+    $MsiInfo.DisplayName | Should -Be 'Dissent'
+    $MsiInfo.DisplayVersion | Should -Be '0.0.41'
+    $MsiInfo.ProductCode | Should -Be '{144B869C-FF0A-4C8B-B159-50F2FEF9950B}'
+    $MsiInfo.PackageArchitecture | Should -Be 'x86'
+    $MsiInfo.Template | Should -Be ';1033'
+    $MsiInfo.ArchitectureSelectionMode | Should -Be 'FixedPath'
+    $MsiInfo.SelectedMsiPath | Should -Be 'dissent-windows-amd64.msi'
+    $MsiInfo.Diagnostics | Should -BeNullOrEmpty
+  }
+
   It 'Should read MSI metadata through the InstallerParsers Advanced Installer bridge' {
     $Fixture = Get-InstallerFixture -Name 'TINspireComputerLink-3.9.0.455.exe' -Url 'https://education.ti.com/download/en/ed-tech/82035809F7E6474099944056CCB01C20/AC3AAE51297B4902B6B6CA005B8391F0/TINspireComputerLink-3.9.0.455.exe'
     $FormatInfo = Get-AdvancedInstallerFormatInfo -Path $Fixture
@@ -494,6 +526,7 @@ stagingPercentage: 25
       $X64Info.SelectionMethod | Should -Be 'PayloadTable'
       $X64Info.PackageArchitecture | Should -Be 'x64'
       $X64Info.Template | Should -Be 'x64;2057'
+      { Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture arm64 } | Should -Throw "*MSI package architecture is 'x64'*"
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -510,6 +543,9 @@ stagingPercentage: 25
     $MsiInfo.ArchitectureSelectionMode | Should -Be 'FixedPath'
     $MsiInfo.PackageArchitecture | Should -Be 'arm64'
     $MsiInfo.ProductCode | Should -Be '{AFD6D03F-AE41-4BB2-9E4D-26E8A9E970B0}'
+    # Host/package compatibility must not weaken native architecture checks.
+    { Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x64 } | Should -Throw "*MSI package architecture is 'arm64'*"
+    { Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x86 } | Should -Throw "*MSI package architecture is 'arm64'*"
   }
 
   It 'Should call the InstallerParsers Qt Installer Framework parser through the Apache-2.0 wrapper' {
