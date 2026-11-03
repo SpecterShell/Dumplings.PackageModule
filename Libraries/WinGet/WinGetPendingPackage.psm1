@@ -4,6 +4,34 @@
 # prove one added version, optionally removing one older published version.
 # API reference: https://docs.github.com/en/rest/pulls/pulls
 
+function ConvertTo-WinGetPendingPackageFileChange {
+  <#
+  .SYNOPSIS
+    Expand GitHub rename records into their added and removed paths.
+  .DESCRIPTION
+    GitHub can report a version replacement as renames based on file similarity.
+    Normalize discovery and pre-write reads alike. Callers still validate both
+    paths against the permitted package, versions, and complete manifest sets.
+  .PARAMETER File
+    Complete changed-file records returned by the GitHub PR files endpoint.
+  .OUTPUTS
+    File records with filename and status. Each rename emits two records.
+  #>
+  param ([Parameter(Mandatory)][object[]]$File)
+
+  foreach ($Change in $File) {
+    if ($Change.status -ceq 'renamed') {
+      if ([string]::IsNullOrWhiteSpace($Change.previous_filename) -or $Change.previous_filename -ceq $Change.filename) {
+        throw "The renamed file '$($Change.filename)' does not identify a distinct source path."
+      }
+      [pscustomobject]@{ filename = $Change.filename; status = 'added' }
+      [pscustomobject]@{ filename = $Change.previous_filename; status = 'removed' }
+    } else {
+      $Change
+    }
+  }
+}
+
 function Get-WinGetPendingPackageReference {
   <#
   .SYNOPSIS
@@ -76,13 +104,14 @@ function Get-WinGetPendingPackageReference {
 
         # Preserve published-file edits by declining those PRs as templates.
         # Only a complete older-version removal may accompany the addition.
+        # Count raw API records before expanding renames into two path changes.
         $Files = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $Item.number -RepoOwner $RepoOwner -RepoName $RepoName)
         if ($Files.Count -lt 3 -or $Files.Count -ne $PullRequest.changed_files) { throw 'The complete multi-file addition could not be established.' }
         $Version = $null
         $Paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         $RemovedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         $RemovedVersion = $null
-        foreach ($File in $Files) {
+        foreach ($File in (ConvertTo-WinGetPendingPackageFileChange -File $Files)) {
           $Match = [regex]::Match([string]$File.filename, $FilePattern)
           if (-not $Match.Success) { throw 'The PR contains unrelated or unrecognized files.' }
           $FileVersion = $Match.Groups['Version'].Value
@@ -98,7 +127,10 @@ function Get-WinGetPendingPackageReference {
           } else { throw 'The PR is not a supported single-package manifest addition.' }
         }
         if ($Paths.Count -lt 3) { throw 'The PR does not add a complete manifest set.' }
-        if ($PublishedPackageVersion -and [WinGetVersion]$Version -le [WinGetVersion]$PublishedPackageVersion) { continue }
+        if ($PublishedPackageVersion -and [WinGetVersion]$Version -le [WinGetVersion]$PublishedPackageVersion) {
+          $Task.Log("Skipping PR reference #$($Item.number): Version '${Version}' does not sort above published version '${PublishedPackageVersion}' under WinGet version ordering.", 'Warning')
+          continue
+        }
         if ($RemovedPaths.Count) {
           if ([WinGetVersion]$RemovedVersion -gt [WinGetVersion]$PublishedPackageVersion -or [WinGetVersion]$RemovedVersion -ge [WinGetVersion]$Version) { throw 'The removed version is not an older published version.' }
           # Compare with the base tree, including every localization. Removing
@@ -277,7 +309,8 @@ function Update-WinGetPendingPackagePullRequest {
   if ($Current.state -ne 'open' -or $Current.merged -or $Current.draft -or $Current.head.sha -cne $Reference.HeadSha -or $Current.head.ref -cne $Reference.RepoBranch -or $Current.head.repo.full_name -ine "$($Reference.RepoOwner)/$($Reference.RepoName)" -or $Current.user.login -ine $Reference.PullRequest.user.login -or $Current.base.ref -cne $Reference.PullRequest.base.ref -or $Current.base.repo.full_name -ine $Reference.PullRequest.base.repo.full_name) {
     throw "Referenced PR #${Number} changed or closed. Rerun before updating it."
   }
-  $CurrentFiles = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $Number -RepoOwner $RepoOwner -RepoName $RepoName)
+  $Files = @(Get-WinGetGitHubPullRequestFile -PullRequestNumber $Number -RepoOwner $RepoOwner -RepoName $RepoName)
+  $CurrentFiles = @(ConvertTo-WinGetPendingPackageFileChange -File $Files)
   $RemovedPaths = @($Reference.RemovedPaths | Where-Object { $_ })
   if ($CurrentFiles.Count -ne $Reference.Paths.Count + $RemovedPaths.Count -or $CurrentFiles.Where({ -not (($_.status -ceq 'added' -and $_.filename -cin $Reference.Paths) -or ($_.status -ceq 'removed' -and $_.filename -cin $RemovedPaths)) }).Count) {
     throw "PR #${Number} no longer has the captured addition/removal file delta. Rerun before updating it."

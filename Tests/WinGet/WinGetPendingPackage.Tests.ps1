@@ -43,6 +43,22 @@ BeforeAll {
     $Task | Add-Member ScriptMethod Log { param($Message, $Level) $this.Logs.Add([pscustomobject]@{ Message = $Message; Level = $Level }) }
     return $Task
   }
+
+  function New-TestPendingReplacementFiles {
+    param ([string]$Version = '2.0', [string]$PreviousVersion = '1.0', [int]$RenameCount = 2)
+    $Added = @(New-TestPendingFiles -Version $Version)
+    $Removed = @(New-TestPendingFiles -Version $PreviousVersion)
+    for ($Index = 0; $Index -lt $Added.Count; $Index++) {
+      if ($Index -lt $RenameCount) {
+        $Added[$Index].status = 'renamed'
+        $Added[$Index] | Add-Member NoteProperty previous_filename $Removed[$Index].filename
+      } else {
+        $Removed[$Index].status = 'removed'
+        $Removed[$Index]
+      }
+      $Added[$Index]
+    }
+  }
 }
 
 Describe 'Trusted pending-package reference selection' -Tag Unit {
@@ -143,6 +159,15 @@ Describe 'Trusted pending-package reference selection' -Tag Unit {
     (Get-WinGetPendingPackageReference @Script:Parameters).PullRequest.number | Should -Be 43
   }
 
+  It 'explains when a changed version scheme sorts below the published version' {
+    $Script:Parameters.PublishedPackageVersion = '4.0.0.0-nightly20260509'
+    $Script:Parameters.AllowMissing = $true
+    $Script:Files[42] = @(New-TestPendingFiles -Version '4.0.0-nightly.20261102')
+    Get-WinGetPendingPackageReference @Script:Parameters | Should -BeNullOrEmpty
+    $Script:Task.Logs.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike '*4.0.0-nightly.20261102*does not sort above*4.0.0.0-nightly20260509*'
+    Should -Invoke Read-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+  }
+
   It 'accepts one added version and one complete older-version removal' {
     $Script:Parameters.PublishedPackageVersion = '1.0'
     $Script:Versions[42] = '2.0'
@@ -159,6 +184,60 @@ Describe 'Trusted pending-package reference selection' -Tag Unit {
     $Reference.RemovedPaths | Should -HaveCount 3
     $Reference.RemovedPackageVersion | Should -Be '1.0'
     Should -Invoke Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RepoBranch -ceq ('a' * 40) -and $PackageVersion -eq '1.0' }
+  }
+
+  It 'accepts a complete version replacement with <RenameCount> GitHub renames and extra locale=<ExtraLocale>' -ForEach @(@{ RenameCount = 2; ExtraLocale = $true }, @{ RenameCount = 3; ExtraLocale = $false }) {
+    $Script:Parameters.PublishedPackageVersion = '1.0'
+    $Script:Versions[42] = '2.0'
+    $Script:PullRequests[42].base | Add-Member NoteProperty sha ('a' * 40)
+    $Script:Files[42] = @(New-TestPendingReplacementFiles -RenameCount $RenameCount)
+    if ($ExtraLocale) {
+      # PR #468783 adds a localization while GitHub labels two moved files as renames.
+      $Script:Files[42] += [pscustomobject]@{ filename = 'manifests/v/Vendor/Package/2.0/Vendor.Package.locale.zh-CN.yaml'; status = 'added' }
+      Mock Read-WinGetGitHubManifests -ModuleName WinGetPendingPackage {
+        $Content = New-TestPendingContent -Version '2.0'
+        $Content.Locale['zh-CN'] = $Content.Locale['en-US'].Replace('defaultLocale', 'locale').Replace('PackageLocale: en-US', 'PackageLocale: zh-CN')
+        $Content
+      }
+    }
+    $Script:PullRequests[42].changed_files = $Script:Files[42].Count
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage {
+      New-TestPendingFiles | ForEach-Object { [pscustomobject]@{ path = Split-Path $_.filename -Leaf } }
+    }
+    $Reference = Get-WinGetPendingPackageReference @Script:Parameters
+    $Reference.PackageVersion | Should -Be '2.0'
+    $Reference.Paths | Should -HaveCount (3 + [int]$ExtraLocale)
+    $Reference.RemovedPaths | Should -HaveCount 3
+    $Reference.RemovedPackageVersion | Should -Be '1.0'
+    $Reference.Paths | Should -Contain 'manifests/v/Vendor/Package/2.0/Vendor.Package.yaml'
+    $Reference.RemovedPaths | Should -Contain 'manifests/v/Vendor/Package/1.0/Vendor.Package.yaml'
+    $Script:Task.Logs | Should -BeNullOrEmpty
+    Should -Invoke Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RepoBranch -ceq ('a' * 40) }
+  }
+
+  It 'rejects unsafe rename-based replacements: <_>' -ForEach @('missing-source', 'unrelated-source', 'other-package', 'same-path', 'same-version', 'partial-removal', 'multiple-removals', 'duplicate-addition', 'duplicate-removal', 'missing-package') {
+    $Script:Parameters.PublishedPackageVersion = '1.0'
+    $Script:Versions[42] = '2.0'
+    $Script:PullRequests[42].base | Add-Member NoteProperty sha ('a' * 40)
+    $Script:Files[42] = @(New-TestPendingReplacementFiles -RenameCount 3)
+    switch ($_) {
+      missing-source { $Script:Files[42][0].previous_filename = '' }
+      unrelated-source { $Script:Files[42][0].previous_filename = 'README.md' }
+      other-package { $Script:Files[42][0].previous_filename = 'manifests/o/Other/Package/1.0/Other.Package.yaml' }
+      same-path { $Script:Files[42][0].previous_filename = $Script:Files[42][0].filename }
+      same-version { for ($Index = 0; $Index -lt 3; $Index++) { $Script:Files[42][$Index].previous_filename = $Script:Files[42][($Index + 1) % 3].filename } }
+      partial-removal { $Script:Files[42][0].status = 'added' }
+      multiple-removals { $Script:Files[42][0].previous_filename = $Script:Files[42][0].previous_filename.Replace('/1.0/', '/0.9/') }
+      duplicate-addition { $Script:Files[42] += $Script:Files[42][0] }
+      duplicate-removal { $Script:Files[42][1].previous_filename = $Script:Files[42][0].previous_filename }
+      missing-package { $Script:Parameters.Remove('PublishedPackageVersion') }
+    }
+    $Script:PullRequests[42].changed_files = $Script:Files[42].Count
+    Mock Get-WinGetGitHubManifests -ModuleName WinGetPendingPackage {
+      New-TestPendingFiles | ForEach-Object { [pscustomobject]@{ path = Split-Path $_.filename -Leaf } }
+    }
+    { Get-WinGetPendingPackageReference @Script:Parameters } | Should -Throw '*No trusted open PR*'
+    Should -Invoke Read-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
   }
 
   It 'rejects invalid existing-package removals: <_>' -ForEach @('partial', 'two-versions', 'unpublished', 'modified', 'renamed') {
@@ -292,6 +371,25 @@ Describe 'Pending PR updates and exact-content comparison' -Tag Unit {
     Mock Get-WinGetGitHubPullRequestFile -ModuleName WinGetPendingPackage { @(New-TestPendingFiles) + $Script:CapturedRemoved }
     Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.5'
     Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RemovePath.Count -eq 3 -and @($RemovePath | Where-Object { $_ -like '*/0.5/*' }).Count -eq 0 }
+  }
+
+  It 'rechecks rename-based deltas and preserves their already absent source files' {
+    $Script:Reference | Add-Member NoteProperty RemovedPaths @(New-TestPendingFiles -Version '0.5').filename
+    $Script:Reference | Add-Member NoteProperty RemovedPackageVersion '0.5'
+    Mock Get-WinGetGitHubPullRequestFile -ModuleName WinGetPendingPackage { New-TestPendingReplacementFiles -Version '1.0' -PreviousVersion '0.5' }
+    Update-WinGetPendingPackagePullRequest @Script:Parameters -RemovePackageVersion '0.5'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter {
+      $RequireUnchangedHead -and $RemovePath.Count -eq 3 -and @($RemovePath | Where-Object { $_ -like '*/0.5/*' }).Count -eq 0
+    }
+  }
+
+  It 'rejects a rename whose source no longer matches the captured removal' {
+    $Script:Reference | Add-Member NoteProperty RemovedPaths @(New-TestPendingFiles -Version '0.5').filename
+    $Script:Reference | Add-Member NoteProperty RemovedPackageVersion '0.5'
+    Mock Get-WinGetGitHubPullRequestFile -ModuleName WinGetPendingPackage { New-TestPendingReplacementFiles -Version '1.0' -PreviousVersion '0.4' }
+    { Update-WinGetPendingPackagePullRequest @Script:Parameters } | Should -Throw '*captured addition/removal file delta*'
+    Should -Invoke Add-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 0
+    Should -Invoke Set-WinGetGitHubPullRequestTitle -ModuleName WinGetPendingPackage -Exactly 0
   }
 
   It 'adds an explicit published removal to the same atomic update' {
