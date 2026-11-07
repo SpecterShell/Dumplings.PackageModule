@@ -46,6 +46,13 @@ function ConvertTo-WinGetManifestScalarType {
     if ([long]::TryParse([string]$Value, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$ParsedInteger)) {
       return $ParsedInteger
     }
+    # WinGet's YAML integer reader accepts hexadecimal HRESULTs through stoll
+    # with base 0: https://github.com/microsoft/winget-cli/blob/master/src/AppInstallerSharedLib/Yaml.cpp
+    # Restrict conversion to a complete literal and retain invalid input for schema diagnostics.
+    if ([string]$Value -match '^\s*(?<Sign>[+-]?)0x(?<Digits>[0-9a-f]+)\s*$' -and
+      [long]::TryParse($Matches.Digits, [Globalization.NumberStyles]::AllowHexSpecifier, [Globalization.CultureInfo]::InvariantCulture, [ref]$ParsedInteger) -and $ParsedInteger -ge 0) {
+      return $Matches.Sign -ceq '-' ? - $ParsedInteger : $ParsedInteger
+    }
     return $Value
   }
   if ($FieldName -cin $Script:WinGetBooleanFields) {

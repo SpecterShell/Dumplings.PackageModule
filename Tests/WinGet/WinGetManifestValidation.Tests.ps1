@@ -103,6 +103,32 @@ ManifestVersion: 1.12.0
 }
 
 Describe 'Get-WinGetManifestValidationResult' {
+  It 'validates hexadecimal return codes from physical documents and round-tripped models' {
+    $Path = Join-Path $TestDrive 'hexadecimal-return-codes'
+    Write-TestMultiFileManifest -Path $Path
+    $InstallerPath = Join-Path $Path 'Test.Multi.installer.yaml'
+    $Content = Get-Content $InstallerPath -Raw
+    $Codes = @'
+InstallerSuccessCodes:
+- 0x0000002a
+ExpectedReturnCodes:
+- InstallerReturnCode: 0x8004070b
+  ReturnResponse: invalidParameter
+- InstallerReturnCode: '0X80040711'
+  ReturnResponse: installInProgress
+Installers:
+'@
+    Set-Content -LiteralPath $InstallerPath -Value $Content.Replace('Installers:', $Codes) -Encoding utf8NoBOM
+
+    $Model = Read-WinGetManifest -Path $Path
+    $RoundTrip = ConvertFrom-WinGetManifestYaml -Content (ConvertTo-WinGetManifestYaml -Manifest $Model)
+    foreach ($Result in @((Get-WinGetManifestValidationResult -Path $Path), (Get-WinGetManifestValidationResult -Manifest $Model), (Get-WinGetManifestValidationResult -Manifest $RoundTrip))) {
+      $Result.HasErrors | Should -BeFalse -Because ($Result.Diagnostics | ConvertTo-Json -Compress -Depth 10)
+      $Result.EffectiveInstallers[0].InstallerSuccessCodes | Should -Be @(42L)
+      $Result.Manifest.Installers[0].ExpectedReturnCodes.InstallerReturnCode | Should -Be @(2147747595L, 2147747601L)
+    }
+  }
+
   It 'Validates a singleton manifest without launching winget' {
     $Path = Join-Path $TestDrive 'valid.yaml'
     Write-TestSingletonManifest -Path $Path

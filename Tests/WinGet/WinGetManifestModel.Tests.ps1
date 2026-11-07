@@ -33,6 +33,33 @@ BeforeAll {
 }
 
 Describe 'WinGet logical manifest model' -Tag Unit {
+  It 'converts hexadecimal return code <Value> in <Field>' -ForEach @(
+    foreach ($Field in 'InstallerReturnCode', 'InstallerSuccessCodes') {
+      @{ Field = $Field; Value = '0x8004070b'; Expected = 2147747595L }
+      @{ Field = $Field; Value = '0X80040711'; Expected = 2147747601L }
+      @{ Field = $Field; Value = '0xffffffff'; Expected = 4294967295L }
+      @{ Field = $Field; Value = ' +0x10 '; Expected = 16L }
+      @{ Field = $Field; Value = '-0x10'; Expected = -16L }
+      @{ Field = $Field; Value = '0x0'; Expected = 0L }
+    }
+  ) {
+    $Result = ConvertTo-WinGetManifestScalarType -Value $Value -FieldName $Field
+    $Result | Should -BeOfType ([long])
+    $Result | Should -Be $Expected
+  }
+
+  It 'leaves malformed or overflowing hexadecimal return codes for validation: <_>' -ForEach @('0x', '0xGHI', '0x8004070btrailing', '0x10000000000000000', '0xffffffffffffffff') {
+    ConvertTo-WinGetManifestScalarType -Value $_ -FieldName InstallerReturnCode | Should -BeExactly $_
+  }
+
+  It 'keeps hexadecimal-looking version and text fields as strings' {
+    foreach ($Field in 'PackageVersion', 'DisplayVersion', 'PackageName', 'ProductCode') {
+      $Result = ConvertTo-WinGetManifestScalarType -Value '0x8004070b' -FieldName $Field
+      $Result | Should -BeOfType ([string])
+      $Result | Should -BeExactly '0x8004070b'
+    }
+  }
+
   It 'normalizes singleton input to multi-file documents with effective authored values' {
     $Model = ConvertFrom-WinGetManifestYaml -Content (ConvertTo-Yaml (New-TestWinGetSingleton))
     $Documents = ConvertTo-WinGetManifestDocumentSet -Manifest $Model

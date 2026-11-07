@@ -89,6 +89,18 @@ Describe 'Trusted pending-package reference selection' -Tag Unit {
     Should -Invoke Read-WinGetGitHubManifests -ModuleName WinGetPendingPackage -Exactly 1 -ParameterFilter { $RepoBranch -ceq (42).ToString('x40') -and $RepoOwner -eq 'TrustedBot' }
   }
 
+  It 'accepts trusted PR manifests containing hexadecimal InstallShield HRESULTs' {
+    Mock Read-WinGetGitHubManifests -ModuleName WinGetPendingPackage {
+      $Content = New-TestPendingContent
+      $Content.Installer = $Content.Installer.Replace('Installers:', "ExpectedReturnCodes:`n- InstallerReturnCode: 0x8004070b`n  ReturnResponse: invalidParameter`n- InstallerReturnCode: 0x80040711`n  ReturnResponse: installInProgress`nInstallers:")
+      $Content
+    }
+    $Reference = Get-WinGetPendingPackageReference @Script:Parameters
+    $Reference.PullRequest.number | Should -Be 42
+    $Reference.Manifest.Installers[0].ExpectedReturnCodes.InstallerReturnCode | Should -Be @(2147747595L, 2147747601L)
+    $Script:Task.Logs | Should -BeNullOrEmpty
+  }
+
   It 'ignores higher versions in closed or merged PRs' {
     foreach ($Number in 43, 44) {
       $Script:PullRequests[$Number] = New-TestPendingPullRequest -Number $Number -Version '10.0'
