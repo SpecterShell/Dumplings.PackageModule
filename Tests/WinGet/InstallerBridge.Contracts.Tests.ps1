@@ -195,7 +195,12 @@ stagingPercentage: 25
   }
 
   It 'Should forward target architecture to the NSIS parser bridge' {
-    $Fixture = Get-InstallerFixture -Name 'BitComet_2.21_setup.exe' -Url 'https://download.bitcomet.com/achive/BitComet_2.21_setup.exe' -Sha256 '2BB0AC769FE8B75B1B1B8CA42FA55D29D94AAF68480611538DBB4395D05082D2'
+    $FixturePath = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'BitComet_2.21_setup.exe')
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $FixturePath -Sha256 '2BB0AC769FE8B75B1B1B8CA42FA55D29D94AAF68480611538DBB4395D05082D2')) {
+      Set-ItResult -Skipped -Because 'The pinned BitComet 2.21 installer is no longer downloadable; the vendor archive link redirects to an unavailable page.'
+      return
+    }
+    $Fixture = $FixturePath
 
     $X86Info = Get-NSISInfo -Path $Fixture -Architecture x86
     $X64Info = Get-NSISInfo -Path $Fixture -Architecture x64
