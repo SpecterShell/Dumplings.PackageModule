@@ -404,8 +404,17 @@ function Get-WebDriverLease {
   $OwnerId = Get-WebDriverLeaseOwnerId
   $Configuration = "${Browser}:$(if ($Headless) { 'Headless' } else { 'Visible' })"
   $Pool = Get-WebDriverLeasePool
-  $ResourceFactory = $Browser -eq 'Edge' ? ${function:New-PooledEdgeDriverResource} : ${function:New-PooledFirefoxDriverResource}
-  $Factory = [Func[Dumplings.WebDriver.WebDriverResource]] { & $ResourceFactory -Configuration $Configuration -Headless:$Headless }.GetNewClosure()
+  # The pool invokes this delegate from C#, where the closure has no module
+  # affinity. Resolve the factory inside the module session state so a mock or
+  # hook override of the pooled resource factory still applies.
+  $ResourceFactory = $Browser -eq 'Edge' ? 'New-PooledEdgeDriverResource' : 'New-PooledFirefoxDriverResource'
+  $FactoryModule = $ExecutionContext.SessionState.Module
+  $Factory = [Func[Dumplings.WebDriver.WebDriverResource]] {
+    & $FactoryModule {
+      param($ResourceName, $ResourceConfiguration, $ResourceHeadless)
+      & $ResourceName -Configuration $ResourceConfiguration -Headless:$ResourceHeadless
+    } $ResourceFactory $Configuration $Headless
+  }.GetNewClosure()
   $Lease = $Pool.Acquire($OwnerId, $Configuration, $Factory, (Get-WebDriverLeaseDuration), (Get-WebDriverQueueTimeout))
   $Script:WebDriverLeases[$OwnerId] = $Lease
   return $Lease
