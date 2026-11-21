@@ -1,0 +1,3 @@
+# Provider source builds are generated locally and never shipped from Git.
+Assets/Providers/*/Source/obj/
+Assets/Providers/*/Source/bin/
