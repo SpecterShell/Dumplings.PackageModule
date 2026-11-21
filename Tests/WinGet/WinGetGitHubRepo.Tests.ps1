@@ -279,3 +279,407 @@ Describe 'Remove-WinGetGitHubBranch' -Tag Unit {
     $Script:GitHubApiParameters.Method | Should -Be Delete
   }
 }
+
+Describe 'Get-WinGetGitHubPackageAncestorPath' -Tag Unit {
+  It 'returns the containing folders from the closest parent up to the first-character folder' {
+    $Result = @(Get-WinGetGitHubPackageAncestorPath -PackageIdentifier 'SpecterShell.Dumplings' -RootPath 'manifests')
+
+    $Result.Count | Should -Be 2
+    $Result[0] | Should -Be 'manifests/s/SpecterShell'
+    $Result[1] | Should -Be 'manifests/s'
+  }
+
+  It 'returns every sub-publisher folder of a nested publisher' {
+    $Result = @(Get-WinGetGitHubPackageAncestorPath -PackageIdentifier 'Vendor.Studio.Product' -RootPath 'manifests')
+
+    ($Result -join '|') | Should -Be 'manifests/v/Vendor/Studio|manifests/v/Vendor|manifests/v'
+  }
+
+  It 'omits the root path when no root path is supplied' {
+    $Result = @(Get-WinGetGitHubPackageAncestorPath -PackageIdentifier 'SpecterShell.Dumplings')
+
+    ($Result -join '|') | Should -Be 's/SpecterShell|s'
+  }
+}
+
+Describe 'Get-WinGetGitHubCommitPage' -Tag Unit {
+  It 'reports a single page when GitHub returns no Link header' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { [pscustomobject]@{ sha = ('a' * 40) } }
+
+    $Result = Get-WinGetGitHubCommitPage -Uri 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs&per_page=1&page=1'
+
+    @($Result.Commits).Count | Should -Be 1
+    $Result.Commits[0].sha | Should -Be ('a' * 40)
+    $Result.LastPage | Should -Be 1
+  }
+
+  It 'reports an empty page when the path has no commit' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { }
+
+    $Result = Get-WinGetGitHubCommitPage -Uri 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs&per_page=1&page=1'
+
+    @($Result.Commits).Count | Should -Be 0
+    $Result.LastPage | Should -Be 1
+  }
+
+  It 'asks for the response headers that carry the page count' {
+    $Script:RequestedHeaders = $null
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      $Script:RequestedHeaders = $ResponseHeadersVariable
+      [pscustomobject]@{ sha = ('a' * 40) }
+    }
+    Mock Get-GitHubApiResponseHeader -ModuleName WinGetGitHubRepo { }
+
+    $null = Get-WinGetGitHubCommitPage -Uri 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs&per_page=1&page=1'
+
+    $Script:RequestedHeaders | Should -Not -BeNullOrEmpty
+  }
+
+  It 'reports the last page advertised by the Link header' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { [pscustomobject]@{ sha = ('a' * 40) } }
+    Mock Get-GitHubApiResponseHeader -ModuleName WinGetGitHubRepo {
+      '<https://api.github.com/repositories/1/commits?path=manifests%2Fs&per_page=1&page=2>; rel="next", <https://api.github.com/repositories/1/commits?path=manifests%2Fs&per_page=1&page=57>; rel="last"'
+    }
+
+    $Result = Get-WinGetGitHubCommitPage -Uri 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs&per_page=1&page=1'
+
+    $Result.LastPage | Should -Be 57
+  }
+
+  It 'reports a further page without a last page when GitHub omits it' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { [pscustomobject]@{ sha = ('a' * 40) } }
+    Mock Get-GitHubApiResponseHeader -ModuleName WinGetGitHubRepo {
+      '<https://api.github.com/repositories/1/commits?path=manifests%2Fs&per_page=1&page=2>; rel="next"'
+    }
+
+    $Result = Get-WinGetGitHubCommitPage -Uri 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs&per_page=1&page=1'
+
+    $Result.HasMorePages | Should -BeTrue
+    $Result.LastPage | Should -Be 1
+  }
+
+  It 'reports no further page for a single page response' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { [pscustomobject]@{ sha = ('a' * 40) } }
+    Mock Get-GitHubApiResponseHeader -ModuleName WinGetGitHubRepo { }
+
+    $Result = Get-WinGetGitHubCommitPage -Uri 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs&per_page=1&page=1'
+
+    $Result.HasMorePages | Should -BeFalse
+  }
+}
+
+Describe 'Get-WinGetGitHubHistoryAnchor' -Tag Unit {
+  It 'reads the newest commit of the escaped branch at or before the requested date' {
+    $Script:AnchorUris = [System.Collections.Generic.List[string]]::new()
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      $Script:AnchorUris.Add($Uri)
+      [pscustomobject]@{ sha = ('e' * 40) }
+    }
+
+    $Result = Get-WinGetGitHubHistoryAnchor -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'feature/new-version' -Until ([datetime]'2021-11-16T19:32:32Z')
+
+    $Result.sha | Should -Be ('e' * 40)
+    $Script:AnchorUris.Count | Should -Be 1
+    $Script:AnchorUris[0] | Should -Be 'https://api.github.com/repos/microsoft/winget-pkgs/commits?sha=feature%2Fnew-version&per_page=1&until=2021-11-16T19:32:32Z'
+  }
+
+  It 'returns nothing when the branch has no commit that early' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { }
+
+    $Result = @(Get-WinGetGitHubHistoryAnchor -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master' -Until ([datetime]'2016-01-01T00:00:00Z'))
+
+    $Result.Count | Should -Be 0
+  }
+}
+
+Describe 'Get-WinGetGitHubOldestPathCommitPage' -Tag Unit {
+  BeforeAll {
+    $Script:NewestHistoryCommit = [pscustomobject]@{
+      sha    = ('d' * 40)
+      commit = [pscustomobject]@{ committer = [pscustomobject]@{ date = '2026-11-16T19:32:32Z' } }
+    }
+  }
+
+  It 'reads only the last page of a history that GitHub paginates' {
+    $Script:CommitPageUris = [System.Collections.Generic.List[string]]::new()
+    Mock Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo {
+      $Script:CommitPageUris.Add($Uri)
+      if ($Uri -match 'page=1$') {
+        [pscustomobject]@{ Commits = @($Script:NewestHistoryCommit); LastPage = 42; HasMorePages = $false }
+      } else {
+        [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('b' * 40) }); LastPage = 42; HasMorePages = $true }
+      }
+    }
+
+    $Result = Get-WinGetGitHubOldestPathCommitPage -Path 'manifests/s/SpecterShell' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master'
+
+    $Result.Commits[-1].sha | Should -Be ('b' * 40)
+    $Script:CommitPageUris.Count | Should -Be 2
+    $Script:CommitPageUris[0] | Should -Be 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs%2FSpecterShell&per_page=100&sha=master&page=1'
+    $Script:CommitPageUris[1] | Should -Be 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs%2FSpecterShell&per_page=100&sha=master&page=42'
+  }
+
+  It 'reads the only page of a history that fits one page' {
+    Mock Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('c' * 40) }); LastPage = 1; HasMorePages = $false }
+    }
+    Mock Get-WinGetGitHubHistoryAnchor -ModuleName WinGetGitHubRepo { throw 'a single page must not be narrowed' }
+
+    $Result = Get-WinGetGitHubOldestPathCommitPage -Path 'manifests/s/SpecterShell' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master'
+
+    $Result.Commits[-1].sha | Should -Be ('c' * 40)
+    Should -Invoke Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo -Times 1 -Exactly
+  }
+
+  It 'narrows a history that GitHub does not paginate with a commit anchor' {
+    $Script:AnchorDates = [System.Collections.Generic.List[datetime]]::new()
+    Mock Get-WinGetGitHubHistoryAnchor -ModuleName WinGetGitHubRepo {
+      $Script:AnchorDates.Add($Until)
+      [pscustomobject]@{ sha = ('f' * 40) }
+    }
+    Mock Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo {
+      if ($Uri -match "sha=$('f' * 40)&page=1$") {
+        [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('9' * 40) }); LastPage = 12; HasMorePages = $false }
+      } elseif ($Uri -match "sha=$('f' * 40)&page=12$") {
+        [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('8' * 40) }); LastPage = 12; HasMorePages = $false }
+      } else {
+        [pscustomobject]@{ Commits = @($Script:NewestHistoryCommit); LastPage = 1; HasMorePages = $true }
+      }
+    }
+
+    $Result = Get-WinGetGitHubOldestPathCommitPage -Path 'manifests/s' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master'
+
+    $Result.Commits[-1].sha | Should -Be ('8' * 40)
+    $Script:AnchorDates.Count | Should -Be 1
+    $Script:AnchorDates[0] | Should -BeLessThan ([datetime]'2026-11-16T19:32:32Z')
+    $Script:AnchorDates[0] | Should -BeGreaterThan ([datetime]'2016-11-16T19:32:32Z')
+  }
+
+  It 'moves the lower bound forward when the path does not exist at the anchor' {
+    $Script:AnchorCount = 0
+    Mock Get-WinGetGitHubHistoryAnchor -ModuleName WinGetGitHubRepo {
+      $Script:AnchorCount++
+      if ($Script:AnchorCount -eq 1) { [pscustomobject]@{ sha = ('1' * 40) } } else { [pscustomobject]@{ sha = ('2' * 40) } }
+    }
+    Mock Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo {
+      if ($Uri -match "sha=$('1' * 40)") {
+        [pscustomobject]@{ Commits = @(); LastPage = 1; HasMorePages = $false }
+      } elseif ($Uri -match "sha=$('2' * 40)&page=1$") {
+        [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('7' * 40) }); LastPage = 3; HasMorePages = $false }
+      } elseif ($Uri -match "sha=$('2' * 40)&page=3$") {
+        [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('6' * 40) }); LastPage = 3; HasMorePages = $false }
+      } else {
+        [pscustomobject]@{ Commits = @($Script:NewestHistoryCommit); LastPage = 1; HasMorePages = $true }
+      }
+    }
+
+    $Result = Get-WinGetGitHubOldestPathCommitPage -Path 'manifests/s' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master'
+
+    $Result.Commits[-1].sha | Should -Be ('6' * 40)
+    $Script:AnchorCount | Should -Be 2
+  }
+
+  It 'narrows repeatedly until the anchored listing fits one page' {
+    $Script:AnchorDates = [System.Collections.Generic.List[datetime]]::new()
+    Mock Get-WinGetGitHubHistoryAnchor -ModuleName WinGetGitHubRepo {
+      $Script:AnchorDates.Add($Until)
+      if ($Script:AnchorDates.Count -eq 1) { [pscustomobject]@{ sha = ('f' * 40) } } else { [pscustomobject]@{ sha = ('e' * 40) } }
+    }
+    Mock Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo {
+      if ($Uri -match "sha=$('f' * 40)&page=1$") {
+        [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('4' * 40) }); LastPage = 1; HasMorePages = $true }
+      } elseif ($Uri -match "sha=$('e' * 40)&page=1$") {
+        [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('3' * 40) }); LastPage = 2; HasMorePages = $false }
+      } elseif ($Uri -match "sha=$('e' * 40)&page=2$") {
+        [pscustomobject]@{ Commits = @([pscustomobject]@{ sha = ('2' * 40) }, [pscustomobject]@{ sha = ('5' * 40) }); LastPage = 2; HasMorePages = $false }
+      } else {
+        [pscustomobject]@{ Commits = @($Script:NewestHistoryCommit); LastPage = 1; HasMorePages = $true }
+      }
+    }
+
+    $Result = Get-WinGetGitHubOldestPathCommitPage -Path 'manifests/s' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master'
+
+    $Result.Commits[-1].sha | Should -Be ('5' * 40)
+    $Script:AnchorDates.Count | Should -Be 2
+    $Script:AnchorDates[1] | Should -BeLessThan $Script:AnchorDates[0]
+  }
+  It 'reuses the newest page when the history cannot be narrowed' {
+    Mock Get-WinGetGitHubHistoryAnchor -ModuleName WinGetGitHubRepo { }
+    Mock Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ Commits = @($Script:NewestHistoryCommit); LastPage = 1; HasMorePages = $true }
+    }
+
+    $Result = Get-WinGetGitHubOldestPathCommitPage -Path 'manifests/s' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master'
+
+    $Result.Commits[-1].sha | Should -Be ('d' * 40)
+    Should -Invoke Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo -Times 1 -Exactly
+  }
+}
+
+Describe 'Get-WinGetGitHubPathCommit' -Tag Unit {
+  It 'reads the newest commit of the escaped path with a single request' {
+    $Script:CommitPageUris = [System.Collections.Generic.List[string]]::new()
+    Mock Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo {
+      $Script:CommitPageUris.Add($Uri)
+      [pscustomobject]@{
+        Commits  = @([pscustomobject]@{ sha = ('a' * 40) }, [pscustomobject]@{ sha = ('b' * 40) })
+        LastPage = 1
+      }
+    }
+
+    $Result = Get-WinGetGitHubPathCommit -Path 'manifests/s/SpecterShell/Dumplings' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'feature/new-version'
+
+    $Result.sha | Should -Be ('a' * 40)
+    $Script:CommitPageUris.Count | Should -Be 1
+    $Script:CommitPageUris[0] | Should -Be 'https://api.github.com/repos/microsoft/winget-pkgs/commits?path=manifests%2Fs%2FSpecterShell%2FDumplings&sha=feature%2Fnew-version&per_page=1'
+  }
+
+  It 'returns the last entry of the page that holds the oldest commit' {
+    Mock Get-WinGetGitHubOldestPathCommitPage -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{
+        Commits      = @([pscustomobject]@{ sha = ('b' * 40) }, [pscustomobject]@{ sha = ('c' * 40) })
+        LastPage     = 42
+        HasMorePages = $true
+      }
+    }
+
+    $Result = Get-WinGetGitHubPathCommit -Path 'manifests/s' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master' -Oldest
+
+    $Result.sha | Should -Be ('c' * 40)
+    Should -Invoke Get-WinGetGitHubOldestPathCommitPage -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Path -eq 'manifests/s' -and $RepoBranch -eq 'master' }
+  }
+
+  It 'returns nothing when the path has no commit in that history' {
+    Mock Get-WinGetGitHubCommitPage -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ Commits = @(); LastPage = 1; HasMorePages = $false }
+    }
+
+    $Result = @(Get-WinGetGitHubPathCommit -Path 'manifests/s/SpecterShell/Dumplings' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master')
+
+    $Result.Count | Should -Be 0
+  }
+}
+Describe 'Get-WinGetGitHubSubmissionCommit' -Tag Unit {
+  It 'bases a published version on the newest commit of its version directory' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo {
+      if ($Path -eq 'manifests/s/SpecterShell/Dumplings/1.2.3') { [pscustomobject]@{ sha = ('a' * 40) } }
+    }
+
+    $Result = Get-WinGetGitHubSubmissionCommit -PackageIdentifier 'SpecterShell.Dumplings' -PackageVersion '1.2.3' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master' -RootPath 'manifests'
+
+    $Result.sha | Should -Be ('a' * 40)
+    $Result.Path | Should -Be 'manifests/s/SpecterShell/Dumplings/1.2.3'
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 1 -Exactly
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Path -eq 'manifests/s/SpecterShell/Dumplings/1.2.3' -and -not $Oldest }
+  }
+
+  It 'bases a new version on the newest commit of the package directory' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo {
+      if ($Path -eq 'manifests/s/SpecterShell/Dumplings') { [pscustomobject]@{ sha = ('b' * 40) } }
+    }
+
+    $Result = Get-WinGetGitHubSubmissionCommit -PackageIdentifier 'SpecterShell.Dumplings' -PackageVersion '1.2.3' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master' -RootPath 'manifests'
+
+    $Result.sha | Should -Be ('b' * 40)
+    $Result.Path | Should -Be 'manifests/s/SpecterShell/Dumplings'
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Path -eq 'manifests/s/SpecterShell/Dumplings/1.2.3' }
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Path -eq 'manifests/s/SpecterShell/Dumplings' -and -not $Oldest }
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 2 -Exactly
+  }
+
+  It 'bases a new package on the commit that established the closest containing folder' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo {
+      if ($Path -eq 'manifests/s/SpecterShell') { [pscustomobject]@{ sha = ('c' * 40) } }
+    }
+
+    $Result = Get-WinGetGitHubSubmissionCommit -PackageIdentifier 'SpecterShell.Dumplings' -PackageVersion '1.2.3' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master' -RootPath 'manifests'
+
+    $Result.sha | Should -Be ('c' * 40)
+    $Result.Path | Should -Be 'manifests/s/SpecterShell'
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Path -eq 'manifests/s/SpecterShell' -and $Oldest }
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 3 -Exactly
+  }
+
+  It 'walks up to the first-character folder when no closer folder has history' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo {
+      if ($Path -eq 'manifests/s') { [pscustomobject]@{ sha = ('d' * 40) } }
+    }
+
+    $Result = Get-WinGetGitHubSubmissionCommit -PackageIdentifier 'SpecterShell.Dumplings' -PackageVersion '1.2.3' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master' -RootPath 'manifests'
+
+    $Result.sha | Should -Be ('d' * 40)
+    $Result.Path | Should -Be 'manifests/s'
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Path -eq 'manifests/s/SpecterShell' -and $Oldest }
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 2 -Exactly -ParameterFilter { $Oldest }
+  }
+
+  It 'returns nothing when neither the version, the package nor a containing folder has history' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo { }
+
+    $Result = @(Get-WinGetGitHubSubmissionCommit -PackageIdentifier 'SpecterShell.Dumplings' -PackageVersion '1.2.3' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master' -RootPath 'manifests')
+
+    $Result.Count | Should -Be 0
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 4 -Exactly
+  }
+}
+Describe 'Get-WinGetGitHubManifestVersionCommit' -Tag Unit {
+  It 'returns the newest tool commit that declares the manifest version' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo { [pscustomobject]@{ sha = ('b' * 40) } }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      $Text = "`$ManifestVersion = '1.28.0'`r`nif (`$Settings.EnableOverride) { `$ManifestVersion = `$Settings.OverrideManifestVersion }`r`nif (`$ManifestVersion -ne 'latest') { }"
+      [pscustomobject]@{ content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text)) }
+    }
+
+    $Result = Get-WinGetGitHubManifestVersionCommit -ManifestVersion '1.28.0' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master'
+
+    $Result.sha | Should -Be ('b' * 40)
+    Should -Invoke Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter { $Path -eq 'Tools/YamlCreate.ps1' -and -not $Oldest -and $RepoBranch -eq 'master' }
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly -ParameterFilter {
+      $Uri.AbsoluteUri -ceq "https://api.github.com/repos/microsoft/winget-pkgs/contents/Tools/YamlCreate.ps1?ref=$('b' * 40)"
+    }
+  }
+
+  It 'accepts a tool that declares a newer version than the requested one' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo { [pscustomobject]@{ sha = ('c' * 40) } }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("`$ManifestVersion = '1.28.0'")) }
+    }
+
+    $Result = Get-WinGetGitHubManifestVersionCommit -ManifestVersion '1.12.0' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master'
+
+    $Result.sha | Should -Be ('c' * 40)
+  }
+
+  It 'returns nothing when the tool declares an older version' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo { [pscustomobject]@{ sha = ('a' * 40) } }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("`$ManifestVersion = '1.24.0'")) }
+    }
+
+    $Result = @(Get-WinGetGitHubManifestVersionCommit -ManifestVersion '1.28.0' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master')
+
+    $Result.Count | Should -Be 0
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 1 -Exactly
+  }
+
+  It 'returns nothing when the tool has no recognizable version declaration' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo { [pscustomobject]@{ sha = ('a' * 40) } }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo {
+      [pscustomobject]@{ content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('Write-Host "No version here"')) }
+    }
+
+    $Result = @(Get-WinGetGitHubManifestVersionCommit -ManifestVersion '1.28.0' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master')
+
+    $Result.Count | Should -Be 0
+  }
+
+  It 'returns nothing without reading the tool when it has no commit history' {
+    Mock Get-WinGetGitHubPathCommit -ModuleName WinGetGitHubRepo { $null }
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { throw 'Must not read the tool without a commit' }
+
+    $Result = @(Get-WinGetGitHubManifestVersionCommit -ManifestVersion '1.28.0' -RepoOwner microsoft -RepoName winget-pkgs -RepoBranch 'master')
+
+    $Result.Count | Should -Be 0
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Times 0 -Exactly
+  }
+}

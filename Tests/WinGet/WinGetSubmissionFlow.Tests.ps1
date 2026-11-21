@@ -29,6 +29,7 @@ Describe 'Send-WinGetManifest reference version selection' -Tag Unit {
     $Global:DumplingsPreference = @{}
     $Global:DumplingsOutput = $TestDrive
     Mock Get-WinGetLocalRepoPath -ModuleName WinGetSubmission { $null }
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { $null }
     Mock Get-WinGetGitHubBranch -ModuleName WinGetSubmission { @{ object = @{ sha = 'A' * 40 } } }
     Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetSubmission { @{ login = 'TestBot' } }
     Mock Find-WinGetGitHubPullRequest -ModuleName WinGetSubmission { @{ items = @() } }
@@ -66,6 +67,18 @@ Describe 'Send-WinGetManifest reference version selection' -Tag Unit {
     { Send-WinGetManifest -Task (New-SubmissionFlowTask -Version '1.2') } | Should -Throw '*manifest read reached*'
 
     Should -Invoke Read-WinGetGitHubManifests -ModuleName WinGetSubmission -Times 1 -Exactly -ParameterFilter { $RepoBranch -eq ('A' * 40) }
+  }
+
+  It 'discovers versions and reads manifests at the commit the submission depends on' {
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { [pscustomobject]@{ sha = 'B' * 40; Path = 'manifests/c/Contoso/Test/1.2'; commit = [pscustomobject]@{ committer = [pscustomobject]@{ date = '2026-11-01T00:00:00Z' } } } }
+    Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { @('1.0', '1.2') }
+
+    { Send-WinGetManifest -Task (New-SubmissionFlowTask -Version '1.2') } | Should -Throw '*manifest read reached*'
+
+    Should -Invoke Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission -Times 1 -Exactly -ParameterFilter { $PackageVersion -eq '1.2' }
+    Should -Invoke Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission -Times 1 -Exactly -ParameterFilter { $RepoOwner -eq 'microsoft' -and $RepoBranch -eq ('B' * 40) }
+    Should -Invoke Read-WinGetGitHubManifests -ModuleName WinGetSubmission -Times 1 -Exactly -ParameterFilter { $RepoOwner -eq 'microsoft' -and $RepoBranch -eq ('B' * 40) }
+    Should -Invoke Get-WinGetGitHubBranch -ModuleName WinGetSubmission -Times 0 -Exactly
   }
 
   It 'stops before reading manifests when the package has no versions yet' {

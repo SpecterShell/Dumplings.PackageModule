@@ -218,3 +218,87 @@ Describe 'GitHub API diagnostics' -Tag Unit {
     $Result.id | Should -Be @(1, 2)
   }
 }
+
+
+Describe 'ConvertFrom-GitHubLinkHeader' -Tag Unit {
+  It 'returns the last page advertised by the Link header' {
+    $Link = '<https://api.github.com/repositories/1/commits?path=manifests%2Fs&per_page=1&page=2>; rel="next", <https://api.github.com/repositories/1/commits?path=manifests%2Fs&per_page=1&page=57>; rel="last"'
+
+    ConvertFrom-GitHubLinkHeader -Link $Link | Should -Be 57
+  }
+
+  It 'returns the single page of a response without a Link header' {
+    ConvertFrom-GitHubLinkHeader -Link $null | Should -Be 1
+    ConvertFrom-GitHubLinkHeader -Link @() | Should -Be 1
+    ConvertFrom-GitHubLinkHeader -Link '' | Should -Be 1
+  }
+
+  It 'returns the single page when the header has no last relation' {
+    $Link = '<https://api.github.com/repositories/1/commits?per_page=1&page=2>; rel="next"'
+
+    ConvertFrom-GitHubLinkHeader -Link $Link | Should -Be 1
+  }
+
+  It 'reads the last relation from every reported header value' {
+    $Link = @(
+      '<https://api.github.com/repositories/1/commits?per_page=1&page=2>; rel="next"'
+      '<https://api.github.com/repositories/1/commits?per_page=1&page=9>; rel="last"'
+    )
+
+    ConvertFrom-GitHubLinkHeader -Link $Link | Should -Be 9
+  }
+}
+
+Describe 'Get-GitHubApiResponseHeader' -Tag Unit {
+  BeforeEach {
+    InModuleScope GitHub {
+      $Script:GitHubApiResponseHeaders = $null
+    }
+  }
+
+  It 'returns nothing before a request asks for response headers' {
+    Get-GitHubApiResponseHeader -Name 'Link' | Should -BeNullOrEmpty
+  }
+
+  It 'returns the requested header of the most recent request' {
+    InModuleScope GitHub {
+      $Script:GitHubApiResponseHeaders = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::OrdinalIgnoreCase)
+      $Script:GitHubApiResponseHeaders['Link'] = [string[]]@('<https://api.github.com/repositories/1/commits?page=4>; rel="last"')
+    }
+
+    Get-GitHubApiResponseHeader -Name 'Link' | Should -BeLike '*page=4*rel="last"*'
+  }
+
+  It 'matches the header name without regard to case' {
+    InModuleScope GitHub {
+      $Script:GitHubApiResponseHeaders = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::OrdinalIgnoreCase)
+      $Script:GitHubApiResponseHeaders['Link'] = [string[]]@('<https://api.github.com/repositories/1/commits?page=4>; rel="last"')
+    }
+
+    Get-GitHubApiResponseHeader -Name 'LINK' | Should -BeLike '*page=4*'
+  }
+
+  It 'reports every value of a repeated header' {
+    InModuleScope GitHub {
+      $Script:GitHubApiResponseHeaders = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::OrdinalIgnoreCase)
+      $Script:GitHubApiResponseHeaders['Link'] = [string[]]@(
+        '<https://api.github.com/repositories/1/commits?page=2>; rel="next"'
+        '<https://api.github.com/repositories/1/commits?page=9>; rel="last"'
+      )
+    }
+
+    $Link = Get-GitHubApiResponseHeader -Name 'Link'
+
+    @($Link).Count | Should -Be 2
+    ConvertFrom-GitHubLinkHeader -Link $Link | Should -Be 9
+  }
+
+  It 'returns nothing for a header the response did not include' {
+    InModuleScope GitHub {
+      $Script:GitHubApiResponseHeaders = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::OrdinalIgnoreCase)
+      $Script:GitHubApiResponseHeaders['Link'] = [string[]]@('<https://api.github.com/repositories/1/commits?page=4>; rel="last"')
+    }
+
+    Get-GitHubApiResponseHeader -Name 'X-RateLimit-Remaining' | Should -BeNullOrEmpty
+  }
+}
