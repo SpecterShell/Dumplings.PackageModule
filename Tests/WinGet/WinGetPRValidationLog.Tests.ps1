@@ -73,6 +73,9 @@ Describe 'Get-WinGetPRValidationLog' {
           }
         )
       }
+      # No validator check runs on the head, so the script must fall back to the historical Azure comment.
+      if ($RequestUri -match '/pulls/\d+$') { return [pscustomobject]@{ head = [pscustomobject]@{ sha = ('a' * 40) } } }
+      if ($RequestUri -match '/check-runs') { return [pscustomobject]@{ check_runs = @() } }
       if ($RequestUri -match 'HierarchyQuery') { return Get-TestAzureContributionResponse }
       return Get-TestAzureArtifactPage
     }
