@@ -152,6 +152,389 @@ function Get-WinGetGitHubPackageVersion {
   }
 }
 
+function Get-WinGetGitHubPackageAncestorPath {
+  <#
+  .SYNOPSIS
+    Get the folders that contain a package, from the closest parent up to the first-character folder
+  .DESCRIPTION
+    Get the folders that contain a package in the manifests repository, ordered from the closest parent
+    up to the first-character folder. The package folder itself is not returned.
+    A package identifier of SpecterShell.Dumplings yields manifests/s/SpecterShell and manifests/s when
+    the root path is manifests.
+    Submission uses these folders when the package folder has no history in the reference branch.
+  .PARAMETER PackageIdentifier
+    The identifier of the package
+  .PARAMETER RootPath
+    The path to the root folder of the manifests repository
+  .EXAMPLE
+    PS> Get-WinGetGitHubPackageAncestorPath -PackageIdentifier 'SpecterShell.Dumplings' -RootPath 'manifests'
+
+    manifests/s/SpecterShell
+    manifests/s
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The identifier of the package')]
+    [string]$PackageIdentifier,
+    [Parameter(HelpMessage = 'The path to the root folder of the manifests repository')]
+    [ValidateNotNull()]
+    [string]$RootPath = ''
+  )
+
+  process {
+    # s, SpecterShell, Dumplings
+    $Segments = @([string]$PackageIdentifier.ToLower().Chars(0)) + @($PackageIdentifier.Split('.'))
+
+    # s/SpecterShell, then s
+    for ($Length = $Segments.Count - 1; $Length -ge 1; $Length--) {
+      $Path = $Segments[0..($Length - 1)] -join '/'
+      $RootPath ? "${RootPath}/${Path}" : $Path
+    }
+  }
+}
+
+function Get-WinGetGitHubCommitPage {
+  <#
+  .SYNOPSIS
+    Get one page of the commit listing of a repository path
+  .DESCRIPTION
+    Get one page of the commit listing of a repository path together with the last page number reported by
+    the response Link header. Reading the last page lets a caller reach the oldest commit of a path without
+    walking every page, because GitHub lists commits from the newest to the oldest.
+  .PARAMETER Uri
+    The commit listing URI of one page
+  .OUTPUTS
+    An object with Commits, the commits of that page, LastPage, the number of the last page, and
+    HasMorePages, which indicates that GitHub reported another page without reporting the last one.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The commit listing URI of one page')]
+    [string]$Uri
+  )
+
+  process {
+    # GitHub reports the page count only in the Link response header, so the request asks for response
+    # headers and reads them through Get-GitHubApiResponseHeader.
+    $Commits = @(Invoke-GitHubApi -Uri $Uri -ResponseHeadersVariable Headers)
+    $Link = Get-GitHubApiResponseHeader -Name 'Link'
+
+    [pscustomobject]@{
+      Commits      = $Commits
+      LastPage     = ConvertFrom-GitHubLinkHeader -Link $Link
+      HasMorePages = [bool]($Link -match 'rel="next"')
+    }
+  }
+}
+
+function Get-WinGetGitHubHistoryAnchor {
+  <#
+  .SYNOPSIS
+    Get the newest commit of a branch at or before a date
+  .DESCRIPTION
+    Get the newest commit reachable from the given branch at or before the given date.
+    The listing of the whole repository paginates to its first commit even when the listing of a single
+    path does not, so a commit read from it narrows a path listing to an early date without walking the
+    history of the path.
+  .PARAMETER RepoOwner
+    The owner of the repository
+  .PARAMETER RepoName
+    The name of the repository
+  .PARAMETER RepoBranch
+    The branch, tag, or commit SHA whose history is searched
+  .PARAMETER Until
+    The date the commit is at or before
+  .OUTPUTS
+    The commit object reported by GitHub, or nothing when the branch has no commit at or before that date.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
+    [Parameter(Mandatory, HelpMessage = 'The date the commit is at or before')]
+    [datetime]$Until
+  )
+
+  process {
+    # https://docs.github.com/rest/commits/commits#list-commits
+    $Date = $Until.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+    $Uri = "https://api.github.com/repos/${RepoOwner}/${RepoName}/commits?sha=$([Uri]::EscapeDataString($RepoBranch))&per_page=1&until=${Date}"
+    foreach ($Commit in (Invoke-GitHubApi -Uri $Uri)) { return $Commit }
+  }
+}
+
+function Get-WinGetGitHubOldestPathCommitPage {
+  <#
+  .SYNOPSIS
+    Get the page of a path commit listing that holds the oldest commit
+  .DESCRIPTION
+    Get the page of the commit listing of a path that holds the commit which established the path.
+    GitHub lists commits from the newest to the oldest and reports the number of the last page in the
+    response Link header, so the oldest commit of a path with a paginated history reads with two requests.
+    GitHub reports no last page and refuses deeper pages once a path has more commits than it paginates,
+    which happens for the first-character folders of the manifests repository because one repository-wide
+    commit created all of them when it partitioned the manifests by publisher
+    (https://github.com/microsoft/winget-pkgs/issues/8900). The listing is then narrowed with commits that
+    move towards the commit which established the path. The oldest commit of every narrowed listing is
+    still the commit which established the path, so the first listing that GitHub pages is already exact,
+    and a path that does not exist yet at a narrowed commit started later, which moves the lower bound of
+    the search forward.
+  .PARAMETER Path
+    The relative path whose history is searched
+  .PARAMETER RepoOwner
+    The owner of the repository
+  .PARAMETER RepoName
+    The name of the repository
+  .PARAMETER RepoBranch
+    The branch, tag, or commit SHA whose history is searched
+  .OUTPUTS
+    The page whose last entry is the oldest commit of the path. The newest page is returned when the
+    history cannot be narrowed.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The relative path whose history is searched')]
+    [string]$Path,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch
+  )
+
+  process {
+    # https://docs.github.com/rest/commits/commits#list-commits
+    $Query = "https://api.github.com/repos/${RepoOwner}/${RepoName}/commits?path=$([Uri]::EscapeDataString($Path))&per_page=100&sha="
+    $Uri = "${Query}$([Uri]::EscapeDataString($RepoBranch))"
+
+    $Page = Get-WinGetGitHubCommitPage -Uri "${Uri}&page=1"
+    if ($Page.LastPage -gt 1) { return Get-WinGetGitHubCommitPage -Uri "${Uri}&page=$($Page.LastPage)" }
+    if (-not $Page.HasMorePages -or -not $Page.Commits.Count) { return $Page }
+
+    # The path has more commits than GitHub paginates, so the listing is narrowed by date. Each narrowed
+    # listing starts at a commit anchor, which keeps the request inside a listing GitHub can page, and
+    # the newest commit of the path bounds the search from above. The oldest commit of any narrowed listing
+    # is still the commit that established the path, so the first listing GitHub can page is already exact.
+    $Upper = [datetime]$Page.Commits[0].commit.committer.date
+    $Lower = $Upper.AddYears(-10)
+    for ($Step = 0; $Step -lt 16 -and ($Upper - $Lower) -gt [timespan]'1.00:00:00'; $Step++) {
+      $Middle = $Lower.AddTicks([long](($Upper - $Lower).Ticks / 2))
+      $Anchor = Get-WinGetGitHubHistoryAnchor -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch -Until $Middle
+      if (-not $Anchor) {
+        # The repository has no commit that early, so the path cannot be older than the middle date.
+        $Lower = $Middle
+        continue
+      }
+      $AnchoredUri = "${Query}$($Anchor.sha)"
+      $Anchored = Get-WinGetGitHubCommitPage -Uri "${AnchoredUri}&page=1"
+      if (-not $Anchored.Commits.Count) {
+        # The path does not exist yet at the anchor, so the commit which established it is newer.
+        $Lower = $Middle
+        continue
+      }
+      if ($Anchored.LastPage -gt 1) { return Get-WinGetGitHubCommitPage -Uri "${AnchoredUri}&page=$($Anchored.LastPage)" }
+      if (-not $Anchored.HasMorePages) { return $Anchored }
+      # The narrowed listing is still deeper than GitHub pages, so the path was established before it.
+      $Upper = $Middle
+    }
+
+    Write-Verbose "The history of ${Path} could not be narrowed to the commit that established it, so its newest commit is used instead."
+    $Page
+  }
+}
+
+function Get-WinGetGitHubPathCommit {
+  <#
+  .SYNOPSIS
+    Get the newest or the oldest commit that changed a path in the remote repository
+  .DESCRIPTION
+    Get a commit reachable from the given branch that changed any file below the given path.
+    GitHub lists commits from the newest to the oldest. The newest commit is the first entry of that
+    listing, while the oldest commit, which is the commit that established the path, is the last entry
+    of the last page.
+    A path with more commits than GitHub paginates has no reported last page, so the listing is narrowed
+    by date until it fits in a paginated listing and the oldest commit of that listing is read.
+  .PARAMETER Path
+    The relative path whose history is searched
+  .PARAMETER RepoOwner
+    The owner of the repository
+  .PARAMETER RepoName
+    The name of the repository
+  .PARAMETER RepoBranch
+    The branch, tag, or commit SHA whose history is searched
+  .PARAMETER Oldest
+    Return the oldest commit instead of the newest commit
+  .OUTPUTS
+    The commit object reported by GitHub, or nothing when the path has no commit in that history.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The relative path whose history is searched')]
+    [string]$Path,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
+    [Parameter(HelpMessage = 'Indicates that the oldest commit is returned instead of the newest commit')]
+    [switch]$Oldest
+  )
+
+  process {
+    # https://docs.github.com/rest/commits/commits#list-commits
+    $Uri = "https://api.github.com/repos/${RepoOwner}/${RepoName}/commits?path=$([Uri]::EscapeDataString($Path))&sha=$([Uri]::EscapeDataString($RepoBranch))"
+
+    if (-not $Oldest) {
+      foreach ($Commit in (Get-WinGetGitHubCommitPage -Uri "${Uri}&per_page=1").Commits) { return $Commit }
+      return
+    }
+
+    # The page lists commits from the newest to the oldest, so the last entry is the oldest commit.
+    $Page = Get-WinGetGitHubOldestPathCommitPage -Path $Path -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch
+    if ($Page.Commits.Count) { return $Page.Commits[-1] }
+  }
+}
+function Get-WinGetGitHubSubmissionCommit {
+  <#
+  .SYNOPSIS
+    Get the commit that submission bases the candidate branch of a package on
+  .DESCRIPTION
+    Get the commit reachable from the given branch whose tree holds everything the submission reads
+    and writes, so a candidate branch created at it carries only the manifest changes of the package.
+    A version directory that has history is a version that is already published and is rewritten in
+    place, so the newest commit of that version directory applies. A version directory without history
+    is a new version that is modeled after the package, so the newest commit of the package directory
+    applies. A package directory without history was never submitted, so the closest folder that does
+    have history supplies the commit that established it, walking from the publisher folder up to the
+    first-character folder; the newest of those creation commits is the commit of the closest folder
+    that exists. A first-character folder has more history than GitHub paginates in one listing because
+    a single commit created all of them when the manifests were partitioned by publisher, so the commit
+    that established it is resolved by narrowing that listing by date.
+  .PARAMETER PackageIdentifier
+    The identifier of the package
+  .PARAMETER PackageVersion
+    The version of the package that the submission writes
+  .PARAMETER RepoOwner
+    The owner of the repository
+  .PARAMETER RepoName
+    The name of the repository
+  .PARAMETER RepoBranch
+    The branch, tag, or commit SHA whose history is searched
+  .PARAMETER RootPath
+    The path to the root folder of the manifests repository
+  .OUTPUTS
+    The commit object reported by GitHub, or nothing when neither the version, the package, nor a
+    containing folder has a commit in that history. The Path property reports the folder the commit
+    belongs to.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The identifier of the package')]
+    [string]$PackageIdentifier,
+    [Parameter(Mandatory, HelpMessage = 'The version of the package that the submission writes')]
+    [string]$PackageVersion,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
+    [Parameter(Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath
+  )
+
+  process {
+    $VersionPath = Get-WinGetGitHubPackagePath -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RootPath $RootPath
+    $Commit = Get-WinGetGitHubPathCommit -Path $VersionPath -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch
+    if ($Commit) { return $Commit | Add-Member -NotePropertyName 'Path' -NotePropertyValue $VersionPath -Force -PassThru }
+
+    $Path = Get-WinGetGitHubPackagePath -PackageIdentifier $PackageIdentifier -RootPath $RootPath
+    $Commit = Get-WinGetGitHubPathCommit -Path $Path -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch
+
+    if (-not $Commit) {
+      foreach ($AncestorPath in Get-WinGetGitHubPackageAncestorPath -PackageIdentifier $PackageIdentifier -RootPath $RootPath) {
+        $Commit = Get-WinGetGitHubPathCommit -Path $AncestorPath -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch -Oldest
+        if ($Commit) {
+          $Path = $AncestorPath
+          break
+        }
+      }
+    }
+
+    if ($Commit) { return $Commit | Add-Member -NotePropertyName 'Path' -NotePropertyValue $Path -Force -PassThru }
+  }
+}
+
+function Get-WinGetGitHubManifestVersionCommit {
+  <#
+  .SYNOPSIS
+    Get a commit of the authoring tool that already declares a manifest version
+  .DESCRIPTION
+    Get the newest commit of the authoring tool that declares the given manifest version or a newer one.
+    A submission that writes manifests with a newer manifest version than the reference has to be based
+    at or after the commit that made that version current in the manifests repository, so the candidate
+    branch and the repository describe the same schema version.
+    The version is read from the authoring tool itself instead of matched in commit messages, because the
+    message wording is not part of the tool's contract and a renamed or abbreviated message silently based
+    the candidate branch on a commit that predates the version change. Every commit of the tool is a
+    descendant of the commit that introduced the version it declares, so the newest commit already
+    satisfies the requirement when it declares the given version or a newer one.
+    A tool that declares an older version has not received that version yet, and nothing is returned.
+  .PARAMETER ManifestVersion
+    The manifest version that the candidate branch has to support
+  .PARAMETER RepoOwner
+    The owner of the repository
+  .PARAMETER RepoName
+    The name of the repository
+  .PARAMETER RepoBranch
+    The branch, tag, or commit SHA whose history is searched
+  .PARAMETER ToolsPath
+    The path of the authoring tool that declares the manifest version
+  .OUTPUTS
+    The commit object reported by GitHub, or nothing when the tool does not declare the given version or
+    a newer one.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory, HelpMessage = 'The manifest version that the candidate branch has to support')]
+    [string]$ManifestVersion,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository')]
+    [string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository')]
+    [string]$RepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch name of the repository')]
+    [string]$RepoBranch,
+    [Parameter(HelpMessage = 'The path of the authoring tool that declares the manifest version')]
+    [string]$ToolsPath = 'Tools/YamlCreate.ps1'
+  )
+
+  process {
+    $Target = [version]::new()
+    if (-not [version]::TryParse($ManifestVersion, [ref]$Target)) { return }
+
+    $Commit = Get-WinGetGitHubPathCommit -Path $ToolsPath -RepoOwner $RepoOwner -RepoName $RepoName -RepoBranch $RepoBranch
+    if (-not $Commit) { return }
+
+    # https://docs.github.com/rest/repos/contents#get-repository-content
+    $Content = Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/contents/${ToolsPath}?ref=$([Uri]::EscapeDataString([string]$Commit.sha))"
+    $Text = [string]$Content.content | ConvertFrom-Base64
+    # The tool assigns its manifest version once as a literal, so the declarations of settings overrides
+    # and of a version comparison cannot be mistaken for the version it writes.
+    $Pattern = '(?m)^\s*\$ManifestVersion\s*=\s*''(?<Version>[^'']+)'''
+    $Declared = [version]::new()
+    if (-not [version]::TryParse([regex]::Match($Text, $Pattern).Groups['Version'].Value, [ref]$Declared)) { return }
+    if ($Declared -lt $Target) { return }
+
+    return $Commit
+  }
+}
+
 function Get-WinGetGitHubManifests {
   <#
   .SYNOPSIS
