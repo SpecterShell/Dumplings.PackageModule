@@ -211,6 +211,27 @@ Describe 'Set-WinGetGitHubPullRequestTitle' -Tag Unit {
   }
 }
 
+Describe 'Get-WinGetGitHubPullRequestForHead' -Tag Unit {
+  It 'queries every state for the encoded owner-qualified head' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { [pscustomobject]@{ number = 42 } }
+
+    $Result = @(Get-WinGetGitHubPullRequestForHead -HeadOwner DumplingsBot -HeadBranch 'Vendor.Package-2.0-1' -RepoOwner microsoft -RepoName winget-pkgs)
+
+    $Result | Should -HaveCount 1
+    Should -Invoke Invoke-GitHubApi -ModuleName WinGetGitHubRepo -Exactly 1 -ParameterFilter {
+      $Uri.AbsoluteUri -ceq 'https://api.github.com/repos/microsoft/winget-pkgs/pulls?head=DumplingsBot%3AVendor.Package-2.0-1&state=all&per_page=100'
+    }
+  }
+
+  It 'returns an empty collection when no pull request uses the branch' {
+    Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { }
+
+    $Result = @(Get-WinGetGitHubPullRequestForHead -HeadOwner DumplingsBot -HeadBranch 'unused-branch' -RepoOwner microsoft -RepoName winget-pkgs)
+
+    $Result | Should -HaveCount 0
+  }
+}
+
 Describe 'Get-WinGetGitHubApiTokenUser' -Tag Unit {
   It 'uses the default credential when no token is supplied' {
     Mock Invoke-GitHubApi -ModuleName WinGetGitHubRepo { @{ login = 'DefaultBot' } }

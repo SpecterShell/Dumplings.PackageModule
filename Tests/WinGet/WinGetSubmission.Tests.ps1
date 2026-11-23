@@ -325,6 +325,7 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
     Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission { @{ files = @($Script:CandidateChange) } }
     Mock Get-WinGetGitHubPullRequestFile -ModuleName WinGetSubmission { $Script:CandidateChange }
     Mock Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission {}
+    Mock Get-WinGetGitHubPullRequestForHead -ModuleName WinGetSubmission { @() }
     Mock New-WinGetGitHubPullRequest -ModuleName WinGetSubmission {
       @{ number = 43; title = 'New version: Vendor.Package version 2.0'; html_url = 'https://example.test/pr/43' }
     }
@@ -611,7 +612,7 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
     $Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike '*Normal replacement submission will continue*PR files temporarily unavailable*'
   }
 
-  It 'still throws a PR creation failure and leaves existing PRs open' {
+  It 'still throws a PR creation failure, leaves existing PRs open, and removes the unused branch' {
     Mock Get-WinGetGitHubComparison -ModuleName WinGetSubmission { throw 'comparison failed' }
     Mock Find-WinGetGitHubPullRequest -ModuleName WinGetSubmission { @{ items = @($Script:ExistingPullRequest) } }
     Mock New-WinGetGitHubPullRequest -ModuleName WinGetSubmission { throw 'PR creation failed' }
@@ -619,6 +620,30 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
     { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*PR creation failed*'
 
     Should -Invoke Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke Get-WinGetGitHubPullRequestForHead -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter {
+      $HeadOwner -eq 'DumplingsBot' -and $HeadBranch -like 'Vendor.Package-2.0-*' -and $RepoOwner -eq 'microsoft' -and $RepoName -eq 'winget-pkgs'
+    }
+    Should -Invoke Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission -Exactly 1
+    @($Script:SubmissionTask.Logs.Where({ $_.Message -like '*No pull request uses the candidate branch DumplingsBot:Vendor.Package-2.0-*after the creation failure*' })) | Should -HaveCount 1
+  }
+
+  It 'keeps the candidate branch when the rejected request still produced a pull request' {
+    Mock New-WinGetGitHubPullRequest -ModuleName WinGetSubmission { throw 'A pull request already exists for DumplingsBot:candidate' }
+    Mock Get-WinGetGitHubPullRequestForHead -ModuleName WinGetSubmission { @([pscustomobject]@{ number = 44 }) }
+
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*A pull request already exists*'
+
+    Should -Invoke Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'keeps the candidate branch when the head lookup fails and rethrows the creation failure' {
+    Mock New-WinGetGitHubPullRequest -ModuleName WinGetSubmission { throw 'PR creation failed' }
+    Mock Get-WinGetGitHubPullRequestForHead -ModuleName WinGetSubmission { throw 'head lookup failed' }
+
+    { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*PR creation failed*'
+
+    Should -Invoke Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission -Exactly 0
+    $Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike '*Failed to check whether any pull request uses the candidate branch DumplingsBot:*head lookup failed*'
   }
 
   AfterAll {

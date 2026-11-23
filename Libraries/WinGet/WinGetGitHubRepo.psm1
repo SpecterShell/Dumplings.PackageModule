@@ -952,6 +952,45 @@ function Get-WinGetGitHubPullRequest {
   Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls/${PullRequestNumber}"
 }
 
+function Get-WinGetGitHubPullRequestForHead {
+  <#
+  .SYNOPSIS
+    List the pull requests that use one fork branch as their head.
+  .DESCRIPTION
+    Reads the pull-request head filter, which matches every state unless a state
+    is requested. A caller uses the result before it removes a candidate branch,
+    because a branch that already belongs to a pull request must survive.
+  .PARAMETER HeadOwner
+    Owner of the fork that contains the head branch.
+  .PARAMETER HeadBranch
+    Name of the head branch.
+  .PARAMETER RepoOwner
+    Owner of the repository that receives the pull requests.
+  .PARAMETER RepoName
+    Name of the repository that receives the pull requests.
+  .PARAMETER State
+    Pull-request state filter. Every state is matched by default.
+  .OUTPUTS
+    Pull-request objects returned by GitHub, or nothing when no pull request uses the branch.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The owner of the fork that contains the head branch')]
+    [ValidateNotNullOrWhiteSpace()][string]$HeadOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the head branch')]
+    [ValidateNotNullOrWhiteSpace()][string]$HeadBranch,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository that receives the pull requests')]
+    [ValidateNotNullOrWhiteSpace()][string]$RepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository that receives the pull requests')]
+    [ValidateNotNullOrWhiteSpace()][string]$RepoName,
+    [ValidateSet('all', 'open', 'closed')][string]$State = 'all'
+  )
+
+  # Keep an empty answer an empty collection so a caller can tell "no pull
+  # request" apart from "one pull request".
+  return @((Invoke-GitHubApi -Uri "https://api.github.com/repos/${RepoOwner}/${RepoName}/pulls?head=$([Uri]::EscapeDataString("${HeadOwner}:${HeadBranch}"))&state=${State}&per_page=100")).Where({ $null -ne $_ })
+}
+
 function Set-WinGetGitHubPullRequestTitle {
   <#
   .SYNOPSIS
