@@ -100,4 +100,19 @@ Describe 'Bounded VM process waiter' -Tag Unit {
     $Result.Completed | Should -BeTrue
     $Result.ExitCode | Should -Be 31
   }
+
+  It 'stamps the wait start before blocking on the process' {
+    $Process = Start-ControlledWaitTestProcess 'Start-Sleep -Milliseconds 3000; exit 0'
+    $RequestedAtUtc = [DateTime]::UtcNow
+    $Result = & $Script:WaitScript -Process $Process -TimeoutSeconds 10
+    $ProcessStartedAtUtc = [DateTime]::Parse($Result.ProcessStartedAtUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+    $WaitStartedAtUtc = [DateTime]::Parse($Result.WaitStartedAtUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+
+    $Result.Completed | Should -BeTrue
+    $Result.ElapsedMilliseconds | Should -BeGreaterThan 2000
+    $ProcessStartedAtUtc | Should -BeLessOrEqual $WaitStartedAtUtc
+    # Sampling the wait start after WaitForExit returns would stamp the exit time instead.
+    $WaitStartedAtUtc | Should -BeGreaterOrEqual $RequestedAtUtc.AddSeconds(-1)
+    $WaitStartedAtUtc | Should -BeLessThan $RequestedAtUtc.AddMilliseconds(2000)
+  }
 }
