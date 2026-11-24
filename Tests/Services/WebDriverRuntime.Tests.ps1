@@ -24,8 +24,9 @@ Describe 'Edge driver build selection' -Tag Unit {
   It 'warns when the published build has a different build number' {
     Mock Invoke-WebRequest { [pscustomobject]@{ Content = "157.0.4340.20`r`n" } } -ModuleName WebDriverRuntime
     $Result = Install-DumplingsWebDriver -Browser Edge -CacheRoot (Join-Path $TestDrive 'driver') -WarningVariable Warnings -WarningAction SilentlyContinue
+    $BrowserTriplet = Get-DumplingsVersionTriplet -Version ([version]'157.0.4341.60')
     $Result.Version | Should -Be ([version]'157.0.4340.20')
-    $Warnings | Should -Match 'Edge 157\.0\.4341 has no published driver'
+    $Warnings | Should -Match ([regex]::Escape("Edge $BrowserTriplet has no published driver"))
   }
 
   It 'refuses a published build from another major version' {
@@ -71,6 +72,13 @@ Describe 'Installed browser discovery' -Tag Unit {
     Mock Get-ItemProperty { $null } -ModuleName WebDriverRuntime
     Mock Test-Path { $false } -ModuleName WebDriverRuntime
     { Install-DumplingsWebDriver -Browser Edge -CacheRoot (Join-Path $TestDrive 'driver') } | Should -Throw '*is not installed*'
+  }
+}
+
+Describe 'Version triplet' -Tag Unit {
+  It 'ignores the fourth component and separates the third' {
+    Get-DumplingsVersionTriplet -Version ([version]'157.0.4341.60') | Should -BeExactly (Get-DumplingsVersionTriplet -Version ([version]'157.0.4341.99'))
+    Get-DumplingsVersionTriplet -Version ([version]'157.0.4341.60') | Should -Not -BeExactly (Get-DumplingsVersionTriplet -Version ([version]'157.0.4340.60'))
   }
 }
 
