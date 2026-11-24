@@ -96,8 +96,8 @@ Describe 'PackageModule manifest-backed loading' -Tag Unit {
   It 'retains the default manifest schema version after global parent-module imports' {
     $Schema = Get-WinGetManifestSchema -ManifestType version
 
-    $Schema['$id'] | Should -Be 'https://aka.ms/winget-manifest.version.1.12.0.schema.json'
-    $ManifestVersion | Should -Be '1.12.0'
+    $Schema['$id'] | Should -Be 'https://aka.ms/winget-manifest.version.1.28.0.schema.json'
+    $ManifestVersion | Should -Be '1.28.0'
   }
 
   It 'retains internal state for the globally loaded installer cache' {

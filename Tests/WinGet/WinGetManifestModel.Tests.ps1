@@ -33,6 +33,33 @@ BeforeAll {
 }
 
 Describe 'WinGet logical manifest model' -Tag Unit {
+  It 'converts hexadecimal return code <Value> in <Field>' -ForEach @(
+    foreach ($Field in 'InstallerReturnCode', 'InstallerSuccessCodes') {
+      @{ Field = $Field; Value = '0x8004070b'; Expected = 2147747595L }
+      @{ Field = $Field; Value = '0X80040711'; Expected = 2147747601L }
+      @{ Field = $Field; Value = '0xffffffff'; Expected = 4294967295L }
+      @{ Field = $Field; Value = ' +0x10 '; Expected = 16L }
+      @{ Field = $Field; Value = '-0x10'; Expected = -16L }
+      @{ Field = $Field; Value = '0x0'; Expected = 0L }
+    }
+  ) {
+    $Result = ConvertTo-WinGetManifestScalarType -Value $Value -FieldName $Field
+    $Result | Should -BeOfType ([long])
+    $Result | Should -Be $Expected
+  }
+
+  It 'leaves malformed or overflowing hexadecimal return codes for validation: <_>' -ForEach @('0x', '0xGHI', '0x8004070btrailing', '0x10000000000000000', '0xffffffffffffffff') {
+    ConvertTo-WinGetManifestScalarType -Value $_ -FieldName InstallerReturnCode | Should -BeExactly $_
+  }
+
+  It 'keeps hexadecimal-looking version and text fields as strings' {
+    foreach ($Field in 'PackageVersion', 'DisplayVersion', 'PackageName', 'ProductCode') {
+      $Result = ConvertTo-WinGetManifestScalarType -Value '0x8004070b' -FieldName $Field
+      $Result | Should -BeOfType ([string])
+      $Result | Should -BeExactly '0x8004070b'
+    }
+  }
+
   It 'normalizes singleton input to multi-file documents with effective authored values' {
     $Model = ConvertFrom-WinGetManifestYaml -Content (ConvertTo-Yaml (New-TestWinGetSingleton))
     $Documents = ConvertTo-WinGetManifestDocumentSet -Manifest $Model
@@ -86,6 +113,56 @@ Describe 'WinGet logical manifest model' -Tag Unit {
     $Model = ConvertFrom-WinGetMergedManifest -Manifest (New-TestWinGetSingleton) -SourceFormat Singleton
     $Model.Installers[0].InstallerSwitches.Contains('Silent') | Should -BeFalse
     $Model.Installers[0].Contains('ExpectedReturnCodes') | Should -BeFalse
+  }
+
+  It 'removes pre-elevation from <Type>/<Nested> in <Scope> scope without mutating input' -ForEach @(
+    foreach ($Scope in 'user', 'machine') {
+      foreach ($Type in 'msi', 'wix') {
+        @{ Type = $Type; Nested = ''; Scope = $Scope }
+        @{ Type = 'zip'; Nested = $Type; Scope = $Scope }
+      }
+    }
+  ) {
+    $Source = New-TestWinGetSingleton
+    $Source.InstallerType = $Type
+    $Source.ElevationRequirement = 'elevationRequired'
+    $Source.Scope = $Scope
+    if ($Nested) { $Source.NestedInstallerType = $Nested }
+    $Model = ConvertFrom-WinGetMergedManifest -Manifest $Source
+    $Before = ConvertTo-Json $Model -Depth 100 -Compress
+    $Optimized = Optimize-WinGetManifest -Manifest $Model
+    $Optimized.Installers[0].Contains('ElevationRequirement') | Should -BeFalse
+    $Optimized.InstallerDefaults.Contains('ElevationRequirement') | Should -BeFalse
+    $Documents = ConvertTo-WinGetManifestDocumentSet -Manifest $Model
+    $Documents.Installer.Contains('ElevationRequirement') | Should -BeFalse
+    $Documents.Installer.Installers[0].Contains('ElevationRequirement') | Should -BeFalse
+    (ConvertTo-Json $Model -Depth 100 -Compress) | Should -BeExactly $Before
+    (ConvertTo-Json (Optimize-WinGetManifest $Optimized) -Depth 100 -Compress) | Should -BeExactly (ConvertTo-Json $Optimized -Depth 100 -Compress)
+  }
+
+  It 'retains other MSI elevation values: <_>' -ForEach @('elevatesSelf', 'elevationProhibited') {
+    $Source = New-TestWinGetSingleton
+    $Source.ElevationRequirement = $_
+    $Model = ConvertFrom-WinGetMergedManifest -Manifest $Source
+    (Optimize-WinGetManifest $Model).Installers[0].ElevationRequirement | Should -BeExactly $_
+  }
+
+  It 'preserves inherited pre-elevation on EXE and Burn entries in a mixed manifest' {
+    $Source = New-TestWinGetSingleton
+    $Source.ElevationRequirement = 'elevationRequired'
+    $Source.Installers = @(
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'msi' }
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'zip'; NestedInstallerType = 'wix' }
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'exe'; AppsAndFeaturesEntries = @([ordered]@{ InstallerType = 'msi' }) }
+      [ordered]@{ Architecture = 'x64'; InstallerType = 'burn' }
+    )
+    $Model = ConvertFrom-WinGetMergedManifest -Manifest $Source
+    $Optimized = Optimize-WinGetManifest $Model
+    $Optimized.Installers[0].Contains('ElevationRequirement') | Should -BeFalse
+    $Optimized.Installers[1].Contains('ElevationRequirement') | Should -BeFalse
+    $Optimized.Installers[2].ElevationRequirement | Should -Be elevationRequired
+    $Optimized.Installers[3].ElevationRequirement | Should -Be elevationRequired
+    $Optimized.InstallerDefaults.Contains('ElevationRequirement') | Should -BeFalse
   }
 
   It 'removes InstallerLocale when every installer has the same locale' {

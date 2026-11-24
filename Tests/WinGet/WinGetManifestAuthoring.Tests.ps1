@@ -9,7 +9,7 @@ BeforeAll {
   . (Join-Path $Script:DumplingsModuleRoot 'Index.ps1')
 
   function New-AuthoringTestModel {
-    param ([int]$InstallerCount = 1)
+    param ([int]$InstallerCount = 1, [string]$ManifestVersion)
 
     $Installers = for ($Index = 0; $Index -lt $InstallerCount; $Index++) {
       [ordered]@{
@@ -19,7 +19,9 @@ BeforeAll {
         InstallerSha256 = ([char](65 + $Index)).ToString() * 64
       }
     }
-    New-WinGetManifest -PackageIdentifier 'Contoso.AuthoringTest' -PackageVersion '1.2.3' `
+    $Arguments = @{}
+    if ($ManifestVersion) { $Arguments.ManifestVersion = $ManifestVersion }
+    New-WinGetManifest @Arguments -PackageIdentifier 'Contoso.AuthoringTest' -PackageVersion '1.2.3' `
       -DefaultLocalization ([ordered]@{
         PackageLocale    = 'en-US'
         Publisher        = 'Contoso'
@@ -60,6 +62,33 @@ BeforeAll {
 }
 
 Describe 'WinGet manifest model authoring' -Tag Unit {
+  It 'authors schema 1.28.0 consistently across every document and header by default' {
+    $Manifest = New-AuthoringTestModel
+    $Manifest = Add-WinGetManifestLocale -Manifest $Manifest -Localization ([ordered]@{ PackageLocale = 'zh-CN'; ShortDescription = 'Localized authoring test.' })
+    $Bundle = ConvertTo-WinGetManifestYaml -Manifest $Manifest
+
+    $Manifest.ManifestVersion | Should -Be '1.28.0'
+    foreach ($Document in @(
+        @{ Type = 'version'; Content = $Bundle.Version }
+        @{ Type = 'installer'; Content = $Bundle.Installer }
+        @{ Type = 'defaultLocale'; Content = $Bundle.Locale['en-US'] }
+        @{ Type = 'locale'; Content = $Bundle.Locale['zh-CN'] }
+      )) {
+      $Document.Content | Should -Match ([regex]::Escape("https://aka.ms/winget-manifest.$($Document.Type).1.28.0.schema.json"))
+      $Document.Content | Should -Match '(?m)^ManifestVersion: 1\.28\.0\r?$'
+    }
+    (Get-WinGetManifestValidationResult -Manifest $Manifest).IsValid | Should -BeTrue
+  }
+
+  It 'retains an explicitly requested historical authoring version' {
+    $Manifest = New-AuthoringTestModel -ManifestVersion '1.12.0'
+    $Bundle = ConvertTo-WinGetManifestYaml -Manifest $Manifest
+
+    $Manifest.ManifestVersion | Should -Be '1.12.0'
+    $Bundle.Version | Should -Match 'winget-manifest\.version\.1\.12\.0\.schema\.json'
+    (Get-WinGetManifestValidationResult -Manifest $Manifest).IsValid | Should -BeTrue
+  }
+
   It 'creates a complete logical model and rejects incomplete output' {
     $Manifest = New-AuthoringTestModel
     $Manifest.PSTypeNames | Should -Contain 'Dumplings.WinGet.ManifestModel'

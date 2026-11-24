@@ -483,7 +483,7 @@ function ConvertTo-WinGetSuggestedInstallerType {
   $Normalized = ($InstallerType -split '\s+#', 2)[0].Trim().ToLowerInvariant()
   if ($Normalized -ceq 'msixbundle') { $Normalized = 'msix' }
   if ($Normalized -ceq 'appxbundle') { $Normalized = 'appx' }
-  $Schema = Get-WinGetManifestSchema -ManifestType installer -ManifestVersion '1.12.0'
+  $Schema = Get-WinGetManifestSchema -ManifestType installer
   $AllowedTypes = @($Schema['definitions']['InstallerType']['enum'])
   if ($Normalized -cin $AllowedTypes) { return $Normalized }
   return $null
@@ -501,9 +501,9 @@ function ConvertTo-WinGetSuggestedManifestFieldSet {
 
   $Result = [ordered]@{}
   if ($null -eq $InputObject) { return $Result }
-  $Schema = Get-WinGetManifestSchema -ManifestType installer -ManifestVersion '1.12.0'
+  $Schema = Get-WinGetManifestSchema -ManifestType installer
   $InstallerSchema = $Schema['definitions']['Installer']
-  $AllowedFields = Get-WinGetInstallerPropertyCatalog -ManifestVersion '1.12.0'
+  $AllowedFields = Get-WinGetInstallerPropertyCatalog -ManifestVersion ($Schema['properties']['ManifestVersion']['default'])
   foreach ($Field in $AllowedFields) {
     $Value = Get-WinGetSuggestionPropertyValue -InputObject $InputObject -Name $Field
     if ($Field -ceq 'InstallerType') {

@@ -443,8 +443,11 @@ function Get-AdvancedInstallerMsiInfo {
         $Database.Close()
       }
 
-      # MSI metadata validates the already selected payload; it is not used as the selector.
-      if ($Architecture -and $MsiInfo.PackageArchitecture -cne $Architecture) {
+      # Architecture selects the bootstrapper's target-host branch, not the
+      # MSI database bitness. Intel packages (including a blank platform in
+      # Template Summary) can run on x64/ARM64 hosts. Preserve their actual
+      # PackageArchitecture while still rejecting incompatible native packages.
+      if ($Architecture -and $MsiInfo.PackageArchitecture -cne $Architecture -and $MsiInfo.PackageArchitecture -cne 'x86') {
         throw "Advanced Installer selected '$($MsiFile.Name)' for '$Architecture', but the MSI package architecture is '$($MsiInfo.PackageArchitecture)'"
       }
 

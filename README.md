@@ -73,7 +73,11 @@ Use `Copy-Object` and `Test-ObjectValueEqual` from `Libraries/Data/Conversion.ps
 
 Each manifest-update operation owns its downloads, hashes, extracted ZIP entries, and parser results. Cache keys include file identity and every supplied parser option, including architecture, scope, and command line. Each entry applies cached parser facts to its own authored fields and diagnostic policy. Entries never share authored ARP values solely by URL. Cleanup in `finally` removes only operation-created files. Files supplied through `InstallerFiles` remain caller-owned. The internal metadata updater does not accept an `Installers` argument.
 
-Submission reads remote reference manifests at one captured commit and carries that revision into branch creation. Existing branch-head conflict, identical-PR and empty-change checks remain in place.
+Submission reads remote reference manifests at one captured commit and carries that revision into branch creation. Confirmed identical PRs and empty changes stop redundant submission. If a comparison fails after retries, submission logs a warning and continues without those checks.
+
+Missing packages still fail by default. Set `WinGetPendingPackageFallback: true` with an explicit `WinGetPendingPackageTrustedUsers` allowlist to select a validated, addition-only open, unmerged PR as the reference. `WinGetPendingPackageAction` defaults to `UpdatePullRequest`, which atomically replaces the pending version on an unchanged, writable PR branch and updates its title. Identical manifests can still repair a stale title without another commit. `NewPullRequest` instead uses the pending manifests as a template on the normal origin base and leaves the source PR open. Task configuration overrides the global defaults. See the [pending-package workflow](../../.agents/skills/author-winget-manifest/references/submission/pending-packages.md) for search limits, permissions, dry runs, and rejected PR shapes. Existing packages do not use this fallback.
+
+The optional `GitHubPullRequestAuthorTokens` secret map selects a title-update credential by PR author. The account is verified before committing, and all branch writes retain the normal bot credential. Core loads the map from `Secret.yaml` or `DUMPLINGS_SECRET`; standalone callers can supply it in `$Global:DumplingsSecret`. See [PR author credentials](../../.agents/skills/author-winget-manifest/references/submission/pending-packages.md#pr-author-credentials) for configuration and failure handling.
 
 ### Installer Analysis
 
@@ -95,7 +99,7 @@ Each aggregate parser constructs the canonical identity/ARP envelope directly an
 
 Public installer expansion functions resolve source and destination paths against PowerShell's filesystem location before passing them to .NET or a parser child process. Their optional `Name` selector defaults to `*`, so omitting it expands every catalogued payload within the parser's entry and byte limits. Extractors that can produce multiple files accept `CollisionAction Prompt|Error|Skip|Overwrite|Rename`. `Prompt` is the interactive default and offers `Rename` as its preselected choice. Functions and unattended automation that compose extractors pass `Rename` explicitly, allocating deterministic names such as `payload (1).dll` without opening a prompt.
 
-Manifest updates run a known manifest-declared parser before generic detection. If metadata parsing fails, structural evidence classifies the result as matched, mismatched, or indeterminate. Only a definitive incompatible format produces a blocking diagnostic and throws. Matched or indeterminate failures preserve existing fields, and diagnostics unrelated to fields being refreshed stay verbose. The update buffers diagnostics from all installer entries, deduplicates them, and writes them once after processing the manifest.
+Manifest updates run a known manifest-declared parser before generic detection. If metadata parsing fails, structural evidence classifies the result as matched, mismatched, or indeterminate. Only a definitive incompatible format produces a blocking diagnostic and throws. Matched or indeterminate failures preserve existing fields, and diagnostics unrelated to fields being refreshed stay verbose. Diagnostics are deduplicated within each installer entry and logged with an `[Installer #n/total]` prefix. Cached parser evidence remains attributed to every affected entry.
 
 Bypass the parser stage globally with `-SkipInstallerAnalysis` or per task with `SkipInstallerAnalysis: true` in `Config.yaml`. This preserves existing installer metadata and skips nested extraction, family detection, and static parsing. SHA-256 downloads, release-date handling, formatting, validation, and submission still run.
 
@@ -115,6 +119,7 @@ Manifest processing uses these modules.
 | `WinGetManifestUpdate.psm1` | Installer download, matching, parser metadata, and safe updates to existing authored fields. |
 | `WinGetManifestAuthoring.psm1` | Immutable manifest creation/editing, conservative installer suggestions, and atomic local persistence. |
 | `WinGetSubmission.psm1` | Repository acquisition, manifest generation, validation, duplicate-PR policy, and submission. |
+| `WinGetPendingPackage.psm1` | Opt-in trusted PR references and guarded in-place updates for unmerged new packages. |
 | `SourceIdentity.psm1` | Forge- and storage-aware installer source identity normalization used by task state comparison to detect domain changes. |
 
 Primary entry points include:

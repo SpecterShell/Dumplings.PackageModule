@@ -10,6 +10,22 @@ Describe 'Manifest update operation ownership and cache isolation' -Tag Unit {
     }
     AfterEach { Close-WinGetManifestUpdateContext $Context }
 
+    It 'upgrades historical manifests and their serialized headers to schema 1.28.0' {
+      Mock Update-WinGetInstallerManifestInstallers { $OldInstallers }
+      $Manifest = New-WinGetManifestModel -PackageIdentifier 'Test.SchemaUpdate' -PackageVersion '1.0.0' -ManifestVersion '1.12.0' -InstallerDefaults ([ordered]@{}) -Installers @([ordered]@{ Architecture = 'x64'; InstallerType = 'portable'; InstallerUrl = 'https://example.test/app.exe'; InstallerSha256 = 'A' * 64 }) -DefaultLocalization ([ordered]@{ PackageLocale = 'en-US'; Publisher = 'Test'; PackageName = 'Schema Update'; License = 'MIT'; ShortDescription = 'Tests schema upgrades.' }) -Localizations @([ordered]@{ PackageLocale = 'zh-CN'; ShortDescription = 'Localized schema test.' })
+
+      $Updated = Update-WinGetManifest -Manifest $Manifest -PackageVersion '2.0.0' -InstallerEntries @([ordered]@{ Architecture = 'x64' }) -Logger {}
+      $Bundle = ConvertTo-WinGetManifestYaml -Manifest $Updated
+
+      $Manifest.ManifestVersion | Should -Be '1.12.0'
+      $Updated.ManifestVersion | Should -Be '1.28.0'
+      foreach ($Content in @($Bundle.Version, $Bundle.Installer, $Bundle.Locale['en-US'], $Bundle.Locale['zh-CN'])) {
+        $Content | Should -Match 'winget-manifest\.[A-Za-z]+\.1\.28\.0\.schema\.json'
+        $Content | Should -Match '(?m)^ManifestVersion: 1\.28\.0\r?$'
+      }
+      Should -Invoke Update-WinGetInstallerManifestInstallers -Times 1 -Exactly
+    }
+
     It 'indexes literal selectors while keeping queries and wildcard entries in authored order' {
       $Entries = @(@{ Architecture = 'x86' }, @{ Query = { $true } }, @{ Architecture = 'x64' }, @{ InstallerUrl = 'https://example.test/all' }, @{ Query = @{ Scope = 'user' } })
       $Index = New-WinGetInstallerEntryIndex $Entries
