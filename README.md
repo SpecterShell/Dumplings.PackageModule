@@ -210,6 +210,53 @@ flag, or multi-page pool.
 
 Do not pass PowerShell scriptblocks to Playwright `RouteAsync`, event handlers, `ExposeBindingAsync`, or similar callback APIs. Playwright may invoke them without the originating PowerShell runspace, causing hangs. Dumplings uses compiled C# route callbacks and waits synchronously with `Wait-PlaywrightTask`.
 
+### WebDriver
+
+Use the scoped API so task completion and runner timeouts always release the
+process-wide driver lease. Task scraping uses Playwright, so this applies only
+when a workflow needs Selenium semantics:
+
+```powershell
+$Title = Use-EdgeDriver -Headless {
+  param($Driver)
+
+  $Driver.Navigate().GoToUrl('https://example.com/')
+  $Driver.FindElement([OpenQA.Selenium.By]::TagName('title')).Text
+}
+```
+
+`Use-FirefoxDriver` provides the same contract, and both accept `-Screenshot`.
+The module never downloads a driver: `msedgedriver.exe` and `geckodriver.exe`
+are resolved from `EDGEWEBDRIVER` / `GECKOWEBDRIVER` and then from `PATH`, and a
+missing driver throws instead of starting a session. See the
+[WebDriver documentation](https://docs.microsoft.com/microsoft-edge/webdriver/#download-microsoft-edge-webdriver)
+for the version rule.
+
+`Utilities\WebDriverRuntime.psm1` provisions a driver that matches the
+installed browser and caches it under `%LOCALAPPDATA%\Dumplings\WebDriver`:
+
+```powershell
+Import-Module .\Modules\PackageModule\Utilities\WebDriverRuntime.psm1 -Force
+
+$Driver = Install-DumplingsWebDriver -Browser Edge
+$env:EDGEWEBDRIVER = $Driver.Directory
+```
+
+A cached build is reused unless `-Force` is passed, and `-CacheRoot` moves the
+cache. Edge selects the build published for the installed major version;
+Firefox uses the newest geckodriver release, because geckodriver has an
+independent version line.
+
+The suites need no driver. The real-session cases run only with the switch
+below, which is why `Tests\Services` reports three skips by default: two
+WebDriver cases plus one Playwright case gated by
+`DUMPLINGS_PLAYWRIGHT_INTEGRATION`.
+
+```powershell
+$env:DUMPLINGS_WEBDRIVER_INTEGRATION = '1'
+Invoke-Pester .\Modules\PackageModule\Tests\Services\WebDriver.Tests.ps1
+```
+
 ## Directory Layout
 
 ```text
@@ -226,7 +273,7 @@ PackageModule/
 +-- Libraries/         # categorized PowerShell modules
 +-- Models/            # task classes
 +-- Tests/              # domain Pester suites plus non-discoverable Support helpers
-`-- Utilities/          # standalone maintenance and validation scripts
+`-- Utilities/          # standalone runtime modules and maintenance scripts
 ```
 
 See [`Assets/README.md`](Assets/README.md) before adding or moving runtime assets. Each owning module selects asset versions and load order. Do not discover assets recursively.
@@ -254,6 +301,8 @@ Run a focused suite while developing:
 Invoke-Pester .\Modules\PackageModule\Tests\WinGet\WinGetManifestValidation.Tests.ps1
 Invoke-Pester .\Modules\PackageModule\Tests\Installers\ChromiumSetup.Tests.ps1
 ```
+
+Browser integration cases run only when their environment switch is set. See [WebDriver](#webdriver) for the driver each switch needs.
 
 Run ScriptAnalyzer on modified PowerShell modules and use the repository's accepted exclusion rules where documented:
 
