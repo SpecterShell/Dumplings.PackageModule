@@ -3,6 +3,7 @@
 BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Runtime.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'Binary.psm1') -Force
+  Import-Module (Join-Path -Path $Script:DumplingsModuleRoot -ChildPath 'Libraries\Infrastructure\InstallerDiagnostics.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Infrastructure' 'InstallerEvidence.psm1') -Force
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries' 'Installers' 'MSI.psm1') -Force
 }
@@ -50,7 +51,7 @@ Describe 'MSI Apps & Features parser' {
     $Info.PSObject.Properties.Name[0..13] | Should -Be @(
       'Path', 'InstallerType', 'ProductCode', 'UpgradeCode', 'DisplayName', 'DisplayVersion',
       'Publisher', 'Scope', 'DefaultInstallLocation', 'WritesAppsAndFeaturesEntry',
-      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Warnings', 'UnresolvedFields'
+      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Diagnostics', 'UnresolvedFields'
     )
     $Info.PSObject.Properties.Name | Should -Not -Contain 'ProductName'
     $Info.PSObject.Properties.Name | Should -Not -Contain 'ProductVersion'
@@ -59,9 +60,9 @@ Describe 'MSI Apps & Features parser' {
     $Info.DisplayVersion | Should -Not -BeNullOrEmpty
     $Info.PSObject.Properties.Name | Should -Contain 'Scope'
     $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
-    $Info.Warnings | Should -Be @()
+    $Info.Diagnostics | Should -Be @()
     $Info.UnresolvedFields | Should -Be @()
-    $Info.Warnings.GetType() | Should -Be ([string[]])
+    $Info.Diagnostics.GetType() | Should -Be ([object[]])
     $Info.UnresolvedFields.GetType() | Should -Be ([string[]])
   }
 
@@ -201,7 +202,7 @@ Describe 'MSI builder and install-location parser' {
       $Requirement.VerifierAction.Action | Should -Be 'ISVerifyScriptingRuntime'
       $Requirement.SequenceConditions | Should -Be 'NOT AFTERREBOOT AND NOT ISSETUPDRIVEN'
       $Requirement.Evidence | Should -Contain 'ISVerifyScriptingRuntime custom action'
-      $Requirement.Warnings | Should -BeNullOrEmpty
+      $Requirement.Diagnostics | Should -BeNullOrEmpty
     }
 
     It 'Should classify Chromium enterprise MSIs compiled from WiX source' {
@@ -234,6 +235,57 @@ Describe 'MSI builder and install-location parser' {
       }
 
       Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo | Should -Be 'WiX'
+    }
+
+    It 'Should prioritize an explicit WiX Program Name over application-authored InstallShield evidence' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties          = @{
+          ISUIMODE  = 'Full'
+          ISUPGRADE = '0'
+        }
+        Tables              = @('Property')
+        CustomActionRows    = @([pscustomobject]@{ Action = 'ISInitAllUsers'; Source = 'ALLUSERS'; Target = '2' })
+        UpgradeRows         = @()
+        LaunchConditionRows = @()
+        SummaryInfo         = [pscustomobject]@{
+          CreatingApp = 'Windows Installer XML Toolset (3.14.1.8722)'
+          Comments    = $null
+        }
+      }
+
+      $Evidence = Get-MsiBuilderEvidenceFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $Evidence.Builder | Should -Be 'WiX'
+      $Evidence.Source | Should -Be 'SummaryInformation.CreatingApp'
+    }
+
+    It 'Should prioritize exact WiX fallback evidence over unrelated InstallShield-prefixed properties' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties          = @{ WIXUI_INSTALLDIR = 'INSTALLDIR'; ISUPGRADE = '0' }
+        Tables              = @('Property')
+        CustomActionRows    = @()
+        UpgradeRows         = @()
+        LaunchConditionRows = @()
+        SummaryInfo         = [pscustomobject]@{ CreatingApp = 'Publisher build system'; Comments = $null }
+      }
+
+      $Evidence = Get-MsiBuilderEvidenceFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $Evidence.Builder | Should -Be 'WiX'
+      $Evidence.Source | Should -Be 'Property'
+    }
+
+    It 'Should not classify a builder from table names alone' {
+      $StaticTableInfo = [pscustomobject]@{
+        Properties          = @{}
+        Tables              = @('AI_ThemeStyle', 'InstallShield', 'WixFeature', 'WiseCustomData')
+        CustomActionRows    = @()
+        UpgradeRows         = @()
+        LaunchConditionRows = @()
+        SummaryInfo         = [pscustomobject]@{ CreatingApp = $null; Comments = $null }
+      }
+
+      $Evidence = Get-MsiBuilderEvidenceFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $Evidence.Builder | Should -Be 'Unknown'
+      $Evidence.Source | Should -BeNullOrEmpty
     }
 
     It 'Should read an exact Advanced Installer builder version only from Summary Information' {
@@ -413,6 +465,16 @@ Describe 'MSI builder and install-location parser' {
     $Info.AppsAndFeaturesInstallerType | Should -Be 'wix'
     $Info.HidesMsiAppsAndFeaturesEntry | Should -BeFalse
     $Info.HasCustomAppsAndFeaturesEntry | Should -BeFalse
+  }
+
+  It 'Should prioritize Oracle JDK WiX Summary Information over InstallShield-named fallback evidence' {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/MSI/Oracle.JDK.25/25.0.4.1/jdk-25.0.4.1_windows-x64_bin.msi' -Uri 'https://download.oracle.com/java/25/archive/jdk-25.0.4.1_windows-x64_bin.msi' -Sha256 '5F0FC729FCB01C816784D93593DAF44B12054431B1D3BA7ED8AB13E4B37EB813'
+
+    $Info = Get-MsiInstallerInfo -Path $Fixture
+
+    $Info.InstallerBuilder | Should -Be 'WiX'
+    $Info.InstallerBuilderSource | Should -Be 'SummaryInformation.CreatingApp'
+    $Info.SummaryCreatingApplication | Should -Be 'Windows Installer XML Toolset (3.11.1.2318)'
   }
 }
 

@@ -2,11 +2,16 @@
 #
 # Static Tauri application-executable asset parser.
 # Sources:
+# - https://github.com/tauri-apps/tauri/blob/tauri-v1.0.0/core/tauri-codegen/src/embedded_assets.rs
+# - https://github.com/tauri-apps/tauri/blob/tauri-v1.0.0/core/tauri/scripts/pattern.js
+# - https://github.com/tauri-apps/tauri/blob/tauri-v1.0.0/core/tauri/src/manager.rs
 # - https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-codegen/src/embedded_assets.rs
 # - https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-codegen/src/context.rs
 # - https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-utils/src/assets.rs
 # - https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-utils/src/platform.rs
 # - https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle.rs
+# - https://github.com/tauri-apps/tauri/blob/tauri-v2.9.5/crates/tauri-bundler/src/bundle/windows/util.rs
+# - https://github.com/tauri-apps/tauri/blob/tauri-v2.9.5/crates/tauri-utils/src/platform.rs
 # Behavioral reference only: https://github.com/Mas0nShi/tauri-dumper
 #
 # Binary structure consumed by this module:
@@ -15,12 +20,15 @@
 # +-- DOS/PE/COFF headers                 machine, image base, subsystem
 # +-- section table                       VA <-> file-offset mapping
 # +-- VERSIONINFO resource                product/company/version strings
-# `-- .rdata
+# +-- .taubndl (Tauri 2.7 through 2.9)    &str pointer and three-byte bundle tag
+# +-- writable initialized data            mutable &str selecting the Tauri 2.10+ runtime bundle token
+# `-- read-only initialized data
 #     +-- Rust PHF entry slice            one or more contiguous maps
 #     |   `-- (&str, &[u8]) records
+#     +-- HTML CSP PHF values             CspHash::Script(&str) slices
 #     +-- rooted UTF-8 asset names        /index.html, /assets/app.js, ...
 #     +-- Brotli or raw asset bytes       include_bytes! output
-#     `-- Tauri literals                  bundle type and framework markers
+#     `-- Tauri literals                  v1/v2 framework and bundle markers
 #
 # Pointer-sized PHF record (record-relative offsets, little endian):
 #
@@ -41,13 +49,47 @@ $Script:TauriMaximumNameBytes = 4096
 $Script:TauriMaximumStoredAssetBytes = 1073741824
 $Script:TauriMaximumExpandedAssetBytes = 1073741824
 $Script:TauriMaximumMeasuredExpandedBytes = 8589934592
+$Script:TauriMaximumMeasuredStoredBytes = 8589934592
 $Script:TauriMaximumIdentifierCandidates = 128
-$Script:TauriBundleMarkerPrefix = '__TAURI_BUNDLE_TYPE_VAR_'
+$Script:TauriMaximumScannedDataBytes = 1073741824
+$Script:TauriMaximumRecordCandidateOffsets = 67108864
+$Script:TauriMaximumDataReferenceCandidates = 16777216
+$Script:TauriMaximumBundleReferences = 64
+$Script:TauriMaximumMarkerOccurrences = 32
+$Script:TauriMaximumCspHashValidationEntries = 65536
 
 # Compile the bounded record scanner once. Installer infrastructure has already
 # been loaded by PackageModule's deterministic module order.
-  $TauriScannerSource = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets', 'Source', 'Tauri', 'TauriExecutableScanner.cs'
+$TauriScannerSource = Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets', 'Source', 'Tauri', 'TauriExecutableScanner.cs'
 $null = Import-InstallerManagedSource -Path $TauriScannerSource -TypeName 'Dumplings.Tauri.TauriExecutableScanner'
+
+function Test-TauriReadOnlyDataSection {
+  <#
+  .SYNOPSIS
+    Test whether a PE section can contain immutable Tauri records and strings.
+  #>
+  [OutputType([bool])]
+  param ([Parameter(Mandatory)][psobject]$Section)
+
+  if ($Section.Name -eq '.rdata') { return $true }
+  $Characteristics = [uint32]$Section.Characteristics
+  return ($Characteristics -band 0x00000040) -ne 0 -and ($Characteristics -band 0x40000000) -ne 0 -and
+  ($Characteristics -band 0xA0000000L) -eq 0
+}
+
+function Test-TauriWritableDataSection {
+  <#
+  .SYNOPSIS
+    Test whether a PE section can contain Tauri's mutable runtime bundle string.
+  #>
+  [OutputType([bool])]
+  param ([Parameter(Mandatory)][psobject]$Section)
+
+  if ($Section.Name -eq '.data') { return $true }
+  $Characteristics = [uint32]$Section.Characteristics
+  return ($Characteristics -band 0x00000040) -ne 0 -and ($Characteristics -band 0x80000000L) -ne 0 -and
+  ($Characteristics -band 0x20000000) -eq 0
+}
 
 function ConvertTo-TauriPeSectionArray {
   <#
@@ -64,10 +106,11 @@ function ConvertTo-TauriPeSectionArray {
   $Sections = [Collections.Generic.List[Dumplings.Tauri.TauriPeSection]]::new()
   foreach ($Section in $Layout.Sections) {
     $Sections.Add([Dumplings.Tauri.TauriPeSection]@{
-        Name           = [string]$Section.Name
-        VirtualAddress = [uint32]$Section.VirtualAddress
-        RawOffset      = [uint32]$Section.RawOffset
-        RawSize        = [uint32]$Section.RawSize
+        Name            = [string]$Section.Name
+        VirtualAddress  = [uint32]$Section.VirtualAddress
+        RawOffset       = [uint32]$Section.RawOffset
+        RawSize         = [uint32]$Section.RawSize
+        Characteristics = [uint32]$Section.Characteristics
       })
   }
   return $Sections.ToArray()
@@ -88,7 +131,7 @@ function Open-TauriExecutableContext {
   param ([Parameter(Mandatory)][string]$Path)
 
   $ResolvedPath = Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf
-  $Stream = [IO.File]::Open($ResolvedPath, 'Open', 'Read', 'ReadWrite')
+  $Stream = [IO.File]::Open($ResolvedPath, 'Open', 'Read', 'Read')
   try {
     $Layout = Get-PELayout -Stream $Stream
     if (-not $Layout) { throw 'The file is not a supported PE image.' }
@@ -105,7 +148,16 @@ function Open-TauriExecutableContext {
       throw 'The PE machine and optional-header pointer width are inconsistent.'
     }
     $Sections = ConvertTo-TauriPeSectionArray -Layout $Layout
-    if (-not ($Sections.Name -contains '.rdata')) { throw 'The PE does not contain the .rdata section required for generated Tauri assets.' }
+    if (@($Sections | Where-Object { Test-TauriReadOnlyDataSection $_ }).Count -eq 0) {
+      throw 'The PE does not contain a read-only initialized-data section required for generated Tauri assets.'
+    }
+    $ScannedDataBytes = 0L
+    foreach ($Section in $Sections | Where-Object { (Test-TauriReadOnlyDataSection $_) -or (Test-TauriWritableDataSection $_) }) {
+      if ([long]$Section.RawSize -gt $Script:TauriMaximumScannedDataBytes - $ScannedDataBytes) {
+        throw "The Tauri PE data scan exceeds the $Script:TauriMaximumScannedDataBytes-byte limit."
+      }
+      $ScannedDataBytes += [long]$Section.RawSize
+    }
 
     return [pscustomobject]@{
       Path         = $ResolvedPath
@@ -122,6 +174,121 @@ function Open-TauriExecutableContext {
   }
 }
 
+function Read-TauriLegacyBundleMarker {
+  <#
+  .SYNOPSIS
+    Read the Tauri 2.7 through 2.9 bundle tag through its dedicated PE section.
+  .PARAMETER Context
+    Open Tauri PE context. The function restores the stream position after bounded reads.
+  .OUTPUTS
+    A validated bundle marker for each source-shaped .taubndl section.
+  #>
+  [OutputType([pscustomobject[]])]
+  param ([Parameter(Mandatory)][psobject]$Context)
+
+  $Markers = [Collections.Generic.List[object]]::new()
+  foreach ($BundleSection in $Context.Sections | Where-Object Name -EQ '.taubndl') {
+    $FatPointerSize = $Context.PointerSize * 2
+    if ([long]$BundleSection.RawSize -lt $FatPointerSize -or [long]$BundleSection.RawOffset -gt $Context.Stream.Length - $FatPointerSize) { continue }
+
+    $Pointer = if ($Context.PointerSize -eq 4) {
+      [uint64](Read-PEUInt32 -Stream $Context.Stream -Offset $BundleSection.RawOffset)
+    } else {
+      Read-PEUInt64 -Stream $Context.Stream -Offset $BundleSection.RawOffset
+    }
+    $Length = if ($Context.PointerSize -eq 4) {
+      [uint64](Read-PEUInt32 -Stream $Context.Stream -Offset ($BundleSection.RawOffset + $Context.PointerSize))
+    } else {
+      Read-PEUInt64 -Stream $Context.Stream -Offset ($BundleSection.RawOffset + $Context.PointerSize)
+    }
+    if ($Length -ne 3 -or $Pointer -lt [uint64]$Context.Layout.ImageBase) { continue }
+
+    $Rva64 = $Pointer - [uint64]$Context.Layout.ImageBase
+    if ($Rva64 -gt [uint32]::MaxValue) { continue }
+    $Rva = [uint32]$Rva64
+    $TargetSection = $Context.Sections | Where-Object {
+      (Test-TauriReadOnlyDataSection $_) -and [uint64]$_.RawSize -ge 3 -and
+      $Rva -ge [uint32]$_.VirtualAddress -and
+      [uint64]($Rva - [uint32]$_.VirtualAddress) -le [uint64]$_.RawSize - 3
+    } | Select-Object -First 1
+    if (-not $TargetSection) { continue }
+
+    $ValueOffset = [long]$TargetSection.RawOffset + ($Rva - [uint32]$TargetSection.VirtualAddress)
+    if ($ValueOffset -lt 0 -or $ValueOffset -gt $Context.Stream.Length - 3) { continue }
+    $Value = [Text.Encoding]::ASCII.GetString((Read-PEFileBytes -Stream $Context.Stream -Offset $ValueOffset -Count 3))
+    $Marker = switch ($Value) {
+      'NSS' { [pscustomobject]@{ Name = 'BundleTypeNsis'; BundleType = 'NSIS' } }
+      'MSI' { [pscustomobject]@{ Name = 'BundleTypeMsi'; BundleType = 'MSI' } }
+      'UNK' { [pscustomobject]@{ Name = 'BundleTypeUnknown'; BundleType = 'Unknown' } }
+      default { $null }
+    }
+    if ($Marker) {
+      $Markers.Add([pscustomobject]@{
+          Name            = $Marker.Name
+          Value           = $Value
+          Offset          = $ValueOffset
+          BundleType      = $Marker.BundleType
+          Format          = 'LegacySection'
+          HeaderOffset    = [long]$BundleSection.RawOffset
+          ReferenceOffset = [long]$BundleSection.RawOffset
+          IsRuntimeValue  = $true
+        })
+    }
+  }
+  return $Markers.ToArray()
+}
+
+function Resolve-TauriLongBundleMarkerReference {
+  <#
+  .SYNOPSIS
+    Identify the long bundle token referenced by Tauri's mutable runtime string.
+  .PARAMETER Context
+    Open Tauri PE context.
+  .PARAMETER Marker
+    Long-token and framework markers recovered from read-only data.
+  .PARAMETER TokenDefinition
+    Source-backed long bundle-token definitions.
+  .OUTPUTS
+    The input marker records with runtime-reference evidence populated.
+  #>
+  [OutputType([pscustomobject[]])]
+  param (
+    [Parameter(Mandatory)][psobject]$Context,
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Marker,
+    [Parameter(Mandatory)][object[]]$TokenDefinition
+  )
+
+  $Resolved = [Collections.Generic.List[object]]::new()
+  foreach ($Item in $Marker) { $Resolved.Add($Item) }
+  $References = @([Dumplings.Tauri.TauriExecutableScanner]::FindBundleTypeReferences(
+      $Context.Stream, [uint64]$Context.Layout.ImageBase, $Context.PointerSize, $Context.Sections,
+      [string[]]$TokenDefinition.Value, $Script:TauriMaximumBundleReferences, $Script:TauriMaximumScannedDataBytes,
+      $Script:TauriMaximumDataReferenceCandidates))
+  foreach ($Reference in $References) {
+    $Definition = $TokenDefinition | Where-Object Value -CEQ $Reference.Value | Select-Object -First 1
+    if (-not $Definition) { continue }
+    $Candidate = $Resolved | Where-Object {
+      $_.Format -eq 'LongToken' -and -not $_.IsRuntimeValue -and [long]$_.Offset -eq [long]$Reference.Offset
+    } | Select-Object -First 1
+    if (-not $Candidate) {
+      $Candidate = [pscustomobject]@{
+        Name            = $Definition.Name
+        Value           = $Definition.Value
+        Offset          = [long]$Reference.Offset
+        BundleType      = $Definition.BundleType
+        Format          = 'LongToken'
+        HeaderOffset    = $null
+        ReferenceOffset = $null
+        IsRuntimeValue  = $false
+      }
+      $Resolved.Add($Candidate)
+    }
+    $Candidate.ReferenceOffset = [long]$Reference.ReferenceOffset
+    $Candidate.IsRuntimeValue = $true
+  }
+  return $Resolved.ToArray()
+}
+
 function Find-TauriExecutableMarker {
   <#
   .SYNOPSIS
@@ -129,34 +296,61 @@ function Find-TauriExecutableMarker {
   .PARAMETER Context
     Open Tauri PE context. The function restores the stream position after every bounded search.
   .OUTPUTS
-    Marker records with name, literal value, and absolute file offset.
+    A catalog containing marker records and definitions truncated by the evidence cap.
   #>
-  [OutputType([pscustomobject[]])]
+  [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][psobject]$Context)
 
   $MarkerDefinitions = @(
-    [pscustomobject]@{ Name = 'AssetOrigin'; Value = 'tauri://localhost' }
-    [pscustomobject]@{ Name = 'Internals'; Value = '__TAURI_INTERNALS__' }
-    [pscustomobject]@{ Name = 'BundleTypeUnknown'; Value = '__TAURI_BUNDLE_TYPE_VAR_UNK' }
-    [pscustomobject]@{ Name = 'BundleTypeNsis'; Value = '__TAURI_BUNDLE_TYPE_VAR_NSS' }
-    [pscustomobject]@{ Name = 'BundleTypeMsi'; Value = '__TAURI_BUNDLE_TYPE_VAR_MSI' }
+    [pscustomobject]@{ Name = 'AssetOrigin'; Value = 'tauri://localhost'; BundleType = $null; Format = 'StringLiteral' }
+    [pscustomobject]@{ Name = 'LegacyPattern'; Value = '__TAURI_PATTERN__'; BundleType = $null; Format = 'StringLiteral' }
+    [pscustomobject]@{ Name = 'LegacyMetadata'; Value = '__TAURI_METADATA__'; BundleType = $null; Format = 'StringLiteral' }
+    [pscustomobject]@{ Name = 'Internals'; Value = '__TAURI_INTERNALS__'; BundleType = $null; Format = 'StringLiteral' }
+    [pscustomobject]@{ Name = 'BundleTypeUnknown'; Value = '__TAURI_BUNDLE_TYPE_VAR_UNK'; BundleType = 'Unknown'; Format = 'LongToken' }
+    [pscustomobject]@{ Name = 'BundleTypeNsis'; Value = '__TAURI_BUNDLE_TYPE_VAR_NSS'; BundleType = 'NSIS'; Format = 'LongToken' }
+    [pscustomobject]@{ Name = 'BundleTypeMsi'; Value = '__TAURI_BUNDLE_TYPE_VAR_MSI'; BundleType = 'MSI'; Format = 'LongToken' }
   )
+  $LongTokenDefinitions = @($MarkerDefinitions | Where-Object Format -EQ 'LongToken')
   $Markers = [Collections.Generic.List[object]]::new()
-  foreach ($Section in $Context.Sections | Where-Object Name -EQ '.rdata') {
-    foreach ($Definition in $MarkerDefinitions) {
+  $TruncatedDefinitions = [Collections.Generic.List[string]]::new()
+  foreach ($Marker in @(Read-TauriLegacyBundleMarker -Context $Context)) { $Markers.Add($Marker) }
+  foreach ($Definition in $MarkerDefinitions) {
+    $DefinitionOffsets = [Collections.Generic.List[long]]::new()
+    foreach ($Section in $Context.Sections | Where-Object { Test-TauriReadOnlyDataSection $_ }) {
+      $Remaining = ($Script:TauriMaximumMarkerOccurrences + 1) - $DefinitionOffsets.Count
+      if ($Remaining -le 0) { break }
       $Pattern = [Text.Encoding]::ASCII.GetBytes($Definition.Value)
-      foreach ($Offset in @(Find-BinaryPattern -Stream $Context.Stream -Pattern $Pattern -StartOffset $Section.RawOffset -Length $Section.RawSize -Maximum 32)) {
-        $Markers.Add([pscustomobject]@{ Name = $Definition.Name; Value = $Definition.Value; Offset = [long]$Offset })
+      foreach ($Offset in @(Find-BinaryPattern -Stream $Context.Stream -Pattern $Pattern -StartOffset $Section.RawOffset -Length $Section.RawSize -Maximum $Remaining)) {
+        $DefinitionOffsets.Add([long]$Offset)
       }
     }
+    if ($Definition.Format -eq 'LongToken' -and $DefinitionOffsets.Count -gt $Script:TauriMaximumMarkerOccurrences) {
+      $TruncatedDefinitions.Add($Definition.Name)
+    }
+    foreach ($Offset in $DefinitionOffsets | Select-Object -First $Script:TauriMaximumMarkerOccurrences) {
+      $Markers.Add([pscustomobject]@{
+          Name            = $Definition.Name
+          Value           = $Definition.Value
+          Offset          = [long]$Offset
+          BundleType      = $Definition.BundleType
+          Format          = $Definition.Format
+          HeaderOffset    = $null
+          ReferenceOffset = $null
+          IsRuntimeValue  = $false
+        })
+    }
   }
-  return @($Markers | Sort-Object Offset)
+  $ResolvedMarkers = @(Resolve-TauriLongBundleMarkerReference -Context $Context -Marker $Markers.ToArray() -TokenDefinition $LongTokenDefinitions | Sort-Object Offset, ReferenceOffset)
+  return [pscustomobject]@{
+    Markers              = $ResolvedMarkers
+    TruncatedDefinitions = $TruncatedDefinitions.ToArray()
+  }
 }
 
 function Split-TauriAssetRecordRun {
   <#
   .SYNOPSIS
-    Group scanner records into contiguous Rust PHF entry slices.
+    Group scanner records into Rust PHF entry slices.
   .PARAMETER Record
     Structurally valid candidate records sorted by absolute header offset.
   .PARAMETER RecordSize
@@ -172,12 +366,20 @@ function Split-TauriAssetRecordRun {
 
   $Runs = [Collections.Generic.List[object]]::new()
   $Current = [Collections.Generic.List[object]]::new()
+  $CurrentNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
   foreach ($Item in $Record | Sort-Object HeaderOffset) {
-    if ($Current.Count -gt 0 -and [long]$Item.HeaderOffset -ne ([long]$Current[$Current.Count - 1].HeaderOffset + $RecordSize)) {
+    # PHF map keys are unique. A repeated key at the next record is therefore
+    # the boundary between adjacent generated maps even when the linker leaves
+    # no padding between their entry slices.
+    if ($Current.Count -gt 0 -and (
+        [long]$Item.HeaderOffset -ne ([long]$Current[$Current.Count - 1].HeaderOffset + $RecordSize) -or
+        $CurrentNames.Contains([string]$Item.Name))) {
       $Runs.Add([pscustomobject]@{ Records = $Current.ToArray() })
       $Current = [Collections.Generic.List[object]]::new()
+      $CurrentNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     }
     $Current.Add($Item)
+    $null = $CurrentNames.Add([string]$Item.Name)
   }
   if ($Current.Count -gt 0) { $Runs.Add([pscustomobject]@{ Records = $Current.ToArray() }) }
   return $Runs.ToArray()
@@ -215,6 +417,8 @@ function Measure-TauriBrotliPayload {
     Stored payload length in bytes.
   .PARAMETER MaximumExpandedBytes
     Maximum decompressed bytes accepted for this asset.
+  .PARAMETER MaximumStoredBytes
+    Maximum stored bytes read while probing this asset.
   .OUTPUTS
     A result containing Success, ExpandedSize, and an error string for classification.
   #>
@@ -223,10 +427,11 @@ function Measure-TauriBrotliPayload {
     [Parameter(Mandatory)][IO.Stream]$Stream,
     [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Offset,
     [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Length,
-    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes
+    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes,
+    [ValidateRange(1, [long]::MaxValue)][long]$MaximumStoredBytes = [long]::MaxValue
   )
 
-  return [Dumplings.Tauri.TauriExecutableScanner]::MeasureBrotli($Stream, $Offset, $Length, $MaximumExpandedBytes)
+  return [Dumplings.Tauri.TauriExecutableScanner]::MeasureBrotli($Stream, $Offset, $Length, $MaximumExpandedBytes, $MaximumStoredBytes)
 }
 
 function Test-TauriRawEntryPage {
@@ -292,6 +497,92 @@ function Test-TauriRawPayloadEvidence {
   return $false
 }
 
+function Resolve-TauriVirtualAddressOffset {
+  <#
+  .SYNOPSIS
+    Resolve a bounded absolute PE virtual-address range to its file offset.
+  #>
+  [OutputType([long])]
+  param (
+    [Parameter(Mandatory)][psobject]$Context,
+    [Parameter(Mandatory)][uint64]$VirtualAddress,
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$Length,
+    [switch]$ReadOnlyData
+  )
+
+  if ($VirtualAddress -lt [uint64]$Context.Layout.ImageBase) { return -1L }
+  $Rva = $VirtualAddress - [uint64]$Context.Layout.ImageBase
+  foreach ($Section in $Context.Sections) {
+    if ($ReadOnlyData -and -not (Test-TauriReadOnlyDataSection $Section)) { continue }
+    if ($Rva -lt [uint64]$Section.VirtualAddress) { continue }
+    $Delta = $Rva - [uint64]$Section.VirtualAddress
+    if ($Delta -gt [uint64]$Section.RawSize -or [uint64]$Length -gt [uint64]$Section.RawSize - $Delta) { continue }
+    $Offset = [uint64]$Section.RawOffset + $Delta
+    if ($Offset -gt [uint64][long]::MaxValue -or $Offset -gt [uint64]$Context.Stream.Length -or
+      [uint64]$Length -gt [uint64]$Context.Stream.Length - $Offset) { return -1L }
+    return [long]$Offset
+  }
+  return -1L
+}
+
+function Get-TauriHtmlCspHashMapEvidence {
+  <#
+  .SYNOPSIS
+    Validate the Rust CspHash slices used by Tauri's HTML-to-hash PHF map.
+  .PARAMETER Context
+    Open Tauri PE context.
+  .PARAMETER Record
+    One contiguous candidate PHF record run.
+  .PARAMETER ValidationWork
+    Aggregate count of CSP enum elements examined across the current parser operation.
+  .PARAMETER AllowEmptySlice
+    Accept zero-element slices when matching non-empty HTML records prove an adjacent generated map boundary.
+  .OUTPUTS
+    Structural evidence when every value is a valid CspHash::Script slice.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$Context,
+    [Parameter(Mandatory)][object[]]$Record,
+    [Parameter(Mandatory)][ref]$ValidationWork,
+    [switch]$AllowEmptySlice
+  )
+
+  if ($Record.Count -eq 0 -or @($Record | Where-Object Name -NotMatch '(?i)\.html?$').Count -gt 0) { return $null }
+  $ElementSize = $Context.PointerSize * 3
+  $HashCount = 0L
+  foreach ($Item in $Record) {
+    $Count = [long]$Item.StoredSize
+    if ($Count -eq 0) {
+      if (-not $AllowEmptySlice -or $Item.DataOffset -ge 0) { return $null }
+      continue
+    }
+    if ($Count -gt 4096 -or $Item.DataOffset -lt 0 -or $Count -gt [long]::MaxValue / $ElementSize) { return $null }
+    $SliceLength = $Count * $ElementSize
+    if ([long]$Item.DataOffset -gt $Context.Stream.Length - $SliceLength) { return $null }
+    for ($Index = 0L; $Index -lt $Count; $Index++) {
+      if ([long]$ValidationWork.Value -ge $Script:TauriMaximumCspHashValidationEntries) {
+        throw "Tauri CSP hash validation exceeds the $Script:TauriMaximumCspHashValidationEntries-entry parser work limit."
+      }
+      $ValidationWork.Value = [long]$ValidationWork.Value + 1
+      $ElementOffset = [long]$Item.DataOffset + ($Index * $ElementSize)
+      $Discriminant = if ($Context.PointerSize -eq 4) { [uint64](Read-PEUInt32 -Stream $Context.Stream -Offset $ElementOffset) } else { Read-PEUInt64 -Stream $Context.Stream -Offset $ElementOffset }
+      if ($Discriminant -ne 0) { return $null }
+      $StringPointerOffset = $ElementOffset + $Context.PointerSize
+      $StringPointer = if ($Context.PointerSize -eq 4) { [uint64](Read-PEUInt32 -Stream $Context.Stream -Offset $StringPointerOffset) } else { Read-PEUInt64 -Stream $Context.Stream -Offset $StringPointerOffset }
+      $StringLengthOffset = $StringPointerOffset + $Context.PointerSize
+      $StringLength = if ($Context.PointerSize -eq 4) { [uint64](Read-PEUInt32 -Stream $Context.Stream -Offset $StringLengthOffset) } else { Read-PEUInt64 -Stream $Context.Stream -Offset $StringLengthOffset }
+      if ($StringLength -ne 53) { return $null }
+      $StringOffset = Resolve-TauriVirtualAddressOffset -Context $Context -VirtualAddress $StringPointer -Length 53 -ReadOnlyData
+      if ($StringOffset -lt 0) { return $null }
+      $Hash = [Text.Encoding]::ASCII.GetString((Read-PEFileBytes -Stream $Context.Stream -Offset $StringOffset -Count 53))
+      if ($Hash -cnotmatch "^'sha256-[A-Za-z0-9+/]{43}='$") { return $null }
+    }
+    $HashCount += $Count
+  }
+  return [pscustomobject]@{ HashCount = $HashCount; Directive = 'script-src'; ElementSize = $ElementSize }
+}
+
 function Get-TauriAssetCatalog {
   <#
   .SYNOPSIS
@@ -316,65 +607,101 @@ function Get-TauriAssetCatalog {
       $Context.Sections,
       $Script:TauriMaximumNameBytes,
       $Script:TauriMaximumStoredAssetBytes,
-      $Script:TauriMaximumAssetCount
+      $Script:TauriMaximumAssetCount,
+      $Script:TauriMaximumScannedDataBytes,
+      $Script:TauriMaximumRecordCandidateOffsets
     ))
   $Runs = @(Split-TauriAssetRecordRun -Record $CandidateRecords -RecordSize $Context.RecordSize)
   $Maps = [Collections.Generic.List[object]]::new()
   $AuxiliaryMaps = [Collections.Generic.List[object]]::new()
   $Assets = [Collections.Generic.List[object]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
   $MeasuredExpandedBytes = 0L
+  $MeasuredBrotliExpandedBytes = 0L
+  $MeasuredBrotliStoredBytes = 0L
+  $CspHashValidationWork = 0L
+  $MeasurementCache = @{}
+  $HasRejectedMap = $false
+  $NonEmptyRecordNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($Record in $CandidateRecords | Where-Object StoredSize -GT 0) { $null = $NonEmptyRecordNames.Add([string]$Record.Name) }
 
   foreach ($Run in $Runs) {
     $Records = @($Run.Records)
     $EntryRecords = @($Records | Where-Object Name -Match '(?i)/(?:index|main)(?:\.[^/]+)?\.html?$|(?i)/index\.html?$')
     $HasFrameworkMarker = $Markers.Count -gt 0
-    if ($EntryRecords.Count -eq 0 -and $Records.Count -lt 2) { continue }
+    if ($EntryRecords.Count -eq 0 -and $Records.Count -lt 2 -and -not $HasFrameworkMarker) { continue }
 
     # An unsafe member inside an otherwise coherent record run means the map
     # cannot be exported completely; rejecting it avoids partial-map recovery.
     $UnsafeRecords = @($Records | Where-Object { -not $_.IsSafeName -or -not (Test-TauriAssetRelativePath -Name $_.Name) })
     if ($UnsafeRecords.Count -gt 0) {
-      throw "A Tauri asset map contains an unsafe path: $($UnsafeRecords[0].Name)"
+      if ($EntryRecords.Count -eq 0 -and $Records.Count -lt 2) { continue }
+      $HasRejectedMap = $true
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.AssetMap.UnsafePath' -Source 'Tauri' `
+            -Message "A structurally coherent Tauri asset map contains an unsafe path and was rejected as a complete unit: $($UnsafeRecords[0].Name)" `
+            -Kind Invalid -Areas @('Extraction', 'Security') -AffectedFields 'EmbeddedAssets' `
+            -Evidence ([pscustomobject]@{ HeaderOffset = [long]$Records[0].HeaderOffset; Paths = [string[]]$UnsafeRecords.Name })))
+      continue
     }
 
     $Measurements = [Collections.Generic.List[object]]::new()
     foreach ($Record in $Records) {
-      $Measurements.Add((Measure-TauriBrotliPayload -Stream $Context.Stream -Offset ([Math]::Max(0L, [long]$Record.DataOffset)) `
-            -Length $Record.StoredSize -MaximumExpandedBytes $Script:TauriMaximumExpandedAssetBytes))
+      $MeasurementKey = "$([long]$Record.DataOffset):$([long]$Record.StoredSize)"
+      if ($MeasurementCache.ContainsKey($MeasurementKey)) {
+        $Measurements.Add($MeasurementCache[$MeasurementKey])
+        continue
+      }
+      $RemainingExpandedWork = $Script:TauriMaximumMeasuredExpandedBytes - $MeasuredBrotliExpandedBytes
+      $RemainingStoredWork = $Script:TauriMaximumMeasuredStoredBytes - $MeasuredBrotliStoredBytes
+      if ($RemainingExpandedWork -le 0 -or $RemainingStoredWork -le 0) {
+        throw 'Tauri Brotli validation exceeds the cumulative parser work limit.'
+      }
+      $ExpandedLimit = [Math]::Min([long]$Script:TauriMaximumExpandedAssetBytes, [long]$RemainingExpandedWork)
+      $Measurement = Measure-TauriBrotliPayload -Stream $Context.Stream -Offset ([Math]::Max(0L, [long]$Record.DataOffset)) `
+        -Length $Record.StoredSize -MaximumExpandedBytes $ExpandedLimit -MaximumStoredBytes $RemainingStoredWork
+      $MeasuredBrotliExpandedBytes += [long]$Measurement.ExpandedSize
+      $MeasuredBrotliStoredBytes += [long]$Measurement.StoredBytesRead
+      if ($Measurement.StoredLimitExceeded -or ($Measurement.LimitExceeded -and $ExpandedLimit -lt $Script:TauriMaximumExpandedAssetBytes)) {
+        throw 'Tauri Brotli validation exceeds the cumulative parser work limit.'
+      }
+      $MeasurementCache[$MeasurementKey] = $Measurement
+      $Measurements.Add($Measurement)
     }
     $BrotliCount = @($Measurements | Where-Object Success).Count
     $Compression = if ($BrotliCount -eq $Records.Count) { 'Brotli' } elseif ($BrotliCount -eq 0) { 'None' } else { 'Mixed' }
 
-    # Raw maps need marker support or a recognizable entry page. Successful
-    # Brotli framing is stronger evidence by itself but still needs either an
-    # entry page, multiple coherent records, or a Tauri marker.
-    $HasRawEntryPage = $false
-    foreach ($EntryRecord in $EntryRecords) {
-      if (Test-TauriRawEntryPage -Stream $Context.Stream -Record $EntryRecord) { $HasRawEntryPage = $true; break }
-    }
+    # Raw maps need marker support or payload bytes consistent with the named
+    # file type. Successful Brotli framing is stronger evidence by itself.
     $HasRawPayloadEvidence = if ($Compression -eq 'None' -or $Compression -eq 'Mixed') {
       Test-TauriRawPayloadEvidence -Stream $Context.Stream -Record $Records
     } else { $false }
     # EmbeddedAssets also contains a PHF map from HTML paths to CspHash slices.
-    # Its value word is an element count rather than a byte count, so it may look
-    # like a tiny mixed-compression asset run. Catalog it separately and never
+    # Its value word is an element count rather than a byte count, so it looks
+    # like a tiny raw or mixed-compression asset run. Catalog it separately and never
     # expose those Rust enum records as frontend file bytes.
-    $IsHtmlHashMap = $Compression -eq 'Mixed' -and -not $HasRawEntryPage -and
-    @($Records | Where-Object Name -NotMatch '(?i)\.html?$').Count -eq 0 -and
-    [long](($Records | Measure-Object StoredSize -Maximum).Maximum ?? 0) -le 4096
-    if ($IsHtmlHashMap) {
+    $EmptySliceRecords = @($Records | Where-Object StoredSize -EQ 0)
+    $AllowEmptyCspSlice = $EmptySliceRecords.Count -gt 0 -and
+    @($EmptySliceRecords | Where-Object { -not $NonEmptyRecordNames.Contains([string]$_.Name) }).Count -eq 0
+    $HtmlHashMapEvidence = if ($Compression -ne 'Brotli' -and -not $HasRawPayloadEvidence) {
+      Get-TauriHtmlCspHashMapEvidence -Context $Context -Record $Records -ValidationWork ([ref]$CspHashValidationWork) -AllowEmptySlice:$AllowEmptyCspSlice
+    } else { $null }
+    if ($HtmlHashMapEvidence) {
       $AuxiliaryMaps.Add([pscustomobject]@{
           Type         = 'HtmlCspHashMap'
           HeaderOffset = [long]$Records[0].HeaderOffset
           RecordCount  = $Records.Count
           Names        = @($Records.Name)
+          HashCount    = [long]$HtmlHashMapEvidence.HashCount
+          Directive    = $HtmlHashMapEvidence.Directive
         })
       continue
     }
     if ($Compression -eq 'None' -and -not $HasRawPayloadEvidence) {
       if ($HasFrameworkMarker -and $EntryRecords.Count -gt 0) {
-        $Warnings.Add("A Tauri-like asset run at 0x$($Records[0].HeaderOffset.ToString('X')) could not be validated as complete Brotli or source-supported raw data.")
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.AssetMap.Unvalidated' -Source 'Tauri' `
+              -Message "A Tauri-like asset run at 0x$($Records[0].HeaderOffset.ToString('X')) could not be validated as complete Brotli or source-supported raw data." `
+              -Kind Incomplete -Areas @('Metadata', 'Extraction') -AffectedFields 'EmbeddedAssets' `
+              -Evidence ([pscustomobject]@{ HeaderOffset = [long]$Records[0].HeaderOffset; RecordCount = $Records.Count })))
       }
       continue
     }
@@ -383,7 +710,10 @@ function Get-TauriAssetCatalog {
     $MapIndex = $Maps.Count
     $MapCanExpand = $Compression -ne 'Mixed'
     if (-not $MapCanExpand) {
-      $Warnings.Add("Tauri asset map $MapIndex mixes Brotli and non-Brotli payloads; source-supported maps use one mode, so extraction is disabled.")
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.AssetMap.MixedCompression' -Source 'Tauri' `
+            -Message "Tauri asset map $MapIndex mixes Brotli and non-Brotli payloads; source-supported maps use one mode, so extraction is disabled." `
+            -Kind Incomplete -Areas @('Metadata', 'Extraction') -AffectedFields 'EmbeddedAssets' `
+            -Evidence ([pscustomobject]@{ MapIndex = $MapIndex; HeaderOffset = [long]$Records[0].HeaderOffset })))
     }
     $MapAssets = [Collections.Generic.List[object]]::new()
     for ($Index = 0; $Index -lt $Records.Count; $Index++) {
@@ -420,10 +750,13 @@ function Get-TauriAssetCatalog {
   }
 
   $CompressionModes = @($Maps | Select-Object -ExpandProperty Compression -Unique)
-  $CanExpand = $Maps.Count -gt 0 -and -not ($Maps.CanExpand -contains $false) -and $CompressionModes.Count -eq 1
+  $CanExpand = $Maps.Count -gt 0 -and -not $HasRejectedMap -and -not ($Maps.CanExpand -contains $false) -and $CompressionModes.Count -eq 1
   if ($CompressionModes.Count -gt 1) {
     $CanExpand = $false
-    $Warnings.Add('The executable contains generated Tauri asset maps with different compression modes; extraction is disabled pending manual review.')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.AssetMap.InconsistentCompression' -Source 'Tauri' `
+          -Message 'The executable contains generated Tauri asset maps with different compression modes; extraction is disabled pending manual review.' `
+          -Kind Incomplete -Areas @('Metadata', 'Extraction') -AffectedFields 'EmbeddedAssets' `
+          -Evidence ([pscustomobject]@{ CompressionModes = [string[]]$CompressionModes })))
   }
   return [pscustomobject]@{
     Maps                 = $Maps.ToArray()
@@ -434,7 +767,13 @@ function Get-TauriAssetCatalog {
     TotalExpandedBytes   = if ($Assets.Count -gt 0 -and -not ($Assets.ExpandedSize -contains $null)) { [long](($Assets | Measure-Object ExpandedSize -Sum).Sum ?? 0) } else { $null }
     CanExpand            = $CanExpand
     CandidateRecordCount = $CandidateRecords.Count
-    Warnings             = $Warnings.ToArray()
+    ValidationWork       = [pscustomobject]@{
+      UniquePayloadCount     = $MeasurementCache.Count
+      StoredBytesRead        = $MeasuredBrotliStoredBytes
+      ExpandedBytesDecoded   = $MeasuredBrotliExpandedBytes
+      CspHashEntriesExamined = $CspHashValidationWork
+    }
+    Diagnostics          = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
   }
 }
 
@@ -452,17 +791,42 @@ function Test-TauriAssetEvidence {
 
   $Records = @([Dumplings.Tauri.TauriExecutableScanner]::FindAssetRecords(
       $Context.Stream, [uint64]$Context.Layout.ImageBase, $Context.PointerSize, $Context.Sections,
-      $Script:TauriMaximumNameBytes, $Script:TauriMaximumStoredAssetBytes, $Script:TauriMaximumAssetCount))
+      $Script:TauriMaximumNameBytes, $Script:TauriMaximumStoredAssetBytes, $Script:TauriMaximumAssetCount,
+      $Script:TauriMaximumScannedDataBytes, $Script:TauriMaximumRecordCandidateOffsets))
+  $MeasurementCache = @{}
+  $MeasuredBrotliExpandedBytes = 0L
+  $MeasuredBrotliStoredBytes = 0L
   foreach ($Run in @(Split-TauriAssetRecordRun -Record $Records -RecordSize $Context.RecordSize)) {
     $RunRecords = @($Run.Records)
     if ($RunRecords | Where-Object { -not $_.IsSafeName -or -not (Test-TauriAssetRelativePath $_.Name) }) { continue }
     if ($Markers.Count -gt 0 -and $RunRecords.Count -ge 2) { return $true }
-    foreach ($Entry in $RunRecords | Where-Object Name -Match '(?i)/index\.html?$') {
-      $Measurement = Measure-TauriBrotliPayload -Stream $Context.Stream -Offset ([Math]::Max(0L, [long]$Entry.DataOffset)) `
-        -Length $Entry.StoredSize -MaximumExpandedBytes 134217728
-      if ($Measurement.Success -or (Test-TauriRawEntryPage -Stream $Context.Stream -Record $Entry)) { return $true }
+    $EntryRecords = @($RunRecords | Where-Object Name -Match '(?i)/index\.html?$')
+    $ProbeRecords = if ($EntryRecords.Count -gt 0) { $EntryRecords } elseif ($Markers.Count -gt 0 -and $RunRecords.Count -eq 1) { $RunRecords } else { @() }
+    foreach ($Probe in $ProbeRecords) {
+      $MeasurementKey = "$([long]$Probe.DataOffset):$([long]$Probe.StoredSize)"
+      if ($MeasurementCache.ContainsKey($MeasurementKey)) {
+        $Measurement = $MeasurementCache[$MeasurementKey]
+      } else {
+        $RemainingExpandedWork = $Script:TauriMaximumMeasuredExpandedBytes - $MeasuredBrotliExpandedBytes
+        $RemainingStoredWork = $Script:TauriMaximumMeasuredStoredBytes - $MeasuredBrotliStoredBytes
+        if ($RemainingExpandedWork -le 0 -or $RemainingStoredWork -le 0) {
+          throw 'Tauri Brotli validation exceeds the cumulative parser work limit.'
+        }
+        $ExpandedLimit = [Math]::Min(134217728L, [long]$RemainingExpandedWork)
+        $Measurement = Measure-TauriBrotliPayload -Stream $Context.Stream -Offset ([Math]::Max(0L, [long]$Probe.DataOffset)) `
+          -Length $Probe.StoredSize -MaximumExpandedBytes $ExpandedLimit -MaximumStoredBytes $RemainingStoredWork
+        $MeasuredBrotliExpandedBytes += [long]$Measurement.ExpandedSize
+        $MeasuredBrotliStoredBytes += [long]$Measurement.StoredBytesRead
+        if ($Measurement.StoredLimitExceeded -or ($Measurement.LimitExceeded -and $ExpandedLimit -lt 134217728L)) {
+          throw 'Tauri Brotli validation exceeds the cumulative parser work limit.'
+        }
+        $MeasurementCache[$MeasurementKey] = $Measurement
+      }
+      if ($Measurement.Success -or ($Probe.Name -match '(?i)/index\.html?$' -and (Test-TauriRawEntryPage -Stream $Context.Stream -Record $Probe))) { return $true }
     }
-    if ($Markers.Count -gt 0 -and (Test-TauriRawPayloadEvidence -Stream $Context.Stream -Record $RunRecords)) { return $true }
+    if ($Markers.Count -gt 0) {
+      if (Test-TauriRawPayloadEvidence -Stream $Context.Stream -Record $RunRecords) { return $true }
+    }
   }
   return $false
 }
@@ -479,39 +843,73 @@ function Get-TauriExecutableInfoInternal {
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)][psobject]$Context)
 
-  $Markers = @(Find-TauriExecutableMarker -Context $Context)
+  $MarkerCatalog = Find-TauriExecutableMarker -Context $Context
+  $Markers = @($MarkerCatalog.Markers)
   $Catalog = Get-TauriAssetCatalog -Context $Context -Markers $Markers
   $MarkerClasses = @($Markers | ForEach-Object { if ($_.Name -like 'BundleType*') { 'BundleType' } else { $_.Name } } | Select-Object -Unique)
   if ($Catalog.Maps.Count -eq 0 -and $MarkerClasses.Count -lt 2) {
     throw 'The PE does not contain a supported generated Tauri asset map or sufficient framework marker evidence.'
   }
 
-  $Warnings = [Collections.Generic.List[string]]::new()
-  $Notices = [Collections.Generic.List[string]]::new()
-  foreach ($Warning in $Catalog.Warnings) { $Warnings.Add($Warning) }
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  foreach ($Diagnostic in $Catalog.Diagnostics) { $Diagnostics.Add($Diagnostic) }
+  if ($MarkerCatalog.TruncatedDefinitions.Count -gt 0) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.MarkerEvidence.Truncated' -Source 'Tauri' `
+          -Message 'Tauri marker evidence exceeded the per-definition catalog limit; runtime bundle references were resolved independently from writable data.' `
+          -Kind Information -Areas @('Detection', 'Metadata') -AffectedFields 'TauriMarkerEvidence' `
+          -Evidence ([pscustomobject]@{ Definitions = [string[]]$MarkerCatalog.TruncatedDefinitions; MaximumOccurrences = $Script:TauriMaximumMarkerOccurrences })))
+  }
   if ($Catalog.Maps.Count -eq 0) {
-    $Warnings.Add('Tauri framework markers were found, but no standard generated embedded asset map was recovered. The application may use a custom or URL-backed asset provider.')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.AssetMap.NotRecovered' -Source 'Tauri' `
+          -Message 'Tauri framework markers were found, but no standard generated embedded asset map was recovered. The application may use a custom or URL-backed asset provider.' `
+          -Kind Incomplete -Areas @('Detection', 'Metadata', 'Extraction') -AffectedFields 'EmbeddedAssets' `
+          -Evidence ([pscustomobject]@{ CandidateRecordCount = $Catalog.CandidateRecordCount; MarkerClasses = [string[]]$MarkerClasses })))
   }
 
-  # Tauri's bundler patches the first UNK placeholder. Retain the earliest token
-  # as runtime evidence and report later conflicting literals separately.
+  # Tauri 2.7 through 2.9 identifies the exact string through .taubndl. Tauri
+  # 2.10 and later keeps a mutable &str in .data that references the long token
+  # patched by the bundler. Other tokens can remain as match-arm literals.
   $BundleMarkers = @($Markers | Where-Object Name -Like 'BundleType*' | Sort-Object Offset)
-  $BundleMarker = $BundleMarkers | Select-Object -First 1
-  $BundleType = if ($BundleMarker) {
-    switch ($BundleMarker.Value.Substring($Script:TauriBundleMarkerPrefix.Length)) {
-      'NSS' { 'NSIS' }
-      'MSI' { 'MSI' }
-      'UNK' { 'Unknown' }
-      default { 'Unknown' }
-    }
+  $RuntimeBundleMarkers = @($BundleMarkers | Where-Object IsRuntimeValue)
+  $UsedUniqueTokenFallback = $RuntimeBundleMarkers.Count -eq 0 -and @($BundleMarkers.BundleType | Select-Object -Unique).Count -eq 1
+  $AuthoritativeBundleMarkers = if ($RuntimeBundleMarkers.Count -gt 0) {
+    $RuntimeBundleMarkers
+  } elseif ($UsedUniqueTokenFallback) {
+    $BundleMarkers
+  } else { @() }
+  $DistinctAuthoritativeBundleTypes = @($AuthoritativeBundleMarkers.BundleType | Select-Object -Unique)
+  $BundleMarker = if ($DistinctAuthoritativeBundleTypes.Count -eq 1) {
+    $AuthoritativeBundleMarkers | Sort-Object @{ Expression = { $_.Format -ne 'LegacySection' } }, Offset | Select-Object -First 1
   } else { $null }
-  $DistinctBundleValues = @($BundleMarkers.Value | Select-Object -Unique)
-  if ($DistinctBundleValues.Count -gt 1) {
-    $Notices.Add("Additional Tauri bundle tokens differ from the earliest patched token at 0x$($BundleMarker.Offset.ToString('X')); the earliest token is authoritative for this evidence.")
+  $BundleType = if ($BundleMarker) { $BundleMarker.BundleType } else { $null }
+  $HasBundleConflict = if ($RuntimeBundleMarkers.Count -gt 0) {
+    @($RuntimeBundleMarkers.BundleType | Select-Object -Unique).Count -gt 1
+  } else {
+    @($BundleMarkers.BundleType | Select-Object -Unique).Count -gt 1
+  }
+  if ($HasBundleConflict) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.BundleType.Conflict' -Source 'Tauri' `
+          -Message 'The executable contains conflicting Tauri bundle tags backed by runtime references, so BundleType remains unresolved.' `
+          -Kind Ambiguous -Areas Metadata -AffectedFields 'BundleType' `
+          -Evidence @($BundleMarkers | Select-Object BundleType, Format, Offset, HeaderOffset, ReferenceOffset, IsRuntimeValue)))
+  }
+  if ($BundleMarker -and $UsedUniqueTokenFallback) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.BundleType.UniqueTokenFallback' -Source 'Tauri' `
+          -Message 'BundleType uses the only long bundle token found because no mutable runtime reference was recovered; treat the value as non-authoritative evidence.' `
+          -Kind Fallback -Areas Metadata -AffectedFields 'BundleType' `
+          -Evidence ($BundleMarker | Select-Object BundleType, Format, Offset, ReferenceOffset, IsRuntimeValue)))
+  }
+  $LegacyBundleSections = @($Context.Sections | Where-Object Name -EQ '.taubndl')
+  if ($LegacyBundleSections.Count -gt 0 -and @($BundleMarkers | Where-Object Format -EQ 'LegacySection').Count -eq 0) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.BundleType.InvalidLegacySection' -Source 'Tauri' `
+          -Message 'The Tauri .taubndl section does not contain a valid pointer-sized string record and three-byte bundle tag.' `
+          -Kind Incomplete -Areas Metadata -AffectedFields 'BundleType' `
+          -Evidence @($LegacyBundleSections | Select-Object RawOffset, RawSize, VirtualAddress)))
   }
 
   $CandidateData = @([Dumplings.Tauri.TauriExecutableScanner]::FindIdentifierCandidates(
-      $Context.Stream, $Context.Sections, $Script:TauriMaximumIdentifierCandidates, 256))
+      $Context.Stream, $Context.Sections, $Script:TauriMaximumIdentifierCandidates, 256,
+      $Script:TauriMaximumScannedDataBytes))
   $PackageIdentifierCandidates = @($CandidateData | Where-Object Kind -EQ 'PackageIdentifier' | ForEach-Object {
       [pscustomobject]@{ Value = $_.Value; Offset = [long]$_.Offset; Confidence = 'low'; Reason = 'Reverse-domain string in read-only PE data; ownership by Tauri config is not preserved.' }
     })
@@ -519,7 +917,10 @@ function Get-TauriExecutableInfoInternal {
       [pscustomobject]@{ Value = $_.Value; Offset = [long]$_.Offset; Confidence = 'low'; Reason = 'Tauri ACL-shaped string in read-only PE data; inclusion does not prove that the permission is granted.' }
     })
   if ($PackageIdentifierCandidates.Count -gt 0 -or $AclPermissionCandidates.Count -gt 0) {
-    $Notices.Add('Identifier and ACL strings are non-authoritative candidates because optimized Rust binaries do not preserve their original configuration context.')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'Tauri.IdentifierCandidates.NonAuthoritative' -Source 'Tauri' `
+          -Message 'Identifier and ACL strings are non-authoritative candidates because optimized Rust binaries do not preserve their original configuration context.' `
+          -Kind Information -Areas Metadata `
+          -Evidence ([pscustomobject]@{ PackageIdentifierCount = $PackageIdentifierCandidates.Count; AclPermissionCount = $AclPermissionCandidates.Count })))
   }
 
   # VERSIONINFO is the authoritative source for the application identity strings
@@ -530,40 +931,42 @@ function Get-TauriExecutableInfoInternal {
   if (-not $BundleType -or $BundleType -eq 'Unknown') { $UnresolvedFields.Add('BundleType') }
 
   return [pscustomobject]@{
-    Path                        = $Context.Path
-    FileKind                    = 'Executable'
-    Framework                   = 'Tauri'
-    Architecture                = $Context.Architecture
-    Machine                     = $Context.Layout.MachineName
-    Subsystem                   = $Context.Layout.SubsystemName
-    DetectionConfidence         = if ($Catalog.Maps.Count -gt 0) { 'high' } else { 'medium' }
-    BundleType                  = $BundleType
-    BundleTypeMarker            = $BundleMarker
-    VersionResources            = $VersionResources
-    FileVersion                 = $VersionResources.FileVersion
-    ProductVersion              = $VersionResources.ProductVersion
-    ProductName                 = $VersionResources.ProductName
-    CompanyName                 = $VersionResources.CompanyName
-    FileDescription             = $VersionResources.FileDescription
-    LegalCopyright              = $VersionResources.LegalCopyright
-    AssetCompression            = $Catalog.Compression
-    AssetMapCount               = $Catalog.Maps.Count
-    AssetCount                  = $Catalog.Assets.Count
-    TotalStoredBytes            = $Catalog.TotalStoredBytes
-    TotalExpandedBytes          = $Catalog.TotalExpandedBytes
-    EntryPageCandidates         = @($Catalog.Assets | Where-Object Name -Match '(?i)\.html?$' | Select-Object -ExpandProperty Name -Unique)
-    AssetMaps                   = $Catalog.Maps
-    AuxiliaryMaps               = $Catalog.AuxiliaryMaps
-    AuxiliaryMapCount           = $Catalog.AuxiliaryMaps.Count
-    AssetDescriptors            = $Catalog.Assets
-    CanExpand                   = [bool]$Catalog.CanExpand
-    TauriMarkerEvidence         = $Markers
-    PackageIdentifierCandidates = $PackageIdentifierCandidates
-    AclPermissionCandidates     = $AclPermissionCandidates
-    Notices                     = $Notices.ToArray()
-    Warnings                    = $Warnings.ToArray()
-    UnresolvedFields            = $UnresolvedFields.ToArray()
-    ParserVersionInfo           = [pscustomobject]@{
+    Path                         = $Context.Path
+    FileKind                     = 'Executable'
+    Framework                    = 'Tauri'
+    Architecture                 = $Context.Architecture
+    Machine                      = $Context.Layout.MachineName
+    Subsystem                    = $Context.Layout.SubsystemName
+    DetectionConfidence          = if ($Catalog.Maps.Count -gt 0) { 'high' } else { 'medium' }
+    BundleType                   = $BundleType
+    BundleTypeEvidenceConfidence = if ($BundleMarker -and $BundleMarker.IsRuntimeValue) { 'high' } elseif ($BundleMarker) { 'medium' } else { $null }
+    BundleTypeMarker             = $BundleMarker
+    VersionResources             = $VersionResources
+    FileVersion                  = $VersionResources.FileVersion
+    ProductVersion               = $VersionResources.ProductVersion
+    ProductName                  = $VersionResources.ProductName
+    CompanyName                  = $VersionResources.CompanyName
+    FileDescription              = $VersionResources.FileDescription
+    LegalCopyright               = $VersionResources.LegalCopyright
+    AssetCompression             = $Catalog.Compression
+    AssetMapCount                = $Catalog.Maps.Count
+    AssetCount                   = $Catalog.Assets.Count
+    TotalStoredBytes             = $Catalog.TotalStoredBytes
+    TotalExpandedBytes           = $Catalog.TotalExpandedBytes
+    ValidationWork               = $Catalog.ValidationWork
+    EntryPageCandidates          = @($Catalog.Assets | Where-Object Name -Match '(?i)\.html?$' | Select-Object -ExpandProperty Name -Unique)
+    AssetMaps                    = $Catalog.Maps
+    AuxiliaryMaps                = $Catalog.AuxiliaryMaps
+    AuxiliaryMapCount            = $Catalog.AuxiliaryMaps.Count
+    AssetDescriptors             = $Catalog.Assets
+    CanExpand                    = [bool]$Catalog.CanExpand
+    TauriMarkerEvidence          = $Markers
+    PackageIdentifierCandidates  = $PackageIdentifierCandidates
+    AclPermissionCandidates      = $AclPermissionCandidates
+
+    Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
+    UnresolvedFields             = $UnresolvedFields.ToArray()
+    ParserVersionInfo            = [pscustomobject]@{
       Format       = 'Tauri generated EmbeddedAssets PHF map'
       RecordWidth  = $Context.RecordSize
       PointerWidth = $Context.PointerSize
@@ -588,7 +991,8 @@ function Test-TauriExecutable {
     $Context = $null
     try {
       $Context = Open-TauriExecutableContext -Path $Path
-      $Markers = @(Find-TauriExecutableMarker -Context $Context)
+      $MarkerCatalog = Find-TauriExecutableMarker -Context $Context
+      $Markers = @($MarkerCatalog.Markers)
       if (Test-TauriAssetEvidence -Context $Context -Markers $Markers) { return $true }
       $MarkerClasses = @($Markers | ForEach-Object { if ($_.Name -like 'BundleType*') { 'BundleType' } else { $_.Name } } | Select-Object -Unique)
       return $MarkerClasses.Count -ge 2

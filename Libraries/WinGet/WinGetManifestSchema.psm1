@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 # Force stop on undefined variables or properties
 Set-StrictMode -Version 3
 
-$Script:WinGetDefaultManifestVersion = '1.12.0'
+$Script:WinGetDefaultManifestVersion = '1.28.0'
 # Preserve the established exported variable without using its globally re-exported
 # slot as module-internal state. PowerShell can detach that slot when a parent module
 # re-exports it, which previously left schema parameter defaults null in Core workers.

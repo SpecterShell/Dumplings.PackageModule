@@ -68,22 +68,35 @@ function Read-BinaryInteger {
   <#
   .SYNOPSIS
     Read a signed or unsigned integer with explicit endianness
+  .PARAMETER Bytes
+    Caller-owned buffer. Offset is buffer-relative; the buffer is never modified.
+  .PARAMETER Stream
+    Caller-owned seekable stream. Offset is absolute and its position is restored.
+  .PARAMETER Offset
+    Zero-based offset of the integer in the supplied input.
+  .PARAMETER Size
+    Integer width in bytes: 1, 2, 4, or 8.
+  .PARAMETER Endian
+    Encoded byte order.
+  .PARAMETER Signed
+    Interpret the bits as a signed integer.
   #>
+  [CmdletBinding(DefaultParameterSetName = 'Stream')]
   param (
-    [Parameter(Mandatory)][System.IO.Stream]$Stream,
-    [Parameter(Mandatory)][long]$Offset,
-    [Parameter(Mandatory)][ValidateSet(1, 2, 4, 8)][int]$Size,
-    [ValidateSet('LittleEndian', 'BigEndian')][string]$Endian = 'LittleEndian',
+    [Parameter(Position = 0, Mandatory, ParameterSetName = 'Stream')][System.IO.Stream]$Stream,
+    [Parameter(Position = 0, Mandatory, ParameterSetName = 'Bytes')][AllowEmptyCollection()][byte[]]$Bytes,
+    [Parameter(Position = 1, Mandatory)][long]$Offset,
+    [Parameter(Position = 2, Mandatory)][ValidateSet(1, 2, 4, 8)][int]$Size,
+    [Parameter(Position = 3)][ValidateSet('LittleEndian', 'BigEndian')][string]$Endian = 'LittleEndian',
     [switch]$Signed
   )
-  $Bytes = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Size
-  if (($Endian -eq 'BigEndian') -eq [BitConverter]::IsLittleEndian) { [Array]::Reverse($Bytes) }
-  switch ($Size) {
-    1 { if ($Signed) { return [sbyte]$Bytes[0] }; return [byte]$Bytes[0] }
-    2 { if ($Signed) { return [BitConverter]::ToInt16($Bytes, 0) }; return [BitConverter]::ToUInt16($Bytes, 0) }
-    4 { if ($Signed) { return [BitConverter]::ToInt32($Bytes, 0) }; return [BitConverter]::ToUInt32($Bytes, 0) }
-    8 { if ($Signed) { return [BitConverter]::ToInt64($Bytes, 0) }; return [BitConverter]::ToUInt64($Bytes, 0) }
+  if ($PSCmdlet.ParameterSetName -eq 'Bytes') {
+    Assert-InstallerInfrastructureLoaded
+    return [Dumplings.InstallerInfrastructure.BinaryIO]::ReadInteger($Bytes, $Offset, $Size, $Endian -eq 'BigEndian', $Signed.IsPresent)
+  } else {
+    $Bytes = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count $Size
   }
+  return [Dumplings.InstallerInfrastructure.BinaryIO]::ReadInteger($Bytes, 0, $Size, $Endian -eq 'BigEndian', $Signed.IsPresent)
 }
 
 function Read-BinarySequentialInteger {
@@ -113,13 +126,8 @@ function Read-BinarySequentialInteger {
     if ($Count -le 0) { throw 'Unexpected end of stream while reading an integer.' }
     $Read += $Count
   }
-  if (($Endian -eq 'BigEndian') -eq [BitConverter]::IsLittleEndian) { [Array]::Reverse($Bytes) }
-  switch ($Size) {
-    1 { if ($Signed) { return [sbyte]$Bytes[0] }; return [byte]$Bytes[0] }
-    2 { if ($Signed) { return [BitConverter]::ToInt16($Bytes, 0) }; return [BitConverter]::ToUInt16($Bytes, 0) }
-    4 { if ($Signed) { return [BitConverter]::ToInt32($Bytes, 0) }; return [BitConverter]::ToUInt32($Bytes, 0) }
-    8 { if ($Signed) { return [BitConverter]::ToInt64($Bytes, 0) }; return [BitConverter]::ToUInt64($Bytes, 0) }
-  }
+  Assert-InstallerInfrastructureLoaded
+  return [Dumplings.InstallerInfrastructure.BinaryIO]::ReadInteger($Bytes, 0, $Size, $Endian -eq 'BigEndian', $Signed.IsPresent)
 }
 
 function Find-BinaryPattern {

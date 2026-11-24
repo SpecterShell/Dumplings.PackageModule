@@ -9,7 +9,7 @@ function New-InstallerDecompressionStream {
   #>
   [OutputType([System.IO.Stream])]
   param (
-    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
+    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'GZip', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [byte[]]$Properties,
     [long]$CompressedSize = -1,
@@ -26,7 +26,14 @@ function New-InstallerDecompressionStream {
       if (-not $Properties) { throw 'LZMA2 properties are required.' }
       return [SharpCompress.Compressors.LZMA.LzmaStream]::new($Properties, $Stream, $CompressedSize, $UncompressedSize, $null, $true)
     }
-    'BZip2' { return [SharpCompress.Compressors.BZip2.BZip2Stream]::new($Stream, [SharpCompress.Compressors.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
+    'BZip2' {
+      # SharpCompress's Boolean constructor argument controls concatenated members, not ownership.
+      # Installer ranges contain one member and may be followed by unrelated records.
+      Import-InstallerInfrastructure
+      $DecoderInput = $LeaveOpen ? [Dumplings.InstallerInfrastructure.NonDisposingStream]::new($Stream) : $Stream
+      return [SharpCompress.Compressors.BZip2.BZip2Stream]::new($DecoderInput, [SharpCompress.Compressors.CompressionMode]::Decompress, $false)
+    }
+    'GZip' { return [System.IO.Compression.GZipStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Zlib' { return [System.IO.Compression.ZLibStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Deflate' { return [System.IO.Compression.DeflateStream]::new($Stream, [System.IO.Compression.CompressionMode]::Decompress, $LeaveOpen.IsPresent) }
     'Zstd' { return [ZstdSharp.DecompressionStream]::new($Stream, 131072, $true, $LeaveOpen.IsPresent) }
@@ -40,7 +47,7 @@ function Expand-InstallerCompressedStream {
   #>
   [OutputType([long])]
   param (
-    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
+    [Parameter(Mandatory)][ValidateSet('Lzma', 'Lzma2', 'BZip2', 'GZip', 'Zlib', 'Deflate', 'Zstd')][string]$Algorithm,
     [Parameter(Mandatory)][System.IO.Stream]$Stream,
     [Parameter(Mandatory)][System.IO.Stream]$Destination,
     [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes,
@@ -93,16 +100,27 @@ function Get-InstallerArchive {
   <#
   .SYNOPSIS
     Open an archive from a path or seekable stream
+  .PARAMETER Path
+    Resolved archive path.
+  .PARAMETER Stream
+    Caller-owned seekable archive stream. The returned archive leaves it open.
+  .PARAMETER Password
+    Optional archive password passed directly to SharpCompress.
   #>
+  [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '', Justification = 'SharpCompress requires an archive password string; callers must keep recovered installer passwords private.')]
   param (
     [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
-    [Parameter(Mandatory, ParameterSetName = 'Stream')][System.IO.Stream]$Stream
+    [Parameter(Mandatory, ParameterSetName = 'Stream')][System.IO.Stream]$Stream,
+    [AllowNull()][string]$Password
   )
   Import-InstallerArchiveDependency
+  $Options = [SharpCompress.Readers.ReaderOptions]::new()
+  $Options.LeaveStreamOpen = $PSCmdlet.ParameterSetName -eq 'Stream'
+  if (-not [string]::IsNullOrEmpty($Password)) { $Options.Password = $Password }
   if ($PSCmdlet.ParameterSetName -eq 'Path') {
-    return [SharpCompress.Archives.ArchiveFactory]::Open((Get-Item -LiteralPath $Path -Force).FullName)
+    return [SharpCompress.Archives.ArchiveFactory]::Open((Get-Item -LiteralPath $Path -Force).FullName, $Options)
   }
-  return [SharpCompress.Archives.ArchiveFactory]::Open($Stream)
+  return [SharpCompress.Archives.ArchiveFactory]::Open($Stream, $Options)
 }
 
 function Open-InstallerArchiveRange {
@@ -112,13 +130,17 @@ function Open-InstallerArchiveRange {
   .DESCRIPTION
     The returned context owns the archive, bounded range stream, and source file
     stream. Pass it to Close-InstallerArchiveRange when archive access is done.
+  .PARAMETER Password
+    Optional archive password passed directly to SharpCompress. Callers remain responsible for keeping sensitive values out of returned evidence and logs.
   #>
   [OutputType([pscustomobject])]
+  [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '', Justification = 'SharpCompress requires an archive password string; callers must keep recovered installer passwords private.')]
   param (
     [Parameter(Mandatory)][string]$Path,
     [Parameter(Mandatory, ParameterSetName = 'Range')]$Range,
     [Parameter(Mandatory, ParameterSetName = 'Coordinates')][ValidateRange(0, [long]::MaxValue)][long]$Offset,
-    [Parameter(Mandatory, ParameterSetName = 'Coordinates')][ValidateRange(1, [long]::MaxValue)][long]$Length
+    [Parameter(Mandatory, ParameterSetName = 'Coordinates')][ValidateRange(1, [long]::MaxValue)][long]$Length,
+    [AllowNull()][string]$Password
   )
 
   if ($PSCmdlet.ParameterSetName -eq 'Range') {
@@ -130,7 +152,7 @@ function Open-InstallerArchiveRange {
   $Archive = $null
   try {
     $RangeStream = New-BoundedReadStream -Stream $Source -Offset $Offset -Length $Length -LeaveOpen
-    $Archive = Get-InstallerArchive -Stream $RangeStream
+    $Archive = Get-InstallerArchive -Stream $RangeStream -Password $Password
     return [pscustomobject]@{
       Archive      = $Archive
       RangeStream  = $RangeStream
@@ -196,6 +218,11 @@ function Open-InstallerArchiveEntry {
   [OutputType([System.IO.Stream])]
   param ([Parameter(Mandatory)]$Entry)
   $NativeEntry = if ($Entry.PSObject.Properties.Name -contains 'NativeEntry') { $Entry.NativeEntry } else { $Entry }
+  # SharpCompress does not expose a stream for some valid zero-length 7z
+  # entries. Present an ordinary empty stream so callers can still materialize
+  # the catalog entry and preserve the archive's file set.
+  $Length = if ($Entry.PSObject.Properties.Name -contains 'Length') { [long]$Entry.Length } elseif ($Entry.PSObject.Properties.Name -contains 'Size') { [long]$Entry.Size } else { -1L }
+  if ($Length -eq 0) { return [IO.MemoryStream]::new([byte[]]::new(0), $false) }
   return $NativeEntry.OpenEntryStream()
 }
 
@@ -243,13 +270,20 @@ function Export-InstallerArchiveEntry {
   <#
   .SYNOPSIS
     Export one bounded archive entry to a validated destination
+  .PARAMETER MaximumBytes
+    Remaining output budget in bytes. Zero permits only a proven empty entry;
+    an extra stream read still rejects data beyond its declared length.
+  .PARAMETER EntryStream
+    Optional already-open decompressed stream. The caller retains ownership;
+    without this parameter the function opens and disposes the entry stream.
   #>
   [OutputType([System.IO.FileInfo])]
   param (
     [Parameter(Mandatory)]$Entry,
     [Parameter(Mandatory)][string]$DestinationPath,
-    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes,
-    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename'
+    [Parameter(Mandatory)][ValidateRange(0, [long]::MaxValue)][long]$MaximumBytes,
+    [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Rename',
+    [IO.Stream]$EntryStream
   )
 
   $Length = if ($Entry.PSObject.Properties.Name -contains 'Length') { [long]$Entry.Length } else { [long]$Entry.Size }
@@ -261,15 +295,18 @@ function Export-InstallerArchiveEntry {
   $ResolvedDestinationPath = $Target.Path
   $Parent = [IO.Path]::GetDirectoryName($ResolvedDestinationPath)
   if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
-  $EntryStream = Open-InstallerArchiveEntry -Entry $Entry
-  $Output = [IO.File]::Open($ResolvedDestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $OwnsEntryStream = -not $EntryStream
+  if ($OwnsEntryStream) { $EntryStream = Open-InstallerArchiveEntry -Entry $Entry }
+  $Output = $null
   try {
+    $Output = [IO.File]::Open($ResolvedDestinationPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
     $CopyArguments = @{ Source = $EntryStream; Destination = $Output; MaximumBytes = $MaximumBytes }
     if ($Length -ge 0) { $CopyArguments.ExpectedBytes = $Length }
     $null = Copy-BoundedStream @CopyArguments
+    if ($Length -ge 0 -and $EntryStream.ReadByte() -ge 0) { throw "The archive entry exceeds its declared $Length-byte length." }
   } finally {
-    $Output.Dispose()
-    $EntryStream.Dispose()
+    if ($Output) { $Output.Dispose() }
+    if ($OwnsEntryStream) { $EntryStream.Dispose() }
   }
   return Get-Item -LiteralPath $ResolvedDestinationPath
 }
@@ -278,6 +315,11 @@ function Export-InstallerArchiveSelection {
   <#
   .SYNOPSIS
     Export selected entries with aggregate limits and safe path handling
+  .DESCRIPTION
+    Full 7z extraction over a borrowed stream shares one sequential decoder
+    across each solid block. Selective extraction, file-owned archives and
+    other formats retain direct entry access. The caller owns the archive;
+    this function disposes only its reader and streams.
   #>
   param (
     [Parameter(Mandatory)]$Archive,
@@ -292,18 +334,48 @@ function Export-InstallerArchiveSelection {
   $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $ExpandedBytes = 0L
   $EntryCount = 0
-  foreach ($Entry in Get-InstallerArchiveEntry -Archive $Archive) {
-    if ([string]::IsNullOrWhiteSpace($Entry.FullName)) { continue }
-    if (-not (Test-ExtractionPattern -Path $Entry.FullName -Pattern $Name)) { continue }
-    if (++$EntryCount -gt $MaximumEntries) { throw "The archive selection exceeds the $MaximumEntries-entry limit." }
-    if (-not [string]::IsNullOrWhiteSpace($Entry.LinkTarget)) { throw "Archive links are not extracted: $($Entry.FullName)" }
-    $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.FullName -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
-    if (-not $Target.ShouldWrite) { continue }
-    $Remaining = $MaximumExpandedBytes - $ExpandedBytes
-    if ($Remaining -le 0 -or $Entry.Length -gt $Remaining) { throw "The archive selection exceeds the $MaximumExpandedBytes-byte output limit." }
-    $File = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $Target.Path -MaximumBytes $Remaining -CollisionAction Overwrite
-    $ExpandedBytes += $File.Length
-    $Files.Add($File)
+  $Reader = $null
+  $Enumerator = $null
+  try {
+    # Opening each solid 7z entry separately replays its block from the start.
+    # SharpCompress's reader retains the block decoder and skips directories or
+    # collision-skipped entries while advancing through the physical catalog.
+    if ($Name -ceq '*' -and $Archive.Type -eq [SharpCompress.Common.ArchiveType]::SevenZip) {
+      # The reader disposes its archive volume, so use it only with a protected
+      # borrowed stream. Keep file-owned archives reusable. ReaderOptions is
+      # protected in bundled SharpCompress.
+      $OptionsProperty = $Archive.GetType().GetProperty('ReaderOptions', [Reflection.BindingFlags]'Instance,NonPublic')
+      if ($OptionsProperty -and $OptionsProperty.GetValue($Archive).LeaveStreamOpen) { $Reader = $Archive.ExtractAllEntries() }
+    }
+    if (-not $Reader) { $Enumerator = $Archive.Entries.GetEnumerator() }
+    while ($Reader ? $Reader.MoveToNextEntry() : $Enumerator.MoveNext()) {
+      $Entry = $Reader ? $Reader.Entry : $Enumerator.Current
+      if ($Entry.IsDirectory -or [string]::IsNullOrWhiteSpace($Entry.Key)) { continue }
+      if (-not (Test-ExtractionPattern -Path $Entry.Key -Pattern $Name)) { continue }
+      if (++$EntryCount -gt $MaximumEntries) { throw "The archive selection exceeds the $MaximumEntries-entry limit." }
+      if ($Entry.PSObject.Properties.Name -contains 'LinkTarget' -and -not [string]::IsNullOrWhiteSpace($Entry.LinkTarget)) { throw "Archive links are not extracted: $($Entry.Key)" }
+      $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Key -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+      if (-not $Target.ShouldWrite) {
+        # Explicitly advance via the reader stream: SharpCompress's generic
+        # skip path queries packed-size metadata that empty 7z files lack.
+        if ($Reader) { $SkippedStream = $Reader.OpenEntryStream(); $SkippedStream.Dispose() }
+        continue
+      }
+      $Remaining = $MaximumExpandedBytes - $ExpandedBytes
+      # Check empty entries against their declared size too. A forged zero
+      # length must not bypass the output limit.
+      if ($Remaining -lt 0 -or $Entry.Size -gt $Remaining) { throw "The archive selection exceeds the $MaximumExpandedBytes-byte output limit." }
+      $EntryStream = $null
+      try {
+        if ($Reader) { $EntryStream = $Reader.OpenEntryStream() }
+        $File = Export-InstallerArchiveEntry -Entry $Entry -DestinationPath $Target.Path -MaximumBytes $Remaining -CollisionAction Overwrite -EntryStream $EntryStream
+      } finally { if ($EntryStream) { $EntryStream.Dispose() } }
+      $ExpandedBytes += $File.Length
+      $Files.Add($File)
+    }
+  } finally {
+    if ($Reader) { $Reader.Dispose() }
+    if ($Enumerator -is [IDisposable]) { $Enumerator.Dispose() }
   }
   [pscustomobject]@{ Files = @($Files); ExpandedBytes = $ExpandedBytes; EntryCount = $EntryCount }
 }

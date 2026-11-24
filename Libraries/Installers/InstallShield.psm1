@@ -204,7 +204,7 @@ function Resolve-InstallShieldRelease {
     [object[]]@($MappedEvidence | Where-Object { $CommonIdentityKeys -contains "$($_.ProductVersion)|$($_.Year)" })
   } else { $MappedEvidence }
 
-  # A year or major is deliberately broad evidence. Once a structured schema or
+  # A year or major is broad evidence. Once a structured schema or
   # trusted runtime names an exact point release, specificity refines compatible
   # broad evidence even when the broad suite namespace has a higher source rank.
   $HighestSpecificity = ($EligibleEvidence | Measure-Object -Property Specificity -Maximum).Maximum
@@ -260,7 +260,7 @@ function Resolve-InstallShieldRelease {
     Confidence     = $Confidence
     Candidates     = [object[]]$Candidates.ToArray()
     Evidence       = $Evidence
-    Warnings       = [string[]]$Warnings.ToArray()
+    Diagnostics    = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'InstallShield' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -1102,7 +1102,7 @@ function Merge-InstallShieldAdvancedUiResult {
     )) {
     $Result.$PropertyName = $AdvancedUiInfo.$PropertyName
   }
-  $Result.Warnings = [string[]]@($Result.Warnings + $AdvancedUiInfo.Warnings)
+  $Result.Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic @($Result.Diagnostics, $AdvancedUiInfo.Diagnostics))
   $Result.UnresolvedFields = [string[]]@($AdvancedUiInfo.UnresolvedFields)
   return $Result
 }
@@ -1148,7 +1148,7 @@ function Merge-InstallShieldInstallScriptResult {
     }
   }
   $Result.UnresolvedFields = [string[]]@((@($Result.UnresolvedFields) + @($InstallScriptInfo.UnresolvedFields)) | Select-Object -Unique)
-  $Result.Warnings = [string[]]@($Result.Warnings + @($InstallScriptInfo.Warnings))
+  $Result.Diagnostics = @(Merge-InstallerDiagnostics -Diagnostic @($Result.Diagnostics, $InstallScriptInfo.Diagnostics))
   return $Result
 }
 
@@ -1196,7 +1196,7 @@ function Get-InstallShieldInfo {
     } elseif ($InxFiles) {
       'InstallScript'
     } else { $null }
-    $PayloadSelectionWarnings = if ($AdvancedUiInfo) { @() } else { @($MsiPayloadSelection.Warnings) }
+    $PayloadSelectionWarnings = if ($AdvancedUiInfo) { @() } else { @($MsiPayloadSelection.Diagnostics) }
     $PackageForTheWebInfo = if ($PackageForTheWebCabinet) {
       $Configuration = $MsiPayloadSelection.Configuration
       $RootSetupFiles = [object[]]@($ExtractedFiles | Where-Object {
@@ -1269,7 +1269,7 @@ function Get-InstallShieldInfo {
     $ElevationRequirementEvidence = Get-InstallShieldElevationInfo `
       -RequestedExecutionLevel $Context.RequestedExecutionLevel `
       -PrerequisiteEvidence $PrerequisiteEvidence
-    foreach ($ElevationWarning in @($ElevationRequirementEvidence.Warnings)) {
+    foreach ($ElevationWarning in @($ElevationRequirementEvidence.Diagnostics)) {
       $ClassificationWarnings.Add($ElevationWarning)
     }
 
@@ -1278,7 +1278,7 @@ function Get-InstallShieldInfo {
     # Setup.ini has selected an MSI payload.
     $Result = [pscustomobject][ordered]@{
       Path                               = $InstallerPath
-      InstallerType                      = 'InstallShield'
+      InstallerType                      = 'exe'
       ProductCode                        = $null
       UpgradeCode                        = $null
       DisplayName                        = $null
@@ -1297,8 +1297,14 @@ function Get-InstallShieldInfo {
       WritesAppsAndFeaturesEntry         = $null
       AppsAndFeaturesProductCode         = $null
       AppsAndFeaturesInstallerType       = $null
-      Warnings                           = [string[]]@($PayloadSelectionWarnings + $InstallShieldCabinetSupport.Warnings + $ClassificationWarnings + @($SelectedMsiInfo.InstallShieldScriptInfo.Warnings) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+      Diagnostics                        = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@(
+              @($PayloadSelectionWarnings)
+              @($InstallShieldCabinetSupport.Diagnostics)
+              @($ClassificationWarnings)
+              if ($SelectedMsiInfo -and $SelectedMsiInfo.InstallShieldScriptInfo) { @($SelectedMsiInfo.InstallShieldScriptInfo.Diagnostics) }
+            )) -Source 'InstallShield' -Kind Incomplete -Areas Metadata))
       UnresolvedFields                   = [string[]]@()
+      Family                             = 'InstallShield'
       AppsAndFeaturesEntries             = [object[]]@()
       RegistryWrites                     = [object[]]@()
       RegistryItems                      = [object[]]@()
@@ -1380,7 +1386,12 @@ function Get-InstallShieldInfo {
           -EntryPoint $AdvancedUiInfo.InstallScriptEntryPoints -AnalysisScope EmbeddedAction
         $Result = Merge-InstallShieldInstallScriptResult -Result $Result -InstallScriptInfo $InstallScriptInfo -Supplemental
       } catch {
-        $Result.Warnings = [string[]]@($Result.Warnings + "Advanced UI InstallScript action analysis failed: $($_.Exception.Message)")
+        $Result.Diagnostics = @(
+          Merge-InstallerDiagnostics -Diagnostic @(
+            $Result.Diagnostics
+            New-InstallerDiagnostic -Id 'InstallShield.AdvancedUI.InstallScriptAnalysisFailed' -Source 'InstallShield' -Message "Advanced UI InstallScript action analysis failed: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata -AffectedFields AppsAndFeaturesEntries
+          )
+        )
       }
       # Reuse this extraction and analyze setup.inx/setup.iss once for a
       # standalone InstallScript package, where the script owns ARP and silent behavior.
@@ -1389,12 +1400,22 @@ function Get-InstallShieldInfo {
         $InstallScriptInfo = Get-InstallShieldInstallScriptInfo -Installer $Result
         $Result = Merge-InstallShieldInstallScriptResult -Result $Result -InstallScriptInfo $InstallScriptInfo
       } catch {
-        $Result.Warnings = [string[]]@($Result.Warnings + "InstallScript analysis failed: $($_.Exception.Message)")
+        $Result.Diagnostics = @(
+          Merge-InstallerDiagnostics -Diagnostic @(
+            $Result.Diagnostics
+            New-InstallerDiagnostic -Id 'InstallShield.InstallScript.AnalysisFailed' -Source 'InstallShield' -Message "InstallScript analysis failed: $($_.Exception.Message)" -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries
+          )
+        )
       }
     }
     $Result.InstallShieldStructuralRoutes = Get-InstallShieldStructuralRoute -Context $Context -Result $Result
     $Result.InstallShieldRelease = Resolve-InstallShieldRelease -Evidence (Get-InstallShieldReleaseEvidenceFromContext -Context $Context)
-    $Result.Warnings = [string[]]@($Result.Warnings + $Result.InstallShieldRelease.Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+    $Result.Diagnostics = @(
+      Merge-InstallerDiagnostics -Diagnostic @(
+        $Result.Diagnostics
+        @(ConvertTo-InstallerDiagnostic -InputObject @($Result.InstallShieldRelease.Diagnostics) -Source 'InstallShieldRelease' -Kind Ambiguous -Areas Detection)
+      )
+    )
     return $Result
   }
 }

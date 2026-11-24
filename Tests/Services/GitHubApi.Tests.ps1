@@ -12,7 +12,7 @@ BeforeAll {
   Import-Module $Script:GitHubModulePath -Force
 }
 
-Describe 'Invoke-GitHubApi proxy command' {
+Describe 'Invoke-GitHubApi proxy command' -Tag Unit {
   It 'exposes the Invoke-RestMethod parameter surface' {
     $RestMethodParameters = (Get-Command Microsoft.PowerShell.Utility\Invoke-RestMethod).Parameters.Keys
     $GitHubParameters = (Get-Command Invoke-GitHubApi).Parameters.Keys
@@ -138,7 +138,7 @@ Describe 'Invoke-GitHubApi proxy command' {
   }
 }
 
-Describe 'GitHub API diagnostics' {
+Describe 'GitHub API diagnostics' -Tag Unit {
   It 'formats GitHub REST status, validation details, documentation, and request ID' {
     $Response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::UnprocessableEntity)
     try {

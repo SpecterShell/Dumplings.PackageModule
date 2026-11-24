@@ -11,7 +11,7 @@ BeforeAll {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Data\ProtocolBuffers.psm1') -Force
 }
 
-Describe 'ConvertFrom-ProtoBuf' {
+Describe 'ConvertFrom-ProtoBuf' -Tag Unit {
   It 'exports only the public converter from the dedicated module' {
     $Module = Get-Module ProtocolBuffers
 

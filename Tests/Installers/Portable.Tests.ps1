@@ -257,6 +257,7 @@ Describe 'PE architecture helpers' {
   It 'Should map native PE machine values to concrete WinGet architectures' {
     (Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-x86.exe' -Machine 0x014C)).RecommendedWinGetArchitecture | Should -Be 'x86'
     (Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-x64.exe' -Machine 0x8664 -PE32Plus)).RecommendedWinGetArchitecture | Should -Be 'x64'
+    (Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-arm.exe' -Machine 0x01C4)).RecommendedWinGetArchitecture | Should -Be 'arm'
     (Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-arm64.exe' -Machine 0xAA64 -PE32Plus)).RecommendedWinGetArchitecture | Should -Be 'arm64'
   }
 
@@ -271,11 +272,22 @@ Describe 'PE architecture helpers' {
     (Get-PEArchitectureInfo -Path $Arm64Dll).RecommendedWinGetArchitecture | Should -Be 'arm64'
   }
 
-  It 'Should exclude ARM32 from recommendations' {
+  It 'Should map ARM32 DLLs to the WinGet arm architecture' {
     $Info = Get-PEArchitectureInfo -Path (Get-PortableTestPEFixture -Name 'native-arm.dll' -Machine 0x01C4 -Dll)
 
-    $Info.RecommendedWinGetArchitectures | Should -BeNullOrEmpty
-    $Info.Warnings[0] | Should -BeLike '*ARM32*excluded*'
+    $Info.NativeArchitecture | Should -Be 'arm'
+    $Info.RecommendedWinGetArchitecture | Should -Be 'arm'
+    $Info.RecommendedWinGetArchitectures | Should -Be @('arm')
+    Test-PEArchitecture -Path $Info.Path -Architecture arm | Should -BeTrue
+    $Info.Diagnostics | Should -BeNullOrEmpty
+  }
+
+  It 'Should recognize the real 7-Zip ARM32 installer PE architecture' -Tag RealFixture {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers\PE\7zip.7zip\26.03\7z2603-arm.exe' -Uri 'https://github.com/ip7z/7zip/releases/download/26.03/7z2603-arm.exe' -Sha256 '74144F45945359FCE65C67228A7975EAA55C897CC7255942746654F4AB66CAD6'
+    $Info = Get-PEArchitectureInfo -Path $Fixture
+
+    $Info.MachineName | Should -Be 'ARMNT'
+    $Info.RecommendedWinGetArchitecture | Should -Be 'arm'
   }
 
   It 'Should report .NET Framework AnyCPU below 4.8.1 as x86 and x64 only' {
@@ -295,7 +307,7 @@ Describe 'PE architecture helpers' {
     $Info.RecommendedWinGetArchitectures | Should -Contain 'x86'
     $Info.RecommendedWinGetArchitectures | Should -Contain 'x64'
     $Info.RecommendedWinGetArchitectures | Should -Not -Contain 'arm64'
-    $Info.Warnings | Should -Contain 'Managed AnyCPU target framework metadata was not found; reporting x86 and x64 only and requiring manual review before adding arm64.'
+    $Info.Diagnostics.Message | Should -Contain 'Managed AnyCPU target framework metadata was not found; reporting x86 and x64 only and requiring manual review before adding arm64.'
   }
 
   It 'Should map 32BitRequired managed executables to x86' {
@@ -320,7 +332,7 @@ Describe 'PE architecture helpers' {
     $Info = Get-PEArchitectureInfo -Path $Main -RelatedFile $NativeDll
 
     $Info.RecommendedWinGetArchitecture | Should -Be 'x64'
-    $Info.Warnings | Should -Contain 'Related PE files narrow this portable executable to x64.'
+    $Info.Diagnostics.Message | Should -Contain 'Related PE files narrow this portable executable to x64.'
   }
 
   It 'Should warn when related native DLLs contain multiple architectures' {
@@ -330,7 +342,7 @@ Describe 'PE architecture helpers' {
 
     $Info = Get-PEArchitectureInfo -Path $Main -RelatedFile @($X86Dll, $X64Dll)
 
-    $Info.Warnings | Should -Contain 'Related PE files contain multiple concrete architectures: x64, x86. Inspect package layout manually before authoring WinGet installers.'
+    $Info.Diagnostics.Message | Should -Contain 'Related PE files contain multiple concrete architectures: x64, x86. Inspect package layout manually before authoring WinGet installers.'
   }
 
   It 'Should not export superseded portable architecture wrapper names' {
@@ -376,6 +388,19 @@ Describe 'PE dependency helpers' {
     $Info = Get-PEDependencyInfo -Path $Path
 
     $Info.RecommendedPackageDependencyIds | Should -Contain 'Microsoft.VCRedist.2015+.arm64'
+  }
+
+  It 'Should preserve ARM32 VC runtime evidence without inventing a package dependency' {
+    $Path = Get-PortableTestPEFixture -Name 'vcredist-arm.exe' -Machine 0x01C4 -Imports @('vcruntime140.dll')
+
+    $Info = Get-PEDependencyInfo -Path $Path
+
+    $Info.DependsOnVCRedist | Should -BeTrue
+    $Info.VCRedistImports | Should -HaveCount 1
+    $Info.VCRedistImports[0].Architecture | Should -Be 'arm'
+    $Info.VCRedistImports[0].PackageIdentifier | Should -BeNullOrEmpty
+    $Info.RecommendedPackageDependencyIds | Should -BeNullOrEmpty
+    $Info.Diagnostics.Message | Should -Contain "Import 'vcruntime140.dll' maps to VC++ 2015+, but no Microsoft.VCRedist.2015+.arm package is available."
   }
 
   It 'Should report UCRT imports separately from VCRedist package dependencies' {
@@ -563,8 +588,8 @@ Describe 'PE dependency helpers' {
     $Info = Get-PEDependencyInfo -Path $Dll -RelatedFile $RuntimeConfig
 
     $Info.RecommendedPackageDependencyIds | Should -BeNullOrEmpty
-    $Info.Warnings | Should -Contain "Unknown .NET runtimeconfig framework 'Contoso.Runtime' was found; dependency mapping requires manual review."
-    $Info.Warnings | Should -Contain "Runtimeconfig framework 'Microsoft.NETCore.App' version '11.0.0' is outside the supported Microsoft.DotNet dependency majors 5-10."
+    $Info.Diagnostics.Message | Should -Contain "Unknown .NET runtimeconfig framework 'Contoso.Runtime' was found; dependency mapping requires manual review."
+    $Info.Diagnostics.Message | Should -Contain "Runtimeconfig framework 'Microsoft.NETCore.App' version '11.0.0' is outside the supported Microsoft.DotNet dependency majors 5-10."
   }
 
   It 'Should warn when a managed .NET 5+ DLL has no runtimeconfig sidecar' {
@@ -572,7 +597,7 @@ Describe 'PE dependency helpers' {
 
     $Info = Get-PEDependencyInfo -Path $Dll
 
-    $Info.Warnings[0] | Should -BeLike '*has no runtimeconfig sidecar*'
+    @($Info.Diagnostics | Where-Object Message -Like '*has no runtimeconfig sidecar*') | Should -Not -BeNullOrEmpty
   }
 
   It 'Should not export superseded VCRedist wrapper names' {

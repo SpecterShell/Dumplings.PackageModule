@@ -15,6 +15,7 @@ namespace Dumplings.InstallerInfrastructure
         public uint VirtualSize { get; set; }
         public uint RawOffset { get; set; }
         public uint RawSize { get; set; }
+        public uint Characteristics { get; set; }
     }
 
     public sealed class PeDirectoryData
@@ -133,7 +134,8 @@ namespace Dumplings.InstallerInfrastructure
                 {
                     layout.Sections.Add(new PeSectionData {
                         Name = section.Name, VirtualAddress = unchecked((uint)section.VirtualAddress), VirtualSize = unchecked((uint)section.VirtualSize),
-                        RawOffset = unchecked((uint)section.PointerToRawData), RawSize = unchecked((uint)section.SizeOfRawData)
+                        RawOffset = unchecked((uint)section.PointerToRawData), RawSize = unchecked((uint)section.SizeOfRawData),
+                        Characteristics = unchecked((uint)section.SectionCharacteristics)
                     });
                 }
                 DirectoryEntry[] directories = {
@@ -147,7 +149,7 @@ namespace Dumplings.InstallerInfrastructure
                     DirectoryEntry item = directories[i];
                     uint address = unchecked((uint)item.RelativeVirtualAddress);
                     uint size = unchecked((uint)item.Size);
-                    // The certificate directory uses a file offset; all other directories use RVAs.
+                    // The certificate directory uses a file offset. Other directories use RVAs.
                     long offset = address == 0 ? -1 : (i == 4 ? (long)address : RvaToOffset(address, layout.Sections));
                     layout.DataDirectories[DirectoryNames[i]] = new PeDirectoryData {
                         Index = i, Name = DirectoryNames[i], Rva = address, Size = size, Offset = offset

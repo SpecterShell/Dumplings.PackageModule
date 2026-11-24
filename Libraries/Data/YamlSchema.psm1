@@ -1,8 +1,9 @@
 # Generic JSON Schema processing for PowerShell objects serialized as YAML.
-# The module intentionally performs no YAML parsing and never accesses the
-# network unless the caller explicitly supplies -AllowNetworkReference.
+# Callers supply parsed objects. Network access requires -AllowNetworkReference.
 
 Set-StrictMode -Version 3
+
+Import-Module (Join-Path $PSScriptRoot 'Conversion.psm1') -ErrorAction Stop
 
 function New-YamlSchemaDiagnostic {
   <#
@@ -44,64 +45,6 @@ function New-YamlSchemaDiagnostic {
     ObjectPath = $ObjectPath
     SchemaPath = $SchemaPath
   }
-}
-
-function Copy-YamlSchemaObject {
-  <#
-  .SYNOPSIS
-    Deep-copy dictionaries and arrays without changing scalar values.
-  .PARAMETER InputObject
-    The value to copy.
-  #>
-  param ([AllowNull()]$InputObject)
-
-  if ($InputObject -is [System.Collections.IDictionary]) {
-    $Result = [ordered]@{}
-    foreach ($Key in $InputObject.Keys) {
-      $Result[$Key] = Copy-YamlSchemaObject -InputObject $InputObject[$Key]
-    }
-    return $Result
-  }
-  if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
-    return , @($InputObject | ForEach-Object { Copy-YamlSchemaObject -InputObject $_ })
-  }
-  return $InputObject
-}
-
-function Test-YamlSchemaValueEqual {
-  <#
-  .SYNOPSIS
-    Compare two schema values using JSON structural equality.
-  .PARAMETER Left
-    The left value.
-  .PARAMETER Right
-    The right value.
-  #>
-  [OutputType([bool])]
-  param ([AllowNull()]$Left, [AllowNull()]$Right)
-
-  if ($null -eq $Left -or $null -eq $Right) {
-    return $null -eq $Left -and $null -eq $Right
-  }
-  if ($Left -is [System.Collections.IDictionary]) {
-    if ($Right -isnot [System.Collections.IDictionary] -or $Left.Count -ne $Right.Count) { return $false }
-    foreach ($Key in $Left.Keys) {
-      $RightKey = $Right.Keys | Where-Object { $_ -ceq $Key } | Select-Object -First 1
-      if ($null -eq $RightKey -or -not (Test-YamlSchemaValueEqual -Left $Left[$Key] -Right $Right[$RightKey])) { return $false }
-    }
-    return $true
-  }
-  if ($Left -is [System.Collections.IEnumerable] -and $Left -isnot [string]) {
-    if ($Right -isnot [System.Collections.IEnumerable] -or $Right -is [string]) { return $false }
-    $LeftItems = @($Left)
-    $RightItems = @($Right)
-    if ($LeftItems.Count -ne $RightItems.Count) { return $false }
-    for ($Index = 0; $Index -lt $LeftItems.Count; $Index++) {
-      if (-not (Test-YamlSchemaValueEqual -Left $LeftItems[$Index] -Right $RightItems[$Index])) { return $false }
-    }
-    return $true
-  }
-  return $Left -ceq $Right
 }
 
 function Get-YamlSchemaValue {
@@ -275,6 +218,8 @@ function Invoke-YamlSchemaNodeValidation {
     Report unknown and incorrectly cased properties.
   .PARAMETER ReferenceStack
     Active reference/object-path pairs used for cycle detection.
+  .PARAMETER ReferenceCache
+    Resolved local references owned by this validation operation and root schema.
   .PARAMETER Depth
     Current recursion depth.
   .PARAMETER MaximumDepth
@@ -288,6 +233,7 @@ function Invoke-YamlSchemaNodeValidation {
     [string]$SchemaPath,
     [switch]$ValidatePropertyNames,
     [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$ReferenceStack,
+    [Collections.Generic.Dictionary[string, object]]$ReferenceCache = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal),
     [int]$Depth,
     [int]$MaximumDepth
   )
@@ -308,8 +254,9 @@ function Invoke-YamlSchemaNodeValidation {
       return $Diagnostics.ToArray()
     }
     try {
-      $Resolved = Get-YamlSchemaValue -InputObject $RootSchema -Ref $Reference
-      return Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Resolved -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath $Reference -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
+      if (-not $ReferenceCache.ContainsKey($Reference)) { $ReferenceCache[$Reference] = Get-YamlSchemaValue -InputObject $RootSchema -Ref $Reference }
+      $Resolved = $ReferenceCache[$Reference]
+      return Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Resolved -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath $Reference -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -ReferenceCache $ReferenceCache -Depth ($Depth + 1) -MaximumDepth $MaximumDepth
     } catch {
       $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword '$ref' -Reason InvalidReference -Message $_.Exception.Message -ObjectPath $ObjectPath -SchemaPath $SchemaPath))
       return $Diagnostics.ToArray()
@@ -323,7 +270,7 @@ function Invoke-YamlSchemaNodeValidation {
   if ($Schema.Contains('oneOf')) {
     $AlternativeMatches = 0
     foreach ($Alternative in @($Schema['oneOf'])) {
-      $AlternativeDiagnostics = @(Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Alternative -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/oneOf" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth)
+      $AlternativeDiagnostics = @(Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Alternative -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/oneOf" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -ReferenceCache $ReferenceCache -Depth ($Depth + 1) -MaximumDepth $MaximumDepth)
       if ($AlternativeDiagnostics.Count -eq 0) { $AlternativeMatches++ }
     }
     if ($AlternativeMatches -ne 1) {
@@ -331,14 +278,14 @@ function Invoke-YamlSchemaNodeValidation {
     }
   }
   if ($Schema.Contains('not')) {
-    $NotDiagnostics = @(Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Schema['not'] -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/not" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth)
+    $NotDiagnostics = @(Invoke-YamlSchemaNodeValidation -InputObject $InputObject -Schema $Schema['not'] -RootSchema $RootSchema -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/not" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -ReferenceCache $ReferenceCache -Depth ($Depth + 1) -MaximumDepth $MaximumDepth)
     if ($NotDiagnostics.Count -eq 0) {
       $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword not -Reason ProhibitedMatch -Message 'Value matches a prohibited schema.' -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/not"))
     }
   }
 
   # Determine the JSON type represented by the PowerShell value. Integer is a
-  # valid number, while strings are deliberately never coerced here.
+  # valid number, while strings are never coerced here.
   $AllowedTypes = @($Schema.Contains('type') ? $Schema['type'] : @())
   if ($AllowedTypes.Count -gt 0) {
     $ActualType = if ($null -eq $InputObject) { 'null' }
@@ -356,10 +303,10 @@ function Invoke-YamlSchemaNodeValidation {
   }
   if ($null -eq $InputObject) { return $Diagnostics.ToArray() }
 
-  if ($Schema.Contains('enum') -and -not @($Schema['enum']).Where({ Test-YamlSchemaValueEqual -Left $InputObject -Right $_ }, 'First')) {
+  if ($Schema.Contains('enum') -and -not @($Schema['enum']).Where({ Test-ObjectValueEqual -Left $InputObject -Right $_ }, 'First')) {
     $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword enum -Reason NotAllowed -Message 'Value is not in the allowed enumeration.' -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/enum"))
   }
-  if ($Schema.Contains('const') -and -not (Test-YamlSchemaValueEqual -Left $InputObject -Right $Schema['const'])) {
+  if ($Schema.Contains('const') -and -not (Test-ObjectValueEqual -Left $InputObject -Right $Schema['const'])) {
     $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword const -Reason NotEqual -Message "Value must equal '$($Schema['const'])'." -Value $InputObject -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/const"))
   }
 
@@ -375,14 +322,14 @@ function Invoke-YamlSchemaNodeValidation {
         # text ordinally before deciding whether casing is valid.
         $ExactKey = $Schema['properties'].Keys | Where-Object { $_ -ceq $Key } | Select-Object -First 1
         if ($null -ne $ExactKey) {
-          $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $InputObject[$Key] -Schema $Schema['properties'][$ExactKey] -RootSchema $RootSchema -ObjectPath "${ObjectPath}.${Key}" -SchemaPath "${SchemaPath}/properties/${ExactKey}" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
+          $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $InputObject[$Key] -Schema $Schema['properties'][$ExactKey] -RootSchema $RootSchema -ObjectPath "${ObjectPath}.${Key}" -SchemaPath "${SchemaPath}/properties/${ExactKey}" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -ReferenceCache $ReferenceCache -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
           continue
         }
 
         $ExpectedKey = $Schema['properties'].Keys | Where-Object { $_ -ieq $Key } | Select-Object -First 1
         if ($ValidatePropertyNames -and $ExpectedKey) {
           $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword properties -Reason PropertyNameCase -Message "Property '${Key}' has incorrect casing; expected '${ExpectedKey}'." -Field $Key -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/properties"))
-          $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $InputObject[$Key] -Schema $Schema['properties'][$ExpectedKey] -RootSchema $RootSchema -ObjectPath "${ObjectPath}.${Key}" -SchemaPath "${SchemaPath}/properties/${ExpectedKey}" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
+          $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $InputObject[$Key] -Schema $Schema['properties'][$ExpectedKey] -RootSchema $RootSchema -ObjectPath "${ObjectPath}.${Key}" -SchemaPath "${SchemaPath}/properties/${ExpectedKey}" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -ReferenceCache $ReferenceCache -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
         } elseif ($ValidatePropertyNames -or ($Schema.Contains('additionalProperties') -and $Schema['additionalProperties'] -eq $false)) {
           $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword properties -Reason UnknownProperty -Message "Property '${Key}' is not defined by the schema." -Field $Key -ObjectPath $ObjectPath -SchemaPath "${SchemaPath}/properties"))
         }
@@ -399,7 +346,7 @@ function Invoke-YamlSchemaNodeValidation {
     if ($Schema.Contains('uniqueItems') -and $Schema['uniqueItems']) {
       for ($LeftIndex = 0; $LeftIndex -lt $Items.Count; $LeftIndex++) {
         for ($RightIndex = $LeftIndex + 1; $RightIndex -lt $Items.Count; $RightIndex++) {
-          if (Test-YamlSchemaValueEqual -Left $Items[$LeftIndex] -Right $Items[$RightIndex]) {
+          if (Test-ObjectValueEqual -Left $Items[$LeftIndex] -Right $Items[$RightIndex]) {
             $Diagnostics.Add((New-YamlSchemaDiagnostic -Keyword uniqueItems -Reason DuplicateItem -Message 'Array items must be unique.' -Value $Items[$RightIndex] -ObjectPath "${ObjectPath}[${RightIndex}]" -SchemaPath "${SchemaPath}/uniqueItems"))
           }
         }
@@ -407,7 +354,7 @@ function Invoke-YamlSchemaNodeValidation {
     }
     if ($Schema.Contains('items')) {
       for ($Index = 0; $Index -lt $Items.Count; $Index++) {
-        $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $Items[$Index] -Schema $Schema['items'] -RootSchema $RootSchema -ObjectPath "${ObjectPath}[${Index}]" -SchemaPath "${SchemaPath}/items" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
+        $Diagnostics.AddRange(@(Invoke-YamlSchemaNodeValidation -InputObject $Items[$Index] -Schema $Schema['items'] -RootSchema $RootSchema -ObjectPath "${ObjectPath}[${Index}]" -SchemaPath "${SchemaPath}/items" -ValidatePropertyNames:$ValidatePropertyNames -ReferenceStack $ReferenceStack -ReferenceCache $ReferenceCache -Depth ($Depth + 1) -MaximumDepth $MaximumDepth))
       }
     }
   } elseif ($InputObject -is [string]) {
@@ -551,7 +498,7 @@ function ConvertTo-SortedYamlObject {
       # Formatting must never discard extension or misspelled fields; schema
       # validation remains responsible for reporting them to the caller.
       foreach ($Key in $InputObject.Keys) {
-        if (-not $Output.Contains($Key)) { $Output[$Key] = Copy-YamlSchemaObject -InputObject $InputObject[$Key] }
+        if (-not $Output.Contains($Key)) { $Output[$Key] = Copy-Object -InputObject $InputObject[$Key] }
       }
       return $Output
     }

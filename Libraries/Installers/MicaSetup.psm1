@@ -127,6 +127,31 @@ function Get-MicaSetupOptionValue {
   return $DefaultValue
 }
 
+function Get-MicaSetupObjectValue {
+  <#
+  .SYNOPSIS
+    Read one property from a bounded object-initializer projection.
+  .PARAMETER InputObject
+    Dictionary or PSCustomObject returned by the managed CIL evaluator.
+  .PARAMETER Name
+    Exact source property name.
+  .PARAMETER DefaultValue
+    Value used when the property was not present in the compiled initializer.
+  #>
+  param (
+    $InputObject,
+    [Parameter(Mandatory)][string]$Name,
+    $DefaultValue = $null
+  )
+
+  if ($InputObject -is [Collections.IDictionary]) {
+    if (@($InputObject.Keys) -ccontains $Name) { return $InputObject[$Name] }
+    return $DefaultValue
+  }
+  $Property = $InputObject.PSObject.Properties[$Name]
+  return $Property ? $Property.Value : $DefaultValue
+}
+
 function Open-MicaSetupPayloadArchive {
   <#
   .SYNOPSIS
@@ -230,7 +255,7 @@ function Get-MicaSetupPayloadEvidence {
   param (
     [Parameter(Mandatory)]$Archive,
     [string]$ExeName,
-    [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
+    [AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
   )
 
   $Catalog = [Collections.Generic.List[object]]::new()
@@ -313,27 +338,54 @@ function Get-MicaSetupInfo {
   process {
     $File = Get-Item -LiteralPath (Resolve-InstallerFileSystemPath -Path $Path -PathType Leaf) -Force -ErrorAction Stop
     $Warnings = [Collections.Generic.List[string]]::new()
-    $Notices = [Collections.Generic.List[string]]::new()
+    $Diagnostics = [Collections.Generic.List[object]]::new()
+    $InformationMessages = [Collections.Generic.List[string]]::new()
     $UnresolvedFields = [Collections.Generic.List[string]]::new()
     $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
       $Managed = Get-MicaSetupManagedInfo -Stream $Stream
       $PayloadResource = @($Managed.Resources | Where-Object { $_.Name -ieq $Script:MicaSetupPayloadResourceName -and $_.TypeCode -eq 33 })
-      $HasConfigurationHost = $Managed.FileKind -eq 'Executable' -and (($Managed.HasOptionType -and $Managed.HasUseOptionsMethod) -or ($Managed.HasPackType -and $Managed.HasUsePackMethod))
+      # MicaSetup 1.1 is a source-backed transition: it uses MicaSetup.Core.Option with
+      # the older UsePack host method. Later Option models use UseOptions.
+      $HasConfigurationHost = $Managed.FileKind -eq 'Executable' -and (($Managed.HasOptionType -and ($Managed.HasUseOptionsMethod -or $Managed.HasUsePackMethod)) -or ($Managed.HasPackType -and $Managed.HasUsePackMethod))
       if (-not $HasConfigurationHost -or $PayloadResource.Count -ne 1) {
-        throw 'The PE does not contain the CLR Option/UseOptions or Pack/UsePack configuration host and WPF publish.7z structures required for MicaSetup.'
+        throw 'The PE does not contain a supported CLR Option/UseOptions, Option/UsePack, or Pack/UsePack configuration host and WPF publish.7z structures required for MicaSetup.'
       }
       foreach ($Warning in $Managed.Warnings) { $Warnings.Add("MicaSetup CLR analysis: $Warning") }
       $Options = ConvertTo-MicaSetupOptionMap -Evidence $Managed.Options
       $UnresolvedExpressions = @($Options.Evidence | Where-Object { -not $_.IsResolved } | ForEach-Object {
           [pscustomobject]@{ Name = $_.Name; Expression = $_.Expression; Method = $_.Method; IlOffset = $_.IlOffset }
         })
-      if ($UnresolvedExpressions.Count -gt 0) {
-        $Notices.Add("MicaSetup contains $($UnresolvedExpressions.Count) unresolved compiled configuration expression(s); affected effects require source inspection or VM validation.")
+      $LocalizedUiExpressionNames = @('SetupName', 'MessageOfPage2', 'MessageOfPage3')
+      $LocalizedUiExpressions = @($UnresolvedExpressions | Where-Object Name -In $LocalizedUiExpressionNames)
+      $BehaviorExpressions = @($UnresolvedExpressions | Where-Object Name -NotIn $LocalizedUiExpressionNames)
+      if ($LocalizedUiExpressions.Count -gt 0) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Configuration.LocalizedUiExpressions' -Source 'MicaSetup' -Message "MicaSetup contains $($LocalizedUiExpressions.Count) runtime-localized setup UI expression(s); their source calls are retained without treating them as unresolved package metadata." -Kind Information -Areas Metadata -Evidence $LocalizedUiExpressions))
+      }
+      if ($BehaviorExpressions.Count -gt 0) {
+        $AffectedExpressionFields = [string[]]@($BehaviorExpressions | ForEach-Object {
+            switch ($_.Name) {
+              { $_ -in 'AppName', 'DisplayName' } { 'DisplayName'; 'AppsAndFeaturesEntries' }
+              'DisplayVersion' { 'DisplayVersion'; 'AppsAndFeaturesEntries' }
+              'Publisher' { 'Publisher'; 'AppsAndFeaturesEntries' }
+              'KeyName' { 'ProductCode'; 'AppsAndFeaturesEntries' }
+              'DisplayIcon' { 'DisplayIcon'; 'AppsAndFeaturesEntries' }
+              { $_ -in 'UseElevated', 'IsUseRegistryPreferX86' } { 'Scope'; 'AppsAndFeaturesEntries' }
+              { $_ -in 'IsCreateRegistryKeys', 'IsCreateUninst', 'SystemComponent' } { 'ProductCode'; 'AppsAndFeaturesEntries' }
+              { $_ -in 'InstallPath', 'UseInstallPathPreferX86' } { 'DefaultInstallLocation' }
+              'UnpackingPassword' { 'PayloadPassword' }
+            }
+          } | Sort-Object -Unique)
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Configuration.ExpressionsUnresolved' -Source 'MicaSetup' -Message "MicaSetup contains $($BehaviorExpressions.Count) unresolved compiled configuration expression(s); affected effects require source inspection or VM validation." -Kind Incomplete -Areas Metadata -AffectedFields $AffectedExpressionFields -Evidence $BehaviorExpressions))
       }
       $Generation = $Managed.BuilderGeneration
       $ConfigurationModel = $Managed.ConfigurationModel
       if ($Generation -notin 'v1', 'v2') { throw 'The MicaSetup option schema generation is unsupported.' }
+      $FormatCompatibility = switch ($ConfigurationModel) {
+        'Pack' { [pscustomobject][ordered]@{ FirstKnownRelease = '1.0.0'; LastKnownRelease = '1.0.0'; Notes = 'Costura-backed Pack and UsePack configuration.' } }
+        'OptionLegacy' { [pscustomobject][ordered]@{ FirstKnownRelease = '1.1.0'; LastKnownRelease = '2.3.2'; Notes = 'UseOptions configuration shared by later v1 and early v2 releases.' } }
+        'OptionModern' { [pscustomobject][ordered]@{ FirstKnownRelease = '2.3.3'; LastKnownRelease = $null; Notes = 'Modern Option schema beginning with IsUninstLower; later additive options retain the same container.' } }
+      }
 
       $UseElevated = if ($Generation -eq 'v1') { $true } elseif ($null -ne $Managed.UseElevated) { [bool]$Managed.UseElevated } elseif ($Managed.RequestExecutionLevel -ieq 'admin') { $true } elseif ($Managed.RequestExecutionLevel -ieq 'user') { $false } else { $null }
       $Scope = if ($UseElevated -eq $true) { 'machine' } elseif ($UseElevated -eq $false) { 'user' } else { $null }
@@ -361,9 +413,9 @@ function Get-MicaSetupInfo {
 
       $WritesArp = $Scope -eq 'machine' -and $CreateRegistry -and -not [string]::IsNullOrWhiteSpace($KeyName)
       $VisibleArp = $WritesArp -and -not $SystemComponent
-      if ($Scope -eq 'user' -and $CreateRegistry) { $Notices.Add('MicaSetup v2 user-mode installations write Uninst.dat instead of a Windows uninstall registry entry.') }
-      if ($WritesArp -and $SystemComponent) { $Notices.Add('MicaSetup writes a hidden uninstall entry because SystemComponent is enabled.') }
-      if (-not $CreateRegistry) { $Notices.Add('MicaSetup registry/uninstall entry creation is disabled by IsCreateRegistryKeys.') }
+      if ($Scope -eq 'user' -and $CreateRegistry) { $InformationMessages.Add('MicaSetup v2 user-mode installations write Uninst.dat instead of a Windows uninstall registry entry.') }
+      if ($WritesArp -and $SystemComponent) { $InformationMessages.Add('MicaSetup writes a hidden uninstall entry because SystemComponent is enabled.') }
+      if (-not $CreateRegistry) { $InformationMessages.Add('MicaSetup registry/uninstall entry creation is disabled by IsCreateRegistryKeys.') }
 
       # Project the built-in uninstall entry as individual registry values so it has the same shape
       # as explicit custom writes and can be consumed by shared registry-evidence helpers.
@@ -395,13 +447,13 @@ function Get-MicaSetupInfo {
           })
       }
       $AssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite @($RegistryWrites)
-      foreach ($Warning in $AssociationInfo.Warnings) { $Warnings.Add("MicaSetup association analysis: $Warning") }
+      foreach ($Diagnostic in $AssociationInfo.Diagnostics) { $Diagnostics.Add($Diagnostic) }
 
       $PasswordEvidence = $Options.Internal['UnpackingPassword']
       $PayloadEncrypted = $PasswordEvidence -and $PasswordEvidence.IsResolved -and -not [string]::IsNullOrEmpty([string]$PasswordEvidence.Value)
       $Password = if ($PayloadEncrypted) { [string]$PasswordEvidence.Value } else { $null }
       if ($PasswordEvidence -and -not $PasswordEvidence.IsResolved) {
-        $Warnings.Add('The MicaSetup payload password expression is not constant; static extraction is unavailable without manual evidence.')
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Extraction.PasswordUnresolved' -Source 'MicaSetup' -Message 'The MicaSetup payload password expression is not constant; static extraction is unavailable without manual evidence.' -Kind Unsupported -Areas Extraction -AffectedFields PayloadPassword))
         $UnresolvedFields.Add('PayloadPassword')
       }
 
@@ -428,91 +480,209 @@ function Get-MicaSetupInfo {
           if ($ArchiveContext) { Close-MicaSetupPayloadArchive -Context $ArchiveContext }
         }
       }
+      if ($PayloadEvidence.ArchitectureInfo) {
+        foreach ($Diagnostic in @($PayloadEvidence.ArchitectureInfo.Diagnostics)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } }
+      }
+      if ($PayloadEvidence.DependencyInfo) {
+        foreach ($Diagnostic in @($PayloadEvidence.DependencyInfo.Diagnostics)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } }
+      }
 
       $HasModernOptions = $ConfigurationModel -ne 'Pack'
       $Shortcuts = @(
         if ([bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsCreateDesktopShortcut' -DefaultValue $true)) { [pscustomobject]@{ Location = 'Desktop'; Name = $DisplayName; Target = $ExeName } }
-        if ([bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsCreateStartMenu' -DefaultValue $HasModernOptions)) { [pscustomobject]@{ Location = 'StartMenu'; Name = $DisplayName; Target = $ExeName } }
+        if ([bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsCreateStartMenu' -DefaultValue $HasModernOptions)) {
+          [pscustomobject]@{
+            Location = 'StartMenu'
+            Name     = $DisplayName
+            Target   = $ExeName
+            Pinned   = [bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsPinToStartMenu' -DefaultValue $false)
+          }
+        }
         if ([bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsCreateQuickLaunch' -DefaultValue $false)) { [pscustomobject]@{ Location = 'QuickLaunch'; Name = $DisplayName; Target = $ExeName } }
       )
+      $AutorunIsUserConfigurable = [bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsCustomizeVisiableAutoRun' -DefaultValue $false)
       $Autorun = if ([bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsCreateAsAutoRun' -DefaultValue $false)) {
-        @([pscustomobject]@{ Hive = 'HKEY_CURRENT_USER'; Key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; Name = $KeyName; Command = "$ExeName $([string](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'AutoRunLaunchCommand' -DefaultValue ''))".Trim() })
+        @([pscustomobject]@{ Hive = 'HKEY_CURRENT_USER'; Key = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; Name = $KeyName; Command = "$ExeName $([string](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'AutoRunLaunchCommand' -DefaultValue ''))".Trim(); UserConfigurable = $AutorunIsUserConfigurable })
       } else { @() }
       $EnvironmentChanges = if ($Generation -eq 'v2' -and [bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsEnvironmentVariable' -DefaultValue $false)) { @([pscustomobject]@{ Variable = 'PATH'; Action = 'AppendInstallLocationAndSubdirectories' }) } else { @() }
       $FirewallRules = if ([bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsAllowFirewall' -DefaultValue $HasModernOptions)) { @([pscustomobject]@{ Action = 'AllowApplication'; Target = $ExeName; ConditionalOnElevation = $true }) } else { @() }
       $Certificates = if ([bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsInstallCertificate' -DefaultValue $false)) { @($Managed.Resources | Where-Object Name -Like 'resources/setups/*.cer' | ForEach-Object { [pscustomobject]@{ Resource = $_.Name; ConditionalOnElevation = $true } }) } else { @() }
+      # The language option was added after v2.5.6. Earlier releases package a fixed set of
+      # BAML dictionaries, so infer those cultures instead of incorrectly assuming English only.
+      $SupportedLanguageEvidence = $Options.Internal['SupportLanguages']
+      $SupportedLanguages = if ($SupportedLanguageEvidence -and $SupportedLanguageEvidence.IsResolved) {
+        @($SupportedLanguageEvidence.Value | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+      } else {
+        @($Managed.Resources | ForEach-Object {
+            if ($_.Name -match '^resources/languages/(?<Culture>[^/]+)\.baml$') { $Matches.Culture }
+          } | Where-Object { $_ } | Sort-Object -Unique)
+      }
+      $OverlayRemoveExtensions = @(([string](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'OverlayInstallRemoveExt' -DefaultValue '')).Split(',', [StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim().TrimStart('.') } | Where-Object { $_ })
+      $OverlayRemovePatterns = @((Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'OverlayInstallRemovePatterns' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+      $OverlayHandlerEvidence = $Options.Internal['OverlayInstallRemoveHandler']
+      $OverlayCleanup = [pscustomobject][ordered]@{
+        Extensions            = $OverlayRemoveExtensions
+        Patterns              = $OverlayRemovePatterns
+        HasCustomHandler      = [bool]($OverlayHandlerEvidence -and (($OverlayHandlerEvidence.IsResolved -and $null -ne $OverlayHandlerEvidence.Value) -or -not $OverlayHandlerEvidence.IsResolved))
+        CustomHandlerResolved = [bool](!$OverlayHandlerEvidence -or $OverlayHandlerEvidence.IsResolved)
+      }
+      if ($OverlayRemoveExtensions.Count -gt 0 -or $OverlayRemovePatterns.Count -gt 0 -or $OverlayCleanup.HasCustomHandler) {
+        $InformationMessages.Add('MicaSetup performs configured overlay-install cleanup before extracting the replacement payload; review extension, pattern, and custom-handler evidence when preserving user-modified files matters.')
+      }
       $CloseApplicationsEvidence = $Options.Internal['CloseApplications']
-      $CloseApplications = if ($CloseApplicationsEvidence -and $CloseApplicationsEvidence.ArrayLength -ge 0) { [pscustomobject]@{ Count = $CloseApplicationsEvidence.ArrayLength; DetailsResolved = $CloseApplicationsEvidence.IsResolved } } else { $null }
-      if ($CloseApplications -and $CloseApplications.Count -gt 0 -and -not $CloseApplications.DetailsResolved) { $Notices.Add("MicaSetup configures $($CloseApplications.Count) application-close record(s); detailed object initializers require VM validation.") }
+      $ResolvedCloseApplications = if ($CloseApplicationsEvidence -and $CloseApplicationsEvidence.IsResolved) {
+        @($CloseApplicationsEvidence.Value | ForEach-Object {
+            [pscustomobject][ordered]@{
+              Target           = [string](Get-MicaSetupObjectValue -InputObject $_ -Name 'Target')
+              Description      = Get-MicaSetupObjectValue -InputObject $_ -Name 'Description'
+              WindowTitle      = Get-MicaSetupObjectValue -InputObject $_ -Name 'WindowTitle'
+              CloseMessage     = [bool](Get-MicaSetupObjectValue -InputObject $_ -Name 'CloseMessage' -DefaultValue $true)
+              RebootPrompt     = [bool](Get-MicaSetupObjectValue -InputObject $_ -Name 'RebootPrompt' -DefaultValue $false)
+              TerminateProcess = [bool](Get-MicaSetupObjectValue -InputObject $_ -Name 'TerminateProcess' -DefaultValue $true)
+              TimeoutSeconds   = [int](Get-MicaSetupObjectValue -InputObject $_ -Name 'Timeout' -DefaultValue 5)
+            }
+          })
+      } else { @() }
+      $CloseApplications = if ($CloseApplicationsEvidence -and $CloseApplicationsEvidence.ArrayLength -ge 0) {
+        [pscustomobject][ordered]@{
+          Count           = $CloseApplicationsEvidence.ArrayLength
+          DetailsResolved = $CloseApplicationsEvidence.IsResolved
+          Applications    = $ResolvedCloseApplications
+        }
+      } else { $null }
+      if ($CloseApplications -and $CloseApplications.Count -gt 0 -and -not $CloseApplications.DetailsResolved) { $InformationMessages.Add("MicaSetup configures $($CloseApplications.Count) application-close record(s); detailed object initializers require VM validation.") }
+
+      # When enabled, the elevated runtime grants inherited FullControl to both broad local
+      # identities. Preserve this security-relevant effect instead of reducing it to a Boolean.
+      $AllowFullFolderSecurity = [bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsAllowFullFolderSecurity' -DefaultValue $true)
+      $FolderPermissionChanges = if ($AllowFullFolderSecurity) {
+        @([pscustomobject][ordered]@{
+            Target                 = $DefaultInstallLocation
+            Identities             = @('Everyone', 'Users')
+            Rights                 = 'FullControl'
+            InheritToChildren      = $true
+            ConditionalOnElevation = $true
+          })
+      } else { @() }
+      if ($FolderPermissionChanges.Count -gt 0) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Security.PermissiveInstallAcl' -Source 'MicaSetup' -Message 'MicaSetup grants Everyone and Users inherited FullControl over the installation directory when running elevated.' -Kind Risk -Areas Security -AffectedFields DefaultInstallLocation -Evidence $FolderPermissionChanges))
+      }
+
+      # These options control observable shell and uninstall behavior but do not map directly to
+      # WinGet manifest fields. Return them as source evidence for authoring and VM validation.
+      $RefreshesExplorer = [bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsRefreshExplorer' -DefaultValue $false)
+      $EnablesUninstallDelayUntilReboot = [bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsEnableUninstallDelayUntilReboot' -DefaultValue $false)
+      $HostBehavior = [pscustomobject][ordered]@{
+        SingleInstanceMutex = [string](Get-MicaSetupObjectValue -InputObject $Managed -Name 'SingleInstanceMutex')
+        UsesTempPathFork    = Get-MicaSetupObjectValue -InputObject $Managed -Name 'UseTempPathFork'
+      }
+
+      # The runtime selects only license.txt or license.rtf from this resource directory. This is
+      # presentation evidence; source review still determines whether manifest Agreements apply.
+      $UsesExternalLicenseFile = [bool](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'IsUseLicenseFile' -DefaultValue $false)
+      $LicenseFileType = [string](Get-MicaSetupOptionValue -OptionMap $Options.Internal -Name 'LicenseFileType' -DefaultValue 'txt')
+      $LicenseResources = @($Managed.Resources | Where-Object Name -Match '^resources/licenses/license\.(?:txt|rtf)$' | ForEach-Object Name)
+      $LicensePolicy = [pscustomobject][ordered]@{
+        UsesExternalLicenseFile = $UsesExternalLicenseFile
+        FileType                = $LicenseFileType.ToLowerInvariant()
+        Resources               = $LicenseResources
+      }
 
       $AppsAndFeaturesEntries = if ($VisibleArp) { @([ordered]@{ ProductCode = $KeyName; DisplayName = $DisplayName; DisplayVersion = $DisplayVersion; Publisher = $Publisher; InstallerType = 'exe' }) } else { @() }
       $RequestedExecutionLevel = if ($Scope -eq 'machine') { 'requireAdministrator' } elseif ($Scope -eq 'user') { 'asInvoker' } else { $null }
       if ($Managed.RequestExecutionLevel) { $RequestedExecutionLevel = if ($Managed.RequestExecutionLevel -ieq 'admin') { 'requireAdministrator' } elseif ($Managed.RequestExecutionLevel -ieq 'user') { 'asInvoker' } else { $Managed.RequestExecutionLevel } }
-      if ($Generation -eq 'v1') { $Notices.Add('MicaSetup v1 calls UseElevated unconditionally and is treated as a machine-scope installer.') }
-      $Notices.Add('Upstream MicaSetup documents /q and /a as unfinished; no silent switch is returned without compiled command-line evidence.')
+      if ($Generation -eq 'v1') { $InformationMessages.Add('MicaSetup v1 calls UseElevated unconditionally and is treated as a machine-scope installer.') }
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'MicaSetup.Installability.SilentUnsupported' -Source 'MicaSetup' -Message 'Upstream MicaSetup documents /q and /a as unfinished; no silent switch is returned without compiled command-line evidence.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
 
       return [pscustomobject]@{
-        Path                           = $File.FullName
-        Family                         = 'MicaSetup'
-        InstallerType                  = 'MicaSetup'
-        BuilderGeneration              = $Generation
-        ConfigurationModel             = $ConfigurationModel
-        TargetFramework                = $Managed.TargetFramework
-        RequestedExecutionLevel        = $RequestedExecutionLevel
-        SupportedScopes                = $SupportedScopes
-        Scope                          = $Scope
-        ProductCode                    = if ($VisibleArp) { $KeyName } else { $null }
-        UpgradeCode                    = $null
-        DisplayName                    = $DisplayName
-        DisplayVersion                 = $DisplayVersion
-        Publisher                      = $Publisher
-        DefaultInstallLocation         = $DefaultInstallLocation
-        InstallLocation                = $DefaultInstallLocation
-        UninstallString                = $UninstallString
-        QuietUninstallString           = $null
-        DisplayIcon                    = $DisplayIcon
-        SystemComponent                = $SystemComponent
-        RegistryView                   = $RegistryView
-        WritesAppsAndFeaturesEntry     = $VisibleArp
-        AppsAndFeaturesProductCode     = if ($VisibleArp) { $KeyName } else { $null }
-        AppsAndFeaturesInstallerType   = if ($VisibleArp) { 'exe' } else { $null }
-        AppsAndFeaturesEntries         = $AppsAndFeaturesEntries
-        RegistryWrites                 = @($RegistryWrites)
-        AppName                        = $AppName
-        KeyName                        = $KeyName
-        ExeName                        = $ExeName
-        IsCreateUninstaller            = $CreateUninstaller
-        UninstallerName                = $UninstallerName
-        OptionValues                   = $Options.Public
-        OptionEvidence                 = $Options.Evidence
-        UnresolvedExpressions          = $UnresolvedExpressions
-        EmbeddedResources              = @($Managed.Resources | ForEach-Object { [pscustomobject]@{ Name = $_.Name; TypeCode = $_.TypeCode; TypeName = $_.TypeName; Offset = $_.Offset; Length = $_.Length } })
-        PayloadFiles                   = @($PayloadEvidence.Catalog)
-        PayloadArchitectures           = @($PayloadEvidence.Architectures)
-        PayloadArchitectureInfo        = $PayloadEvidence.ArchitectureInfo
-        DependencyInfo                 = $PayloadEvidence.DependencyInfo
-        PayloadEncrypted               = [bool]$PayloadEncrypted
-        PayloadDecryptionSucceeded     = $DecryptionSucceeded
-        CanExpand                      = $CanExpand
-        Shortcuts                      = $Shortcuts
-        AutorunEntries                 = $Autorun
-        EnvironmentChanges             = $EnvironmentChanges
-        FirewallRules                  = $FirewallRules
-        Certificates                   = $Certificates
-        CloseApplications              = $CloseApplications
-        Protocols                      = @($AssociationInfo.Protocols)
-        FileExtensions                 = @($AssociationInfo.FileExtensions)
-        ProtocolAssociations           = @($AssociationInfo.ProtocolAssociations)
-        FileExtensionAssociations      = @($AssociationInfo.FileExtensionAssociations)
-        RegistryAssociationInfo        = $AssociationInfo
-        InstallModes                   = @('interactive')
-        InstallerSwitches              = [ordered]@{}
-        SupportedCommandLineSwitches   = @()
-        RecommendedPackageDependencies = if ($PayloadEvidence.DependencyInfo) { @($PayloadEvidence.DependencyInfo.RecommendedPackageDependencies) } else { @() }
-        Notices                        = @($Notices)
-        Warnings                       = @($Warnings)
-        UnresolvedFields               = @($UnresolvedFields | Sort-Object -Unique)
-        ParserVersionInfo              = [pscustomobject]@{ Name = 'Dumplings MicaSetup parser'; Version = 1; Generation = $Generation; Evidence = @($Managed.Evidence) }
+        Path                             = $File.FullName
+        InstallerType                    = 'exe'
+        BuilderGeneration                = $Generation
+        ConfigurationModel               = $ConfigurationModel
+        FormatCompatibility              = $FormatCompatibility
+        TargetFramework                  = $Managed.TargetFramework
+        RequestedExecutionLevel          = $RequestedExecutionLevel
+        SupportedScopes                  = $SupportedScopes
+        Scope                            = $Scope
+        ProductCode                      = if ($VisibleArp) { $KeyName } else { $null }
+        UpgradeCode                      = $null
+        DisplayName                      = $DisplayName
+        DisplayVersion                   = $DisplayVersion
+        Publisher                        = $Publisher
+        DefaultInstallLocation           = $DefaultInstallLocation
+        InstallLocation                  = $DefaultInstallLocation
+        UninstallString                  = $UninstallString
+        QuietUninstallString             = $null
+        DisplayIcon                      = $DisplayIcon
+        SystemComponent                  = $SystemComponent
+        RegistryView                     = $RegistryView
+        WritesAppsAndFeaturesEntry       = $VisibleArp
+        AppsAndFeaturesProductCode       = if ($VisibleArp) { $KeyName } else { $null }
+        AppsAndFeaturesInstallerType     = if ($VisibleArp) { 'exe' } else { $null }
+        AppsAndFeaturesEntries           = $AppsAndFeaturesEntries
+        RegistryWrites                   = @($RegistryWrites)
+        AppName                          = $AppName
+        KeyName                          = $KeyName
+        ExeName                          = $ExeName
+        IsCreateUninstaller              = $CreateUninstaller
+        UninstallerName                  = $UninstallerName
+        OptionValues                     = $Options.Public
+        OptionEvidence                   = $Options.Evidence
+        UnresolvedExpressions            = $UnresolvedExpressions
+        EmbeddedResources                = @($Managed.Resources | ForEach-Object { [pscustomobject]@{ Name = $_.Name; TypeCode = $_.TypeCode; TypeName = $_.TypeName; Offset = $_.Offset; Length = $_.Length } })
+        PayloadFiles                     = @($PayloadEvidence.Catalog)
+        PayloadArchitectures             = @($PayloadEvidence.Architectures)
+        PayloadArchitectureInfo          = $PayloadEvidence.ArchitectureInfo
+        DependencyInfo                   = $PayloadEvidence.DependencyInfo
+        PayloadEncrypted                 = [bool]$PayloadEncrypted
+        PayloadDecryptionSucceeded       = $DecryptionSucceeded
+        CanExpand                        = $CanExpand
+        Shortcuts                        = $Shortcuts
+        AutorunEntries                   = $Autorun
+        EnvironmentChanges               = $EnvironmentChanges
+        FirewallRules                    = $FirewallRules
+        Certificates                     = $Certificates
+        SupportedLanguages               = $SupportedLanguages
+        OverlayCleanup                   = $OverlayCleanup
+        CloseApplications                = $CloseApplications
+        FolderPermissionChanges          = $FolderPermissionChanges
+        RefreshesExplorer                = $RefreshesExplorer
+        EnablesUninstallDelayUntilReboot = $EnablesUninstallDelayUntilReboot
+        HostBehavior                     = $HostBehavior
+        LicensePolicy                    = $LicensePolicy
+        SystemEffects                    = [pscustomobject][ordered]@{
+          RegistryWrites                   = @($RegistryWrites)
+          Shortcuts                        = $Shortcuts
+          AutorunEntries                   = $Autorun
+          EnvironmentChanges               = $EnvironmentChanges
+          FirewallRules                    = $FirewallRules
+          Certificates                     = $Certificates
+          FolderPermissionChanges          = $FolderPermissionChanges
+          CloseApplications                = $CloseApplications
+          OverlayCleanup                   = $OverlayCleanup
+          RefreshesExplorer                = $RefreshesExplorer
+          EnablesUninstallDelayUntilReboot = $EnablesUninstallDelayUntilReboot
+        }
+        Protocols                        = @($AssociationInfo.Protocols)
+        FileExtensions                   = @($AssociationInfo.FileExtensions)
+        ProtocolAssociations             = @($AssociationInfo.ProtocolAssociations)
+        FileExtensionAssociations        = @($AssociationInfo.FileExtensionAssociations)
+        RegistryAssociationInfo          = $AssociationInfo
+        InstallModes                     = @('interactive')
+        InstallerSwitches                = [ordered]@{}
+        SupportedCommandLineSwitches     = @()
+        RecommendedPackageDependencies   = if ($PayloadEvidence.DependencyInfo) { @($PayloadEvidence.DependencyInfo.RecommendedPackageDependencies) } else { @() }
+
+        Diagnostics                      = @(
+          Merge-InstallerDiagnostics -Diagnostic @(
+            $Diagnostics
+            @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'MicaSetup' -Kind Incomplete -Areas Metadata -AffectedFields $UnresolvedFields)
+            @(ConvertTo-InstallerDiagnostic -InputObject @($InformationMessages) -Source 'MicaSetup' -Kind Information -Areas Metadata)
+          )
+        )
+        UnresolvedFields                 = @($UnresolvedFields | Sort-Object -Unique)
+        Family                           = 'MicaSetup'
+        ParserVersionInfo                = [pscustomobject]@{ Name = 'Dumplings MicaSetup parser'; Version = 2; Generation = $Generation; Evidence = @($Managed.Evidence) }
       }
     } finally {
       $Stream.Dispose()
@@ -536,7 +706,7 @@ function Test-MicaSetupInstaller {
       $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
       try {
         $Info = Get-MicaSetupManagedInfo -Stream $Stream
-        $HasConfigurationHost = $Info.FileKind -eq 'Executable' -and (($Info.HasOptionType -and $Info.HasUseOptionsMethod) -or ($Info.HasPackType -and $Info.HasUsePackMethod))
+        $HasConfigurationHost = $Info.FileKind -eq 'Executable' -and (($Info.HasOptionType -and ($Info.HasUseOptionsMethod -or $Info.HasUsePackMethod)) -or ($Info.HasPackType -and $Info.HasUsePackMethod))
         return $HasConfigurationHost -and @($Info.Resources | Where-Object { $_.Name -ieq $Script:MicaSetupPayloadResourceName -and $_.TypeCode -eq 33 }).Count -eq 1
       } finally { $Stream.Dispose() }
     } catch { return $false }
@@ -583,7 +753,7 @@ function Expand-MicaSetupInstaller {
     $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
       $Managed = Get-MicaSetupManagedInfo -Stream $Stream
-      $HasConfigurationHost = $Managed.FileKind -eq 'Executable' -and (($Managed.HasOptionType -and $Managed.HasUseOptionsMethod) -or ($Managed.HasPackType -and $Managed.HasUsePackMethod))
+      $HasConfigurationHost = $Managed.FileKind -eq 'Executable' -and (($Managed.HasOptionType -and ($Managed.HasUseOptionsMethod -or $Managed.HasUsePackMethod)) -or ($Managed.HasPackType -and $Managed.HasUsePackMethod))
       if (-not $HasConfigurationHost) { throw 'The PE is not a supported MicaSetup installer.' }
       $Options = ConvertTo-MicaSetupOptionMap -Evidence $Managed.Options
       $PasswordEvidence = $Options.Internal['UnpackingPassword']

@@ -103,10 +103,12 @@ function ConvertTo-InstallerBridgeObject {
           $RequiresDictionary = $true
         }
         $ConvertedValue = ConvertTo-InstallerBridgeObject -InputObject $Entry.Value
-        if ($MemberName -in @('Warnings', 'Notices', 'UnresolvedFields')) {
-          # JSON arrays lose their element type. Restore the documented parser
-          # diagnostic contract as part of transport deserialization only.
+        if ($MemberName -eq 'UnresolvedFields') {
+          # JSON arrays lose their element type. Restore unresolved metadata
+          # field names without flattening structured diagnostic evidence.
           $ConvertedValue = [string[]]@($ConvertedValue)
+        } elseif ($MemberName -eq 'Diagnostics') {
+          $ConvertedValue = [object[]]@($ConvertedValue)
         }
         $Converted[$MemberName] = $ConvertedValue
       }
@@ -209,9 +211,8 @@ function Invoke-InstallerBridgeCommand {
     if ($null -eq $Entry.Value) { continue }
     if ($Entry.Value -is [string] -and [string]::IsNullOrWhiteSpace($Entry.Value)) { continue }
 
-    # Native PowerShell switch parameters are presence-based. Forward true
-    # Boolean values as a bare switch and omit false values instead of passing
-    # the strings "True" or "False", which parameter binding cannot convert.
+    # Forward true switches by name and omit false switches. Native PowerShell
+    # cannot bind the strings "True" and "False" to switch parameters.
     if ($Entry.Value -is [bool] -or $Entry.Value -is [System.Management.Automation.SwitchParameter]) {
       if ([bool]$Entry.Value) { $null = $StartInfo.ArgumentList.Add("-$($Entry.Key)") }
       continue

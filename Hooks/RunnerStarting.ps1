@@ -9,7 +9,7 @@ param (
   [System.Collections.IDictionary]$Context
 )
 
-$QueueModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Messaging' 'MessageQueue.psm1') -Force -PassThru
+$QueueModule = Import-Module (Join-Path $PSScriptRoot '..' 'Libraries' 'Messaging' 'MessageQueue.psm1') -PassThru
 & $QueueModule {
   param ($Storage)
   Initialize-MessageQueue -Storage $Storage

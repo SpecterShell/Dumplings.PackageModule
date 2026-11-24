@@ -34,31 +34,7 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 # Force stop on error
 $ErrorActionPreference = 'Stop'
 
-function Get-Assembly {
-  <#
-  .SYNOPSIS
-    Get the Microsoft.Deployment.Compression.Cab.dll assembly
-  #>
-  [OutputType([string])]
-  param ()
-
-  if (Test-Path -Path ($Path = Join-Path $PSScriptRoot '..' '..' 'Assets' 'Assemblies' 'Microsoft.Deployment.Compression.Cab.dll')) {
-    return (Get-Item -Path $Path -Force)
-  } else {
-    throw 'The Microsoft.Deployment.Compression.Cab.dll assembly could not be found'
-  }
-}
-
-function Import-Assembly {
-  <#
-  .SYNOPSIS
-    Load the Microsoft.Deployment.Compression.Cab.dll assembly
-  #>
-
-  Import-CabinetDependency
-}
-
-Import-Assembly
+Import-CabinetDependency
 
 # .wixburn field offsets are relative to the section's raw file range.
 $BURN_SECTION_OFFSET_MAGIC = 0
@@ -731,7 +707,7 @@ function Expand-BurnInstaller {
       }
 
       # Decode each physical cabinet once. The shared helper deduplicates source
-      # entries that intentionally project to several logical aliases.
+      # entries that project to several logical aliases.
       foreach ($ContainerIndex in @($Selected.ContainerIndex | Sort-Object -Unique)) {
         $ContainerSelection = @($Selected | Where-Object ContainerIndex -EQ $ContainerIndex)
         if ($ContainerSelection.Count -eq 0) { continue }
@@ -740,8 +716,10 @@ function Expand-BurnInstaller {
       }
 
       if ($ManifestInfo.ExternalPayloadCount -gt 0 -or $ManifestInfo.DetachedContainerCount -gt 0) {
-        Write-Warning ('Burn extraction omitted {0} external payload(s) and {1} detached container(s) because their bytes are not embedded.' -f `
-            $ManifestInfo.ExternalPayloadCount, $ManifestInfo.DetachedContainerCount)
+        $Diagnostic = New-InstallerDiagnostic -Id 'Burn.Extraction.ExternalPayloadOmitted' -Source 'Burn' `
+          -Message ('Burn extraction omitted {0} external payload(s) and {1} detached container(s) because their bytes are not embedded.' -f $ManifestInfo.ExternalPayloadCount, $ManifestInfo.DetachedContainerCount) `
+          -Kind Unsupported -Areas Extraction -Evidence ([ordered]@{ ExternalPayloadCount = $ManifestInfo.ExternalPayloadCount; DetachedContainerCount = $ManifestInfo.DetachedContainerCount })
+        Write-InstallerDiagnostics -Diagnostic @($Diagnostic) -Scenario Extraction
       }
       $Results = [Collections.Generic.List[IO.FileInfo]]::new($Selected.Count)
       foreach ($Item in $Selected) { $Results.Add((Get-Item -LiteralPath $Item.DestinationPath -Force)) }
@@ -1314,7 +1292,7 @@ function Get-BurnInfo {
     $ScopeInfo = Get-BurnScopeInfo -Path $Path
     $Info = [pscustomobject][ordered]@{
       Path                         = (Get-Item -Path $Path -Force).FullName
-      InstallerType                = 'Burn'
+      InstallerType                = 'burn'
       ProductCode                  = $ProductCode
       UpgradeCode                  = $UpgradeCode
       DisplayName                  = $Arp.Count -gt 0 ? $Arp[0].GetAttribute('DisplayName') : $null
@@ -1325,8 +1303,14 @@ function Get-BurnInfo {
       WritesAppsAndFeaturesEntry   = $true
       AppsAndFeaturesProductCode   = $ProductCode
       AppsAndFeaturesInstallerType = 'burn'
-      Warnings                     = [string[]]@()
+      Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'Burn' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
+      Family                       = 'Burn'
+      SupportedScopes              = $ScopeInfo.SupportedScopes
+      SupportsDualScope            = $ScopeInfo.SupportsDualScope
+      UserScopeSwitch              = $ScopeInfo.SupportsDualScope ? 'InstallAllUsers=0' : $null
+      MachineScopeSwitch           = $ScopeInfo.SupportsDualScope ? 'InstallAllUsers=1' : $null
+      ScopeInstallLocationSwitches = $ScopeInfo.SupportsDualScope ? [pscustomobject]@{ User = 'DefaultJustForMeTargetDir="<INSTALLPATH>"'; Machine = 'DefaultAllUsersTargetDir="<INSTALLPATH>"' } : $null
     }
     if ([string]::IsNullOrWhiteSpace($Info.DisplayName)) { $Info.DisplayName = Read-ProductNameFromBurn -Path $Path }
     if ([string]::IsNullOrWhiteSpace($Info.DisplayVersion)) { $Info.DisplayVersion = Read-ProductVersionFromExe -Path $Path }

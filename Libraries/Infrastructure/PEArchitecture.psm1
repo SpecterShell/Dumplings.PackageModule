@@ -3,8 +3,9 @@
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
-# Concrete package architectures only; ARM32 and neutral are not recommended for PE payloads.
-$Script:PortableWinGetArchitectures = @('x86', 'x64', 'arm64')
+# WinGet supports four concrete PE architectures. Neutral remains invalid for
+# packages containing architecture-specific binary payloads.
+$Script:PortableWinGetArchitectures = @('x86', 'x64', 'arm', 'arm64')
 
 function Resolve-PortablePEMachineArchitecture {
   <#
@@ -17,9 +18,9 @@ function Resolve-PortablePEMachineArchitecture {
     0x014C { [pscustomobject]@{ Architecture = 'x86'; IsSupported = $true; IsArm32 = $false }; break }
     0x8664 { [pscustomobject]@{ Architecture = 'x64'; IsSupported = $true; IsArm32 = $false }; break }
     0xAA64 { [pscustomobject]@{ Architecture = 'arm64'; IsSupported = $true; IsArm32 = $false }; break }
-    0x01C0 { [pscustomobject]@{ Architecture = 'arm'; IsSupported = $false; IsArm32 = $true }; break }
-    0x01C2 { [pscustomobject]@{ Architecture = 'arm'; IsSupported = $false; IsArm32 = $true }; break }
-    0x01C4 { [pscustomobject]@{ Architecture = 'arm'; IsSupported = $false; IsArm32 = $true }; break }
+    0x01C0 { [pscustomobject]@{ Architecture = 'arm'; IsSupported = $true; IsArm32 = $true }; break }
+    0x01C2 { [pscustomobject]@{ Architecture = 'arm'; IsSupported = $true; IsArm32 = $true }; break }
+    0x01C4 { [pscustomobject]@{ Architecture = 'arm'; IsSupported = $true; IsArm32 = $true }; break }
     default { [pscustomobject]@{ Architecture = $null; IsSupported = $false; IsArm32 = $false } }
   }
 }
@@ -185,9 +186,7 @@ function Get-PEArchitectureInfo {
     $PreferredArchitecture = $null
     $SupportedArchitectures = @()
 
-    if ($MachineInfo.IsArm32) {
-      $Warnings.Add('ARM32 PE file detected. ARM32 is intentionally excluded from Dumplings WinGet architecture recommendations.')
-    } elseif (-not $MachineInfo.IsSupported) {
+    if (-not $MachineInfo.IsSupported) {
       $Warnings.Add("Unsupported or unknown PE machine value 0x$($Layout.Machine.ToString('X4')) was found.")
     } elseif ($IsManaged) {
       if ($ClrHeader.Requires32Bit) {
@@ -218,7 +217,7 @@ function Get-PEArchitectureInfo {
           RecommendedWinGetArchitecture  = $null
           RecommendedWinGetArchitectures = @()
           SupportedArchitectures         = @()
-          Warnings                       = @($_.Exception.Message)
+          Diagnostics                    = @(ConvertTo-InstallerDiagnostic -InputObject @($_.Exception.Message) -Source 'PEArchitecture' -Kind Incomplete -Areas Metadata -AffectedFields Architecture)
         }
       }
     }
@@ -272,7 +271,7 @@ function Get-PEArchitectureInfo {
       RecommendedWinGetArchitecture  = $RecommendedWinGetArchitecture
       RecommendedWinGetArchitectures = $SupportedArchitectures
       RelatedArchitectureInfo        = $RelatedArchitectureInfo
-      Warnings                       = @($Warnings)
+      Diagnostics                    = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'PEArchitecture' -Kind Incomplete -Areas Metadata -AffectedFields Architecture)
     }
   }
 }
@@ -322,7 +321,7 @@ function Test-PEArchitecture {
     [string]$Path,
 
     [Parameter(Mandatory, HelpMessage = 'The concrete WinGet architecture to test')]
-    [ValidateSet('x86', 'x64', 'arm64')]
+    [ValidateSet('x86', 'x64', 'arm', 'arm64')]
     [string]$Architecture,
 
     [Parameter(HelpMessage = 'Related PE files that can narrow the executable architecture')]

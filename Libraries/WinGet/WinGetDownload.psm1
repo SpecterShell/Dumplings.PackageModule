@@ -2,12 +2,13 @@
 # Native WinGet-compatible installer downloads and compatibility probes. These
 # functions never execute installers; probe files are deleted unless retained.
 
+Import-Module (Join-Path $PSScriptRoot '..' 'Networking' 'Web.psm1') -ErrorAction Stop
+
 # Apply Dumplings defaults when the module is loaded independently or by PackageModule.
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
-if (-not ([System.Management.Automation.PSTypeName]'Dumplings.WinGetDownload.WinInetDownloader').Type) {
-  Add-Type -Path (Join-Path -Path $PSScriptRoot -ChildPath '..' -AdditionalChildPath '..', 'Assets', 'Source', 'WinGet', 'WinGetDownloadProbe.cs')
-}
+Import-Module (Join-Path $PSScriptRoot '..' 'Infrastructure' 'Runtime.psm1') -ErrorAction Stop
+$null = Import-InstallerManagedSource -Path (Join-Path $PSScriptRoot '..' '..' 'Assets' 'Source' 'WinGet' 'WinGetDownloadProbe.cs') -TypeName 'Dumplings.WinGetDownload.WinInetDownloader'
 
 $Script:WinGetDownloadFallbackClientVersion = '1.0.0'
 $Script:WinGetDownloadWingetMutexName = 'Local\Dumplings-WinGetCli'
@@ -442,7 +443,7 @@ function Invoke-WinGetDownloadOperation {
       return $Result
     }
     $RemainingRetryDelaySeconds = [long]$MaximumTotalRetryDelaySeconds - $TotalRetryDelaySeconds
-    if ($Delay -gt $RemainingRetryDelaySeconds) {
+    if (-not (Test-RetryDelayBudget -DelaySeconds $Delay -UsedSeconds $TotalRetryDelaySeconds -MaximumSeconds $MaximumRetryDelaySeconds -MaximumTotalSeconds $MaximumTotalRetryDelaySeconds)) {
       Write-Verbose "Not retrying $Activity because the requested $Delay-second delay exceeds the $RemainingRetryDelaySeconds-second remaining retry-delay budget."
       return $Result
     }

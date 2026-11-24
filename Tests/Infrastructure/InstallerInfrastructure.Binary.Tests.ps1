@@ -115,6 +115,20 @@ Describe 'Bounded binary streams' {
     finally { $Destination.Dispose(); $Source.Dispose() }
   }
 
+  It 'computes a stream CRC32 and consumed length in one bounded pass' {
+    $Source = [IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes('123456789'))
+    $Source.Position = 2
+    try {
+      $Result = [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32WithLength($Source, $true, 7, [byte[]](0x21))
+      $Result.Checksum | Should -Be (Get-BinaryCrc32 -Bytes ([Text.Encoding]::ASCII.GetBytes('3456789!')))
+      $Result.Length | Should -Be 8
+      $Source.Position | Should -Be 2
+
+      { [Dumplings.InstallerInfrastructure.BinaryIO]::Crc32WithLength($Source, $true, 6, $null) } | Should -Throw
+      $Source.Position | Should -Be 2
+    } finally { $Source.Dispose() }
+  }
+
   It 'copies and decodes a bounded fixed-XOR stream' {
     $Source = [IO.MemoryStream]::new([byte[]](0xC0, 0xED, 0xE4, 0xE4, 0xE7))
     $Destination = [IO.MemoryStream]::new()
@@ -125,5 +139,34 @@ Describe 'Bounded binary streams' {
       $Destination.Dispose()
       $Source.Dispose()
     }
+  }
+}
+
+Describe 'Read-InstallerHeader' {
+  It 'reads the requested prefix and clamps files larger than Int32.MaxValue' {
+    $SmallPath = Join-Path $Script:TemporaryRoot 'header-small.bin'
+    [IO.File]::WriteAllBytes($SmallPath, [byte[]](1..16))
+    $SmallHeader = InModuleScope InstallerAnalyzer -Parameters @{ File = (Get-Item -LiteralPath $SmallPath) } {
+      param ($File)
+      Read-InstallerHeader -File $File -Count 8
+    }
+    $SmallHeader.Length | Should -Be 8
+    $SmallHeader[0] | Should -Be 1
+
+    # SetLength creates the over-2GB length without allocating data on NTFS.
+    $LargePath = Join-Path $Script:TemporaryRoot 'header-large.bin'
+    $Stream = [IO.File]::Open($LargePath, [IO.FileMode]::CreateNew)
+    try {
+      $Stream.SetLength(([int64][int]::MaxValue + 1024))
+      $Stream.Write([byte[]](9, 8, 7, 6), 0, 4)
+    } finally {
+      $Stream.Dispose()
+    }
+    $LargeHeader = InModuleScope InstallerAnalyzer -Parameters @{ File = (Get-Item -LiteralPath $LargePath) } {
+      param ($File)
+      Read-InstallerHeader -File $File -Count 8
+    }
+    $LargeHeader.Length | Should -Be 8
+    $LargeHeader[0] | Should -Be 9
   }
 }

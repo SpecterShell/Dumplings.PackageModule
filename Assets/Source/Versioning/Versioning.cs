@@ -133,9 +133,8 @@ namespace Dumplings.Versioning
                 int result = left.CompareTo(right);
                 if (result != 0)
                 {
-                    // PowerShell's Sort-Object Top/Bottom heap compares against exactly -1 and
-                    // 1 instead of checking only the sign. Keep the public IComparable result
-                    // canonical even when an inner string comparer returns another magnitude.
+                    // Sort-Object's Top/Bottom heap requires exactly -1 or 1.
+                    // Normalize inner comparer results to that IComparable contract.
                     return result < 0 ? -1 : 1;
                 }
             }

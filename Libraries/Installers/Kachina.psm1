@@ -4,6 +4,7 @@
 # - https://github.com/YuehaiTeam/kachina-installer/blob/main/src-tauri/src/local.rs
 # - https://github.com/YuehaiTeam/kachina-installer/blob/main/src-tauri/src/builder/pack.rs
 # - https://github.com/YuehaiTeam/kachina-installer/blob/main/src-tauri/src/installer/registry.rs
+# - https://github.com/YuehaiTeam/kachina-installer/blob/main/src-tauri/src/utils/hash.rs
 #
 # The upstream repository did not declare a license when this parser was written. This file is an
 # independent implementation based on observed binary structures and documented runtime behavior;
@@ -38,7 +39,7 @@
 #
 # Index offsets point to record content relative to the first appended record. The parser validates
 # every available index entry against the sequential record stream but retains appended records that
-# are intentionally absent from the index.
+# are absent from the index.
 
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -54,6 +55,18 @@ $Script:KachinaMaximumIndexBytes = 67108864
 $Script:KachinaMaximumRecordSearchBytes = 67108864L
 $Script:KachinaMaximumAnalysisFiles = 256
 $Script:KachinaMaximumAnalysisBytes = 536870912L
+
+function Import-KachinaHashProvider {
+  <#
+  .SYNOPSIS
+    Compile the source-shipped XXH3-128 provider used to validate modern Kachina payloads.
+  #>
+  if (([System.Management.Automation.PSTypeName]'Dumplings.Kachina.KachinaHash').Type) { return }
+  $SourceRoot = Join-Path $PSScriptRoot '..\..\Assets\Source\Kachina'
+  $SourceFiles = @(Get-ChildItem -LiteralPath $SourceRoot -Filter '*.cs' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
+  if ($SourceFiles.Count -eq 0) { throw "The Kachina XXH3-128 source provider is missing: $SourceRoot" }
+  $null = Import-InstallerManagedSource -Path $SourceFiles -TypeName 'Dumplings.Kachina.KachinaHash' -CompilerOptions '/unsafe', '/nowarn:0414'
+}
 
 function Get-KachinaMapValue {
   <#
@@ -197,10 +210,10 @@ function Get-KachinaPreIndex {
     $Values[$Index] = [uint32](Read-BinaryInteger -Stream $Stream -Offset ($Offset + 18 + ($Index * 4)) -Size 4 -Endian BigEndian)
   }
   [pscustomobject][ordered]@{
-    Offset     = $Offset
+    Offset      = $Offset
     FieldOffset = $Offset + 18
-    Values     = $Values
-    IsCleared  = -not ($Values | Where-Object { $_ -ne 0 })
+    Values      = $Values
+    IsCleared   = -not ($Values | Where-Object { $_ -ne 0 })
   }
 }
 
@@ -274,7 +287,7 @@ function Read-KachinaIndex {
     [Parameter(Mandatory)]$Record,
     [Parameter(Mandatory)][long]$RecordStart,
     [Parameter(Mandatory)][object[]]$Records,
-    [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
+    [AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
   )
 
   if ($Record.Length -gt $Script:KachinaMaximumIndexBytes) { throw "The Kachina index exceeds the $Script:KachinaMaximumIndexBytes-byte limit." }
@@ -394,7 +407,7 @@ function Get-KachinaAnalysisContext {
     PreIndex               = $PreIndex
     FormatGeneration       = $Generation
     GeneratedExecutableEnd = $GeneratedExecutableEnd
-    Warnings               = @($Warnings)
+    Diagnostics            = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Warnings)) -Source 'Kachina' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -409,7 +422,7 @@ function Get-KachinaMetadataHash {
   $Md5 = [string](Get-KachinaMapValue -Map $Item -Name 'md5')
   if (-not [string]::IsNullOrWhiteSpace($Md5)) { return [pscustomobject]@{ Value = $Md5; Algorithm = 'MD5' } }
   $Xxh = [string](Get-KachinaMapValue -Map $Item -Name 'xxh')
-  if (-not [string]::IsNullOrWhiteSpace($Xxh)) { return [pscustomobject]@{ Value = $Xxh; Algorithm = 'XXH (source-defined)' } }
+  if (-not [string]::IsNullOrWhiteSpace($Xxh)) { return [pscustomobject]@{ Value = $Xxh; Algorithm = 'XXH3-128' } }
   return $null
 }
 
@@ -425,7 +438,7 @@ function Get-KachinaPayloadCatalog {
   [OutputType([pscustomobject[]])]
   param (
     [Parameter(Mandatory)]$Context,
-    [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
+    [AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
   )
 
   if (-not $Context.Metadata) { return @() }
@@ -445,15 +458,15 @@ function Get-KachinaPayloadCatalog {
     $Record = $RecordsByName[$Hash.Value]
     if (-not $Record) { $Warnings.Add("Kachina payload record '$($Hash.Value)' for '$Path' is absent.") }
     $Catalog.Add([pscustomobject][ordered]@{
-        Path             = $Path.Replace('/', '\')
-        Hash             = $Hash.Value
-        HashAlgorithm    = $Hash.Algorithm
-        ExpectedSize     = [long]$Size
-        CompressedSize   = $Record ? [long]$Record.Length : $null
-        RecordOffset     = $Record ? [long]$Record.RawOffset : $null
-        DataOffset       = $Record ? [long]$Record.DataOffset : $null
-        IsEmbedded       = $null -ne $Record
-        Compression      = 'Zstandard'
+        Path           = $Path.Replace('/', '\')
+        Hash           = $Hash.Value
+        HashAlgorithm  = $Hash.Algorithm
+        ExpectedSize   = [long]$Size
+        CompressedSize = $Record ? [long]$Record.Length : $null
+        RecordOffset   = $Record ? [long]$Record.RawOffset : $null
+        DataOffset     = $Record ? [long]$Record.DataOffset : $null
+        IsEmbedded     = $null -ne $Record
+        Compression    = 'Zstandard'
       })
   }
   return @($Catalog)
@@ -533,6 +546,17 @@ function Export-KachinaPayloadItem {
     # this is an integrity comparison, not a security decision.
     $ActualHash = (Get-FileHash -LiteralPath $File.FullName -Algorithm MD5).Hash
     if ($ActualHash -ine $Item.Hash) { Remove-Item -LiteralPath $File.FullName -Force; throw "Kachina payload '$($Item.Path)' failed its MD5 check." }
+  } elseif ($Item.HashAlgorithm -eq 'XXH3-128') {
+    # Current Kachina uses twox_hash::XxHash3_128 with seed zero and formats the UInt128 as
+    # lower-case hexadecimal without a fixed leading-zero width.
+    Import-KachinaHashProvider
+    $ActualHash = [Dumplings.Kachina.KachinaHash]::ComputeXxHash3_128($File.FullName)
+    $ExpectedHash = ([string]$Item.Hash).TrimStart('0')
+    if ($ExpectedHash.Length -eq 0) { $ExpectedHash = '0' }
+    if ($ActualHash -ine $ExpectedHash) {
+      Remove-Item -LiteralPath $File.FullName -Force
+      throw "Kachina payload '$($Item.Path)' failed its XXH3-128 check."
+    }
   }
   return $File
 }
@@ -646,7 +670,7 @@ function Get-KachinaPayloadEvidence {
     [Parameter(Mandatory)]$Context,
     [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Catalog,
     [Parameter(Mandatory)][string]$ExeName,
-    [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
+    [AllowEmptyCollection()][Collections.Generic.List[string]]$Warnings
   )
 
   $Main = $Catalog | Where-Object { $_.Path -ieq $ExeName -or [IO.Path]::GetFileName($_.Path) -ieq [IO.Path]::GetFileName($ExeName) } | Select-Object -First 1
@@ -692,9 +716,12 @@ function Get-KachinaInfo {
     $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
       $Context = Get-KachinaAnalysisContext -File $File -Stream $Stream
-      $Warnings = [Collections.Generic.List[string]]::new()
-      foreach ($Warning in $Context.Warnings) { $Warnings.Add($Warning) }
-      $Notices = [Collections.Generic.List[string]]::new()
+      # Payload helpers still return concise text because they operate below the
+      # parser-result boundary. Keep those messages isolated so they cannot
+      # inherit unrelated unresolved fields such as Source or Scope.
+      $PayloadMessages = [Collections.Generic.List[string]]::new()
+      $Diagnostics = [Collections.Generic.List[object]]::new()
+      foreach ($Diagnostic in $Context.Diagnostics) { $Diagnostics.Add($Diagnostic) }
       $UnresolvedFields = [Collections.Generic.List[string]]::new()
       $Config = $Context.Config
       $Metadata = $Context.Metadata
@@ -706,14 +733,59 @@ function Get-KachinaInfo {
       $UpdaterName = [string](Get-KachinaMapValue -Map $Config -Name 'updaterName' -DefaultValue 'update.exe')
       $ProgramFilesPath = [string](Get-KachinaMapValue -Map $Config -Name 'programFilesPath' -DefaultValue 'KachinaInstaller')
       $UacStrategy = [string](Get-KachinaMapValue -Map $Config -Name 'uacStrategy' -DefaultValue 'prefer-admin')
-      if ($UacStrategy -notin 'prefer-admin', 'prefer-user', 'force') { $Warnings.Add("Unknown Kachina UAC strategy '$UacStrategy'; supported scope evidence is conservative."); $UacStrategy = 'unknown' }
+      if ($UacStrategy -notin 'prefer-admin', 'prefer-user', 'force') {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Scope.UnknownUacStrategy' -Source 'Kachina' -Message "Unknown Kachina UAC strategy '$UacStrategy'; supported scope evidence is conservative." -Kind Unsupported -Areas Installability -AffectedFields @('Scope', 'ElevationRequirement') -Evidence $UacStrategy))
+        $UacStrategy = 'unknown'
+      }
       $DisplayVersion = if ($Metadata) { [string](Get-KachinaMapValue -Map $Metadata -Name 'tag_name') } else { $null }
       if ([string]::IsNullOrWhiteSpace($DisplayVersion)) { $DisplayVersion = $null; $UnresolvedFields.Add('DisplayVersion') }
-      if (-not $Metadata) { $UnresolvedFields.Add('PayloadFiles'); $Notices.Add('This is a config-only Kachina updater; target version and payload evidence require the configured source.') }
+      if (-not $Metadata) {
+        $UnresolvedFields.Add('PayloadFiles')
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Payload.ConfigOnly' -Source 'Kachina' -Message 'This is a config-only Kachina updater; target version and payload evidence require the configured source.' -Kind Information -Areas Metadata, Extraction -AffectedFields @('DisplayVersion', 'PayloadFiles')))
+      }
+
+      # Kachina originally accepted one source URI and later accepted an ordered source catalog.
+      # Normalize both representations while retaining source IDs needed by the hidden --source selector.
+      $ConfiguredSource = Get-KachinaMapValue -Map $Config -Name 'source'
+      if ($null -eq $ConfiguredSource) { $ConfiguredSource = Get-KachinaMapValue -Map $Config -Name 'dfsPath' }
+      $Sources = [Collections.Generic.List[object]]::new()
+      if ($ConfiguredSource -is [string]) {
+        if (-not [string]::IsNullOrWhiteSpace($ConfiguredSource)) {
+          $Sources.Add([pscustomobject][ordered]@{ Id = 'default'; Name = 'Default'; Uri = $ConfiguredSource; Hidden = $false; Icon = $null })
+        }
+      } elseif ($ConfiguredSource -is [Collections.IEnumerable]) {
+        foreach ($ConfiguredSourceItem in $ConfiguredSource) {
+          $SourceUri = [string](Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'uri')
+          if ([string]::IsNullOrWhiteSpace($SourceUri)) {
+            $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Source.EntryWithoutUri' -Source 'Kachina' -Message 'Kachina contains a configured source entry without a URI.' -Kind Incomplete -Areas Metadata -AffectedFields Source -Evidence ([ordered]@{ Id = Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'id'; Name = Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'name' })))
+            continue
+          }
+          $Sources.Add([pscustomobject][ordered]@{
+              Id     = [string](Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'id' -DefaultValue 'default')
+              Name   = [string](Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'name' -DefaultValue 'Default')
+              Uri    = $SourceUri
+              Hidden = [bool](Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'hidden' -DefaultValue $false)
+              Icon   = Get-KachinaMapValue -Map $ConfiguredSourceItem -Name 'icon'
+            })
+        }
+      }
+      $Source = $Sources.Count -gt 0 ? $Sources[0].Uri : $null
+      if (-not $Source) {
+        $UnresolvedFields.Add('Source')
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Source.Unresolved' -Source 'Kachina' -Message 'Kachina does not expose a usable update source URI.' -Kind Incomplete -Areas Metadata -AffectedFields Source))
+      }
+
+      $UserDataPaths = @((Get-KachinaMapValue -Map $Config -Name 'userDataPath' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+      $IgnoredUpdatePaths = @((Get-KachinaMapValue -Map $Config -Name 'ignoreFolderPath' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+      $ExtraUninstallPaths = @((Get-KachinaMapValue -Map $Config -Name 'extraUninstallPath' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+      $MetadataDeletes = if ($Metadata) { @((Get-KachinaMapValue -Map $Metadata -Name 'deletes' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) } else { @() }
+      $NeedsWebView2 = [bool](Get-KachinaMapValue -Map $Config -Name 'needWebView2' -DefaultValue $true)
 
       $SupportedScopes = $UacStrategy -eq 'force' ? @('machine') : @('machine', 'user')
       $Scope = 'machine'
-      if ($UacStrategy -ne 'force') { $Notices.Add("Kachina defaults to Program Files and machine scope; '$UacStrategy' can use user scope when -D selects an eligible user-writable path.") }
+      if ($UacStrategy -ne 'force') {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Scope.InstallLocationDependent' -Source 'Kachina' -Message "Kachina defaults to Program Files and machine scope; '$UacStrategy' can use user scope when -D selects an eligible user-writable path." -Kind Information -Areas Installability -AffectedFields @('Scope', 'ElevationRequirement') -Evidence $UacStrategy))
+      }
       $DefaultInstallLocation = '%ProgramFiles%\' + $ProgramFilesPath.TrimStart('\', '/')
       $UninstallString = "$DefaultInstallLocation\$UninstallName"
       $DisplayIcon = "$DefaultInstallLocation\$ExeName"
@@ -724,14 +796,14 @@ function Get-KachinaInfo {
       $UninstallKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$ProductCode"
       $EstimatedBytes = if ($Metadata) { (@(Get-KachinaMapValue -Map $Metadata -Name 'hashed' -DefaultValue @()) | Measure-Object -Property size -Sum).Sum } else { $null }
       $ArpValues = [ordered]@{
-        DisplayName      = $DisplayName
-        DisplayVersion   = $DisplayVersion
-        UninstallString  = $UninstallString
-        InstallLocation  = $DefaultInstallLocation
-        DisplayIcon      = $DisplayIcon
-        Publisher        = $Publisher
-        NoModify         = 1
-        NoRepair         = 1
+        DisplayName     = $DisplayName
+        DisplayVersion  = $DisplayVersion
+        UninstallString = $UninstallString
+        InstallLocation = $DefaultInstallLocation
+        DisplayIcon     = $DisplayIcon
+        Publisher       = $Publisher
+        NoModify        = 1
+        NoRepair        = 1
       }
       if ($null -ne $EstimatedBytes) { $ArpValues['EstimatedSize'] = [uint32][Math]::Min([uint32]::MaxValue, [Math]::Floor([double]$EstimatedBytes / 1024)) }
       foreach ($Entry in $ArpValues.GetEnumerator()) {
@@ -742,11 +814,11 @@ function Get-KachinaInfo {
       $RegistryRoutes.Add([pscustomobject]@{ Scope = 'machine'; Hive = 'HKEY_LOCAL_MACHINE'; Root = 'HKLM'; Condition = 'Installer process is elevated' })
       if ($UacStrategy -ne 'force') { $RegistryRoutes.Add([pscustomobject]@{ Scope = 'user'; Hive = 'HKEY_CURRENT_USER'; Root = 'HKCU'; Condition = 'Installer process is not elevated after -D selects an eligible user-writable path' }) }
       $AssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite @($RegistryWrites)
-      foreach ($Warning in $AssociationInfo.Warnings) { $Warnings.Add("Kachina association analysis: $Warning") }
+      foreach ($Diagnostic in $AssociationInfo.Diagnostics) { $Diagnostics.Add($Diagnostic) }
 
-      $Catalog = @(Get-KachinaPayloadCatalog -Context $Context -Warnings $Warnings)
+      $Catalog = @(Get-KachinaPayloadCatalog -Context $Context -Warnings $PayloadMessages)
       $Patches = @(Get-KachinaPatchCatalog -Context $Context)
-      $PayloadEvidence = Get-KachinaPayloadEvidence -Context $Context -Catalog $Catalog -ExeName $ExeName -Warnings $Warnings
+      $PayloadEvidence = Get-KachinaPayloadEvidence -Context $Context -Catalog $Catalog -ExeName $ExeName -Warnings $PayloadMessages
       if (@($PayloadEvidence.Architectures).Count -eq 0) { $UnresolvedFields.Add('PayloadArchitecture') }
       $ConfiguredRuntimes = @((Get-KachinaMapValue -Map $Config -Name 'runtimes' -DefaultValue @()) | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
       $EmbeddedRuntimePackages = @($Context.Records | Where-Object { $_.Name -match '^Microsoft\.(?:DotNet|VCRedist)\.' } | ForEach-Object { [pscustomobject]@{ PackageIdentifier = $_.Name; Offset = $_.DataOffset; Length = $_.Length; Delivery = 'Raw appended installer' } })
@@ -754,38 +826,51 @@ function Get-KachinaInfo {
           $Identifier = $_
           [pscustomobject]@{ PackageIdentifier = $Identifier; IsConfigured = $true; IsEmbedded = [bool]($EmbeddedRuntimePackages | Where-Object PackageIdentifier -CEQ $Identifier | Select-Object -First 1) }
         })
-      if ($ConfiguredRuntimes.Count -gt 0) { $Notices.Add('Kachina can install its configured runtime prerequisites itself; dependency evidence is returned without mutating manifest Dependencies.') }
+      if ($ConfiguredRuntimes.Count -gt 0) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'Kachina.Dependencies.RuntimePackages' -Source 'Kachina' -Message 'Kachina can install its configured runtime prerequisites itself; dependency evidence is returned without mutating manifest Dependencies.' -Kind Information -Areas Installability -AffectedFields Dependencies -Evidence $RuntimePackages))
+      }
 
       $AppsAndFeaturesEntry = [ordered]@{ ProductCode = $ProductCode; DisplayName = $DisplayName; Publisher = $Publisher; InstallerType = 'exe' }
       if ($DisplayVersion) { $AppsAndFeaturesEntry.DisplayVersion = $DisplayVersion }
       $AppsAndFeaturesEntries = @($AppsAndFeaturesEntry)
       $CanExpand = $Catalog.Count -gt 0 -and -not ($Catalog | Where-Object { -not $_.IsEmbedded })
-      $Source = Get-KachinaMapValue -Map $Config -Name 'source'
-      if ($null -eq $Source) { $Source = Get-KachinaMapValue -Map $Config -Name 'dfsPath' }
       $Shortcuts = @(
         [pscustomobject]@{ Location = 'StartMenu'; Target = $ExeName; Conditional = $false }
         [pscustomobject]@{ Location = 'StartMenu'; Target = $UninstallName; Conditional = $false }
         [pscustomobject]@{ Location = 'Desktop'; Target = $ExeName; Conditional = $true }
       )
       $SystemEffects = [pscustomobject][ordered]@{
-        RegistryWrites     = @($RegistryWrites)
-        RegistryRoutes     = @($RegistryRoutes)
-        Shortcuts          = $Shortcuts
-        CreatesUpdater     = $true
-        CreatesUninstaller = $true
-        Protocols          = @($AssociationInfo.Protocols)
-        FileExtensions     = @($AssociationInfo.FileExtensions)
-        PathChanges        = @()
-        AutorunEntries     = @()
-        FirewallRules      = @()
-        Certificates       = @()
+        RegistryWrites         = @($RegistryWrites)
+        RegistryRoutes         = @($RegistryRoutes)
+        Shortcuts              = $Shortcuts
+        CreatesUpdater         = $true
+        CreatesUninstaller     = $true
+        Protocols              = @($AssociationInfo.Protocols)
+        FileExtensions         = @($AssociationInfo.FileExtensions)
+        PathChanges            = @()
+        AutorunEntries         = @()
+        FirewallRules          = @()
+        Certificates           = @()
+        PreservedUserDataPaths = $UserDataPaths
+        IgnoredUpdatePaths     = $IgnoredUpdatePaths
+        ExtraUninstallPaths    = $ExtraUninstallPaths
+        MetadataDeletes        = $MetadataDeletes
+      }
+
+      # Release numbers are not encoded in the container. This catalog states only the source-
+      # verified release range compatible with the detected structural route.
+      $FormatCompatibility = switch ($Context.FormatGeneration) {
+        'LegacyScan' { [pscustomobject][ordered]@{ FirstKnownRelease = '0.0.1'; LastKnownRelease = '0.0.17'; Notes = 'Sequential !INS records without a compact index.' } }
+        'EarlyIndexed' { [pscustomobject][ordered]@{ FirstKnownRelease = '0.0.18'; LastKnownRelease = '0.0.18'; Notes = 'INDEX-first media with the original pre-index field ordering and offset defect.' } }
+        'ConfigOnly' { [pscustomobject][ordered]@{ FirstKnownRelease = '0.0.25'; LastKnownRelease = $null; Notes = 'Online media with cleared pre-index lengths and no embedded metadata or payload.' } }
+        default { [pscustomobject][ordered]@{ FirstKnownRelease = '0.0.19'; LastKnownRelease = $null; Notes = 'CONFIG-first indexed media; the post-0.5 native host preserves this container.' } }
       }
 
       return [pscustomobject][ordered]@{
         Path                           = $File.FullName
-        Family                         = 'Kachina'
-        InstallerType                  = 'Kachina'
+        InstallerType                  = 'exe'
         FormatGeneration               = $Context.FormatGeneration
+        FormatCompatibility            = $FormatCompatibility
         ProductCode                    = $ProductCode
         UpgradeCode                    = $null
         DisplayName                    = $DisplayName
@@ -812,6 +897,7 @@ function Get-KachinaInfo {
         Configuration                  = $Config
         Metadata                       = $Metadata
         Source                         = $Source
+        Sources                        = @($Sources)
         AppName                        = $DisplayName
         RegName                        = $ProductCode
         ExeName                        = $ExeName
@@ -828,6 +914,11 @@ function Get-KachinaInfo {
         RuntimePackages                = $RuntimePackages
         EmbeddedRuntimePackages        = $EmbeddedRuntimePackages
         PatchFiles                     = $Patches
+        MetadataDeletes                = $MetadataDeletes
+        UserDataPaths                  = $UserDataPaths
+        IgnoredUpdatePaths             = $IgnoredUpdatePaths
+        ExtraUninstallPaths            = $ExtraUninstallPaths
+        NeedsWebView2                  = $NeedsWebView2
         EmbeddedRecords                = @($Context.Records | ForEach-Object { [pscustomobject]@{ Name = $_.DisplayName; RawOffset = $_.RawOffset; DataOffset = $_.DataOffset; Length = $_.Length } })
         PreIndex                       = $Context.PreIndex
         IndexEntries                   = $Context.Index
@@ -843,10 +934,16 @@ function Get-KachinaInfo {
         ProtocolAssociations           = @($AssociationInfo.ProtocolAssociations)
         FileExtensionAssociations      = @($AssociationInfo.FileExtensionAssociations)
         RegistryAssociationInfo        = $AssociationInfo
-        Notices                        = @($Notices)
-        Warnings                       = @($Warnings)
+
+        Diagnostics                    = @(
+          Merge-InstallerDiagnostics -Diagnostic @(
+            $Diagnostics
+            @(ConvertTo-InstallerDiagnostic -InputObject @($PayloadMessages) -Source 'Kachina' -Kind Incomplete -Areas Metadata, Extraction -AffectedFields @('PayloadFiles', 'PayloadArchitecture', 'Dependencies'))
+          )
+        )
         UnresolvedFields               = @($UnresolvedFields | Sort-Object -Unique)
-        ParserVersionInfo              = [pscustomobject]@{ Name = 'Dumplings Kachina parser'; Version = 1; Generation = $Context.FormatGeneration; Evidence = @('PE overlay Kachina TLV stream', 'compiled JSON configuration', 'metadata/index cross-check') }
+        Family                         = 'Kachina'
+        ParserVersionInfo              = [pscustomobject]@{ Name = 'Dumplings Kachina parser'; Version = 2; Generation = $Context.FormatGeneration; Evidence = @('PE overlay Kachina TLV stream', 'compiled JSON configuration', 'metadata/index cross-check', 'tagged releases 0.0.1 through 0.5.1 and the native-host branch') }
       }
     } finally { $Stream.Dispose() }
   }

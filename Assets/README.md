@@ -1,10 +1,8 @@
 # PackageModule Assets
 
-PackageModule's default license is Apache-2.0. Assemblies, providers, mirrored
-MIT infrastructure, and source-derived components retain the licenses stated
-in their file headers and `THIRD-PARTY-NOTICES.md`.
+PackageModule's default license is Apache-2.0. Assemblies, providers, mirrored MIT infrastructure, and source-derived components retain the licenses in their headers and `THIRD-PARTY-NOTICES.md`.
 
-Runtime assets are grouped by purpose:
+Runtime assets are grouped by purpose.
 
 - `Assemblies`: pinned third-party managed assemblies loaded by PackageModule.
 - `Providers`: independently licensed companion providers with their complete source and license.
@@ -12,5 +10,5 @@ Runtime assets are grouped by purpose:
 - `Source`: auditable C# compiled in process with `Add-Type`, grouped by subsystem.
 - `THIRD-PARTY-NOTICES.md`: source attribution and redistributed dependency licenses.
 
-Pester files belong in `..\Tests`; do not place executable tests in this directory.
-Load assets through their owning PowerShell module rather than relying on recursive discovery.
+Pester files belong in `..\Tests`. Do not place executable tests in this directory.
+Each owning PowerShell module selects and loads its assets. Do not discover assets recursively.

@@ -101,7 +101,7 @@ function Get-IExpressInfo {
     # WExtract package in Apps & Features.
     [pscustomobject][ordered]@{
       Path                         = $Installer.FullName
-      InstallerType                = 'iexpress'
+      InstallerType                = 'exe'
       ProductCode                  = $null
       UpgradeCode                  = $null
       DisplayName                  = $null
@@ -112,13 +112,14 @@ function Get-IExpressInfo {
       WritesAppsAndFeaturesEntry   = $false
       AppsAndFeaturesProductCode   = $null
       AppsAndFeaturesInstallerType = $null
-      Warnings                     = [string[]]@(
-        if ($Commands.Count -eq 0) { 'No IExpress execution command resource was found.' }
-        foreach ($Command in $Commands) {
-          if (-not $Command.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded cabinet entry: $($Command.Command.CommandLine)" }
-        }
-      )
+      Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@(
+            if ($Commands.Count -eq 0) { 'No IExpress execution command resource was found.' }
+            foreach ($Command in $Commands) {
+              if (-not $Command.Command.IsResolved) { "The $($Command.Source) command did not resolve to an embedded cabinet entry: $($Command.Command.CommandLine)" }
+            }
+          )) -Source 'IExpress' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
+      Family                       = 'IExpress'
       Format                       = 'IExpress'
       OriginalFilename             = $OriginalName
       Configuration                = [pscustomobject]$Configuration

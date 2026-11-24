@@ -3,7 +3,7 @@
 $Script:StatusReportModulePath = Join-Path $Script:DumplingsModuleRoot 'Libraries\Messaging\StatusReport.psm1'
 Import-Module $Script:StatusReportModulePath -Force
 
-Describe 'Task status registration' {
+Describe 'Task status registration' -Tag Unit {
   BeforeEach {
     $Script:Storage = [hashtable]::Synchronized(@{})
   }
@@ -87,7 +87,7 @@ Describe 'Task status registration' {
   }
 }
 
-Describe 'Task status report export' {
+Describe 'Task status report export' -Tag Unit {
   BeforeEach {
     $Script:Storage = [hashtable]::Synchronized(@{})
     $Script:TaskStates = [System.Collections.Concurrent.ConcurrentDictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)

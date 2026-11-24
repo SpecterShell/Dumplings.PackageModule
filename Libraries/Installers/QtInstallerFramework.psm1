@@ -21,6 +21,8 @@ function Get-QtInstallerFrameworkInfo {
     Get static metadata from a Qt Installer Framework installer through the separate GPL parser module
   .PARAMETER Path
     The path to the Qt Installer Framework installer
+  .OUTPUTS
+    Static installer metadata, package-location evidence, decoded performed-operation effects, maintenance ARP evidence, config values, verbatim controller/component JavaScript, conservative variable assignments, and analysis instructions returned by the separate parser process.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -42,7 +44,7 @@ function Get-QtInstallerFrameworkFormatInfo {
   .PARAMETER Path
     Path to the Qt IFW executable or DAT binary.
   .OUTPUTS
-    A format diagnostic containing the framework version or range, media role, selected routes, capabilities, evidence, and warnings.
+    A format diagnostic containing the framework version or range, media role, selected routes, package declarations, repository URLs, precise payload availability, capabilities, evidence, and warnings.
   #>
   [OutputType([pscustomobject])]
   param (
@@ -69,6 +71,12 @@ function Expand-QtInstallerFramework {
     The maximum total number of bytes written to the destination
   .PARAMETER CollisionAction
     Behavior when an output path already exists or multiple package entries resolve to the same path.
+  .PARAMETER DataPath
+    Paired Qt IFW DAT binary-content files.
+  .PARAMETER RepositoryPath
+    Local Qt IFW repository roots or Updates.xml files.
+  .PARAMETER PackagePath
+    Explicit Qt IFW package archives or directories.
   #>
   [OutputType([string])]
   param (
@@ -86,7 +94,13 @@ function Expand-QtInstallerFramework {
     [long]$MaximumExpandedBytes = 17179869184,
 
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')]
-    [string]$CollisionAction = 'Prompt'
+    [string]$CollisionAction = 'Prompt',
+
+    [string[]]$DataPath,
+
+    [string[]]$RepositoryPath,
+
+    [string[]]$PackagePath
   )
 
   process {
@@ -99,6 +113,9 @@ function Expand-QtInstallerFramework {
     if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
       $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     }
+    if ($DataPath) { $Arguments.DataPath = @($DataPath | ForEach-Object { Resolve-InstallerFileSystemPath -Path $_ -PathType Leaf }) }
+    if ($RepositoryPath) { $Arguments.RepositoryPath = @($RepositoryPath | ForEach-Object { Resolve-InstallerFileSystemPath -Path $_ }) }
+    if ($PackagePath) { $Arguments.PackagePath = @($PackagePath | ForEach-Object { Resolve-InstallerFileSystemPath -Path $_ }) }
     return Invoke-InstallerBridgeCommand -ModuleName 'InstallerParsers' -Action 'QtInstallerFramework.Expand' -Argument $Arguments
   }
 }

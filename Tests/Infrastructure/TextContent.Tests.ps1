@@ -4,7 +4,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Data\HTML.psm1') -Force
 }
 
-Describe 'Get-TextContent non-table regressions' {
+Describe 'Get-TextContent non-table regressions' -Tag Unit {
   It 'preserves paragraphs and inline text' {
     $Actual = '<div><p>Hello <strong>world</strong>.</p><p>Next &amp; final.</p></div>' | ConvertFrom-Html | Get-TextContent
     $Actual | Should -Be "Hello world.`nNext & final."
@@ -21,7 +21,7 @@ Describe 'Get-TextContent non-table regressions' {
   }
 }
 
-Describe 'Get-TextContent HTML tables' {
+Describe 'Get-TextContent HTML tables' -Tag Unit {
   It 'renders an ordinary header and body as a valid rectangular pipe table' {
     $Html = '<table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td>Alpha</td><td>One</td></tr></tbody></table>'
     $Actual = $Html | ConvertFrom-Html | Get-TextContent

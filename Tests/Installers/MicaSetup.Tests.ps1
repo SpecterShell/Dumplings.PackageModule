@@ -12,6 +12,9 @@ BeforeAll {
   $Script:MicaSetupV1Initial = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'MicaSetup-v1.0.0.exe') `
     -Uri 'https://github.com/lemutec/MicaSetup/releases/download/v1.0.0/DemoInstaller-MicaSetup.exe' `
     -Sha256 'D1BDD8BE96BF55676D3C7F07643A484067552765C8F7B35154DBE24D8188131A'
+  $Script:MicaSetupV1FirstOption = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'MicaSetup-v1.1.0.exe') `
+    -Uri 'https://github.com/lemutec/MicaSetup/releases/download/v1.1.0/DemoInstaller-MicaSetup.exe' `
+    -Sha256 '42898E3FFB0E2E66C70D0DD018E0FAE675C1A98CA687F4A2B1890C8628B06C42'
   $Script:MicaSetupV1 = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'MicaSetup-v1.3.0.exe') `
     -Uri 'https://github.com/lemutec/MicaSetup/releases/download/v1.3.0/DemoInstaller-MicaSetup.exe' `
     -Sha256 'A822E9C6D36018935DEDCE0820CF77CD50E2D3F44CD486C97CDB6847A19EC29B'
@@ -21,6 +24,9 @@ BeforeAll {
   $Script:MicaSetupV2 = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'MicaSetup-v2.5.4.exe') `
     -Uri 'https://github.com/lemutec/MicaSetup/releases/download/v2.5.4/MicaSetup_v2.5.4.exe' `
     -Sha256 '47BE125A67DABA58924FE581DCE87502C889B110F6CEC1446B4E7DCABF9748AC'
+  $Script:MicaSetupV2ArrayOptions = Get-DumplingsTestFixture -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'MicaSetup-v2.5.6.exe') `
+    -Uri 'https://github.com/lemutec/MicaSetup/releases/download/v2.5.6/MicaSetup_v2.5.6.exe' `
+    -Sha256 'B62E2271CF9DBDB76CB356F204A2D2378E7DE5810CA43101E7086F1507D8BDF5'
 }
 
 Describe 'MicaSetup managed structure detection' {
@@ -92,18 +98,29 @@ Describe 'MicaSetup managed structure detection' {
 Describe 'MicaSetup static installer evidence' {
   It 'covers the Pack, legacy Option, and modern Option configuration models' {
     $Pack = Get-MicaSetupInfo -Path $Script:MicaSetupV1Initial
+    $FirstOption = Get-MicaSetupInfo -Path $Script:MicaSetupV1FirstOption
     $LegacyOption = Get-MicaSetupInfo -Path $Script:MicaSetupV2Initial
     $ModernOption = Get-MicaSetupInfo -Path $Script:MicaSetupV2
 
     $Pack.ConfigurationModel | Should -Be 'Pack'
     $Pack.BuilderGeneration | Should -Be 'v1'
+    $Pack.FormatCompatibility.FirstKnownRelease | Should -Be '1.0.0'
+    $Pack.FormatCompatibility.LastKnownRelease | Should -Be '1.0.0'
     $Pack.DisplayVersion | Should -Be '1.0.0.0'
     $Pack.Shortcuts.Location | Should -Be @('Desktop')
     $Pack.FirewallRules | Should -BeNullOrEmpty
+    $FirstOption.ConfigurationModel | Should -Be 'OptionLegacy'
+    $FirstOption.OptionValues.PSObject.Properties.Name | Should -Contain 'IsCreateAsAutoRun'
+    $FirstOption.OptionValues.PSObject.Properties.Name | Should -Not -Contain 'IsCrateAsAutoRun'
+    $FirstOption.OptionValues.IsCreateAsAutoRun | Should -BeFalse
     $LegacyOption.ConfigurationModel | Should -Be 'OptionLegacy'
     $LegacyOption.BuilderGeneration | Should -Be 'v1'
+    $LegacyOption.FormatCompatibility.FirstKnownRelease | Should -Be '1.1.0'
+    $LegacyOption.FormatCompatibility.LastKnownRelease | Should -Be '2.3.2'
     $ModernOption.ConfigurationModel | Should -Be 'OptionModern'
     $ModernOption.BuilderGeneration | Should -Be 'v2'
+    $ModernOption.FormatCompatibility.FirstKnownRelease | Should -Be '2.3.3'
+    $ModernOption.FormatCompatibility.LastKnownRelease | Should -BeNullOrEmpty
   }
 
   It 'parses the official v1 generation as an elevated machine installer' {
@@ -123,6 +140,9 @@ Describe 'MicaSetup static installer evidence' {
     $Info.InstallerSwitches.Count | Should -Be 0
     $Info.PayloadFiles.Count | Should -BeGreaterThan 0
     $Info.PayloadArchitectures | Should -Not -Contain 'neutral'
+    $Info.HostBehavior.SingleInstanceMutex | Should -Be 'MicaSetup'
+    $Info.HostBehavior.UsesTempPathFork | Should -BeTrue
+    $Info.FolderPermissionChanges[0].Identities | Should -Be @('Everyone', 'Users')
   }
 
   It 'parses the official v2 generation and resolves option-property metadata references' {
@@ -140,9 +160,255 @@ Describe 'MicaSetup static installer evidence' {
     $Info.PayloadEncrypted | Should -BeFalse
     $Info.PayloadDecryptionSucceeded | Should -BeNullOrEmpty
     $Info.CanExpand | Should -BeTrue
+    $Info.HostBehavior.SingleInstanceMutex | Should -Be 'MicaSetup'
+    $Info.HostBehavior.UsesTempPathFork | Should -BeFalse
+    $Info.RefreshesExplorer | Should -BeTrue
+    $Info.EnablesUninstallDelayUntilReboot | Should -BeTrue
     $Info.OptionValues.PSObject.Properties.Name | Should -Not -Contain 'UnpackingPassword'
     $Info.PSObject.Properties.Name | Should -Contain 'UnresolvedExpressions'
+    $Info.Diagnostics.Id | Should -Contain 'MicaSetup.Configuration.LocalizedUiExpressions'
+    $Info.Diagnostics.Id | Should -Not -Contain 'MicaSetup.Configuration.ExpressionsUnresolved'
+    ($Info.UnresolvedExpressions | Where-Object Name -EQ 'SetupName').Expression | Should -Match 'System\.String\.Concat\(.+MicaSetup\.Core\.LocaleExtension\.Tr\("Setup"\)'
+    ($Info.UnresolvedExpressions | Where-Object Name -EQ 'MessageOfPage2').Expression | Should -Be 'MicaSetup.Core.LocaleExtension.Tr("Installing")'
     ($Info | ConvertTo-Json -Depth 20) | Should -Not -Match 'constant string \(redacted\).*[^\r\n]*:'
+  }
+
+  It 'does not fabricate a resolved String.Format result from unresolved arguments' {
+    $AssemblyPath = Join-Path $TestDrive 'MicaSetupUnresolvedFormat.dll'
+    $Source = @'
+using System;
+namespace MicaSetup
+{
+    public sealed class Option
+    {
+        public string AppName { get; set; }
+        public string DisplayName { get; set; }
+        public string DisplayVersion { get; set; }
+        public string Publisher { get; set; }
+    }
+
+    public static class Program
+    {
+        private static string RuntimeName() => Environment.MachineName;
+        public static void UseOptions(Action<Option> configure) { }
+        public static void Configure()
+        {
+            UseOptions(option =>
+            {
+                option.AppName = "FormatApp";
+                option.DisplayName = string.Format("Application {0}", RuntimeName());
+                option.DisplayVersion = "1.0.0";
+                option.Publisher = "Fixture Publisher";
+            });
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $Source -OutputAssembly $AssemblyPath
+
+    $null = Test-MicaSetupInstaller -Path $Script:MicaSetupV2ArrayOptions
+    $Managed = [Dumplings.MicaSetup.MicaSetupReader]::Analyze($AssemblyPath)
+    $Evidence = $Managed.Options | Where-Object Name -EQ 'DisplayName' | Select-Object -First 1
+
+    $Evidence.IsResolved | Should -BeFalse
+    $Evidence.Value | Should -BeNullOrEmpty
+    $Evidence.Expression | Should -Match '^System\.String\.Format\("Application \{0\}", .+RuntimeName\(\)\)$'
+  }
+
+  It 'resolves compiler-emitted empty array options in the v2.5.6 release' {
+    $Info = Get-MicaSetupInfo -Path $Script:MicaSetupV2ArrayOptions
+    $PatternEvidence = $Info.OptionEvidence | Where-Object Name -EQ 'OverlayInstallRemovePatterns' | Select-Object -First 1
+
+    $Info.DisplayVersion | Should -Be '2.5.6'
+    $PatternEvidence.IsResolved | Should -BeTrue
+    $PatternEvidence.ArrayLength | Should -Be 0
+    $Info.OverlayCleanup.Patterns | Should -BeNullOrEmpty
+    $Info.OverlayCleanup.Extensions | Should -Be @('exe', 'dll', 'pdb', '7z')
+    $Info.SupportedLanguages | Should -Be @('en', 'ja', 'zh-hans', 'zh-hant')
+    $Info.FormatCompatibility.FirstKnownRelease | Should -Be '2.3.3'
+  }
+
+  It 'evaluates non-empty compiler-emitted string arrays directly from CIL' {
+    $AssemblyPath = Join-Path $TestDrive 'MicaSetupArrayOptions.dll'
+    $Source = @'
+using System;
+namespace MicaSetup
+{
+    public sealed class Option
+    {
+        public string AppName { get; set; }
+        public string KeyName { get; set; }
+        public string ExeName { get; set; }
+        public string DisplayName { get; set; }
+        public string[] SupportLanguages { get; set; }
+        public string[] OverlayInstallRemovePatterns { get; set; }
+    }
+
+    public static class Program
+    {
+        public static void UseOptions(Action<Option> configure) { }
+        public static void Configure()
+        {
+            UseOptions(option =>
+            {
+                option.AppName = "ArrayApp";
+                option.KeyName = "ArrayApp";
+                option.ExeName = "ArrayApp.exe";
+                option.DisplayName = "Array App";
+                option.SupportLanguages = new[] { "en", "ja", "zh-Hans" };
+                option.OverlayInstallRemovePatterns = new[] { "temp/**", "*.log" };
+            });
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $Source -OutputAssembly $AssemblyPath
+
+    # Loading a real parser result initializes the managed reader without loading the fixture.
+    $null = Test-MicaSetupInstaller -Path $Script:MicaSetupV2ArrayOptions
+    $Managed = [Dumplings.MicaSetup.MicaSetupReader]::Analyze($AssemblyPath)
+    ($Managed.Options | Where-Object Name -EQ 'SupportLanguages').Value | Should -Be @('en', 'ja', 'zh-Hans')
+    ($Managed.Options | Where-Object Name -EQ 'OverlayInstallRemovePatterns').Value | Should -Be @('temp/**', '*.log')
+  }
+
+  It 'evaluates official close-application object initializers and host-builder settings' {
+    $AssemblyPath = Join-Path $TestDrive 'MicaSetupObjectOptions.dll'
+    $Source = @'
+using System;
+
+namespace MicaSetup.Helper
+{
+    public sealed class CloseApplicationInfo
+    {
+        public string Target { get; set; } = string.Empty;
+        public string Description { get; set; }
+        public string WindowTitle { get; set; }
+        public bool CloseMessage { get; set; } = true;
+        public bool RebootPrompt { get; set; }
+        public bool TerminateProcess { get; set; } = true;
+        public int Timeout { get; set; } = 5;
+    }
+}
+
+namespace MicaSetup
+{
+    public interface IHostBuilder { }
+
+    public sealed class Option
+    {
+        public string AppName { get; set; }
+        public string KeyName { get; set; }
+        public string ExeName { get; set; }
+        public string DisplayName { get; set; }
+        public MicaSetup.Helper.CloseApplicationInfo[] CloseApplications { get; set; }
+    }
+
+    public static class Hosting
+    {
+        public static void UseOptions(Action<Option> configure) { }
+        public static IHostBuilder UseSingleInstance(IHostBuilder builder, string name, Action<bool> callback = null) { return builder; }
+        public static IHostBuilder UseTempPathFork(IHostBuilder builder, bool enabled = true) { return builder; }
+    }
+
+    public static class Program
+    {
+        public static void Configure()
+        {
+            IHostBuilder builder = null;
+            Hosting.UseSingleInstance(builder, "MicaFixtureMutex");
+            Hosting.UseTempPathFork(builder, false);
+            Hosting.UseOptions(option =>
+            {
+                option.AppName = "ObjectApp";
+                option.KeyName = "ObjectApp";
+                option.ExeName = "ObjectApp.exe";
+                option.DisplayName = "Object App";
+                option.CloseApplications = new[]
+                {
+                    new MicaSetup.Helper.CloseApplicationInfo
+                    {
+                        Target = "ObjectApp.exe",
+                        Description = "Object App",
+                        WindowTitle = "Document",
+                        RebootPrompt = true,
+                        Timeout = 17
+                    }
+                };
+            });
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $Source -OutputAssembly $AssemblyPath
+
+    $null = Test-MicaSetupInstaller -Path $Script:MicaSetupV2ArrayOptions
+    $Managed = [Dumplings.MicaSetup.MicaSetupReader]::Analyze($AssemblyPath)
+    $Evidence = $Managed.Options | Where-Object Name -EQ 'CloseApplications' | Select-Object -First 1
+    $Application = $Evidence.Value[0]
+
+    $Evidence.IsResolved | Should -BeTrue
+    $Evidence.ArrayLength | Should -Be 1
+    $Application.Target | Should -Be 'ObjectApp.exe'
+    $Application.Description | Should -Be 'Object App'
+    $Application.WindowTitle | Should -Be 'Document'
+    $Application.CloseMessage | Should -BeTrue
+    $Application.RebootPrompt | Should -BeTrue
+    $Application.TerminateProcess | Should -BeTrue
+    $Application.Timeout | Should -Be 17
+    $Managed.SingleInstanceMutex | Should -Be 'MicaFixtureMutex'
+    $Managed.UseTempPathFork | Should -BeFalse
+  }
+
+  It 'projects resolved multilingual and overlay pattern arrays without flattening them' {
+    InModuleScope MicaSetup -Parameters @{ Installer = (Get-Process -Id $PID).Path } {
+      $NewOption = {
+        param([string]$Name, $Value)
+        [pscustomobject]@{ Name = $Name; Value = $Value; IsResolved = $true; Expression = 'synthetic array'; Method = 'Fixture::Options'; IlOffset = 0; ArrayLength = @($Value).Count }
+      }
+      $Managed = [pscustomobject]@{
+        FileKind = 'Executable'
+        HasOptionType = $true; HasUseOptionsMethod = $true; HasPackType = $false; HasUsePackMethod = $false
+        BuilderGeneration = 'v2'; ConfigurationModel = 'OptionModern'; TargetFramework = '.NETFramework,Version=v4.8'
+        RequestExecutionLevel = 'admin'; UseElevated = $true; Warnings = @(); Evidence = @('synthetic array options')
+        SingleInstanceMutex = 'ArrayAppMutex'; UseTempPathFork = $false
+        Resources = @([pscustomobject]@{ Name = 'resources/setups/publish.7z'; TypeCode = 33; Offset = 0; Length = 1 })
+        RegistryWrites = @()
+        Options = @(
+          & $NewOption 'AppName' 'ArrayApp'
+          & $NewOption 'KeyName' 'ArrayApp'
+          & $NewOption 'ExeName' 'ArrayApp.exe'
+          & $NewOption 'DisplayName' 'Array App'
+          & $NewOption 'SupportLanguages' ([string[]]@('en', 'ja', 'zh-Hans'))
+          & $NewOption 'OverlayInstallRemoveExt' 'exe,dll'
+          & $NewOption 'OverlayInstallRemovePatterns' ([string[]]@('temp/**', '*.log', '!logs/*.log'))
+          & $NewOption 'CloseApplications' @([ordered]@{ Target = 'ArrayApp.exe'; Description = 'Array App'; WindowTitle = 'Document'; CloseMessage = $true; RebootPrompt = $true; TerminateProcess = $false; Timeout = 13 })
+          & $NewOption 'IsAllowFullFolderSecurity' $true
+          & $NewOption 'IsRefreshExplorer' $true
+          & $NewOption 'IsEnableUninstallDelayUntilReboot' $true
+        )
+      }
+      Mock Get-MicaSetupManagedInfo { $Managed }
+      Mock Open-MicaSetupPayloadArchive { [pscustomobject]@{ Archive = 'synthetic'; Range = $null } }
+      Mock Get-MicaSetupPayloadEvidence { [pscustomobject]@{ Catalog = @(); Architectures = @(); ArchitectureInfo = $null; DependencyInfo = $null } }
+      Mock Close-MicaSetupPayloadArchive {}
+
+      $Info = Get-MicaSetupInfo -Path $Installer
+      $Info.SupportedLanguages | Should -Be @('en', 'ja', 'zh-Hans')
+      $Info.OverlayCleanup.Extensions | Should -Be @('exe', 'dll')
+      $Info.OverlayCleanup.Patterns | Should -Be @('temp/**', '*.log', '!logs/*.log')
+      $Info.CloseApplications.Count | Should -Be 1
+      $Info.CloseApplications.DetailsResolved | Should -BeTrue
+      $Info.CloseApplications.Applications[0].Target | Should -Be 'ArrayApp.exe'
+      $Info.CloseApplications.Applications[0].TimeoutSeconds | Should -Be 13
+      $Info.CloseApplications.Applications[0].TerminateProcess | Should -BeFalse
+      $Info.FolderPermissionChanges[0].Identities | Should -Be @('Everyone', 'Users')
+      $Info.FolderPermissionChanges[0].Rights | Should -Be 'FullControl'
+      $Info.RefreshesExplorer | Should -BeTrue
+      $Info.EnablesUninstallDelayUntilReboot | Should -BeTrue
+      $Info.HostBehavior.SingleInstanceMutex | Should -Be 'ArrayAppMutex'
+      $Info.HostBehavior.UsesTempPathFork | Should -BeFalse
+      $Info.Diagnostics.Id | Should -Contain 'MicaSetup.Security.PermissiveInstallAcl'
+    }
   }
 
   It 'keeps custom association evidence empty when compiled literal writes are absent' {
@@ -186,7 +452,8 @@ Describe 'MicaSetup static installer evidence' {
       $Info.ProductCode | Should -BeNullOrEmpty
       $Info.WritesAppsAndFeaturesEntry | Should -BeFalse
       $Info.RegistryWrites | Should -BeNullOrEmpty
-      ($Info.Notices -join "`n") | Should -Match 'Uninst.dat'
+      ($Info.Diagnostics.Message -join "`n") | Should -Match 'Uninst.dat'
+      @($Info.Diagnostics | Where-Object Kind -EQ Information) | Should -Not -BeNullOrEmpty
     }
   }
 
@@ -236,7 +503,7 @@ Describe 'MicaSetup static installer evidence' {
       ($Info.RegistryWrites | Where-Object Name -EQ 'SystemComponent').Value | Should -Be 1
       $Info.Protocols | Should -Contain 'mica'
       $Info.FileExtensions | Should -Contain 'mica'
-      ($Info.Notices -join "`n") | Should -Match 'hidden uninstall entry'
+      ($Info.Diagnostics.Message -join "`n") | Should -Match 'hidden uninstall entry'
     }
   }
 }
@@ -298,7 +565,8 @@ Describe 'MicaSetup malformed nested payload handling' {
     Test-MicaSetupInstaller -Path $CorruptInstaller | Should -BeTrue
     $Info = Get-MicaSetupInfo -Path $CorruptInstaller
     $Info.CanExpand | Should -BeFalse
-    $Info.Warnings | Should -Match 'payload archive analysis failed'
+    ($Info.Diagnostics.Message -join "`n") | Should -Match 'payload archive analysis failed'
+    @($Info.Diagnostics | Where-Object Kind -EQ Incomplete) | Should -Not -BeNullOrEmpty
   }
 }
 
@@ -313,21 +581,22 @@ Describe 'MicaSetup analyzer integration' {
     $Result.Success | Should -BeTrue
     $Result.Result.ProductCode | Should -Be 'MicaSetup'
     $Result.Result.AppsAndFeaturesEntries.ProductCode | Should -Contain 'MicaSetup'
-    $Result.Result.Notices | Should -Not -BeNullOrEmpty
-    $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe # MicaSetup'
+    $Result.Result.Diagnostics | Should -Not -BeNullOrEmpty
+    $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe'
     $Result.Result.SuggestedManifestFields.InstallModes | Should -Be @('interactive')
-    $Result.Result.SuggestedManifestFields.InstallerSwitches.Count | Should -Be 0
+    $Result.Result.SuggestedManifestFields.PSObject.Properties.Name | Should -Not -Contain 'InstallerSwitches'
   }
 
   It 'produces a conservative WinGet installer suggestion without fabricating silent switches' {
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.com/MicaSetup.exe' -InstallerPath $Script:MicaSetupV2 -Architecture x64
 
-    $Suggestion.BlockingIssues | Should -BeNullOrEmpty
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
+    $Suggestion.Diagnostics.Id | Should -Contain 'MicaSetup.Installability.SilentUnsupported'
     $Suggestion.Installers | Should -HaveCount 1
     $Suggestion.Installers[0].InstallerType | Should -Be 'exe'
     $Suggestion.Installers[0].ProductCode | Should -Be 'MicaSetup'
     $Suggestion.Installers[0].Scope | Should -Be 'machine'
     $Suggestion.Installers[0].Contains('InstallerSwitches') | Should -BeFalse
-    $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe # MicaSetup'
+    $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe'
   }
 }

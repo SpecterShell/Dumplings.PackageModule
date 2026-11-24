@@ -48,66 +48,30 @@
   The name of the origin repository
 #>
 
-enum LogLevel {
-  Verbose
-  Log
-  Info
-  Warning
-  Error
-}
-
-class PackageTask: System.IDisposable {
+class PackageTask : DumplingsTaskBase {
   #region Properties
-  [ValidateNotNullOrEmpty()][string]$Name
-  [ValidateNotNullOrEmpty()][string]$Path
-  [System.Collections.IDictionary]$Config = [ordered]@{}
   [System.Collections.IDictionary]$LastState = [ordered]@{ Version = $null; Installer = @(); Locale = @() }
   [System.Collections.IDictionary]$CurrentState = [ordered]@{ Version = $null; Installer = @(); Locale = @() }
-  [ValidateNotNullOrEmpty()][string]$ScriptPath
   [System.Collections.Generic.List[string]]$Status = [System.Collections.Generic.List[string]]@()
   [System.Collections.Generic.List[string]]$Logs = [System.Collections.Generic.List[string]]@()
   [System.Collections.IDictionary]$InstallerFiles = [ordered]@{}
+  [System.Collections.IDictionary]$InstallerFileEvidence = [ordered]@{}
+  hidden [Collections.Generic.HashSet[string]]$BorrowedTrackingFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  hidden [Collections.Generic.HashSet[string]]$OwnedTrackingFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  hidden [object]$PendingInstallerUpdate
   [bool]$MessageEnabled = $false
   [System.Collections.Generic.List[System.Tuple[string, Int64]]]$MessageSession = @()
   [long]$MessageSessionGeneration = 0
-  [bool]$InvocationSucceeded = $false
-  [bool]$InvocationSkipped = $false
+  hidden [string]$LastQueuedMessage
+  hidden [string]$LastQueuedSessionKey
+  hidden [object]$LastQueuedTicket
   #endregion
 
-  # Initialize task
-  PackageTask([System.Collections.IDictionary]$Properties) {
-    # Load name
-    if (-not $Properties.Contains('Name') -or [string]::IsNullOrEmpty($Properties.Name)) { throw 'PackageTask: The provided task name is null or empty' }
-    $this.Name = $Properties.Name
+  PackageTask([Collections.IDictionary]$Properties) : base($Properties) { $this.InitializeState() }
+  PackageTask([string]$Name, [string]$Path) : base(@{ Name = $Name; Path = $Path }) { $this.InitializeState() }
+  PackageTask([string]$Name, [string]$Path, [Collections.IDictionary]$Config) : base(@{ Name = $Name; Path = $Path; Config = $Config }) { $this.InitializeState() }
 
-    # Load path
-    if (-not $Properties.Contains('Path') -or [string]::IsNullOrEmpty($Properties.Path)) { throw 'PackageTask: The provided task path is null or empty' }
-    if (-not (Test-Path -Path $Properties.Path)) { throw 'PackageTask: The provided task path is not reachable' }
-    $this.Path = $Properties.Path
-
-    # Load config
-    if ($Properties.Contains('Config')) {
-      if ($Properties.Config -and $Properties.Config -is [System.Collections.IDictionary]) {
-        $this.Config = $Properties.Config
-      } else {
-        throw 'PackageTask: The provided task config is empty or not a valid dictionary'
-      }
-    } else {
-      $Private:ConfigPath = Join-Path $this.Path 'Config.yaml'
-      if (Test-Path -Path $Private:ConfigPath) {
-        try {
-          $RawConfig = Get-Content -Path $Private:ConfigPath -Raw | ConvertFrom-Yaml -Ordered
-          if ($RawConfig -and $RawConfig -is [System.Collections.IDictionary]) {
-            $this.Config = $RawConfig
-          } else {
-            Write-Log -Object 'The config file is invalid. Assigning an empty hashtable' -Level Warning
-          }
-        } catch {
-          Write-Log -Object "Failed to load config. Assigning an empty hashtable: ${_}" -Level Warning
-        }
-      }
-    }
-
+  hidden [void] InitializeState() {
     # Load last state
     $Private:LastStatePath = Join-Path $this.Path 'State.yaml'
     if (Test-Path -Path $Private:LastStatePath) {
@@ -125,26 +89,57 @@ class PackageTask: System.IDisposable {
       $this.Status.Add('New')
     }
 
-    # Probe script
-    $this.ScriptPath = Join-Path $this.Path 'Script.ps1'
-    if (-not (Test-Path -Path $this.ScriptPath)) { throw 'PackageTask: The script file is not found' }
-
-    # Log notes
+    # Preserve the configured note as the first package log entry.
     if ($this.Config.Contains('Notes')) { $this.Logs.Add($this.Config.Notes) }
   }
 
-  PackageTask([string]$Name, [string]$Path) {
-    PackageTask(@{ Name = $Name; Path = $Path })
-  }
-
-  PackageTask([string]$Name, [string]$Path, [System.Collections.IDictionary]$Config) {
-    PackageTask(@{ Name = $Name; Path = $Path; Config = $Config })
-  }
-
   [void] Dispose() {
-    foreach ($InstallerPath in $this.InstallerFiles.Values) {
-      Remove-Item -Path $InstallerPath -Force -ErrorAction 'Continue'
+    foreach ($InstallerPath in @(@($this.InstallerFiles.Values) + @($this.OwnedTrackingFiles) | Select-Object -Unique)) {
+      if (-not $this.BorrowedTrackingFiles.Contains($InstallerPath) -and (Test-Path -LiteralPath $InstallerPath)) { Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction 'Continue' }
     }
+  }
+
+  # Probe/hash/version work is separate from publishing, leaving a narrow place
+  # for package-specific release metadata before completion. Logging during the
+  # check must not activate previously enabled notification callbacks.
+  [object] CheckInstallerUpdates([Collections.IDictionary]$Options) {
+    if ($this.PendingInstallerUpdate -and -not $this.PendingInstallerUpdate.Completed) { throw 'Complete the pending installer update before checking again.' }
+    $PreviousMessaging = $this.MessageEnabled
+    $this.MessageEnabled = $false
+    try {
+      $Result = Get-PackageTaskInstallerUpdate -Task $this -Options $Options -Force:([bool]$Global:DumplingsPreference['Force'])
+      foreach ($Warning in $Result.Warnings) { $this.Log($Warning, 'Warning') }
+      if ($Result.Accepted) {
+        foreach ($Path in $this.InstallerFiles.Values) { if (-not $this.OwnedTrackingFiles.Contains([string]$Path)) { $null = $this.BorrowedTrackingFiles.Add([string]$Path) } }
+        foreach ($Path in $Result.OwnedFiles) { $null = $this.OwnedTrackingFiles.Add($Path) }
+        foreach ($Url in $Result.Files.Keys) {
+          $Path = [string]$Result.Files[$Url]
+          $this.InstallerFiles[$Url] = $Path
+          if ($Path -notin $Result.OwnedFiles) { $null = $this.BorrowedTrackingFiles.Add($Path) }
+          else { $null = $this.BorrowedTrackingFiles.Remove($Path) }
+        }
+        foreach ($Path in $Result.FileEvidence.Keys) { $this.InstallerFileEvidence[$Path] = $Result.FileEvidence[$Path] }
+        $this.CurrentState = $Result.CandidateState
+        if ($Result.NeedsMetadata) { $null = $this.Check() }
+        if ($Result.Outcome -eq 'Rebuilt' -and -not $this.Status.Contains('Rebuilt')) { $this.Status.Add('Rebuilt') }
+      }
+      $this.Log("Installer tracking: $($Result.Outcome)", 'Info')
+      $this.PendingInstallerUpdate = $Result
+      return $Result
+    } finally { $this.MessageEnabled = $PreviousMessaging }
+  }
+
+  # Mark completion before external effects. Retrying a partly failed submission
+  # must be an explicit new operation, not a duplicate completion of this ticket.
+  [void] CompleteInstallerUpdates([object]$Result) {
+    if (-not [object]::ReferenceEquals($this.PendingInstallerUpdate, $Result) -or $null -eq $Result) { throw 'Installer update result belongs to another task or check.' }
+    if ($Result.Completed) { return }
+    $Result.Completed = $true
+    if (-not $Result.Accepted) { return }
+    if ($Result.NeedsMetadata) { $this.Print() }
+    if ($Result.ShouldWrite) { $this.Write() }
+    if ($Result.ShouldMessage) { $this.Message() }
+    if ($Result.ShouldSubmit) { $this.Submit() }
   }
 
   # Log in specified level
@@ -162,26 +157,6 @@ class PackageTask: System.IDisposable {
   # Log in default level
   [void] Log([string]$Message) {
     $this.Log($Message, 'Log')
-  }
-
-  # Invoke script
-  [void] Invoke() {
-    $DumplingsLogIdentifier = $Script:DumplingsLogIdentifier + $this.Name
-    $this.InvocationSucceeded = $false
-    $this.InvocationSkipped = $false
-    if (($Global:DumplingsPreference.Contains('Force') -and $Global:DumplingsPreference.Force) -or -not ($this.Config.Contains('Skip') -and $this.Config.Skip)) {
-      Write-Log -Object 'Run!'
-      try {
-        $null = & $this.ScriptPath
-        $this.InvocationSucceeded = $true
-      } catch {
-        $_ | Out-Host
-        $this.Log("Unexpected error: ${_}", 'Error')
-      }
-    } else {
-      $this.InvocationSkipped = $true
-      $this.Log('Skipped', 'Info')
-    }
   }
 
   # Compare current state with last state
@@ -243,10 +218,14 @@ class PackageTask: System.IDisposable {
           if (-not [string]::IsNullOrWhiteSpace($Identity)) { $null = $TrustedIdentities.Add($Identity) }
         }
         if ($TrustedIdentities.Count -gt 0) {
+          $InstallerIndex = 0
+          $PreviousIdentities = "'" + ($TrustedIdentities -join "', '") + "'"
+          $IdentityLabel = $TrustedIdentities.Count -eq 1 ? 'identity' : 'identities'
           foreach ($InstallerEntry in $this.CurrentState.Installer) {
+            $InstallerIndex += 1
             $Identity = Get-InstallerSourceIdentity -Uri $InstallerEntry['InstallerUrl']
             if (-not [string]::IsNullOrWhiteSpace($Identity) -and -not $TrustedIdentities.Contains($Identity)) {
-              $this.Log("The installer source identity '${Identity}' changed from the trusted history: $($TrustedIdentities -join ', ')", 'Warning')
+              $this.Log("[Installer #${InstallerIndex}/$($this.CurrentState.Installer.Count)] The installer source ${IdentityLabel} ${PreviousIdentities} changed to '${Identity}'", 'Warning')
             }
           }
         }
@@ -275,166 +254,8 @@ class PackageTask: System.IDisposable {
     }
   }
 
-  # Convert current state to Markdown message
-  [string] ToMarkdown() {
-    $Message = [System.Text.StringBuilder]::new(2048)
-
-    # WinGetIdentifier
-    if ($this.Config.Contains('WinGetIdentifier')) { $Message = $Message.AppendLine("**$($this.Config.WinGetIdentifier)**") }
-
-    $Message = $Message.AppendLine()
-
-    # Version
-    $Message = $Message.AppendLine("**Version:** $($this.CurrentState['Version'] | ConvertTo-MarkdownEscapedText)")
-    # RealVersion
-    if ($this.CurrentState.Contains('RealVersion')) { $Message = $Message.AppendLine("**RealVersion:** $($this.CurrentState['RealVersion'] | ConvertTo-MarkdownEscapedText)") }
-
-    # Installer
-    for ($i = 0; $i -lt $this.CurrentState.Installer.Count; $i++) {
-      $Installer = $this.CurrentState.Installer[$i]
-      $Message = $Message.Append("**Installer \#$($i + 1)/$($this.CurrentState.Installer.Count) \(")
-      if ($Installer.Contains('Query')) {
-        if ($Installer.Query -is [scriptblock]) {
-          $Message = $Message.Append('ScriptBlock')
-        } elseif ($Installer.Query -is [System.Collections.IDictionary]) {
-          $Message = $Message.Append(($Installer.Query.Contains('InstallerLocale') ? ($Installer.Query['InstallerLocale'] | ConvertTo-MarkdownEscapedText) : '\*'))
-          $Message = $Message.Append(', ')
-          $Message = $Message.Append(($Installer.Query.Contains('Architecture') ? ($Installer.Query['Architecture'] | ConvertTo-MarkdownEscapedText) : '\*'))
-          $Message = $Message.Append(', ')
-          $Message = $Message.Append(($Installer.Query.Contains('InstallerType') ? ($Installer.Query['InstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
-          $Message = $Message.Append(', ')
-          $Message = $Message.Append(($Installer.Query.Contains('NestedInstallerType') ? ($Installer.Query['NestedInstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
-          $Message = $Message.Append(', ')
-          $Message = $Message.Append(($Installer.Query.Contains('Scope') ? ($Installer.Query['Scope'] | ConvertTo-MarkdownEscapedText) : '\*'))
-        } else {
-          throw 'Invalid Query type'
-        }
-      } else {
-        $Message = $Message.Append(($Installer.Contains('InstallerLocale') ? ($Installer['InstallerLocale'] | ConvertTo-MarkdownEscapedText) : '\*'))
-        $Message = $Message.Append(', ')
-        $Message = $Message.Append(($Installer.Contains('Architecture') ? ($Installer['Architecture'] | ConvertTo-MarkdownEscapedText) : '\*'))
-        $Message = $Message.Append(', ')
-        $Message = $Message.Append(($Installer.Contains('InstallerType') ? ($Installer['InstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
-        $Message = $Message.Append(', ')
-        $Message = $Message.Append(($Installer.Contains('NestedInstallerType') ? ($Installer['NestedInstallerType'] | ConvertTo-MarkdownEscapedText) : '\*'))
-        $Message = $Message.Append(', ')
-        $Message = $Message.Append(($Installer.Contains('Scope') ? ($Installer['Scope'] | ConvertTo-MarkdownEscapedText) : '\*'))
-      }
-      $Message = $Message.AppendLine('\):**')
-      $Message = $Message.AppendLine(($Installer['InstallerUrl'].Replace(' ', '%20') | ConvertTo-MarkdownEscapedText))
-    }
-
-    # ReleaseDate
-    if ($this.CurrentState.Contains('ReleaseTime')) {
-      if ($this.CurrentState.ReleaseTime -is [datetime]) {
-        $Message = $Message.AppendLine("**ReleaseDate:** $($this.CurrentState.ReleaseTime.ToString('yyyy-MM-dd') | ConvertTo-MarkdownEscapedText)")
-      } else {
-        $Message = $Message.AppendLine("**ReleaseDate:** $($this.CurrentState.ReleaseTime | ConvertTo-MarkdownEscapedText)")
-      }
-    }
-
-    # Locale
-    foreach ($Entry in $this.CurrentState.Locale) {
-      if ($Entry.Contains('Key') -and $Entry.Key -in @('ReleaseNotes', 'ReleaseNotesUrl')) {
-        $Message = $Message.Append("**$($Entry['Key'] | ConvertTo-MarkdownEscapedText) \(")
-        $Message = $Message.Append(($Entry.Contains('Locale') ? ($Entry['Locale'] | ConvertTo-MarkdownEscapedText) : '\*'))
-        $Message = $Message.AppendLine('\):**')
-        $Message = $Message.AppendLine(($Entry['Value'] | ConvertTo-MarkdownEscapedText))
-      }
-    }
-
-    # Log
-    if ($this.Logs.Count -gt 0) {
-      $Message = $Message.AppendLine('**Log:**')
-      foreach ($Log in $this.Logs) {
-        $Message = $Message.AppendLine((($Log.Length -gt 1024 ? ($Log.SubString(0, 1024) + '...[truncated]') : $Log) | ConvertTo-MarkdownEscapedText))
-      }
-    }
-
-    # Standard Markdown use two line endings as newline
-    return $Message.ToString().Trim().ReplaceLineEndings("`n`n")
-  }
-
-  # Convert current state to Markdown message in Telegram standard
-  [string] ToTelegramMarkdown() {
-    $Message = [System.Text.StringBuilder]::new(2048)
-
-    # WinGetIdentifier
-    if ($this.Config.Contains('WinGetIdentifier')) { $Message = $Message.AppendLine("*$($this.Config.WinGetIdentifier | ConvertTo-TelegramEscapedText)*") }
-
-    $Message = $Message.AppendLine()
-
-    # Version
-    $Message = $Message.AppendLine("*Version:* $($this.CurrentState['Version'] | ConvertTo-TelegramEscapedText)")
-    # RealVersion
-    if ($this.CurrentState.Contains('RealVersion')) { $Message = $Message.AppendLine("*RealVersion:* $($this.CurrentState['RealVersion'] | ConvertTo-TelegramEscapedText)") }
-
-    # Installer
-    for ($i = 0; $i -lt $this.CurrentState.Installer.Count -and $i -lt 10; $i++) {
-      $Installer = $this.CurrentState.Installer[$i]
-      $Message = $Message.Append("*Installer \#$($i + 1)/$($this.CurrentState.Installer.Count) \(")
-      if ($Installer.Contains('Query')) {
-        if ($Installer.Query -is [scriptblock]) {
-          $Message = $Message.Append('ScriptBlock')
-        } elseif ($Installer.Query -is [System.Collections.IDictionary]) {
-          $Message = $Message.Append(($Installer.Query.Contains('InstallerLocale') ? ($Installer.Query['InstallerLocale'] | ConvertTo-TelegramEscapedText) : '\*'))
-          $Message = $Message.Append(', ')
-          $Message = $Message.Append(($Installer.Query.Contains('Architecture') ? ($Installer.Query['Architecture'] | ConvertTo-TelegramEscapedText) : '\*'))
-          $Message = $Message.Append(', ')
-          $Message = $Message.Append(($Installer.Query.Contains('InstallerType') ? ($Installer.Query['InstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
-          $Message = $Message.Append(', ')
-          $Message = $Message.Append(($Installer.Query.Contains('NestedInstallerType') ? ($Installer.Query['NestedInstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
-          $Message = $Message.Append(', ')
-          $Message = $Message.Append(($Installer.Query.Contains('Scope') ? ($Installer.Query['Scope'] | ConvertTo-TelegramEscapedText) : '\*'))
-        } else {
-          throw 'Invalid Query type'
-        }
-      } else {
-        $Message = $Message.Append(($Installer.Contains('InstallerLocale') ? ($Installer['InstallerLocale'] | ConvertTo-TelegramEscapedText) : '\*'))
-        $Message = $Message.Append(', ')
-        $Message = $Message.Append(($Installer.Contains('Architecture') ? ($Installer['Architecture'] | ConvertTo-TelegramEscapedText) : '\*'))
-        $Message = $Message.Append(', ')
-        $Message = $Message.Append(($Installer.Contains('InstallerType') ? ($Installer['InstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
-        $Message = $Message.Append(', ')
-        $Message = $Message.Append(($Installer.Contains('NestedInstallerType') ? ($Installer['NestedInstallerType'] | ConvertTo-TelegramEscapedText) : '\*'))
-        $Message = $Message.Append(', ')
-        $Message = $Message.Append(($Installer.Contains('Scope') ? ($Installer['Scope'] | ConvertTo-TelegramEscapedText) : '\*'))
-      }
-      $Message = $Message.AppendLine('\):*')
-      $Message = $Message.AppendLine(($Installer['InstallerUrl'].Replace(' ', '%20') | ConvertTo-TelegramEscapedText))
-    }
-
-    # ReleaseTime
-    if ($this.CurrentState.Contains('ReleaseTime')) {
-      if ($this.CurrentState.ReleaseTime -is [datetime]) {
-        $Message = $Message.AppendLine("*ReleaseDate:* $($this.CurrentState.ReleaseTime.ToString('yyyy-MM-dd') | ConvertTo-TelegramEscapedText)")
-      } else {
-        $Message = $Message.AppendLine("*ReleaseDate:* $($this.CurrentState.ReleaseTime | ConvertTo-TelegramEscapedText)")
-      }
-    }
-
-    # Locale
-    foreach ($Entry in $this.CurrentState.Locale) {
-      if ($Entry.Contains('Key') -and $Entry.Key -in @('ReleaseNotes', 'ReleaseNotesUrl')) {
-        $Message = $Message.Append("*$($Entry['Key'] | ConvertTo-TelegramEscapedText) \(")
-        $Message = $Message.Append(($Entry.Contains('Locale') ? ($Entry['Locale'] | ConvertTo-TelegramEscapedText) : '\*'))
-        $Message = $Message.AppendLine('\):*')
-        $Message = $Message.AppendLine(($Entry['Value'] | ConvertTo-TelegramEscapedText))
-      }
-    }
-
-    $Message = $Message.AppendLine()
-
-    # Log
-    if ($this.Logs.Count -gt 0) {
-      $Message = $Message.AppendLine('*Log:*')
-      foreach ($Log in $this.Logs) {
-        $Message = $Message.AppendLine((($Log.Length -gt 1024 ? ($Log.SubString(0, 1024) + '...[truncated]') : $Log) | ConvertTo-TelegramEscapedText))
-      }
-    }
-
-    return $Message.ToString().Trim()
-  }
+  [string] ToMarkdown() { return ConvertTo-PackageTaskMessage -Task $this -Format Markdown }
+  [string] ToTelegramMarkdown() { return ConvertTo-PackageTaskMessage -Task $this -Format Telegram }
 
   # Print current state to console
   [void] Print() {
@@ -449,8 +270,12 @@ class PackageTask: System.IDisposable {
       try {
         $Identifier = $this.GetMessageQueueIdentifier()
         $SessionKey = "PackageState:${Identifier}:$($this.MessageSessionGeneration)"
-        $null = Send-QueuedTelegramMessage -Message $this.ToTelegramMarkdown() -AsMarkdown `
+        $MessageText = $this.ToTelegramMarkdown()
+        if ($this.LastQueuedSessionKey -ceq $SessionKey -and $this.LastQueuedMessage -ceq $MessageText -and $this.LastQueuedTicket -and $this.LastQueuedTicket.State -notin @('Failed', 'Cancelled', 'Superseded')) { return }
+        $this.LastQueuedTicket = Send-QueuedTelegramMessage -Message $MessageText -AsMarkdown `
           -QueueKey $SessionKey -SessionKey $SessionKey
+        $this.LastQueuedSessionKey = $SessionKey
+        $this.LastQueuedMessage = $MessageText
       } catch {
         Write-Log -Object "Failed to send default message: ${_}" -Level Error
         $this.Logs.Add($_.ToString())
@@ -477,14 +302,7 @@ class PackageTask: System.IDisposable {
     $this.MessageSession = [System.Collections.Generic.List[System.Tuple[string, Int64]]]@()
   }
 
-  [string] GetMessageQueueIdentifier() {
-    foreach ($Key in @('WinGetNewPackageIdentifier', 'WinGetNewIdentifier', 'WinGetPackageIdentifier', 'WinGetIdentifier')) {
-      if ($this.Config.Contains($Key) -and -not [string]::IsNullOrWhiteSpace([string]$this.Config[$Key])) {
-        return [string]$this.Config[$Key]
-      }
-    }
-    return $this.Name
-  }
+  [string] GetMessageQueueIdentifier() { return Get-PackageTaskIdentifier -Config $this.Config -Fallback $this.Name }
 
   # Generate manifests and upload them to the origin repository, and then create pull request in the upstream repository
   [void] Submit() {
@@ -493,10 +311,7 @@ class PackageTask: System.IDisposable {
       if ($this.Config.Contains('WinGetPackageIdentifier') -or $this.Config.Contains('WinGetIdentifier')) {
         # Claim the effective destination identifier before repository or network work begins.
         # The concurrent dictionary is shared by all worker runspaces for this runner invocation.
-        [string]$TargetIdentifier = $this.Config['WinGetNewPackageIdentifier'] ??
-        $this.Config['WinGetNewIdentifier'] ??
-        $this.Config['WinGetPackageIdentifier'] ??
-        $this.Config['WinGetIdentifier']
+        [string]$TargetIdentifier = Get-PackageTaskIdentifier -Config $this.Config
         if ([string]::IsNullOrWhiteSpace($TargetIdentifier)) {
           throw 'The effective WinGet submission identifier is null or empty'
         }

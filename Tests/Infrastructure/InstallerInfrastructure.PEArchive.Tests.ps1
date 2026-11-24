@@ -18,6 +18,7 @@ Describe 'Get-PEVersionStringTable' {
     try {
       $Layout = Get-PELayout -Stream $Stream
       $Layout.Sections.Count | Should -BeGreaterThan 0
+      $Layout.Sections[0].Characteristics | Should -BeGreaterThan 0
       $Stream.Position | Should -Be 5
     } finally { $Stream.Dispose() }
   }
@@ -164,6 +165,46 @@ Describe 'Shared archive helpers' {
     } finally { $Output.Dispose(); $CompressedInput.Dispose() }
   }
 
+  It 'decodes bounded GZip members and rejects a corrupt trailer' {
+    $Expected = [Text.Encoding]::UTF8.GetBytes(('astrum-gzip-payload-' * 16))
+    $CompressedOutput = [IO.MemoryStream]::new()
+    $Encoder = [IO.Compression.GZipStream]::new($CompressedOutput, [IO.Compression.CompressionLevel]::Optimal, $true)
+    try { $Encoder.Write($Expected, 0, $Expected.Length) } finally { $Encoder.Dispose() }
+    $Compressed = $CompressedOutput.ToArray()
+    $CompressedOutput.Dispose()
+
+    $CompressedInput = [IO.MemoryStream]::new($Compressed, $false)
+    $Output = [IO.MemoryStream]::new()
+    try {
+      Expand-InstallerCompressedStream -Algorithm GZip -Stream $CompressedInput -Destination $Output -MaximumBytes 4096 -CompressedSize $Compressed.Length -UncompressedSize $Expected.Length | Should -Be $Expected.Length
+      $Output.ToArray() | Should -Be $Expected
+    } finally { $Output.Dispose(); $CompressedInput.Dispose() }
+
+    $Corrupt = [byte[]]$Compressed.Clone()
+    $Corrupt[$Corrupt.Length - 8] = $Corrupt[$Corrupt.Length - 8] -bxor 0xFF
+    $CompressedInput = [IO.MemoryStream]::new($Corrupt, $false)
+    $Output = [IO.MemoryStream]::new()
+    try { { Expand-InstallerCompressedStream -Algorithm GZip -Stream $CompressedInput -Destination $Output -MaximumBytes 4096 -CompressedSize $Corrupt.Length -UncompressedSize $Expected.Length } | Should -Throw }
+    finally { $Output.Dispose(); $CompressedInput.Dispose() }
+  }
+
+  It 'decodes one BZip2 member without treating trailing installer records as another member' {
+    Import-InstallerArchiveDependency
+    $Expected = [Text.Encoding]::UTF8.GetBytes(('deploymaster-classic-payload-' * 16))
+    $CompressedOutput = [IO.MemoryStream]::new()
+    $Encoder = [SharpCompress.Compressors.BZip2.BZip2Stream]::new($CompressedOutput, [SharpCompress.Compressors.CompressionMode]::Compress, $false)
+    try { $Encoder.Write($Expected, 0, $Expected.Length) } finally { $Encoder.Dispose() }
+    $Compressed = $CompressedOutput.ToArray() + [byte[]](0x44, 0x41, 0x54, 0x41)
+
+    $CompressedInput = [IO.MemoryStream]::new($Compressed, $false)
+    $Output = [IO.MemoryStream]::new()
+    try {
+      Expand-InstallerCompressedStream -Algorithm BZip2 -Stream $CompressedInput -Destination $Output -MaximumBytes 4096 | Should -Be $Expected.Length
+      $Output.ToArray() | Should -Be $Expected
+      $CompressedInput.CanRead | Should -BeTrue
+    } finally { $Output.Dispose(); $CompressedInput.Dispose(); $CompressedOutput.Dispose() }
+  }
+
   It 'opens and exports a bounded ZIP entry' {
     $ZipPath = Join-Path $Script:TemporaryRoot 'sample.zip'
     $SourcePath = Join-Path $Script:TemporaryRoot 'source.txt'
@@ -209,6 +250,88 @@ Describe 'Shared archive helpers' {
     }
 
     { Remove-Item -LiteralPath $EmbeddedPath -Force } | Should -Not -Throw
+  }
+
+  It 'extracts an empty ZIP entry after exactly consuming the output budget' {
+    $Stream = [IO.MemoryStream]::new()
+    $Zip = [IO.Compression.ZipArchive]::new($Stream, [IO.Compression.ZipArchiveMode]::Create, $true)
+    try {
+      $EntryStream = $Zip.CreateEntry('payload.bin').Open()
+      try { $EntryStream.Write([byte[]](1, 2, 3)) } finally { $EntryStream.Dispose() }
+      $null = $Zip.CreateEntry('empty.bin')
+    } finally { $Zip.Dispose() }
+    $Stream.Position = 0
+    $Archive = Get-InstallerArchive -Stream $Stream
+    try {
+      $Result = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath (Join-Path $TestDrive 'exact-budget') -MaximumExpandedBytes 3
+      $Result.ExpandedBytes | Should -Be 3
+      $Result.Files.Count | Should -Be 2
+      (Get-Item -LiteralPath (Join-Path $TestDrive 'exact-budget/empty.bin')).Length | Should -Be 0
+      { Export-InstallerArchiveSelection -Archive $Archive -DestinationPath (Join-Path $TestDrive 'below-budget') -MaximumExpandedBytes 2 } | Should -Throw '*output limit*'
+    } finally { $Archive.Dispose(); $Stream.Dispose() }
+  }
+
+  It 'rejects nonempty data even when an entry claims zero length and has zero budget' {
+    $Stream = [IO.MemoryStream]::new([byte[]](1), $false)
+    try {
+      { Export-InstallerArchiveEntry -Entry ([pscustomobject]@{ Size = 0 }) -EntryStream $Stream -DestinationPath (Join-Path $TestDrive 'forged-empty.bin') -MaximumBytes 0 } | Should -Throw '*exceeds its declared 0-byte length*'
+      $Stream.CanRead | Should -BeTrue
+      (Get-Item -LiteralPath (Join-Path $TestDrive 'forged-empty.bin')).Length | Should -Be 0
+      $Stream.Position = 0
+      { Export-InstallerArchiveEntry -Entry ([pscustomobject]@{ Size = 1 }) -EntryStream $Stream -DestinationPath (Join-Path $TestDrive 'no-budget.bin') -MaximumBytes 0 } | Should -Throw '*output limit*'
+      Test-Path -LiteralPath (Join-Path $TestDrive 'no-budget.bin') | Should -BeFalse
+    } finally { $Stream.Dispose() }
+  }
+
+  It 'extracts a solid 7z selection without changing archive ownership: <BorrowedStream>' -ForEach @(
+    @{ BorrowedStream = $true }
+    @{ BorrowedStream = $false }
+  ) {
+    # A tiny two-file solid block plus a directory and empty file, generated
+    # once with 7-Zip. Tests require only the existing SharpCompress dependency.
+    $Bytes = [Convert]::FromBase64String('N3q8ryccAASxiFGwhAAAAAAAAAAhAAAAAAAAAIVDuz8BABZzb2xpZCBhbHBoYQpzb2xpZCBiZXRhCgAAAIEzB64Pz7XvEA/r6py/Nj3+dICx8gG28T6bLfJRCxeSOc2HBQVRzUzA1fbcU8h0JqYN9IqEBdbWjTAbUqIrpCdZcI4AX/8s5WDnXTY0Qg6qgwSIw7/RgJfTq2F9nsIPfV8wUv2XQAAXBhsBCWkABwsBAAEjAwEBBV0AEAAADICSCgHOe1e5AAA=')
+    $Path = Join-Path $TestDrive 'solid.7z'
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+    $Source = $null
+    if ($BorrowedStream) {
+      $Source = [IO.File]::OpenRead($Path)
+      $Archive = Get-InstallerArchive -Stream $Source
+      Mock Open-InstallerArchiveEntry -ModuleName Archive { $Entry.OpenEntryStream() }
+      Mock Open-InstallerArchiveEntry -ModuleName Archive { throw 'Sequential extraction must use the reader stream.' } -ParameterFilter { $Entry.Key -eq 'first.txt' }
+    } else { $Archive = Get-InstallerArchive -Path $Path }
+    try {
+      $Output = Join-Path $TestDrive 'solid-output'
+      $Result = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $Output -MaximumExpandedBytes 23 -MaximumEntries 3
+      $Result.Files.Count | Should -Be 3
+      $Result.ExpandedBytes | Should -Be 23
+      [IO.File]::ReadAllText((Join-Path $Output 'first.txt')) | Should -Be "solid alpha`n"
+      [IO.File]::ReadAllText((Join-Path $Output 'sub/last.txt')) | Should -Be "solid beta`n"
+      (Get-Item -LiteralPath (Join-Path $Output 'empty.txt')).Length | Should -Be 0
+      # Reader disposal must leave the caller-owned archive reusable.
+      (Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $Output -CollisionAction Skip).Files.Count | Should -Be 0
+      (Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $Output -CollisionAction Rename).Files.Count | Should -Be 3
+      (Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $Output -CollisionAction Overwrite).ExpandedBytes | Should -Be 23
+      { Export-InstallerArchiveSelection -Archive $Archive -DestinationPath $Output -CollisionAction Error } | Should -Throw '*already exists*'
+      { Export-InstallerArchiveSelection -Archive $Archive -DestinationPath (Join-Path $TestDrive 'solid-limit') -MaximumExpandedBytes 22 } | Should -Throw '*output limit*'
+      { Export-InstallerArchiveSelection -Archive $Archive -DestinationPath (Join-Path $TestDrive 'solid-count') -MaximumEntries 1 } | Should -Throw '*entry limit*'
+      $Selected = Export-InstallerArchiveSelection -Archive $Archive -DestinationPath (Join-Path $TestDrive 'solid-selected') -Name 'sub/*'
+      $Selected.Files.Count | Should -Be 1
+      $Selected.ExpandedBytes | Should -Be 11
+    } finally { $Archive.Dispose(); if ($Source) { $Source.Dispose() } }
+  }
+
+  It 'retains caller ownership of a supplied decompressed entry stream' {
+    $Stream = [IO.MemoryStream]::new([byte[]](1, 2, 3), $false)
+    try {
+      $File = Export-InstallerArchiveEntry -Entry ([pscustomobject]@{ Size = 3 }) -EntryStream $Stream -DestinationPath (Join-Path $TestDrive 'supplied.bin') -MaximumBytes 3
+      $File.Length | Should -Be 3
+      $Stream.CanRead | Should -BeTrue
+      $Stream.Position = 0
+      { Export-InstallerArchiveEntry -Entry ([pscustomobject]@{ Size = 4 }) -EntryStream $Stream -DestinationPath (Join-Path $TestDrive 'wrong-size.bin') -MaximumBytes 4 } | Should -Throw
+      $Stream.CanRead | Should -BeTrue
+      $Stream.Position = 0
+      { Export-InstallerArchiveEntry -Entry ([pscustomobject]@{ Size = 2 }) -EntryStream $Stream -DestinationPath (Join-Path $TestDrive 'excess-size.bin') -MaximumBytes 3 } | Should -Throw '*exceeds its declared*'
+    } finally { $Stream.Dispose() }
   }
 
   It 'rejects traversal and output-limit violations' {

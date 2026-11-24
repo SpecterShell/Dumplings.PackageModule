@@ -454,6 +454,7 @@ namespace Dumplings.InstallShield.InstallScript
             PropertyHandlers = new List<InstallScriptPropertyHandlerEvidence>();
             OpcodeCoverage = new List<InstallScriptOpcodeEvidence>();
             UnsupportedOpcodes = new List<string>();
+            Notices = new List<string>();
             Warnings = new List<string>();
         }
 
@@ -468,6 +469,7 @@ namespace Dumplings.InstallShield.InstallScript
         public List<InstallScriptPropertyHandlerEvidence> PropertyHandlers { get; private set; }
         public List<InstallScriptOpcodeEvidence> OpcodeCoverage { get; private set; }
         public List<string> UnsupportedOpcodes { get; private set; }
+        public List<string> Notices { get; private set; }
         public List<string> Warnings { get; private set; }
         public int ExploredInstructionCount { get; internal set; }
         public bool Truncated { get; internal set; }

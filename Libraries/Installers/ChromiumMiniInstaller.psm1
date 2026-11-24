@@ -314,7 +314,7 @@ function Read-ChromiumInstallConstantsRecord {
   if ($Index -gt 31) { return $null }
 
   # The first identity fields have remained ordered across the supported 32-bit and 64-bit
-  # InstallConstants layouts. Later GUID/icon fields are deliberately not interpreted here.
+  # InstallConstants layouts. Later GUID/icon fields are not interpreted here.
   $PointerBase = $PointerSize -eq 8 ? 16 : 8
   $Pointers = [uint64[]]::new(9)
   for ($Field = 0; $Field -lt $Pointers.Length; $Field++) {
@@ -397,7 +397,7 @@ function Get-ChromiumInstallModeInfo {
     }
   }
 
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $Selected = $null
   if ($Tables.Count -gt 0) {
     $Ranked = @($Tables | Sort-Object -Property @{ Expression = { $_.Records.Count }; Descending = $true }, @{ Expression = 'Offset'; Descending = $false })
@@ -415,7 +415,7 @@ function Get-ChromiumInstallModeInfo {
     StructureSize = $StructureSize
     PointerSize   = $PointerSize
     InstallModes  = if ($Selected) { $Selected.Records } else { @() }
-    Warnings      = $Warnings.ToArray()
+    Diagnostics   = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'ChromiumMiniInstaller' -Kind Incomplete -Areas Metadata)
   }
 }
 
@@ -434,7 +434,7 @@ function Get-ChromiumMiniInstallerNestedSetupInfo {
     $SetupFile = Export-ChromiumMiniInstallerSetupFromContext -Context $Context -DestinationPath $TemporaryFolder
     $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($SetupFile.FullName)
     $InstallModeInfo = $null
-    $Warnings = [Collections.Generic.List[string]]::new()
+    $Warnings = [Collections.Generic.List[object]]::new()
     $Stream = [IO.File]::Open($SetupFile.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
       # InstallConstants describes source-defined channel selectors and system-level support. It is
@@ -446,7 +446,7 @@ function Get-ChromiumMiniInstallerNestedSetupInfo {
     } finally {
       $Stream.Dispose()
     }
-    if ($InstallModeInfo) { foreach ($Warning in $InstallModeInfo.Warnings) { $Warnings.Add($Warning) } }
+    if ($InstallModeInfo) { foreach ($Warning in $InstallModeInfo.Diagnostics) { $Warnings.Add($Warning) } }
 
     [pscustomobject]@{
       ProductName            = $VersionInfo.ProductName
@@ -455,7 +455,7 @@ function Get-ChromiumMiniInstallerNestedSetupInfo {
       InstallModes           = if ($InstallModeInfo) { @($InstallModeInfo.InstallModes) } else { @() }
       InstallConstantsOffset = if ($InstallModeInfo) { $InstallModeInfo.Offset } else { $null }
       InstallConstantsSize   = if ($InstallModeInfo) { $InstallModeInfo.StructureSize } else { $null }
-      Warnings               = $Warnings.ToArray()
+      Diagnostics            = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'ChromiumMiniInstaller' -Kind Incomplete -Areas Metadata)
     }
   } finally {
     Remove-Item -LiteralPath $TemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue

@@ -29,6 +29,6 @@ Describe 'IExpress parser' {
     $Result.ExecutedPayloads | Should -Contain 'nmsetup.vbs'
     $Result.NestedFiles | Should -Contain 'netmon.msi'
     $Result.NestedFiles | Should -Contain 'NetworkMonitor_Parsers.msi'
-    $Result.Warnings | Should -BeNullOrEmpty
+    $Result.Diagnostics | Should -BeNullOrEmpty
   }
 }

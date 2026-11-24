@@ -52,7 +52,7 @@ function Get-MsiInstallShieldProjectTypeFromStaticTableInfo {
   # ISVerifyScriptingRuntime is added by InstallShield to InstallScript MSI
   # projects. Older and script-heavy projects may additionally expose one of
   # the InstallScript table families below. Generic IS-prefixed tables such as
-  # ISSetupType are intentionally excluded because Basic MSI uses them too.
+  # ISSetupType are excluded because Basic MSI uses them too.
   $InstallScriptTables = [string[]]@($StaticTableInfo.Tables | Where-Object {
       $_ -in @('ISInstallScriptAction', 'ISScriptFile') -or $_ -like 'ISInstallScript*'
     } | Sort-Object -Unique)
@@ -142,7 +142,7 @@ function Get-MsiInstallShieldEmbeddedScriptInfo {
   $CompiledActions = [object[]]@($ScriptActions | Where-Object Kind -EQ 'CompiledFunction')
   if (-not $CompiledActions -or $StaticTableInfo.BinaryNames -inotcontains 'ISSetup.dll') { return $null }
 
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   $TemporaryPath = $null
   try {
     foreach ($RequiredCommand in @('New-TempFolder', 'Expand-InstallShieldInstaller', 'ConvertFrom-Ini', 'Invoke-InstallShieldInstallScriptAnalysis', 'Resolve-UniqueInstallerFile')) {
@@ -193,7 +193,7 @@ function Get-MsiInstallShieldEmbeddedScriptInfo {
     # The temporary extraction is removed before returning; retain only the
     # stable Binary-table and relative-file identities in public evidence.
     $Analysis.Path = $null
-    foreach ($Warning in @($Analysis.Warnings)) { if ($Warning) { $Warnings.Add([string]$Warning) } }
+    foreach ($Diagnostic in @($Analysis.Diagnostics)) { if ($Diagnostic) { $Warnings.Add($Diagnostic) } }
 
     return [pscustomobject][ordered]@{
       BinaryName        = 'ISSetup.dll'
@@ -202,7 +202,8 @@ function Get-MsiInstallShieldEmbeddedScriptInfo {
       Actions           = [object[]]$MappedActions.ToArray()
       Analysis          = $Analysis
       ExtractedFiles    = [string[]]@($Files | ForEach-Object { [IO.Path]::GetRelativePath($ExtractedPath, $_.FullName) })
-      Warnings          = [string[]]$Warnings.ToArray()
+      Diagnostics       = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'InstallShieldMsi' -Kind Incomplete -Areas Metadata)
+
     }
   } catch {
     $Warnings.Add("Embedded InstallScript custom-action analysis failed: $($_.Exception.Message)")
@@ -213,7 +214,8 @@ function Get-MsiInstallShieldEmbeddedScriptInfo {
       Actions           = [object[]]$ScriptActions
       Analysis          = $null
       ExtractedFiles    = [string[]]@()
-      Warnings          = [string[]]$Warnings.ToArray()
+      Diagnostics       = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings.ToArray()) -Source 'InstallShieldMsi' -Kind Incomplete -Areas Metadata)
+
     }
   } finally {
     if ($TemporaryPath) { Remove-Item -LiteralPath $TemporaryPath -Recurse -Force -ErrorAction SilentlyContinue }
@@ -250,14 +252,14 @@ function Get-MsiInstallShieldLauncherRequirement {
       VerifierAction     = $null
       SequenceConditions = [string[]]@()
       Evidence           = [string[]]@()
-      Warnings           = [string[]]@()
+      Diagnostics        = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'InstallShieldMsi' -Kind Incomplete -Areas Metadata)
     }
   }
 
   $Verifier = $ScriptActions | Where-Object Action -CEQ 'ISVerifyScriptingRuntime' | Select-Object -First 1
   $Conditions = [string[]]@($Verifier.Sequences.Condition | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
   $Evidence = [Collections.Generic.List[string]]::new()
-  $Warnings = [Collections.Generic.List[string]]::new()
+  $Warnings = [Collections.Generic.List[object]]::new()
   if ($Verifier) {
     $Evidence.Add('ISVerifyScriptingRuntime custom action')
     foreach ($Sequence in @($Verifier.Sequences)) {
@@ -273,7 +275,7 @@ function Get-MsiInstallShieldLauncherRequirement {
     VerifierAction     = $Verifier
     SequenceConditions = $Conditions
     Evidence           = [string[]]$Evidence
-    Warnings           = [string[]]$Warnings
+    Diagnostics        = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'InstallShieldMsi' -Kind Incomplete -Areas Metadata)
   }
 }
 

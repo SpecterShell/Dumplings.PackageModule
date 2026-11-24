@@ -6,8 +6,8 @@
 
 Set-StrictMode -Version 3
 
-$Script:WinGetAuthoringManifestVersion = '1.12.0'
-$Script:WinGetAuthoringArchitectures = @('x86', 'x64', 'arm64')
+$Script:WinGetAuthoringManifestVersion = (Get-WinGetManifestSchema -ManifestType version -Raw)['properties']['ManifestVersion']['default']
+$Script:WinGetAuthoringArchitectures = @('x86', 'x64', 'arm', 'arm64')
 
 function ConvertTo-WinGetAuthoringDictionary {
   <#
@@ -20,7 +20,7 @@ function ConvertTo-WinGetAuthoringDictionary {
   param ([Parameter(Mandatory)][object]$InputObject)
 
   if ($InputObject -is [System.Collections.IDictionary]) {
-    return Copy-WinGetManifestValue -Value $InputObject
+    return Copy-Object -Value $InputObject
   }
   $Result = [ordered]@{}
   foreach ($Property in $InputObject.PSObject.Properties) {
@@ -29,10 +29,10 @@ function ConvertTo-WinGetAuthoringDictionary {
       $Value = ConvertTo-WinGetAuthoringDictionary -InputObject $Value
     } elseif ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
       $Value = @($Value | ForEach-Object {
-          if ($_ -is [pscustomobject]) { ConvertTo-WinGetAuthoringDictionary -InputObject $_ } else { Copy-WinGetManifestValue -Value $_ }
+          if ($_ -is [pscustomobject]) { ConvertTo-WinGetAuthoringDictionary -InputObject $_ } else { Copy-Object -Value $_ }
         })
     }
-    $Result[$Property.Name] = Copy-WinGetManifestValue -Value $Value
+    $Result[$Property.Name] = Copy-Object -Value $Value
   }
   return $Result
 }
@@ -75,7 +75,7 @@ function Merge-WinGetAuthoringPatch {
     [Parameter(Mandatory)][System.Collections.IDictionary]$Patch
   )
 
-  $Result = Copy-WinGetManifestValue -Value $Target
+  $Result = Copy-Object -Value $Target
   foreach ($Key in $Patch.Keys) {
     $PatchValue = $Patch[$Key]
     if ($null -eq $PatchValue) {
@@ -86,7 +86,7 @@ function Merge-WinGetAuthoringPatch {
       $Result[$Key] = Merge-WinGetAuthoringPatch -Target $Result[$Key] -Patch $PatchValue
       continue
     }
-    $Result[$Key] = Copy-WinGetManifestValue -Value $PatchValue
+    $Result[$Key] = Copy-Object -Value $PatchValue
   }
   return $Result
 }
@@ -122,7 +122,7 @@ function Get-WinGetAuthoringInstallerIndex {
     $Candidate = $Installers[$CandidateIndex]
     $IsMatch = $true
     foreach ($Key in $Match.Keys) {
-      if (-not $Candidate.Contains($Key) -or -not (Test-WinGetManifestValueEqual -Left $Candidate[$Key] -Right $Match[$Key])) {
+      if (-not $Candidate.Contains($Key) -or -not (Test-ObjectValueEqual -Left $Candidate[$Key] -Right $Match[$Key])) {
         $IsMatch = $false
         break
       }
@@ -242,6 +242,7 @@ function ConvertTo-WinGetAuthoringArchitecture {
   switch -Regex ($Architecture.Trim().ToLowerInvariant()) {
     '^(x86|i[3-6]86|win32)$' { return 'x86' }
     '^(x64|amd64|x86_64|win64)$' { return 'x64' }
+    '^(arm|arm32)$' { return 'arm' }
     '^(arm64|aarch64)$' { return 'arm64' }
     default { return $null }
   }
@@ -285,15 +286,14 @@ function Get-WinGetAuthoringAnalysisProjection {
       $ResultProperty = $_.PSObject.Properties['Result']
       $SuccessProperty -and $SuccessProperty.Value -and $ResultProperty -and $null -ne $ResultProperty.Value
     })
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Diagnostics = [System.Collections.Generic.List[object]]::new()
   $Suggestions = [ordered]@{}
-  $BlockingIssues = [System.Collections.Generic.List[string]]::new()
-  foreach ($Issue in @($Analysis.BlockingIssues)) {
-    if (-not [string]::IsNullOrWhiteSpace([string]$Issue)) { $BlockingIssues.Add([string]$Issue) }
+  if ($Analysis.PSObject.Properties['Diagnostics']) {
+    foreach ($Diagnostic in @($Analysis.Diagnostics)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } }
   }
 
   if ($Analysis.DetectedFileType.Type -cin @('MSP', 'MST', 'WindowsInstallerDatabase')) {
-    $BlockingIssues.Add("'$($Analysis.DetectedFileType.Type)' is not a confirmed standalone MSI installer.")
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.WindowsInstaller.NotStandaloneMsi' -Source 'WinGetManifestAuthoring' -Message "'$($Analysis.DetectedFileType.Type)' is not a confirmed standalone MSI installer." -Kind Invalid -Areas Detection, Installability -AffectedFields InstallerType))
   }
 
   $ParserResult = $SuccessfulParsers | Select-Object -First 1
@@ -301,9 +301,9 @@ function Get-WinGetAuthoringAnalysisProjection {
   $PortableEvidence = $Analysis.PortableEvidence
   if ($null -eq $Result -and $PortableEvidence) {
     $Suggestions['InstallerType'] = 'portable'
-    $BlockingIssues.Add('No installer family was confirmed. Specify InstallerType=portable explicitly only after confirming that the PE is a portable command target.')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.Portable.RequiresExplicitType' -Source 'WinGetManifestAuthoring' -Message 'No installer family was confirmed. Specify InstallerType=portable explicitly only after confirming that the PE is a portable command target.' -Kind Invalid -Areas Detection -AffectedFields InstallerType))
   } elseif ($null -eq $Result) {
-    $BlockingIssues.Add('Static analysis did not confirm a supported installer family.')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.InstallerFamilyUnconfirmed' -Source 'WinGetManifestAuthoring' -Message 'Static analysis did not confirm a supported installer family.' -Kind Invalid -Areas Detection -AffectedFields InstallerType))
   }
 
   $Sources = @($Result)
@@ -319,10 +319,10 @@ function Get-WinGetAuthoringAnalysisProjection {
       [string](Get-WinGetAuthoringPropertyValue -Source @($_.Result) -Name Family)
     } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
   if ($ConfirmedInstallerTypes.Count -gt 1) {
-    $BlockingIssues.Add("Confirmed parsers disagree on the installer type: $($ConfirmedInstallerTypes -join ', ').")
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.ConflictingInstallerTypes' -Source 'WinGetManifestAuthoring' -Message "Confirmed parsers disagree on the installer type: $($ConfirmedInstallerTypes -join ', ')." -Kind Mismatch -Areas Detection -AffectedFields InstallerType -Evidence $ConfirmedInstallerTypes))
   }
   if ($ConfirmedFamilies.Count -gt 1) {
-    $BlockingIssues.Add("Confirmed parsers disagree on the installer family: $($ConfirmedFamilies -join ', ').")
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.ConflictingInstallerFamilies' -Source 'WinGetManifestAuthoring' -Message "Confirmed parsers disagree on the installer family: $($ConfirmedFamilies -join ', ')." -Kind Mismatch -Areas Detection -AffectedFields InstallerType -Evidence $ConfirmedFamilies))
   }
   $InstallerType = ConvertTo-WinGetAuthoringInstallerType -InstallerType ([string](Get-WinGetAuthoringPropertyValue -Source $Sources -Name InstallerType))
   $ProductCode = Get-WinGetAuthoringPropertyValue -Source $Sources -Name @('ProductCode', 'AppsAndFeaturesProductCode')
@@ -340,20 +340,18 @@ function Get-WinGetAuthoringAnalysisProjection {
   )
   $SupportsSilentInstallation = Get-WinGetAuthoringPropertyValue -Source $Sources -Name SupportsSilentInstallation
   if ($null -ne $SupportsSilentInstallation -and -not [bool]$SupportsSilentInstallation) {
-    $BlockingIssues.Add('Static parser evidence reports that this installer does not support unattended installation.')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.UnattendedInstallationUnsupported' -Source 'WinGetManifestAuthoring' -Message 'Static parser evidence reports that this installer does not support unattended installation.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes))
   }
 
   foreach ($Source in $Sources) {
-    foreach ($Warning in @(Get-WinGetAuthoringPropertyValue -Source @($Source) -Name Warnings)) {
-      if (-not [string]::IsNullOrWhiteSpace([string]$Warning)) { $Warnings.Add([string]$Warning) }
+    foreach ($Diagnostic in @(Get-WinGetAuthoringPropertyValue -Source @($Source) -Name Diagnostics)) {
+      if ($Diagnostic) { $Diagnostics.Add($Diagnostic) }
     }
     foreach ($Field in @(Get-WinGetAuthoringPropertyValue -Source @($Source) -Name UnresolvedFields)) {
-      if (-not [string]::IsNullOrWhiteSpace([string]$Field)) { $Warnings.Add("Unresolved installer field: $Field") }
+      if (-not [string]::IsNullOrWhiteSpace([string]$Field)) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id "WinGetAuthoring.Unresolved.$(($Field -replace '[^A-Za-z0-9]+', '.').Trim('.'))" -Source 'WinGetManifestAuthoring' -Message "Unresolved installer field: $Field" -Kind Incomplete -Areas Metadata -AffectedFields ([string]$Field)))
+      }
     }
-  }
-  $AnalysisWarnings = @($Analysis.WrapperWarnings | ForEach-Object { if ($_.PSObject.Properties['Warning']) { $_.Warning } })
-  foreach ($Warning in $AnalysisWarnings) {
-    if (-not [string]::IsNullOrWhiteSpace([string]$Warning)) { $Warnings.Add([string]$Warning) }
   }
   if (@($Analysis.SuggestedNextSteps).Count -gt 0) {
     $Suggestions['AnalyzerNextSteps'] = @($Analysis.SuggestedNextSteps)
@@ -388,18 +386,32 @@ function Get-WinGetAuthoringAnalysisProjection {
     if ($Value.Count -gt 0) { $ManifestFields[$Field] = $Value }
   }
 
+  # Generic EXE families have no WinGet runtime defaults. Apply behavior only
+  # when the successful parser returned it as artifact-specific evidence;
+  # family templates remain advisory under Suggestions.
+  if ($InstallerType -ceq 'exe') {
+    foreach ($Field in @('InstallModes', 'InstallerSwitches', 'InstallerSuccessCodes', 'ExpectedReturnCodes', 'ElevationRequirement', 'UpgradeBehavior')) {
+      $Value = Get-WinGetAuthoringPropertyValue -Source $Sources -Name $Field
+      if ($null -eq $Value) { continue }
+      if ($Value -is [string] -and [string]::IsNullOrWhiteSpace([string]$Value)) { continue }
+      if ($Value -is [System.Collections.ICollection] -and $Value.Count -eq 0) { continue }
+      $ManifestFields[$Field] = if ($Value.GetType() -eq [pscustomobject]) { ConvertTo-WinGetAuthoringDictionary -InputObject $Value } else { Copy-Object -Value $Value }
+    }
+  }
+
   # Only known package mappings from MSIX or portable runtime analysis are
   # authoritative enough to author automatically.
   $Dependencies = Get-WinGetAuthoringPropertyValue -Source $Sources -Name Dependencies
   if ($Dependencies -is [System.Collections.IDictionary] -and $Dependencies.Count -gt 0) {
-    $ManifestFields['Dependencies'] = Copy-WinGetManifestValue -Value $Dependencies
+    $ManifestFields['Dependencies'] = Copy-Object -Value $Dependencies
   } elseif ($PortableEvidence -and @($PortableEvidence.RecommendedPackageDependencies).Count -gt 0) {
     $ManifestFields['Dependencies'] = [ordered]@{ PackageDependencies = @($PortableEvidence.RecommendedPackageDependencies | ForEach-Object { ConvertTo-WinGetAuthoringDictionary -InputObject $_ }) }
   }
 
   $InstallLocationSwitch = Get-WinGetAuthoringPropertyValue -Source $Sources -Name InstallLocationSwitch
   if (-not [string]::IsNullOrWhiteSpace([string]$InstallLocationSwitch)) {
-    $ManifestFields['InstallerSwitches'] = [ordered]@{ InstallLocation = [string]$InstallLocationSwitch }
+    if (-not $ManifestFields.Contains('InstallerSwitches')) { $ManifestFields['InstallerSwitches'] = [ordered]@{} }
+    $ManifestFields['InstallerSwitches']['InstallLocation'] = [string]$InstallLocationSwitch
   }
 
   $AppsAndFeaturesEntry = [ordered]@{}
@@ -432,15 +444,18 @@ function Get-WinGetAuthoringAnalysisProjection {
     $Suggestions['AppsAndFeaturesIdentity'] = [ordered]@{ DisplayName = $DisplayName; Publisher = $Publisher }
   }
   $SuggestedFields = Get-WinGetAuthoringPropertyValue -Source $Sources -Name SuggestedManifestFields
-  if ($SuggestedFields) { $Suggestions['FamilyDefaults'] = $SuggestedFields }
+  if ($SuggestedFields -and @($SuggestedFields.PSObject.Properties).Count -gt 0) { $Suggestions['FamilyDefaults'] = $SuggestedFields }
+  $SuggestedVariants = @(Get-WinGetAuthoringPropertyValue -Source $Sources -Name SuggestedManifestVariants)
+  if ($SuggestedVariants.Count -gt 0) { $Suggestions['ManifestVariants'] = $SuggestedVariants }
+  $FamilyNextSteps = @(Get-WinGetAuthoringPropertyValue -Source $Sources -Name SuggestedNextSteps | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+  if ($FamilyNextSteps.Count -gt 0) { $Suggestions['FamilyNextSteps'] = $FamilyNextSteps }
 
   return [pscustomobject]@{
     InstallerType  = $InstallerType
     ManifestFields = $ManifestFields
     Architecture   = $Architecture
     Suggestions    = $Suggestions
-    Warnings       = @($Warnings | Select-Object -Unique)
-    BlockingIssues = @($BlockingIssues | Select-Object -Unique)
+    Diagnostics    = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
     ParserResult   = $ParserResult
   }
 }
@@ -466,7 +481,7 @@ function New-WinGetManifest {
   .PARAMETER Moniker
     Optional package moniker.
   .PARAMETER ManifestVersion
-    WinGet schema version; Dumplings authoring defaults to 1.12.0.
+    WinGet schema version; Dumplings authoring defaults to 1.28.0.
   .EXAMPLE
     $DefaultLocalization = [ordered]@{ PackageLocale = 'en-US'; Publisher = 'Contoso'; PackageName = 'Contoso App'; License = 'MIT'; ShortDescription = 'Contoso App.' }
     $Installer = [ordered]@{ Architecture = 'x64'; InstallerType = 'portable'; InstallerUrl = 'https://example.test/app.exe'; InstallerSha256 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }
@@ -524,7 +539,8 @@ function Get-WinGetInstallerManifestSuggestion {
   .PARAMETER NestedInstallerFile
     Exact archive-relative payload path when a ZIP has multiple candidates.
   .PARAMETER Override
-    Explicit schema-validated fields applied after analyzer evidence.
+    Explicit schema-validated fields applied after analyzer evidence. Silent and
+    Custom installer switches also inform static command-line analysis.
   .PARAMETER PackageVersion
     Optional package version used to author meaningful ARP version differences.
   .PARAMETER Header
@@ -535,20 +551,20 @@ function Get-WinGetInstallerManifestSuggestion {
     Dumplings.WinGet.InstallerManifestSuggestion. Installers contains the complete effective
     installer entries accepted by Add-WinGetManifestInstaller, including per-entry Architecture
     and InstallerType values. AppliedEvidence records fields supported by static analysis;
-    Suggestions contains evidence requiring review; Warnings contains non-blocking concerns;
-    BlockingIssues contains conditions that prevent authoring; Analysis retains the full analyzer
-    result. A single result can contain multiple installer entries, so installer fields are not
-    duplicated at the top level.
+    Suggestions contains actions requiring review. Diagnostics contains scenario-resolved parser
+    and authoring conditions, while HasBlockingDiagnostics identifies conditions that prevent
+    authoring. Analysis retains the full analyzer result. A single result can contain multiple
+    installer entries, so installer fields are not duplicated at the top level.
   .EXAMPLE
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl $InstallerUrl -InstallerPath $InstallerPath
-    if ($Suggestion.BlockingIssues) { throw ($Suggestion.BlockingIssues -join "`n") }
+    if ($Suggestion.HasBlockingDiagnostics) { throw (($Suggestion.Diagnostics | Where-Object IsBlocking).Message -join "`n") }
     $Manifest = Add-WinGetManifestInstaller -Manifest $Manifest -Suggestion $Suggestion
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][uri]$InstallerUrl,
     [string]$InstallerPath,
-    [ValidateSet('x86', 'x64', 'arm64')][string[]]$Architecture,
+    [ValidateSet('x86', 'x64', 'arm', 'arm64')][string[]]$Architecture,
     [ValidateSet('user', 'machine')][string]$Scope,
     [string]$NestedInstallerFile,
     [System.Collections.IDictionary]$Override = [ordered]@{},
@@ -575,11 +591,26 @@ function Get-WinGetInstallerManifestSuggestion {
     }
 
     $Hash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
-    $Analysis = Get-WinGetInstallerAnalysis -Path $InstallerPath -ExtractEmbeddedMsi
+    # Analyze the command that will actually be authored. Wrapper passthrough
+    # arguments can replace defaults and invalidate otherwise proven ARP fields.
+    $CommandArguments = ''
+    if ($Override['InstallerSwitches'] -is [System.Collections.IDictionary]) {
+      $Switches = $Override['InstallerSwitches']
+      $SilentSwitch = $Switches.Contains('Silent') ? [string]$Switches['Silent'] : ''
+      $CustomSwitch = $Switches.Contains('Custom') ? [string]$Switches['Custom'] : ''
+      $CommandArguments = ($SilentSwitch + ' ' + $CustomSwitch).Trim()
+    }
+    $AnalysisArguments = @{ Path = $InstallerPath; ExtractEmbeddedMsi = $true }
+    if ($CommandArguments) { $AnalysisArguments.CommandLine = '"' + $InstallerPath + '" ' + $CommandArguments }
+    $Analysis = Get-WinGetInstallerAnalysis @AnalysisArguments
     $ProjectionAnalysis = $Analysis
     $NestedAnalysis = $null
     $PhysicalInstallerType = $null
     $SelectedNestedFile = $null
+    $AuthoringDiagnostics = [System.Collections.Generic.List[object]]::new()
+    if ($Analysis.PSObject.Properties['Diagnostics']) {
+      foreach ($Diagnostic in @($Analysis.Diagnostics)) { if ($Diagnostic) { $AuthoringDiagnostics.Add($Diagnostic) } }
+    }
 
     if ($Analysis.DetectedFileType.Type -ceq 'ZipArchive') {
       # Analyzer results normally use the detector envelope contract. Check
@@ -593,7 +624,7 @@ function Get-WinGetInstallerManifestSuggestion {
         $SuccessProperty -and $SuccessProperty.Value -and $FamilyProperty -and $FamilyProperty.Value -ceq 'ZIP/archive'
       } | Select-Object -First 1
       if ($null -eq $ZipResult) {
-        $Analysis.BlockingIssues += 'The ZIP archive catalog could not be parsed.'
+        $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.Zip.CatalogUnavailable' -Source 'WinGetManifestAuthoring' -Message 'The ZIP archive catalog could not be parsed.' -Kind Invalid -Areas Extraction, Detection -AffectedFields NestedInstallerFiles))
         $NestedCandidates = @()
       } else {
         $NestedCandidates = @($ZipResult.Result.NestedInstallerFiles)
@@ -604,15 +635,15 @@ function Get-WinGetInstallerManifestSuggestion {
         $NestedCandidates = @(if ($ZipResult) { @($ZipResult.Result.PortableCandidates) })
       }
       if ($NestedCandidates.Count -eq 0) {
-        $Analysis.BlockingIssues += 'The ZIP archive contains no supported nested installer or portable PE candidate.'
+        $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.Zip.NoSupportedCandidate' -Source 'WinGetManifestAuthoring' -Message 'The ZIP archive contains no supported nested installer or portable PE candidate.' -Kind Invalid -Areas Detection, Installability -AffectedFields NestedInstallerType, NestedInstallerFiles))
       } elseif ([string]::IsNullOrWhiteSpace($NestedInstallerFile) -and $NestedCandidates.Count -gt 1) {
-        $Analysis.BlockingIssues += "The ZIP archive contains $($NestedCandidates.Count) installer candidates; specify NestedInstallerFile."
+        $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.Zip.CandidateAmbiguous' -Source 'WinGetManifestAuthoring' -Message "The ZIP archive contains $($NestedCandidates.Count) installer candidates; specify NestedInstallerFile." -Kind Invalid -Areas Metadata -AffectedFields NestedInstallerFiles -Evidence @($NestedCandidates.FullName)))
       } else {
         $SelectedNestedFile = if ($NestedInstallerFile) {
           @($NestedCandidates | Where-Object { ([string]$_.FullName).Replace('\', '/') -ieq $NestedInstallerFile.Replace('\', '/') })
         } else { @($NestedCandidates[0]) }
         if ($SelectedNestedFile.Count -ne 1) {
-          $Analysis.BlockingIssues += "NestedInstallerFile '$NestedInstallerFile' matched $($SelectedNestedFile.Count) archive entries; exactly one is required."
+          $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.Zip.CandidateSelectionInvalid' -Source 'WinGetManifestAuthoring' -Message "NestedInstallerFile '$NestedInstallerFile' matched $($SelectedNestedFile.Count) archive entries; exactly one is required." -Kind Invalid -Areas Metadata -AffectedFields NestedInstallerFiles))
           $SelectedNestedFile = $null
         } else {
           $SelectedNestedFile = $SelectedNestedFile[0]
@@ -625,7 +656,9 @@ function Get-WinGetInstallerManifestSuggestion {
           } finally {
             $Archive.Dispose()
           }
-          $NestedAnalysis = Get-WinGetInstallerAnalysis -Path $NestedPath -ExtractEmbeddedMsi
+          $NestedAnalysisArguments = @{ Path = $NestedPath; ExtractEmbeddedMsi = $true }
+          if ($CommandArguments) { $NestedAnalysisArguments.CommandLine = '"' + $NestedPath + '" ' + $CommandArguments }
+          $NestedAnalysis = Get-WinGetInstallerAnalysis @NestedAnalysisArguments
           $ProjectionAnalysis = $NestedAnalysis
           $PhysicalInstallerType = 'zip'
         }
@@ -633,20 +666,16 @@ function Get-WinGetInstallerManifestSuggestion {
     }
 
     $Projection = Get-WinGetAuthoringAnalysisProjection -Analysis $ProjectionAnalysis -PackageVersion $PackageVersion
-    $BlockingIssues = [System.Collections.Generic.List[string]]::new()
-    foreach ($Issue in @($Analysis.BlockingIssues + $Projection.BlockingIssues)) {
-      if (-not [string]::IsNullOrWhiteSpace([string]$Issue)) { $BlockingIssues.Add([string]$Issue) }
-    }
+    foreach ($Diagnostic in @($Projection.Diagnostics)) { if ($Diagnostic) { $AuthoringDiagnostics.Add($Diagnostic) } }
     # An explicit portable override resolves the analyzer's conservative
     # no-family warning when static PE architecture/dependency evidence exists.
     $ExplicitTypeField = $PhysicalInstallerType -ceq 'zip' ? 'NestedInstallerType' : 'InstallerType'
     $ExplicitInstallerType = ConvertTo-WinGetAuthoringInstallerType -InstallerType ([string]$Override[$ExplicitTypeField])
     if ($ExplicitInstallerType -ceq 'portable' -and $ProjectionAnalysis.PortableEvidence) {
-      $ResolvedMessage = 'No installer family was confirmed. Specify InstallerType=portable explicitly only after confirming that the PE is a portable command target.'
-      $null = $BlockingIssues.Remove($ResolvedMessage)
+      $AuthoringDiagnostics = [System.Collections.Generic.List[object]]::new([object[]]@($AuthoringDiagnostics | Where-Object Id -CNE 'WinGetAuthoring.Portable.RequiresExplicitType'))
     }
 
-    $Fields = Copy-WinGetManifestValue -Value $Projection.ManifestFields
+    $Fields = Copy-Object -Value $Projection.ManifestFields
     if ($PhysicalInstallerType -ceq 'zip') {
       $NestedType = $Fields['InstallerType']
       $Fields['InstallerType'] = 'zip'
@@ -663,41 +692,45 @@ function Get-WinGetInstallerManifestSuggestion {
     $Architectures = @($Architecture | Where-Object { $_ } | Select-Object -Unique)
     if ($Architectures.Count -eq 0 -and $Projection.Architecture) { $Architectures = @($Projection.Architecture) }
     if ($Architectures.Count -eq 0) {
-      $BlockingIssues.Add('A concrete x86, x64, or arm64 architecture is required because static analysis did not prove exactly one architecture.')
+      $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.ArchitectureRequired' -Source 'WinGetManifestAuthoring' -Message 'A concrete x86, x64, arm, or arm64 architecture is required because static analysis did not prove exactly one architecture.' -Kind Invalid -Areas Metadata -AffectedFields Architecture))
     }
 
     $Installers = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
     foreach ($ConcreteArchitecture in $Architectures) {
-      $Entry = Copy-WinGetManifestValue -Value $Fields
+      $Entry = Copy-Object -Value $Fields
       $Entry['Architecture'] = $ConcreteArchitecture
       $Entry = Merge-WinGetAuthoringPatch -Target $Entry -Patch (ConvertTo-WinGetAuthoringDictionary -InputObject $Override)
       if ($Entry.Contains('UnsupportedOSArchitectures')) {
-        $BlockingIssues.Add('UnsupportedOSArchitectures is not authored by this workflow.')
+        $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.UnsupportedOSArchitecturesProhibited' -Source 'WinGetManifestAuthoring' -Message 'UnsupportedOSArchitectures is not authored by this workflow.' -Kind Invalid -Areas Metadata -AffectedFields UnsupportedOSArchitectures))
         $Entry.Remove('UnsupportedOSArchitectures')
       }
       try {
         Assert-WinGetAuthoringInstallerEntry -Installer $Entry -ManifestVersion $Script:WinGetAuthoringManifestVersion
       } catch {
-        $BlockingIssues.Add($_.Exception.Message)
+        $AuthoringDiagnostics.Add((New-InstallerDiagnostic -Id 'WinGetAuthoring.InstallerEntryInvalid' -Source 'WinGetManifestAuthoring' -Message $_.Exception.Message -Kind Invalid -Areas Metadata -Evidence $Entry))
       }
       $Installers.Add($Entry)
     }
 
+    $ResolvedDiagnostics = @(Resolve-InstallerDiagnostics -Diagnostic $AuthoringDiagnostics.ToArray() -Scenario ManifestAuthoring -ConfirmedFamily:($null -ne $Projection.ParserResult))
+
     return [pscustomobject]@{
-      PSTypeName            = 'Dumplings.WinGet.InstallerManifestSuggestion'
-      InstallerUrl          = $InstallerUrl.AbsoluteUri
-      InstallerPath         = $InstallerPath
-      Installers            = @($Installers)
-      ProposedInstallers    = @($Installers)
-      AppliedEvidence       = [pscustomobject]@{ Sha256 = $Hash; AnalyzerFields = $Projection.ManifestFields; ReleaseDate = $ReleaseDate }
-      Suggestions           = $Projection.Suggestions
-      UnresolvedSuggestions = $Projection.Suggestions
-      Warnings              = @($Projection.Warnings | Select-Object -Unique)
-      BlockingIssues        = @($BlockingIssues | Select-Object -Unique)
-      Analysis              = $Analysis
-      RawAnalysis           = $Analysis
-      NestedAnalysis        = $NestedAnalysis
-      DownloadResult        = $DownloadResult
+      PSTypeName             = 'Dumplings.WinGet.InstallerManifestSuggestion'
+      InstallerUrl           = $InstallerUrl.AbsoluteUri
+      InstallerPath          = $InstallerPath
+      Installers             = @($Installers)
+      ProposedInstallers     = @($Installers)
+      AppliedEvidence        = [pscustomobject]@{ Sha256 = $Hash; AnalyzerFields = $Projection.ManifestFields; ReleaseDate = $ReleaseDate }
+      Suggestions            = $Projection.Suggestions
+      UnresolvedSuggestions  = $Projection.Suggestions
+      Diagnostics            = $ResolvedDiagnostics
+      HasWarningDiagnostics  = @($ResolvedDiagnostics | Where-Object Level -EQ Warning).Count -gt 0
+      HasErrorDiagnostics    = @($ResolvedDiagnostics | Where-Object Level -EQ Error).Count -gt 0
+      HasBlockingDiagnostics = @($ResolvedDiagnostics | Where-Object IsBlocking).Count -gt 0
+      Analysis               = $Analysis
+      RawAnalysis            = $Analysis
+      NestedAnalysis         = $NestedAnalysis
+      DownloadResult         = $DownloadResult
     }
   } finally {
     if ($NestedTemporaryFolder) { Remove-Item -LiteralPath $NestedTemporaryFolder -Recurse -Force -ErrorAction SilentlyContinue }
@@ -737,7 +770,7 @@ function Add-WinGetManifestInstaller {
     [Parameter(Mandatory, ParameterSetName = 'Suggestion')]$Suggestion,
     [Parameter(Mandatory, ParameterSetName = 'Analyze')][uri]$InstallerUrl,
     [Parameter(ParameterSetName = 'Analyze')][string]$InstallerPath,
-    [Parameter(ParameterSetName = 'Analyze')][ValidateSet('x86', 'x64', 'arm64')][string[]]$Architecture,
+    [Parameter(ParameterSetName = 'Analyze')][ValidateSet('x86', 'x64', 'arm', 'arm64')][string[]]$Architecture,
     [Parameter(ParameterSetName = 'Analyze')][ValidateSet('user', 'machine')][string]$Scope,
     [Parameter(ParameterSetName = 'Analyze')][string]$NestedInstallerFile,
     [Parameter(ParameterSetName = 'Analyze')][System.Collections.IDictionary]$Override = [ordered]@{},
@@ -753,10 +786,10 @@ function Add-WinGetManifestInstaller {
       }
       $Suggestion = Get-WinGetInstallerManifestSuggestion @Arguments
     }
-    if (@($Suggestion.BlockingIssues).Count -gt 0) {
-      throw "The installer suggestion contains blocking issues:`n$(@($Suggestion.BlockingIssues) -join "`n")"
+    if ($Suggestion.HasBlockingDiagnostics) {
+      throw "The installer suggestion contains blocking diagnostics:`n$(@($Suggestion.Diagnostics | Where-Object IsBlocking | ForEach-Object { "[$($_.Id)] $($_.Message)" }) -join "`n")"
     }
-    foreach ($Warning in @($Suggestion.Warnings)) { Write-Warning $Warning }
+    $null = Write-InstallerDiagnostics -Diagnostic @($Suggestion.Diagnostics) -Scenario ManifestAuthoring
     $Copy = Copy-WinGetAuthoringManifestModel -Manifest $Manifest
     $Installers = [System.Collections.Generic.List[System.Collections.IDictionary]]::new()
     $Installers.AddRange([System.Collections.IDictionary[]]@($Copy.Installers))
@@ -1110,7 +1143,7 @@ function Set-WinGetAuthoringPointerValue {
       if (-not $Current.Contains($Leaf)) { throw "Property path '$Path' does not exist." }
       $Current.Remove($Leaf)
     } else {
-      $Current[$Leaf] = Copy-WinGetManifestValue -Value $Value
+      $Current[$Leaf] = Copy-Object -Value $Value
     }
     return
   }
@@ -1122,7 +1155,7 @@ function Set-WinGetAuthoringPointerValue {
     }
     if ($ArrayIndex -ge $Current.Count) { throw "Property path '$Path' has array index $ArrayIndex outside the current $($Current.Count)-item array." }
     if ($Remove) { throw "Property path '$Path' addresses an array element. Replace the parent array to add or remove array items." }
-    $Current[$ArrayIndex] = Copy-WinGetManifestValue -Value $Value
+    $Current[$ArrayIndex] = Copy-Object -Value $Value
     return
   }
 

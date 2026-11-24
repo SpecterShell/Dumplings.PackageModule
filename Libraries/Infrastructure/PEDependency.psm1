@@ -59,8 +59,12 @@ function Get-PortableVCRedistPackageIdentifier {
   [OutputType([string])]
   param (
     [Parameter(Mandatory)][ValidateSet('2005', '2008', '2010', '2012', '2013', '2015+')][string]$RuntimeVersion,
-    [Parameter(Mandatory)][ValidateSet('x86', 'x64', 'arm64')][string]$Architecture
+    [Parameter(Mandatory)][ValidateSet('x86', 'x64', 'arm', 'arm64')][string]$Architecture
   )
+  # winget-pkgs does not publish an ARM32 Visual C++ redistributable package.
+  # Preserve the import as evidence and let the caller emit a focused warning
+  # instead of fabricating a Microsoft.VCRedist.*.arm dependency identifier.
+  if ($Architecture -eq 'arm') { return $null }
   if ($Architecture -eq 'arm64' -and $RuntimeVersion -ne '2015+') { return $null }
   return "Microsoft.VCRedist.$RuntimeVersion.$Architecture"
 }
@@ -896,7 +900,7 @@ function Get-PEDotNetRuntimeInfo {
     IncludedFrameworks              = @($IncludedFrameworks)
     RecommendedPackageDependencies  = @($RecommendedDependencies | Sort-Object -Property PackageIdentifier)
     RecommendedPackageDependencyIds = @($RecommendedDependencies | Select-Object -ExpandProperty PackageIdentifier | Sort-Object -Unique)
-    Warnings                        = @($Warnings)
+    Diagnostics                     = @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'PEDependency' -Kind Incomplete -Areas Metadata -AffectedFields Dependencies)
   }
 }
 
@@ -971,16 +975,18 @@ function Get-PEDependencyInfo {
         if ($RuntimeVersion) {
           foreach ($Architecture in $FileArchitectures) {
             $PackageIdentifier = Get-PortableVCRedistPackageIdentifier -RuntimeVersion $RuntimeVersion -Architecture $Architecture
-            if ($PackageIdentifier) {
-              $VCRedistImports.Add([pscustomobject]@{
-                  Path              = $FilePath
-                  Directory         = $Import.Directory
-                  DllName           = $Import.DllName
-                  RuntimeVersion    = $RuntimeVersion
-                  Architecture      = $Architecture
-                  PackageIdentifier = $PackageIdentifier
-                })
-            } else {
+            # Preserve dependency evidence even when winget-pkgs has no package
+            # for the architecture/runtime pair. Package recommendations are a
+            # separate projection and therefore exclude null identifiers.
+            $VCRedistImports.Add([pscustomobject]@{
+                Path              = $FilePath
+                Directory         = $Import.Directory
+                DllName           = $Import.DllName
+                RuntimeVersion    = $RuntimeVersion
+                Architecture      = $Architecture
+                PackageIdentifier = $PackageIdentifier
+              })
+            if (-not $PackageIdentifier) {
               $Warnings.Add("Import '$($Import.DllName)' maps to VC++ $RuntimeVersion, but no Microsoft.VCRedist.$RuntimeVersion.$Architecture package is available.")
             }
           }
@@ -997,7 +1003,7 @@ function Get-PEDependencyInfo {
       }
     }
 
-    $VCRedistPackageIds = @($VCRedistImports | Select-Object -ExpandProperty PackageIdentifier -Unique | Sort-Object)
+    $VCRedistPackageIds = @($VCRedistImports | Where-Object PackageIdentifier | Select-Object -ExpandProperty PackageIdentifier -Unique | Sort-Object)
     $DotNetPackageIds = @($DotNetInfo.RecommendedPackageDependencyIds)
     $PackageIds = @($VCRedistPackageIds + $DotNetPackageIds | Sort-Object -Unique)
     $RecommendedDependencies = [System.Collections.Generic.List[psobject]]::new()
@@ -1022,7 +1028,13 @@ function Get-PEDependencyInfo {
       DotNetInfo                      = $DotNetInfo
       RecommendedPackageDependencyIds = $PackageIds
       RecommendedPackageDependencies  = @($RecommendedDependencies | Sort-Object -Property PackageIdentifier)
-      Warnings                        = @($Warnings + $DotNetInfo.Warnings)
+      Diagnostics                     = @(
+        Merge-InstallerDiagnostics -Diagnostic @(
+          @(ConvertTo-InstallerDiagnostic -InputObject @($Warnings) -Source 'PEDependency' -Kind Incomplete -Areas Metadata -AffectedFields Dependencies)
+          $DotNetInfo.Diagnostics
+          $PrimaryArchitectureInfo.Diagnostics
+        )
+      )
     }
   }
 }

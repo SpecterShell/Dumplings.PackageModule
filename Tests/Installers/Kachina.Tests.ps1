@@ -104,12 +104,13 @@ BeforeAll {
     param(
       [string]$Path,
       [ValidateSet('LegacyScan', 'EarlyIndexed', 'Indexed', 'ConfigOnly')][string]$Generation,
-      [ValidateSet('prefer-admin', 'prefer-user', 'force')][string]$UacStrategy = 'prefer-admin'
+      [string]$UacStrategy = 'prefer-admin',
+      $Source = 'https://example.test/App.Install.${version}.exe'
     )
 
     New-TestKachinaPeBase -Path $Path
     $Config = [ordered]@{
-      source           = 'https://example.test/App.Install.${version}.exe'
+      source           = $Source
       appName          = 'Kachina Test'
       publisher        = 'Test Publisher'
       regName          = 'KachinaTest'
@@ -252,6 +253,54 @@ Describe 'Kachina scope and ARP projection' {
     $Info.RegistryRoutes.Scope | Should -Contain 'machine'
     if ($Strategy -eq 'force') { $Info.RegistryRoutes.Scope | Should -Not -Contain 'user' } else { $Info.RegistryRoutes.Scope | Should -Contain 'user' }
   }
+
+  It 'keeps source, scope, and payload diagnostics field-specific' {
+    $Path = Join-Path $TestDrive 'field-specific-diagnostics.exe'
+    New-TestKachinaInstaller -Path $Path -Generation ConfigOnly -UacStrategy 'future-strategy' -Source @([ordered]@{ id = 'broken'; name = 'Broken source' })
+
+    $Info = Get-KachinaInfo -Path $Path
+
+    $ScopeFields = @($Info.Diagnostics | Where-Object Id -EQ 'Kachina.Scope.UnknownUacStrategy' | Select-Object -ExpandProperty AffectedFields)
+    $ScopeFields | Should -HaveCount 2
+    $ScopeFields | Should -Contain 'Scope'
+    $ScopeFields | Should -Contain 'ElevationRequirement'
+    ($Info.Diagnostics | Where-Object Id -EQ 'Kachina.Source.EntryWithoutUri').AffectedFields | Should -Be @('Source')
+    ($Info.Diagnostics | Where-Object Id -EQ 'Kachina.Source.Unresolved').AffectedFields | Should -Be @('Source')
+    ($Info.Diagnostics | Where-Object Id -EQ 'Kachina.Payload.ConfigOnly').AffectedFields | Should -Be @('DisplayVersion', 'PayloadFiles')
+  }
+
+  It 'normalizes ordered source catalogs and exposes update and uninstall path behavior' {
+    $Path = Join-Path $TestDrive 'source-catalog.exe'
+    $Source = @(
+      [ordered]@{ id = 'default'; name = 'Primary'; uri = 'https://example.test/primary'; hidden = $false; icon = 'primary.png' }
+      [ordered]@{ id = 'mirror'; name = 'Mirror'; uri = 'mirrorc://resource/channel'; hidden = $true; icon = $null }
+    )
+    New-TestKachinaInstaller -Path $Path -Generation Indexed -Source $Source
+
+    $Info = Get-KachinaInfo -Path $Path
+    $Info.Source | Should -Be 'https://example.test/primary'
+    $Info.Sources.Id | Should -Be @('default', 'mirror')
+    $Info.Sources.Hidden | Should -Be @($false, $true)
+    $Info.UserDataPaths | Should -Be @('${INSTALL_PATH}/User')
+    $Info.SystemEffects.PreservedUserDataPaths | Should -Be @('${INSTALL_PATH}/User')
+    $Info.NeedsWebView2 | Should -BeTrue
+  }
+}
+
+Describe 'Kachina release compatibility evidence' {
+  It 'maps <Generation> to its source-verified release boundary' -ForEach @(
+    @{ Generation = 'LegacyScan'; First = '0.0.1'; Last = '0.0.17' }
+    @{ Generation = 'EarlyIndexed'; First = '0.0.18'; Last = '0.0.18' }
+    @{ Generation = 'Indexed'; First = '0.0.19'; Last = $null }
+    @{ Generation = 'ConfigOnly'; First = '0.0.25'; Last = $null }
+  ) {
+    $Path = Join-Path $TestDrive "release-$Generation.exe"
+    New-TestKachinaInstaller -Path $Path -Generation $Generation
+
+    $Info = Get-KachinaInfo -Path $Path
+    $Info.FormatCompatibility.FirstKnownRelease | Should -Be $First
+    $Info.FormatCompatibility.LastKnownRelease | Should -Be $Last
+  }
 }
 
 Describe 'Kachina real indexed payload' {
@@ -263,6 +312,8 @@ Describe 'Kachina real indexed payload' {
     $Info.DisplayVersion | Should -Be '1.4.0'
     $Info.Publisher | Should -Be 'ColinXHL'
     $Info.PayloadFiles.Count | Should -Be 12
+    $Info.PayloadFiles.HashAlgorithm | Should -Not -Contain 'SourceDefined128'
+    $Info.PayloadFiles.HashAlgorithm | Should -Contain 'XXH3-128'
     $Info.PayloadArchitectures | Should -Contain 'x64'
     $Info.ConfiguredRuntimes | Should -Contain 'Microsoft.DotNet.DesktopRuntime.8'
     $Info.ConfiguredRuntimes | Should -Contain 'Microsoft.VCRedist.2015+.x64'
@@ -272,7 +323,8 @@ Describe 'Kachina real indexed payload' {
     $Info.SystemEffects.CreatesUpdater | Should -BeTrue
     $Info.SystemEffects.CreatesUninstaller | Should -BeTrue
     ($Info.RegistryWrites | Where-Object Name -EQ 'EstimatedSize').Value | Should -BeGreaterThan 0
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
+    @($Info.Diagnostics | Where-Object Kind -NE Information) | Should -BeNullOrEmpty
   }
 
   It 'catalogues appended runtime installers that are omitted from the payload index' {
@@ -338,6 +390,10 @@ Describe 'Kachina real indexed payload' {
         $WrongMd5.HashAlgorithm = 'MD5'
         $WrongMd5.Hash = '00000000000000000000000000000000'
         { Export-KachinaPayloadItem -Context $Context -Item $WrongMd5 -DestinationPath (Join-Path $Root 'wrong-md5.exe') -MaximumBytes 268435456 } | Should -Throw
+        $WrongXxh = $Main.PSObject.Copy()
+        $WrongXxh.HashAlgorithm = 'XXH3-128'
+        $WrongXxh.Hash = '00000000000000000000000000000000'
+        { Export-KachinaPayloadItem -Context $Context -Item $WrongXxh -DestinationPath (Join-Path $Root 'wrong-xxh.exe') -MaximumBytes 268435456 } | Should -Throw
       } finally { $Stream.Dispose() }
     }
   }
@@ -353,16 +409,16 @@ Describe 'Kachina analyzer integration' {
     $Analysis.DetectedFamilies.Family | Should -Not -Contain 'MicaSetup'
     $Result.Success | Should -BeTrue
     $Result.Result.ProductCode | Should -Be 'Akasha Navigator'
-    $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe # Kachina'
+    $Result.Result.SuggestedManifestFields.InstallerType | Should -Be 'exe'
     $Result.Result.SuggestedManifestFields.InstallerSwitches.Silent | Should -Be '-S'
   }
 
   It 'provides complete conservative authoring suggestions' {
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/AkashaNavigator.Install.1.4.0.exe' -InstallerPath $Script:Akasha -Architecture x64
-    $Suggestion.BlockingIssues | Should -BeNullOrEmpty
+    $Suggestion.HasBlockingDiagnostics | Should -BeFalse
     $Suggestion.Installers[0].ProductCode | Should -Be 'Akasha Navigator'
     $Suggestion.Installers[0].Scope | Should -Be 'machine'
-    $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe # Kachina'
+    $Suggestion.Suggestions.FamilyDefaults.InstallerType | Should -Be 'exe'
   }
 
   It 'updates existing generic EXE identity fields through manifest processing' {
@@ -403,6 +459,11 @@ Describe 'Kachina historical real layouts' {
     $Info = Get-KachinaInfo -Path $Script:BetterGiEarly
     $Info.FormatGeneration | Should -Be 'Indexed'
     $Info.ProductCode | Should -Be 'BetterGI'
+    $Info.Sources.Count | Should -Be 1
+    $Info.Source | Should -Be 'dfs+packed+https://77.cocogoat.cn/v2/dfs/bgi/BetterGI.Install.exe'
+    $Info.UserDataPaths | Should -Be @('${INSTALL_PATH}/User')
+    $Info.ExtraUninstallPaths | Should -Be @('${INSTALL_PATH}/log')
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
   }
 
   It 'reports downloadable runtime requirements in cached BetterGI 0.63 media' {
@@ -414,6 +475,12 @@ Describe 'Kachina historical real layouts' {
     $Info.RuntimePackages.PackageIdentifier | Should -Contain 'Microsoft.DotNet.DesktopRuntime.8'
     $Info.RuntimePackages.PackageIdentifier | Should -Contain 'Microsoft.VCRedist.2015+.x64'
     $Info.RuntimePackages.IsEmbedded | Should -Not -Contain $true
+    $Info.Sources.Count | Should -Be 6
+    ($Info.Sources | Where-Object Id -EQ 'dfs-alpha').Hidden | Should -BeTrue
+    $Info.IgnoredUpdatePaths | Should -Be @('${INSTALL_PATH}/User')
+    $Info.MetadataDeletes | Should -Contain 'libSkiaSharp.dll'
+    $Info.MetadataDeletes | Should -Contain 'LibTorchSharp.dll'
+    $Info.UnresolvedFields | Should -BeNullOrEmpty
 
     $Destination = Join-Path $TestDrive 'deduplicated'
     $Files = @(Expand-KachinaInstaller -Path $Script:BetterGiCurrent -DestinationPath $Destination -Name '*original_resin_top_icon.png' -CollisionAction Error)

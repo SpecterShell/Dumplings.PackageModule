@@ -904,7 +904,7 @@ function Get-MsiChromiumEnterpriseInfoFromStaticTableInfo {
       RequiresPreElevationForSilent = $false
       HasImmediateTagExtraction     = $false
       DeferredInstallerAction       = $null
-      Notices                       = [string[]]@()
+      Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@()) -Source 'ChromiumUpdater' -Kind Information -Areas Metadata)
     }
   }
 
@@ -970,12 +970,12 @@ function Get-MsiChromiumEnterpriseInfoFromStaticTableInfo {
 
   $ExtractSequences = @($StaticTableInfo.SequenceRows | Where-Object Action -CEQ 'ExtractTagInfoFromInstaller')
   $InstallType = [int]$InstallAction.Type
-  $Notices = [System.Collections.Generic.List[string]]::new()
+  $Diagnostics = [System.Collections.Generic.List[object]]::new()
   if ($RequiresPreElevation) {
-    $Notices.Add('The nested Chromium Updater receives plain --silent. Chromium suppresses UAC in that mode, so the silent MSI path requires an already elevated Windows Installer context.')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'ChromiumUpdater.Installability.SilentRequiresPreElevation' -Source 'ChromiumUpdater' -Message 'The nested Chromium Updater receives plain --silent. Chromium suppresses UAC in that mode, so the silent MSI path requires an already elevated Windows Installer context.' -Kind Risk -Areas Installability -AffectedFields ElevationRequirement, InstallerSwitches))
   }
   if ([int]$ExtractAction.Type -eq 1 -and $ExtractSequences.Count -gt 0) {
-    $Notices.Add('ExtractTagInfoFromInstaller is an immediate custom action. NoImpersonate does not elevate immediate actions, so a vendor-modified tag extractor can fail before deferred installation begins.')
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'ChromiumUpdater.Installability.ImmediateTagExtraction' -Source 'ChromiumUpdater' -Message 'ExtractTagInfoFromInstaller is an immediate custom action. NoImpersonate does not elevate immediate actions, so a vendor-modified tag extractor can fail before deferred installation begins.' -Kind Risk -Areas Installability -AffectedFields ElevationRequirement))
   }
 
   return [pscustomobject][ordered]@{
@@ -1004,7 +1004,7 @@ function Get-MsiChromiumEnterpriseInfoFromStaticTableInfo {
       NoImpersonate = ($InstallType -band 0x0800) -ne 0
       Sequences     = [object[]]@($StaticTableInfo.SequenceRows | Where-Object Action -CEQ 'DoInstall')
     }
-    Notices                       = [string[]]$Notices.ToArray()
+    Diagnostics                   = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
   }
 }
 

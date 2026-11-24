@@ -10,6 +10,7 @@ Describe 'Shared installer infrastructure parity' {
       @{ Package = 'Libraries\Infrastructure\Binary.psm1'; Parser = 'Libraries\Infrastructure\Binary.psm1' }
       @{ Package = 'Libraries\Infrastructure\Archive.psm1'; Parser = 'Libraries\Infrastructure\Archive.psm1' }
       @{ Package = 'Libraries\Infrastructure\PE.psm1'; Parser = 'Libraries\Infrastructure\PE.psm1' }
+      @{ Package = 'Libraries\Infrastructure\InstallerDiagnostics.psm1'; Parser = 'Libraries\Infrastructure\InstallerDiagnostics.psm1' }
       @{ Package = 'Libraries\Infrastructure\InstallerEvidence.psm1'; Parser = 'Libraries\Infrastructure\InstallerEvidence.psm1' }
       @{ Package = 'Assets\Source\InstallerInfrastructure\BinaryIO.cs'; Parser = 'Assets\Source\InstallerInfrastructure\BinaryIO.cs' }
       @{ Package = 'Assets\Source\InstallerInfrastructure\PatternSearch.cs'; Parser = 'Assets\Source\InstallerInfrastructure\PatternSearch.cs' }

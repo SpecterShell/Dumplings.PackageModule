@@ -8,7 +8,7 @@ Describe 'Installer bridge' {
     }
 
     $Result | Should -BeOfType ([pscustomobject])
-    $Result.InstallerType | Should -Be 'Nullsoft'
+    $Result.InstallerType | Should -Be 'nullsoft'
     $Result.RegistryValues | Should -BeOfType ([System.Collections.Specialized.OrderedDictionary])
     $Result.RegistryValues.Contains('') | Should -BeTrue
     $Result.RegistryValues[''] | Should -Be '1'
@@ -17,11 +17,13 @@ Describe 'Installer bridge' {
 
   It 'Should restore canonical diagnostic array types returned by a parser CLI' {
     $Result = InModuleScope InstallerBridge {
-      '{"Warnings":["Incomplete metadata"],"Notices":["Localized ARP identity"],"UnresolvedFields":[],"Files":["payload.exe"]}' | ConvertFrom-InstallerBridgeJson
+      '{"Diagnostics":[{"Id":"NSIS.Metadata.Incomplete","Source":"NSIS","Message":"Incomplete metadata","Kind":"Incomplete","Areas":["Metadata"],"AffectedFields":["ProductCode"],"Evidence":{"Offset":42},"Scenario":null,"Level":null,"IsBlocking":null}],"UnresolvedFields":[],"Files":["payload.exe"]}' | ConvertFrom-InstallerBridgeJson
     }
 
-    $Result.Warnings.GetType() | Should -Be ([string[]])
-    $Result.Notices.GetType() | Should -Be ([string[]])
+    $Result.Diagnostics.GetType() | Should -Be ([object[]])
+    $Result.Diagnostics[0].Kind | Should -Be 'Incomplete'
+    $Result.Diagnostics[0].AffectedFields | Should -Be @('ProductCode')
+    $Result.Diagnostics[0].Evidence.Offset | Should -Be 42
     $Result.UnresolvedFields.GetType() | Should -Be ([string[]])
     $Result.Files.GetType() | Should -Not -Be ([string[]])
   }
@@ -30,7 +32,7 @@ Describe 'Installer bridge' {
     $Fixture = Get-InstallerFixture -Name 'Readest_0.11.20_x64-setup.exe' -Url 'https://github.com/readest/readest/releases/download/v0.11.20/Readest_0.11.20_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture -Scope user
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'Readest'
     $Info.DisplayVersion | Should -Be '0.11.20'
     $Info.RegistryValues.CurrentUser | Should -Be '1'
@@ -45,6 +47,87 @@ Describe 'Installer bridge' {
     $Info.DisplayVersion | Should -Be '2.0'
     $Info.ProductCode | Should -Be 'OutCALL2.0'
     $Info.Scope | Should -Be 'machine'
+    $Info.SupportsSilentInstallation | Should -BeTrue
+    $Info.InstallModes | Should -Be @('interactive', 'silent')
+    $Info.InstallerSwitches.Silent | Should -Be '/S'
+  }
+
+  It 'Should preserve Setup Factory 3.1 companion-media evidence through the bridge' {
+    $Archive = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-3.1-builder.zip')
+    if (-not (Test-Path -LiteralPath $Archive -PathType Leaf)) { Set-ItResult -Skipped -Because 'The historical Setup Factory 3.1 fixture is not available'; return }
+    $MediaRoot = Join-Path $TestDrive 'setup-factory-31-bridge'
+    $null = New-Item -ItemType Directory -Path $MediaRoot -Force
+    [IO.Compression.ZipFile]::ExtractToDirectory($Archive, $MediaRoot, $true)
+
+    $Info = Get-SetupFactoryInfo -Path (Join-Path $MediaRoot 'SETUP.EXE')
+    $Extracted = @(Expand-SetupFactoryInstaller -Path (Join-Path $MediaRoot 'IRDATA.IRD') -DestinationPath (Join-Path $TestDrive 'setup-factory-31-bridge-output') -Name 'DEFAULT.SFP' -CollisionAction Error)
+
+    $Info.ParserVersionInfo.ProfileId | Should -BeExactly 'setup-factory-3.1-multifile'
+    $Info.DisplayName | Should -BeExactly 'Setup Factory 3.1 Demo'
+    $Info.DefaultInstallLocation | Should -BeExactly 'C:\SUF310EV'
+    $Info.PayloadCatalog | Should -HaveCount 15
+    $Info.InstallModes | Should -Be @('interactive')
+    $Extracted | Should -HaveCount 1
+    (Get-Item -LiteralPath $Extracted[0]).Length | Should -Be 813
+  }
+
+  It 'Should preserve Setup Factory structural profiles and legacy metadata through the bridge' {
+    $ModernFixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-10.2.0-trial.exe')
+    $LegacyFixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-6.0.1.4-builder.exe')
+    $Version5Fixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SetupFactory-5.0.1.6-builder.exe')
+    if (-not (Test-Path -LiteralPath $ModernFixture) -or -not (Test-Path -LiteralPath $LegacyFixture) -or -not (Test-Path -LiteralPath $Version5Fixture)) { Set-ItResult -Skipped -Because 'The Setup Factory profile fixtures are not available'; return }
+
+    $Modern = Get-SetupFactoryInfo -Path $ModernFixture
+    $Legacy = Get-SetupFactoryInfo -Path $LegacyFixture
+    $Version5 = Get-SetupFactoryInfo -Path $Version5Fixture
+
+    $Modern.ParserVersionInfo.ProfileId | Should -Be 'setup-factory-8-plus'
+    $Modern.ParserVersionInfo.BuilderVersion | Should -Be '10.2.0.0'
+    $Modern.ParserVersionInfo.EmbeddedRuntimeVersion | Should -Be '10.2.0.0'
+    $Modern.EmbeddedRuntimeInfo.IsTrusted | Should -BeTrue
+    $Modern.EmbeddedRuntimeInfo.IsProfileCompatible | Should -BeTrue
+    $Modern.PayloadCatalog.Count | Should -Be 1258
+    $Modern.InstalledFileCatalog.DestinationPolicyLength | Should -Be 11
+    $Modern.InstalledFileCatalog.HasAppUserModelID | Should -BeTrue
+    $Modern.PayloadCatalog[0].Policy.OverwritePolicy | Should -BeExactly 'Older'
+    $Modern.FilePolicySummary.EntryCount | Should -Be 1258
+    $Modern.SupportsSilentInstallation | Should -BeTrue
+    $Modern.InstallerSwitches.Silent | Should -Be '/S'
+    $Legacy.ParserVersionInfo.ProfileId | Should -Be 'setup-factory-6'
+    $Legacy.ParserVersionInfo.MetadataRoute | Should -Be 'irdat-v6'
+    $Legacy.ContainerEntries.Name | Should -Contain 'irsetup.dat'
+    $Legacy.PayloadCatalog.Count | Should -Be 923
+    $Legacy.DisplayName | Should -Be 'Setup Factory 6.0 Demo'
+    $Legacy.DisplayVersion | Should -Be '6.0.1.4'
+    $Legacy.ProductCode | Should -Be 'Setup Factory 6.0 Demo'
+    $Legacy.UninstallConfiguration.IncludeUninstall | Should -BeTrue
+    $Legacy.UnresolvedFields | Should -Not -Contain 'ProductCode'
+    $Legacy.SupportsSilentInstallation | Should -BeTrue
+    $Legacy.InstallModes | Should -Be @('interactive', 'silent')
+    $Legacy.InstallerSwitches.Silent | Should -Be '/S'
+    $Legacy.LegacyActionCatalog.Entries | Should -HaveCount 136
+    @($Legacy.LegacyActionCatalog.Entries | Where-Object { -not $_.ActionName }) | Should -HaveCount 0
+    $Legacy.ExecutionActions | Should -HaveCount 4
+    $Legacy.ActionEffects.UnknownActions | Should -HaveCount 0
+    $Legacy.Diagnostics.Id | Should -Not -Contain 'SetupFactory.Installability.SilentSupportUnresolved'
+    $Version5.ParserVersionInfo.ProfileId | Should -Be 'setup-factory-5'
+    $Version5.LegacyActionCatalog.IsComplete | Should -BeTrue
+    $Version5.ExecutionActions | Should -HaveCount 2
+    $Version5.FileSystemActions | Should -HaveCount 6
+    $Version5.VariableReads | Should -HaveCount 3
+    $Version5.ExecutionActions[1].Target | Should -BeExactly '%AppDir%\builder.exe'
+    $Version5.VariableReads[0].ValueName | Should -BeExactly 'InstallPath'
+  }
+
+  It 'Should forward Setup Factory raw-entry extraction through the bridge' {
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'OutCALL-2.0.exe')
+    if (-not (Test-Path -LiteralPath $Fixture)) { Set-ItResult -Skipped -Because 'The Setup Factory extraction fixture is not available'; return }
+    $Destination = Join-Path $TestDrive 'setup-factory-raw'
+
+    $Files = @(Expand-SetupFactoryInstaller -Path $Fixture -DestinationPath $Destination -Name 'irsetup.dat' -RawEntries -CollisionAction Error)
+
+    $Files | Should -HaveCount 1
+    (Get-Item -LiteralPath $Files[0]).Length | Should -BeGreaterThan 0
   }
 
   It 'Should convert electron-builder latest.yml content without fetching it' {
@@ -78,7 +161,7 @@ stagingPercentage: 25
     $Fixture = Get-InstallerFixture -Name 'alist-desktop_3.60.0_x64-setup.exe' -Url 'https://github.com/AlistGo/desktop-release/releases/download/v3.60.0/alist-desktop_3.60.0_x64-setup.exe'
     $Info = Get-NSISInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Nullsoft'
+    $Info.InstallerType | Should -Be 'nullsoft'
     $Info.DisplayName | Should -Be 'alist-desktop'
     $Info.DisplayVersion | Should -Be '3.60.0'
   }
@@ -95,6 +178,22 @@ stagingPercentage: 25
     $Info.IsSupported | Should -BeTrue
   }
 
+  It 'Should parse Varin ARM64 UTF-16 commands through the NSIS bridge: <Scope>' -ForEach @(
+    @{ Scope = 'user' }
+    @{ Scope = 'machine' }
+  ) {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers/NSIS/Youzini-afk.Varin/0.9.32/Varin-0.9.32-win-arm64.exe' -Uri 'https://github.com/Youzini-afk/Varin/releases/download/v0.9.32/Varin-0.9.32-win-arm64.exe' -Sha256 '2CF783591B4AF54C14A7F7C809C791DD4316CD8534F894AE13F3C789C8FEF613'
+    $Info = Get-NSISInfo -Path $Fixture -Architecture arm64 -Scope $Scope
+
+    $Info.ProductCode | Should -Be '97ba5f9d-69e7-5ca0-b9bd-16d3f3697f80'
+    $Info.DisplayVersion | Should -Be '0.9.32'
+    $Info.Scope | Should -Be $Scope
+    $Info.SupportedArchitectures | Should -Be @('arm64')
+    $Info.ParserVersionInfo.LogCmdIsEnabled | Should -BeFalse
+    $Info.ParserVersionInfo.HasSemanticAmbiguity | Should -BeFalse
+    $Info.Diagnostics | Should -BeNullOrEmpty
+  }
+
   It 'Should forward target architecture to the NSIS parser bridge' {
     $Fixture = Get-InstallerFixture -Name 'BitComet_2.21_setup.exe' -Url 'https://download.bitcomet.com/achive/BitComet_2.21_setup.exe' -Sha256 '2BB0AC769FE8B75B1B1B8CA42FA55D29D94AAF68480611538DBB4395D05082D2'
 
@@ -103,7 +202,7 @@ stagingPercentage: 25
 
     $X86Info.ProductCode | Should -Be 'BitComet'
     $X64Info.ProductCode | Should -Be 'BitComet_x64'
-    $X64Info.Notices.GetType() | Should -Be ([string[]])
+    $X64Info.Diagnostics.GetType() | Should -Be ([object[]])
   }
 
   It 'Should forward target scope to the NSIS parser bridge' {
@@ -154,7 +253,7 @@ stagingPercentage: 25
     $Info.Scope | Should -Be 'machine'
     $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\TranslatorX'
     @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should return FileInfo objects from the InstallerParsers NSIS extraction bridge' {
@@ -267,6 +366,38 @@ stagingPercentage: 25
     $Info.DisassemblyTruncated | Should -BeTrue
     $CombinedInfo.DisplayName | Should -Be 'WinSCP 6.5.6'
     $CombinedInfo.PascalScriptInfo.Functions | Should -HaveCount 223
+  }
+
+  It 'Should parse Inno 7.1.1 SoftPerfect metadata through the GPL bridge' {
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\Inno\SoftPerfect.NetWorx\26.10\networx_setup.exe'
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $Fixture -Sha256 'B971005AA79411B7CBF1B864189ACF2DF3822C438C5B60BA17D592F9E71F1D1F')) {
+      Set-ItResult -Skipped -Because 'The pinned NetWorx 26.10 installer is not cached and the vendor URL is versionless.'
+      return
+    }
+    $Info = Get-InnoInfo -Path $Fixture
+    $Info.ProductCode | Should -Be 'NetWorx_is1'
+    $Info.DisplayVersion | Should -Be '26.10'
+    $Info.ParserVersionInfo.CatalogFormatId | Should -Be '710100-u'
+    $Info.WritesAppsAndFeaturesEntry | Should -BeTrue
+    $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
+    $Info.Diagnostics | Should -BeNullOrEmpty
+  }
+
+  It 'Should retain Dissent MSI database architecture when selecting for <Architecture>' -ForEach @(
+    @{ Architecture = 'x86' }
+    @{ Architecture = 'x64' }
+    @{ Architecture = 'arm64' }
+  ) {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers\AdvancedInstaller\diamondburned.Dissent\0.0.41\dissent-windows-amd64.exe' -Uri 'https://github.com/diamondburned/dissent/releases/download/v0.0.41/dissent-windows-amd64.exe' -Sha256 '17F8D7726298AC0075FCEA86A39D5660792D2B55C26EE5BD028FA0CBF0156350'
+    $MsiInfo = Get-AdvancedInstallerMsiInfo -Path $Fixture -Architecture $Architecture
+    $MsiInfo.DisplayName | Should -Be 'Dissent'
+    $MsiInfo.DisplayVersion | Should -Be '0.0.41'
+    $MsiInfo.ProductCode | Should -Be '{144B869C-FF0A-4C8B-B159-50F2FEF9950B}'
+    $MsiInfo.PackageArchitecture | Should -Be 'x86'
+    $MsiInfo.Template | Should -Be ';1033'
+    $MsiInfo.ArchitectureSelectionMode | Should -Be 'FixedPath'
+    $MsiInfo.SelectedMsiPath | Should -Be 'dissent-windows-amd64.msi'
+    $MsiInfo.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should read MSI metadata through the InstallerParsers Advanced Installer bridge' {
@@ -395,6 +526,7 @@ stagingPercentage: 25
       $X64Info.SelectionMethod | Should -Be 'PayloadTable'
       $X64Info.PackageArchitecture | Should -Be 'x64'
       $X64Info.Template | Should -Be 'x64;2057'
+      { Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture arm64 } | Should -Throw "*MSI package architecture is 'x64'*"
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -411,20 +543,32 @@ stagingPercentage: 25
     $MsiInfo.ArchitectureSelectionMode | Should -Be 'FixedPath'
     $MsiInfo.PackageArchitecture | Should -Be 'arm64'
     $MsiInfo.ProductCode | Should -Be '{AFD6D03F-AE41-4BB2-9E4D-26E8A9E970B0}'
+    # Host/package compatibility must not weaken native architecture checks.
+    { Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x64 } | Should -Throw "*MSI package architecture is 'arm64'*"
+    { Get-AdvancedInstallerMsiInfo -Installer $Info -Architecture x86 } | Should -Throw "*MSI package architecture is 'arm64'*"
   }
 
   It 'Should call the InstallerParsers Qt Installer Framework parser through the Apache-2.0 wrapper' {
-    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-bridge.exe' -InstallerXml @'
+    $ScriptText = @'
+function Controller() {
+  const mode = "bridge";
+  var configured = installer.value("Name");
+  var dynamic = installer.environmentVariable("TEMP");
+}
+'@
+    $Operation = [pscustomobject]@{ Name = 'CreateShortcut'; Data = '<operation><arguments><argument>@TargetDir@\bridge.exe</argument><argument>@StartMenuDir@\Bridge.lnk</argument></arguments></operation>' }
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-bridge.exe' -ScriptText $ScriptText -Operation $Operation -InstallerXml @'
 <Installer>
   <Name>Bridge.QtIFW</Name>
   <Version>2.0.0</Version>
   <Publisher>Bridge Publisher</Publisher>
+  <ProductUUID>{BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF}</ProductUUID>
 </Installer>
 '@
     $Info = Get-QtInstallerFrameworkInfo -Path $Fixture
     $FormatInfo = Get-QtInstallerFrameworkFormatInfo -Path $Fixture
 
-    $Info.InstallerType | Should -Be 'Qt Installer Framework'
+    $Info.InstallerType | Should -Be 'exe'
     $FormatInfo.IsQtInstallerFramework | Should -BeTrue
     $FormatInfo.IsSupported | Should -BeTrue
     $FormatInfo.FormatGeneration | Should -Be 'BinaryContent'
@@ -442,6 +586,22 @@ stagingPercentage: 25
     $Info.Scope | Should -Be 'user'
     $Info.SupportedScopes | Should -Be @('user', 'machine')
     $Info.SupportsDualScope | Should -BeTrue
+    $Info.JavaScriptCount | Should -Be 1
+    $Info.JavaScriptResources[0].RawJavaScript | Should -BeExactly $ScriptText
+    $Info.JavaScriptResources[0].Role | Should -Be 'Controller'
+    ($Info.JavaScriptResources[0].VariableAssignments | Where-Object Name -EQ 'mode').Value | Should -Be 'bridge'
+    ($Info.JavaScriptResources[0].VariableAssignments | Where-Object Name -EQ 'configured').Value | Should -Be 'Bridge.QtIFW'
+    ($Info.JavaScriptResources[0].VariableAssignments | Where-Object Name -EQ 'dynamic').IsResolved | Should -BeFalse
+    $Info.KnownInstallerValues.Name | Should -Be 'Bridge.QtIFW'
+    $Info.JavaScriptAnalysisInstructions.Count | Should -BeGreaterThan 4
+    $Info.AppsAndFeaturesEntries[0].ProductCode | Should -Be '{BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF}'
+    $Info.AppsAndFeaturesEffects[0].Source | Should -Be 'PackageManagerCorePrivate::registerMaintenanceTool'
+    @($Info.RegistryWrites | Where-Object { $_.Name -eq 'DisplayName' -and $_.Value -eq 'Bridge.QtIFW' }) | Should -HaveCount 1
+    $Info.OperationEffects | Should -HaveCount 2
+    $Info.ShortcutEffects[0].ShortcutPath | Should -Be '@StartMenuDir@\Bridge.lnk'
+    $Info.FileSystemEffects.Action | Should -Contain 'CreateShortcut'
+    $Info.Protocols | Should -HaveCount 0
+    $Info.FileExtensions | Should -HaveCount 0
     Read-ScopeFromQtInstallerFramework -Path $Fixture | Should -Be 'user'
     Read-SupportedScopesFromQtInstallerFramework -Path $Fixture | Should -Be @('user', 'machine')
     Test-QtInstallerFrameworkDualScope -Path $Fixture | Should -BeTrue
@@ -474,10 +634,33 @@ stagingPercentage: 25
     }
   }
 
+  It 'Should pass local Qt IFW repository package sources through the GPL bridge' {
+    $Fixture = New-TestQtInstallerFrameworkFixture -Name 'synthetic-ifw-repository-bridge.exe' -InstallerXml '<Installer><Name>Bridge.QtIFW.Repository</Name><Version>1.0.0</Version></Installer>'
+    $Repository = Join-Path $Script:FixtureDirectory 'synthetic-ifw-repository'
+    $ComponentDirectory = Join-Path $Repository 'Bridge.Component'
+    $null = New-Item -Path $ComponentDirectory -ItemType Directory -Force
+    [IO.File]::WriteAllText((Join-Path $Repository 'Updates.xml'), '<Updates><PackageUpdate><Name>Bridge.Component</Name><Version>1.0.0</Version><DownloadableArchives>content.zip</DownloadableArchives></PackageUpdate></Updates>')
+    $ArchivePath = Join-Path $ComponentDirectory '1.0.0content.zip'
+    $ArchiveStream = [IO.File]::Open($ArchivePath, [IO.FileMode]::Create, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    $Archive = [IO.Compression.ZipArchive]::new($ArchiveStream, [IO.Compression.ZipArchiveMode]::Create, $true)
+    try {
+      $Entry = $Archive.CreateEntry('payload.txt')
+      $Writer = [IO.StreamWriter]::new($Entry.Open(), [Text.UTF8Encoding]::new($false))
+      try { $Writer.Write('bridge repository payload') } finally { $Writer.Dispose() }
+    } finally {
+      $Archive.Dispose()
+      $ArchiveStream.Dispose()
+    }
+
+    $ExpandedPath = Join-Path $Script:FixtureDirectory 'synthetic-ifw-repository-expanded'
+    $Result = Expand-QtInstallerFramework -Path $Fixture -RepositoryPath $Repository -DestinationPath $ExpandedPath -Name 'payload.txt' -CollisionAction Rename
+    Get-Content -LiteralPath (Join-Path $Result 'packages\Bridge.Component\content\payload.txt') -Raw | Should -Be 'bridge repository payload'
+  }
+
   It 'Should detect a user-only electron-builder NSIS installer through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'Aircall-Workspace-1.15.13-x64.exe' -Url 'https://download-electron.aircall.io/aircall-workspace/Aircall-Workspace-1.15.13-x64.exe'
     $IsElectronBuilder = Test-ElectronBuilder -Path $Fixture
-    $Info = Get-ElectronBuilderNSISInfo -Path $Fixture
+    $Info = Get-ElectronBuilderNSISInfo -Path $Fixture -Architecture x64
 
     $IsElectronBuilder | Should -BeTrue
     $Info.IsElectronBuilder | Should -BeTrue
@@ -488,12 +671,24 @@ stagingPercentage: 25
     $Info.ProductCode | Should -Be '3ec9d337-6374-5d93-9484-d59100254d53'
     $Info.DisplayVersion | Should -Be '1.15.13'
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-64.7z'
+    @($Info.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch') | Should -HaveCount 0
+
+    $MismatchingInfo = Get-ElectronBuilderNSISInfo -Path $Fixture -Architecture x86
+    $Diagnostic = @($MismatchingInfo.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch')
+    $Diagnostic | Should -HaveCount 1
+    $Diagnostic[0].Evidence.RequestedArchitecture | Should -Be 'x86'
+    $Diagnostic[0].Evidence.SupportedArchitectures | Should -Be @('x64')
+
+    $Metadata = Get-NSISInfo -Path $Fixture -Architecture x86
+    $Metadata.IsElectronBuilder | Should -BeTrue
+    $Metadata.SupportedArchitectures | Should -Be @('x64')
+    @($Metadata.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch') | Should -HaveCount 1
   }
 
   It 'Should detect a universal dual-scope electron-builder NSIS installer through the Apache-2.0 wrapper' {
     $Fixture = Get-InstallerFixture -Name 'Obsidian-1.12.7.exe' -Url 'https://github.com/obsidianmd/obsidian-releases/releases/download/v1.12.7/Obsidian-1.12.7.exe'
     $IsElectronBuilder = Test-ElectronBuilder -Path $Fixture
-    $Info = Get-ElectronBuilderNSISInfo -Path $Fixture
+    $Info = Get-ElectronBuilderNSISInfo -Path $Fixture -Architecture arm64
 
     $IsElectronBuilder | Should -BeTrue
     $Info.IsElectronBuilder | Should -BeTrue
@@ -506,6 +701,7 @@ stagingPercentage: 25
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-arm64.7z'
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-64.7z'
     $Info.Evidence.AppPackageFiles | Should -Contain 'app-32.7z'
+    @($Info.Diagnostics | Where-Object Id -EQ 'NSIS.ElectronBuilder.ArchitectureMismatch') | Should -HaveCount 0
   }
 
   It 'Should return scoped AionUi ARP identity through the Apache-2.0 bridge' {
@@ -534,7 +730,7 @@ stagingPercentage: 25
     $Info.Scope | Should -Be 'machine'
     $Info.DefaultInstallLocation | Should -Be '%ProgramFiles%\TK Copilot'
     @($Info.RegistryWrites | Where-Object IsUninstallKey).Root | Should -Contain 'HKLM'
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should classify the documented electron-builder example <PackageIdentifier>' -ForEach @(

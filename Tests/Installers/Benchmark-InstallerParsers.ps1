@@ -17,6 +17,9 @@ param (
   [string]$BurnPath,
   [string]$MsiPath,
   [string]$TauriPath,
+  [string]$ActualInstallerPath,
+  [string]$ActualInstallerCompanionFile,
+  [string[]]$DellUpdatePackagePath,
   [string]$OutputPath
 )
 
@@ -113,7 +116,7 @@ $Results = @(
     }
   }
   if ($SetupFactoryPath) {
-    Invoke-InstallerParserBenchmark -Name SetupFactory -Path $SetupFactoryPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\FileSystem.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\InstallerEvidence.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Installers\SetupFactory.psm1 -Force; Get-SetupFactoryInfo -Path `$InstallerPath"
+    Invoke-InstallerParserBenchmark -Name SetupFactory -Path $SetupFactoryPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\FileSystem.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\InstallerDiagnostics.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\InstallerEvidence.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Installers\SetupFactory.psm1 -Force; Get-SetupFactoryInfo -Path `$InstallerPath"
   }
   if ($AdvancedInstallerPath) {
     Invoke-InstallerParserBenchmark -Name AdvancedInstaller -Path $AdvancedInstallerPath -Expression "Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Runtime.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Binary.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\FileSystem.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\Archive.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\PE.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Infrastructure\InstallerEvidence.psm1 -Force; Import-Module .\Modules\InstallerParsers\Libraries\Installers\AdvancedInstaller.psm1 -Force; Get-AdvancedInstallerInfo -Path `$InstallerPath"
@@ -138,6 +141,19 @@ $Results = @(
   }
   if ($TauriPath) {
     Invoke-InstallerParserBenchmark -Name TauriExecutable -Path $TauriPath -Expression ". .\Modules\PackageModule\Index.ps1; Get-TauriExecutableInfo -Path `$InstallerPath"
+  }
+  if ($ActualInstallerPath) {
+    $CompanionArgument = if ($ActualInstallerCompanionFile) {
+      $ResolvedCompanion = (Get-Item -LiteralPath $ActualInstallerCompanionFile -Force).FullName.Replace("'", "''")
+      " -CompanionFile '$ResolvedCompanion'"
+    } else { '' }
+    Invoke-InstallerParserBenchmark -Name ActualInstallerInfo -Path $ActualInstallerPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression "Get-ActualInstallerInfo -Path `$InstallerPath$CompanionArgument"
+    Invoke-InstallerParserBenchmark -Name ActualInstallerExtract -Path $ActualInstallerPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression "`$DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ('Dumplings-ActualInstallerBenchmark-' + [guid]::NewGuid().ToString('N')); try { Expand-ActualInstallerInstaller -Path `$InstallerPath$CompanionArgument -DestinationPath `$DestinationPath -CollisionAction Rename } finally { Remove-Item -LiteralPath `$DestinationPath -Recurse -Force -ErrorAction SilentlyContinue }"
+  }
+  foreach ($DellPath in $DellUpdatePackagePath) {
+    Invoke-InstallerParserBenchmark -Name DellConfiguration -Path $DellPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression 'Get-DellUpdatePackageInfo -Path $InstallerPath -SkipNestedAnalysis'
+    Invoke-InstallerParserBenchmark -Name DellNestedAnalysis -Path $DellPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression 'Get-DellUpdatePackageInfo -Path $InstallerPath'
+    Invoke-InstallerParserBenchmark -Name DellWinGetAnalysis -Path $DellPath -InitializationExpression '. .\Modules\PackageModule\Index.ps1' -Expression 'Get-WinGetInstallerAnalysis -Path $InstallerPath'
   }
 ) | Where-Object { $null -ne $_ }
 

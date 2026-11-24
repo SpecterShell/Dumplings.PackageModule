@@ -6,69 +6,13 @@
 # module: https://github.com/microsoft/winget-create
 
 Set-StrictMode -Version 3
+Import-Module (Join-Path $PSScriptRoot '..' 'Data' 'Conversion.psm1') -ErrorAction Stop
 
 $Script:WinGetManifestIdentityFields = @('PackageIdentifier', 'PackageVersion', 'ManifestType', 'ManifestVersion')
 $Script:WinGetArchiveInstallerTypes = @('zip')
 $Script:WinGetProductCodeInstallerTypes = @('exe', 'inno', 'msi', 'nullsoft', 'wix', 'burn', 'portable')
 $Script:WinGetPackageFamilyNameInstallerTypes = @('msix', 'msstore')
-
-function Copy-WinGetManifestValue {
-  <#
-  .SYNOPSIS
-    Deep-copy a manifest value without changing dictionary or array ordering.
-  .PARAMETER Value
-    The scalar, dictionary, or sequence to copy.
-  #>
-  param ([AllowNull()]$Value)
-
-  if ($Value -is [System.Collections.IDictionary]) {
-    $Result = [ordered]@{}
-    foreach ($Key in $Value.Keys) {
-      $Result[$Key] = Copy-WinGetManifestValue -Value $Value[$Key]
-    }
-    return $Result
-  }
-  if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-    return , @($Value | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
-  }
-  return $Value
-}
-
-function Test-WinGetManifestValueEqual {
-  <#
-  .SYNOPSIS
-    Compare two authored manifest values structurally and case-sensitively.
-  .PARAMETER Left
-    The first value.
-  .PARAMETER Right
-    The second value.
-  #>
-  [OutputType([bool])]
-  param ([AllowNull()]$Left, [AllowNull()]$Right)
-
-  if ($null -eq $Left -or $null -eq $Right) {
-    return $null -eq $Left -and $null -eq $Right
-  }
-  if ($Left -is [System.Collections.IDictionary]) {
-    if ($Right -isnot [System.Collections.IDictionary] -or $Left.Count -ne $Right.Count) { return $false }
-    foreach ($Key in $Left.Keys) {
-      $RightKey = $Right.Keys | Where-Object { $_ -ceq $Key } | Select-Object -First 1
-      if ($null -eq $RightKey -or -not (Test-WinGetManifestValueEqual -Left $Left[$Key] -Right $Right[$RightKey])) { return $false }
-    }
-    return $true
-  }
-  if ($Left -is [System.Collections.IEnumerable] -and $Left -isnot [string]) {
-    if ($Right -isnot [System.Collections.IEnumerable] -or $Right -is [string]) { return $false }
-    $LeftItems = @($Left)
-    $RightItems = @($Right)
-    if ($LeftItems.Count -ne $RightItems.Count) { return $false }
-    for ($Index = 0; $Index -lt $LeftItems.Count; $Index++) {
-      if (-not (Test-WinGetManifestValueEqual -Left $LeftItems[$Index] -Right $RightItems[$Index])) { return $false }
-    }
-    return $true
-  }
-  return $Left -ceq $Right
-}
+$Script:WinGetInstallerPropertyCatalogs = @{}
 
 function Merge-WinGetManifestDictionary {
   <#
@@ -88,14 +32,14 @@ function Merge-WinGetManifestDictionary {
     [Parameter(Mandatory)][System.Collections.IDictionary]$Override
   )
 
-  $Result = Copy-WinGetManifestValue -Value $Base
+  $Result = Copy-Object -Value $Base
   foreach ($Key in $Override.Keys) {
     if ($Result.Contains($Key) -and
       $Result[$Key] -is [System.Collections.IDictionary] -and
       $Override[$Key] -is [System.Collections.IDictionary]) {
       $Result[$Key] = Merge-WinGetManifestDictionary -Base $Result[$Key] -Override $Override[$Key]
     } else {
-      $Result[$Key] = Copy-WinGetManifestValue -Value $Override[$Key]
+      $Result[$Key] = Copy-Object -Value $Override[$Key]
     }
   }
   return $Result
@@ -157,11 +101,14 @@ function Get-WinGetInstallerPropertyCatalog {
   )
 
   $SchemaVersion = if ((Resolve-WinGetManifestSchemaVersion $ManifestVersion) -ceq '0.1.0') { '1.0.0' } else { $ManifestVersion }
+  $CacheKey = "$SchemaVersion|$([bool]$RootOnly)"
+  if ($Script:WinGetInstallerPropertyCatalogs.ContainsKey($CacheKey)) { return $Script:WinGetInstallerPropertyCatalogs[$CacheKey].Clone() }
   $Schema = Get-WinGetManifestSchema -ManifestType installer -ManifestVersion $SchemaVersion
   $EntryKeys = @($Schema['definitions']['Installer']['properties'].Keys)
-  if (-not $RootOnly) { return $EntryKeys }
   $RootKeys = @($Schema['properties'].Keys)
-  return @($EntryKeys | Where-Object { $_ -cin $RootKeys })
+  $Result = if ($RootOnly) { @($EntryKeys | Where-Object { $_ -cin $RootKeys }) } else { $EntryKeys }
+  $Script:WinGetInstallerPropertyCatalogs[$CacheKey] = [string[]]$Result
+  return $Result
 }
 
 function Get-WinGetAuthoredEffectiveInstallers {
@@ -188,7 +135,7 @@ function Get-WinGetAuthoredEffectiveInstallers {
   $Defaults = [ordered]@{}
   foreach ($Key in $AllowedKeys) {
     if ($InstallerDefaults.Contains($Key)) {
-      $Defaults[$Key] = Copy-WinGetManifestValue -Value $InstallerDefaults[$Key]
+      $Defaults[$Key] = Copy-Object -Value $InstallerDefaults[$Key]
     }
   }
 
@@ -214,7 +161,7 @@ function Get-WinGetAuthoredEffectiveInstallers {
       }
       if ($EntryHasValue) {
         # Dependencies and all other arrays are atomic installer overrides.
-        $Effective[$SpecialKey] = Copy-WinGetManifestValue -Value $Entry[$SpecialKey]
+        $Effective[$SpecialKey] = Copy-Object -Value $Entry[$SpecialKey]
         continue
       }
       if (-not $Defaults.Contains($SpecialKey)) {
@@ -235,7 +182,7 @@ function Get-WinGetAuthoredEffectiveInstallers {
         'NestedInstallerType' { $BaseType -cin $Script:WinGetArchiveInstallerTypes }
       }
       if ($CopyDefault) {
-        $Effective[$SpecialKey] = Copy-WinGetManifestValue -Value $Defaults[$SpecialKey]
+        $Effective[$SpecialKey] = Copy-Object -Value $Defaults[$SpecialKey]
       } else {
         $Effective.Remove($SpecialKey)
       }
@@ -298,8 +245,8 @@ function Move-WinGetCommonDictionaryValues {
     # Arrays are atomic and retain their authored order. Scalars follow the
     # same all-installers equality rule.
     $First = $Values[0]
-    if (@($Values | Select-Object -Skip 1 | Where-Object { -not (Test-WinGetManifestValueEqual -Left $First -Right $_) }).Count -eq 0) {
-      $Defaults[$Key] = Copy-WinGetManifestValue -Value $First
+    if (@($Values | Select-Object -Skip 1 | Where-Object { -not (Test-ObjectValueEqual -Left $First -Right $_) }).Count -eq 0) {
+      $Defaults[$Key] = Copy-Object -Value $First
       foreach ($Installer in $Installers) { $Installer.Remove($Key) }
     }
   }
@@ -315,7 +262,7 @@ function Get-WinGetManifestCompactedInstallerData {
   [OutputType([pscustomobject])]
   param ([Parameter(Mandatory)]$Manifest)
 
-  $Installers = @($Manifest.Installers | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
+  $Installers = @($Manifest.Installers | ForEach-Object { Copy-Object -Value $_ })
   $RootCandidates = Get-WinGetInstallerPropertyCatalog -ManifestVersion $Manifest.ManifestVersion -RootOnly
   $CandidateInstallers = [System.Collections.Generic.List[object]]::new()
   foreach ($Installer in $Installers) {
@@ -384,13 +331,13 @@ function New-WinGetManifestModel {
 
   # Channel and Moniker are promoted into the logical contract even though
   # WinGet physically stores them in installer and default-locale documents.
-  $InstallerDefaultsCopy = Copy-WinGetManifestValue -Value $InstallerDefaults
+  $InstallerDefaultsCopy = Copy-Object -Value $InstallerDefaults
   if ([string]::IsNullOrEmpty($Channel) -and $InstallerDefaultsCopy.Contains('Channel')) {
     $Channel = [string]$InstallerDefaultsCopy['Channel']
   }
   if ($InstallerDefaultsCopy.Contains('Channel')) { $InstallerDefaultsCopy.Remove('Channel') }
 
-  $DefaultLocalizationCopy = Copy-WinGetManifestValue -Value $DefaultLocalization
+  $DefaultLocalizationCopy = Copy-Object -Value $DefaultLocalization
   if ([string]::IsNullOrEmpty($Moniker) -and $DefaultLocalizationCopy.Contains('Moniker')) {
     $Moniker = [string]$DefaultLocalizationCopy['Moniker']
   }
@@ -404,9 +351,9 @@ function New-WinGetManifestModel {
     Moniker             = $Moniker
     ManifestVersion     = $ManifestVersion
     InstallerDefaults   = $InstallerDefaultsCopy
-    Installers          = @($Installers | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
+    Installers          = @($Installers | ForEach-Object { Copy-Object -Value $_ })
     DefaultLocalization = $DefaultLocalizationCopy
-    Localizations       = @($Localizations | Where-Object { $null -ne $_ } | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
+    Localizations       = @($Localizations | Where-Object { $null -ne $_ } | ForEach-Object { Copy-Object -Value $_ })
     SourceFormat        = $SourceFormat
   }
 }
@@ -418,8 +365,8 @@ function Optimize-WinGetManifest {
   .DESCRIPTION
     The optimization pass deep-copies the logical model before applying rules
     that require effective installer and localization evidence. It removes a
-    common InstallerLocale and redundant fields from a sole Apps & Features
-    entry without changing meaningful ARP overrides.
+    common InstallerLocale, unsupported MSI pre-elevation requirements, and
+    redundant fields from a sole Apps & Features entry.
   .PARAMETER Manifest
     The logical WinGet manifest model to optimize.
   .OUTPUTS
@@ -429,8 +376,22 @@ function Optimize-WinGetManifest {
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)]$Manifest)
 
   process {
-    $Installers = @($Manifest.Installers | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
-    $InstallerDefaults = Copy-WinGetManifestValue -Value $Manifest.InstallerDefaults
+    $Installers = @($Manifest.Installers | ForEach-Object { Copy-Object -Value $_ })
+    $InstallerDefaults = Copy-Object -Value $Manifest.InstallerDefaults
+
+    # WinGet applies runas to the MSI file rather than msiexec, which Windows
+    # cannot launch that way. This also affects ZIP-contained MSI/WiX routes.
+    # Keep other elevation values and EXE-wrapper requirements unchanged.
+    # https://github.com/SpecterShell/Dumplings/issues/148
+    $HasMsiInstaller = $false
+    foreach ($Installer in $Installers) {
+      if ((Get-WinGetManifestEffectiveInstallerType -Installer $Installer) -notin @('msi', 'wix')) { continue }
+      $HasMsiInstaller = $true
+      if ($Installer['ElevationRequirement'] -ceq 'elevationRequired') { $Installer.Remove('ElevationRequirement') }
+    }
+    if ($HasMsiInstaller -and $InstallerDefaults['ElevationRequirement'] -ceq 'elevationRequired') {
+      $InstallerDefaults.Remove('ElevationRequirement')
+    }
 
     # InstallerLocale is useful only when it distinguishes selectable payloads.
     # A common value also causes WinGet validation to force that locale onto
@@ -574,7 +535,7 @@ function ConvertFrom-WinGetMergedManifest {
 
     $Defaults = [ordered]@{}
     foreach ($Key in $InstallerKeys) {
-      if ($Manifest.Contains($Key)) { $Defaults[$Key] = Copy-WinGetManifestValue -Value $Manifest[$Key] }
+      if ($Manifest.Contains($Key)) { $Defaults[$Key] = Copy-Object -Value $Manifest[$Key] }
     }
     $PhysicalInstallers = @($Manifest['Installers'])
     $EffectiveInstallers = @(Get-WinGetAuthoredEffectiveInstallers -InstallerDefaults $Defaults -Installers ([System.Collections.IDictionary[]]$PhysicalInstallers) -ManifestVersion $InstallerSchemaVersion)
@@ -582,12 +543,12 @@ function ConvertFrom-WinGetMergedManifest {
     $DefaultLocalization = [ordered]@{}
     foreach ($Key in $DefaultLocaleSchema['properties'].Keys) {
       if ($Key -cnotin $Script:WinGetManifestIdentityFields -and $Key -cne 'Moniker' -and $Manifest.Contains($Key)) {
-        $DefaultLocalization[$Key] = Copy-WinGetManifestValue -Value $Manifest[$Key]
+        $DefaultLocalization[$Key] = Copy-Object -Value $Manifest[$Key]
       }
     }
     [System.Collections.IDictionary[]]$Localizations = @()
     if ($Manifest.Contains('Localization') -and $null -ne $Manifest['Localization']) {
-      $Localizations = [System.Collections.IDictionary[]]@(@($Manifest['Localization']) | Where-Object { $null -ne $_ } | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
+      $Localizations = [System.Collections.IDictionary[]]@(@($Manifest['Localization']) | Where-Object { $null -ne $_ } | ForEach-Object { Copy-Object -Value $_ })
     }
 
     return New-WinGetManifestModel -PackageIdentifier ([string]$Manifest['PackageIdentifier']) -PackageVersion ([string]$Manifest['PackageVersion']) -Channel ([string]$Manifest['Channel']) -Moniker ([string]$Manifest['Moniker']) -ManifestVersion $ManifestVersion -InstallerDefaults $Defaults -Installers ([System.Collections.IDictionary[]]$EffectiveInstallers) -DefaultLocalization $DefaultLocalization -Localizations ([System.Collections.IDictionary[]]$Localizations) -SourceFormat $SourceFormat
@@ -613,11 +574,11 @@ function ConvertTo-WinGetMergedManifest {
     }
     if (-not [string]::IsNullOrEmpty([string]$Manifest.Channel)) { $Merged['Channel'] = [string]$Manifest.Channel }
     if (-not [string]::IsNullOrEmpty([string]$Manifest.Moniker)) { $Merged['Moniker'] = [string]$Manifest.Moniker }
-    foreach ($Key in $Compacted.Defaults.Keys) { $Merged[$Key] = Copy-WinGetManifestValue -Value $Compacted.Defaults[$Key] }
-    $Merged['Installers'] = @($Compacted.Installers | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
-    foreach ($Key in $Manifest.DefaultLocalization.Keys) { $Merged[$Key] = Copy-WinGetManifestValue -Value $Manifest.DefaultLocalization[$Key] }
+    foreach ($Key in $Compacted.Defaults.Keys) { $Merged[$Key] = Copy-Object -Value $Compacted.Defaults[$Key] }
+    $Merged['Installers'] = @($Compacted.Installers | ForEach-Object { Copy-Object -Value $_ })
+    foreach ($Key in $Manifest.DefaultLocalization.Keys) { $Merged[$Key] = Copy-Object -Value $Manifest.DefaultLocalization[$Key] }
     if (@($Manifest.Localizations).Count -gt 0) {
-      $Merged['Localization'] = @($Manifest.Localizations | ForEach-Object { Copy-WinGetManifestValue -Value $_ })
+      $Merged['Localization'] = @($Manifest.Localizations | ForEach-Object { Copy-Object -Value $_ })
     }
     $Merged['ManifestType'] = 'merged'
     $Merged['ManifestVersion'] = [string]$Manifest.ManifestVersion
@@ -625,4 +586,4 @@ function ConvertTo-WinGetMergedManifest {
   }
 }
 
-Export-ModuleMember -Function Copy-WinGetManifestValue, Test-WinGetManifestValueEqual, Merge-WinGetManifestDictionary, Get-WinGetManifestEffectiveInstallerType, Get-WinGetInstallerPropertyCatalog, Get-WinGetAuthoredEffectiveInstallers, Get-WinGetManifestCompactedInstallerData, New-WinGetManifestModel, Optimize-WinGetManifest, ConvertFrom-WinGetMergedManifest, ConvertTo-WinGetMergedManifest
+Export-ModuleMember -Function Merge-WinGetManifestDictionary, Get-WinGetManifestEffectiveInstallerType, Get-WinGetInstallerPropertyCatalog, Get-WinGetAuthoredEffectiveInstallers, Get-WinGetManifestCompactedInstallerData, New-WinGetManifestModel, Optimize-WinGetManifest, ConvertFrom-WinGetMergedManifest, ConvertTo-WinGetMergedManifest

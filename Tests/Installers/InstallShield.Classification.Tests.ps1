@@ -191,7 +191,7 @@ Describe 'InstallShield container classification' -Tag Unit {
 
     $Release.ReleaseName | Should -Be 'InstallShield 2019 R2'
     $Release.Confidence | Should -Be 'TrustedRuntimeVersion'
-    $Release.Warnings | Should -BeNullOrEmpty
+    $Release.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'reports conflicting exact point-release evidence without changing dispatch' {
@@ -203,7 +203,7 @@ Describe 'InstallShield container classification' -Tag Unit {
 
     $Release.ReleaseName | Should -Be 'InstallShield 2019 R2'
     $Release.Confidence | Should -Be 'Conflicting'
-    $Release.Warnings | Should -Match 'Structural routes remain authoritative'
+    $Release.Diagnostics.Message | Should -Match 'Structural routes remain authoritative'
   }
 
   It 'keeps conflicting release evidence separate from structural dispatch' {
@@ -215,7 +215,7 @@ Describe 'InstallShield container classification' -Tag Unit {
 
     $Release.ReleaseName | Should -Be 'InstallShield 2026 R1'
     $Release.Confidence | Should -Be 'Conflicting'
-    $Release.Warnings | Should -Match 'Structural routes remain authoritative'
+    $Release.Diagnostics.Message | Should -Match 'Structural routes remain authoritative'
   }
 
   It 'does not treat a cabinet format generation as a builder product release' {
@@ -231,7 +231,7 @@ Describe 'InstallShield container classification' -Tag Unit {
     $Release.ReleaseName | Should -Be 'InstallShield 11.5'
     $Release.Confidence | Should -Be 'TrustedRuntimeVersion'
     $Release.Evidence | Where-Object Source -EQ CabinetHeader | Select-Object -ExpandProperty ReleaseName | Should -BeNullOrEmpty
-    $Release.Warnings | Should -BeNullOrEmpty
+    $Release.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'uses compatible runtime detail without replacing stronger release identity' {

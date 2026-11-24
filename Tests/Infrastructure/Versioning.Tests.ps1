@@ -69,7 +69,7 @@ BeforeAll {
   }
 }
 
-Describe 'WinGetVersion' {
+Describe 'WinGetVersion' -Tag Unit {
   It 'parses versions with whitespace and preambles like WinGet' {
     Assert-VersionEqual -Type ([Dumplings.Versioning.WinGetVersion]) -Left '1.0' -Right '1. 0 '
     Assert-VersionEqual -Type ([Dumplings.Versioning.WinGetVersion]) -Left '1.0' -Right 'Version 1.0'
@@ -139,7 +139,7 @@ Describe 'WinGetVersion' {
   }
 }
 
-Describe 'ChunkVersion' {
+Describe 'ChunkVersion' -Tag Unit {
   It 'splits mixed numeric and textual runs when comparing versions' {
     $Versions = @('10', '10rc2', '10rc1', '10beta1', '10alpha2') |
       Sort-Object -Property { [Dumplings.Versioning.ChunkVersion]$_ }
@@ -213,7 +213,7 @@ Describe 'ChunkVersion' {
   }
 }
 
-Describe 'WinGet manifest version listing' {
+Describe 'WinGet manifest version listing' -Tag Unit {
   It 'sorts local manifest directories with WinGetVersion' {
     $RootPath = Join-Path $TestDrive 'manifests'
     $PackageIdentifier = 'Example.Versioning'

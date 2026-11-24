@@ -2,7 +2,7 @@
 . (Join-Path $PSScriptRoot '..\Support\InstallShieldTestSetup.ps1')
 
 Describe 'InstallShield Advanced UI and prerequisites' -Tag Unit {
-It 'Should parse Advanced UI SuiteId and its exact nested package catalog' {
+  It 'Should parse Advanced UI SuiteId and its exact nested package catalog' {
     $Fixture = Resolve-DumplingsTestFixturePath -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'SketchUpViewer-2022-0-316-108.exe')
     if (-not (Test-Path -LiteralPath $Fixture)) {
       Set-ItResult -Skipped -Because 'The persistent SketchUp Viewer Advanced UI fixture is unavailable.'
@@ -47,7 +47,7 @@ It 'Should parse Advanced UI SuiteId and its exact nested package catalog' {
       $ExeInstallOperation.RebootRequest | Should -Be 'DetectReboot'
       $ExeInstallOperation.RebootCodes | Should -Be @(1641, 3010)
       ($Info.SuitePackages | Where-Object Type -EQ 'Exe').Files.SourceUrl | Should -Match '^http://download\.visualstudio\.microsoft\.com/'
-      $Info.Warnings | Should -Not -Contain 'Setup.ini did not identify the MSI; the only extracted MSI is used as a bounded fallback.'
+      $Info.Diagnostics.Message | Should -Not -Contain 'Setup.ini did not identify the MSI; the only extracted MSI is used as a bounded fallback.'
 
       $NestedPackages = Get-InstallShieldAdvancedUiNestedPackageInfo -Info $Info.AdvancedUiInfo -Architecture x64 -OSVersion 10.0 -BuildNumber 19045 -ProductType Workstation
       $NestedMsi = $NestedPackages | Where-Object PackageType -EQ 'Msi'
@@ -62,14 +62,14 @@ It 'Should parse Advanced UI SuiteId and its exact nested package catalog' {
         $NestedExe.Parser | Should -Be 'WinGet installer analyzer'
       } else {
         $NestedExe.Success | Should -BeFalse
-        $NestedExe.Warnings | Should -Match 'Get-WinGetInstallerAnalysis is not loaded'
+        $NestedExe.Diagnostics.Message | Should -Match 'Get-WinGetInstallerAnalysis is not loaded'
       }
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
   }
 
-It 'Should parse an official InstallShield prerequisite definition without executing its payload' {
+  It 'Should parse an official InstallShield prerequisite definition without executing its payload' {
     $PrerequisitePath = Join-Path $Script:FixtureDirectory 'synthetic-dotnet-desktop.prq'
     @'
 <SetupPrereq>
@@ -108,7 +108,7 @@ It 'Should parse an official InstallShield prerequisite definition without execu
     }
   }
 
-It 'Should distinguish limited-user-compatible prerequisite definitions' {
+  It 'Should distinguish limited-user-compatible prerequisite definitions' {
     $PrerequisitePath = Join-Path $TestDrive 'limited-user.prq'
     @'
 <SetupPrereq>
@@ -125,7 +125,7 @@ It 'Should distinguish limited-user-compatible prerequisite definitions' {
     $Info.HasSilentCommandLine | Should -BeTrue
   }
 
-It 'Should evaluate typed InstallShield prerequisite comparisons only from supplied evidence' {
+  It 'Should evaluate typed InstallShield prerequisite comparisons only from supplied evidence' {
     [xml]$Xml = '<conditions><condition Type="32" Comparison="2" Path="HKEY_LOCAL_MACHINE\Software\Vendor\Runtime" FileName="Version" ReturnValue="2.0.0" Bits="2" /></conditions>'
     $Condition = ConvertFrom-InstallShieldPrerequisiteCondition -Node $Xml.DocumentElement.FirstChild
 
@@ -138,7 +138,7 @@ It 'Should evaluate typed InstallShield prerequisite comparisons only from suppl
     (Resolve-InstallShieldPrerequisiteCondition -Condition $Condition -Evidence @{ $Condition.EvidenceKey = $false }).State | Should -Be 'False'
   }
 
-It 'Should read ordered setup prerequisite references from Setup.ini' {
+  It 'Should read ordered setup prerequisite references from Setup.ini' {
     InModuleScope InstallShield {
       $Configuration = ConvertFrom-Ini -Content @'
 [ISSetupPrerequisites]
@@ -159,7 +159,7 @@ PreReq0=First.prq
     }
   }
 
-It 'Should require elevation only for direct launcher or selected prerequisite evidence' {
+  It 'Should require elevation only for direct launcher or selected prerequisite evidence' {
     InModuleScope InstallShield {
       $AdminDefinition = [pscustomobject]@{
         Path                             = 'C:\Extracted\Admin.prq'
@@ -184,7 +184,7 @@ It 'Should require elevation only for direct launcher or selected prerequisite e
     }
   }
 
-It 'Should keep Advanced UI transactions separate from project packages' {
+  It 'Should keep Advanced UI transactions separate from project packages' {
     $SetupXmlPath = Join-Path $Script:FixtureDirectory 'synthetic-suite-transaction.xml'
     @'
 <Setup SuiteId="{11111111-1111-1111-1111-111111111111}" xmlns="installshield/2026/bootstrap">
@@ -208,7 +208,7 @@ It 'Should keep Advanced UI transactions separate from project packages' {
     }
   }
 
-It 'routes the archived InstallShield 5 Professional setup through PackageForTheWeb and old INS' {
+  It 'routes the archived InstallShield 5 Professional setup through PackageForTheWeb and old INS' {
     $Fixture = Join-Path $Script:InstallShieldBuilderRoot '5\ArchivedMedia\IS5pro.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The persistent InstallShield 5 Professional fixture is unavailable.'
@@ -234,7 +234,7 @@ It 'routes the archived InstallShield 5 Professional setup through PackageForThe
     }
   }
 
-It 'Should parse early Advanced UI point-release namespaces' {
+  It 'Should parse early Advanced UI point-release namespaces' {
     $SetupXmlPath = Join-Path $Script:FixtureDirectory 'synthetic-suite-2012.2.xml'
     @'
 <Setup SuiteId="{D6E404DB-1F4D-4C22-9417-D5785DDCB365}" xmlns="installshield/2012.2/bootstrap">
@@ -265,7 +265,7 @@ It 'Should parse early Advanced UI point-release namespaces' {
     }
   }
 
-It 'Should route the archived 2012 Spring builder through its suite catalog' {
+  It 'Should route the archived 2012 Spring builder through its suite catalog' {
     $Fixture = Join-Path $Script:InstallShieldBuilderRoot '2012Spring\ArchivedMedia\InstallShield2012SPRPremierComp-full.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The persistent InstallShield 2012 Spring builder fixture is unavailable.'
@@ -284,13 +284,13 @@ It 'Should route the archived 2012 Spring builder through its suite catalog' {
       $Info.ProductCode | Should -Be '{D6E404DB-1F4D-4C22-9417-D5785DDCB365}'
       $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Overlay/ISSetupStream'
       $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Suite/AdvancedUI'
-      $Info.Warnings | Should -Not -Contain 'Multiple MSI files were extracted, but Setup.ini did not identify which package the bootstrapper launches.'
+      $Info.Diagnostics.Message | Should -Not -Contain 'Multiple MSI files were extracted, but Setup.ini did not identify which package the bootstrapper launches.'
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
   }
 
-It 'Should route the archived 2013 builder through the unversioned-year suite namespace' {
+  It 'Should route the archived 2013 builder through the unversioned-year suite namespace' {
     $Fixture = Join-Path $Script:InstallShieldBuilderRoot '2013\ArchivedMedia\InstallShield2013PremierComp-full.exe'
     if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
       Set-ItResult -Skipped -Because 'The persistent InstallShield 2013 builder fixture is unavailable.'
@@ -308,13 +308,13 @@ It 'Should route the archived 2013 builder through the unversioned-year suite na
       $Info.ProductCode | Should -Be '{EE4F090B-501A-40AB-82F2-4A4F6F79DC49}'
       $Info.SuitePackages.Count | Should -Be 10
       $Info.InstallShieldStructuralRoutes.RouteId | Should -Contain 'Suite/AdvancedUI'
-      $Info.Warnings | Should -BeNullOrEmpty
+      $Info.Diagnostics | Should -BeNullOrEmpty
     } finally {
       Remove-Item -LiteralPath $ExpandedPath -Recurse -Force -ErrorAction SilentlyContinue
     }
   }
 
-It 'Should correlate prerequisite references only by exact source identities' {
+  It 'Should correlate prerequisite references only by exact source identities' {
     InModuleScope InstallShield {
       $Definitions = @(
         [pscustomobject]@{ Path = 'C:\Extracted\DotNetDesktop.prq'; Id = '{11111111-1111-1111-1111-111111111111}'; Description = '.NET Desktop Runtime' },
@@ -332,7 +332,7 @@ It 'Should correlate prerequisite references only by exact source identities' {
     }
   }
 
-It 'Should derive elevation from a selected administrative prerequisite in AFAS PCC' {
+  It 'Should derive elevation from a selected administrative prerequisite in AFAS PCC' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture `
       -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'AFAS.ProfitCommunicationCenter.7.exe') `
       -Uri 'https://profitdownload.afas.nl/download/PCC/PccSetup7.00.exe' `
@@ -352,7 +352,7 @@ It 'Should derive elevation from a selected administrative prerequisite in AFAS 
     }
   }
 
-It 'Should not infer required elevation from the Vertexshare machine MSI' {
+  It 'Should not infer required elevation from the Vertexshare machine MSI' -Tag RealFixture {
     $Fixture = Get-DumplingsTestFixture `
       -RelativePath (Resolve-DumplingsTestFixtureCatalogPath -Name 'Vertexshare.WebpConverter.exe') `
       -Uri 'https://vertexshare.com/download/webp-converter/webpconverter-win.exe' `
@@ -371,7 +371,7 @@ It 'Should not infer required elevation from the Vertexshare machine MSI' {
     }
   }
 
-It 'Should evaluate Advanced UI package eligibility without probing the analysis host' {
+  It 'Should evaluate Advanced UI package eligibility without probing the analysis host' {
     $SetupXmlPath = Join-Path $Script:FixtureDirectory 'synthetic-suite-eligibility.xml'
     @'
 <Setup SuiteId="{11111111-1111-1111-1111-111111111111}" xmlns="installshield/2026/bootstrap">
@@ -408,7 +408,7 @@ It 'Should evaluate Advanced UI package eligibility without probing the analysis
     }
   }
 
-It 'Should apply InstallShield None semantics to multi-child Not groups' {
+  It 'Should apply InstallShield None semantics to multi-child Not groups' {
     $Condition = [pscustomobject]@{
       Type       = 'Not'
       Attributes = [ordered]@{}

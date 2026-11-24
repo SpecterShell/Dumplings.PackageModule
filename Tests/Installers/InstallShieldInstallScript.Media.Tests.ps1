@@ -199,7 +199,7 @@ Describe 'InstallScript media structures' -Tag Unit {
       StaticCalls               = @()
       RegistryWrites            = @()
       Shortcuts                 = @()
-      Warnings                  = @()
+      Diagnostics               = @()
       Protocols                 = @()
       FileExtensions            = @()
       ProtocolAssociations      = @()

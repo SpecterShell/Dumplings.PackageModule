@@ -13,6 +13,133 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       Mock Get-WinGetInstallerReleaseDate { return $null }
     }
 
+    It 'Accepts ARM32 architecture while parsing a generic EXE entry' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults      = @()
+          DetectedFamilies   = @()
+          RoutingHints       = @()
+          RejectedCandidates = @()
+          Diagnostics        = @()
+        }
+      }
+
+      $Result = Get-WinGetGenericInstallerManifestInfo -Path $Script:InstallerPath -Architecture arm -Logger $Script:Logger
+
+      $Result.ParserName | Should -Be 'Generic EXE'
+      $Result.Diagnostics.Id | Should -Contain 'WinGetManifestUpdate.GenericExe.NoParserMetadata'
+      $Result.Diagnostics.Id | Should -Not -Contain 'WinGetManifestUpdate.GenericExe.MetadataUpdateFailed'
+    }
+
+    It 'passes authored silent and custom switches into generic analysis and cache identity' {
+      Mock Get-WinGetInstallerAnalysis {
+        $ProductCode = $CommandLine -match '/passthrough' ? $null : 'New.Product'
+        [pscustomobject]@{
+          ParserResults = @([pscustomobject]@{ Name = 'Dell Update Package'; Success = $true; Result = [pscustomobject]@{
+                Family = 'Dell Update Package'; Metadata = [pscustomobject]@{ ProductCode = $ProductCode; Diagnostics = @() }
+              }
+            })
+          Diagnostics   = @()
+        }
+      }
+      $Context = New-WinGetManifestUpdateContext
+      try {
+        $Normal = [ordered]@{ Architecture = 'x64'; InstallerType = 'exe'; InstallerUrl = $Script:InstallerUrl; ProductCode = 'Existing.Product'; InstallerSwitches = [ordered]@{ Silent = '/s' } }
+        $Override = Copy-Object $Normal
+        $Override.InstallerSwitches.Silent = '/passthrough'
+        $Override.InstallerSwitches.Custom = '/clone_wait /s /v"/qn ARPSYSTEMCOMPONENT=1"'
+        $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Normal -OldInstaller (Copy-Object $Normal) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger -Operation $Context
+        $Result.ProductCode | Should -Be 'New.Product'
+        $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Override -OldInstaller (Copy-Object $Override) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger -Operation $Context
+        $Result.ProductCode | Should -Be 'Existing.Product'
+        Should -Invoke Get-WinGetInstallerAnalysis -Times 2 -Exactly
+        Should -Invoke Get-WinGetInstallerAnalysis -Times 1 -Exactly -ParameterFilter { $CommandLine.EndsWith(' /passthrough /clone_wait /s /v"/qn ARPSYSTEMCOMPONENT=1"') }
+      } finally { Close-WinGetManifestUpdateContext -Context $Context }
+    }
+
+    It 'Selects dotNetInstaller nested MSI metadata by installer architecture and locale' {
+      $DotNetInfo = [pscustomobject]@{
+        NestedInstallerInfos = @(
+          [pscustomobject]@{
+            RelativePath               = 'payload-x86.msi'
+            ProductCode                = '{X86}'
+            WritesAppsAndFeaturesEntry = $true
+            Occurrences                = @([pscustomobject]@{
+                ConfigurationArchitectureFilter = 'x86'
+                ComponentArchitectureFilter     = ''
+                ConfigurationLcidFilter         = '1033'
+                ComponentLcidFilter             = ''
+              })
+          },
+          [pscustomobject]@{
+            RelativePath               = 'payload-x64.msi'
+            ProductCode                = '{X64}'
+            WritesAppsAndFeaturesEntry = $true
+            Occurrences                = @([pscustomobject]@{
+                ConfigurationArchitectureFilter = 'x64'
+                ComponentArchitectureFilter     = ''
+                ConfigurationLcidFilter         = '1033'
+                ComponentLcidFilter             = ''
+              })
+          }
+        )
+        Diagnostics          = @()
+      }
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults = @([pscustomobject]@{
+              Name    = 'dotNetInstaller'
+              Success = $true
+              Result  = [pscustomobject]@{ Family = 'dotNetInstaller'; Metadata = $DotNetInfo }
+            })
+          Diagnostics   = @()
+        }
+      }
+
+      $Result = Get-WinGetGenericInstallerManifestInfo -Path $Script:InstallerPath -Architecture x64 -InstallerLocale en-US -Logger $Script:Logger
+
+      $Result.InputObject[0].ProductCode | Should -Be '{X64}'
+      $Result.SelectedMsiPath | Should -Be 'payload-x64.msi'
+      $Result.SelectionMethod | Should -Be 'ConfigurationFilter'
+    }
+
+    It 'Does not project a hidden dotNetInstaller MSI as visible ARP identity' {
+      $DotNetInfo = [pscustomobject]@{
+        NestedInstallerInfos = @([pscustomobject]@{
+            RelativePath               = 'hidden.msi'
+            ProductCode                = '{HIDDEN}'
+            WritesAppsAndFeaturesEntry = $false
+            Occurrences                = @([pscustomobject]@{
+                ConfigurationArchitectureFilter = ''
+                ComponentArchitectureFilter     = ''
+                ConfigurationLcidFilter         = ''
+                ComponentLcidFilter             = ''
+              })
+          })
+        Diagnostics          = @()
+      }
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults = @([pscustomobject]@{
+              Name    = 'dotNetInstaller'
+              Success = $true
+              Result  = [pscustomobject]@{ Family = 'dotNetInstaller'; Metadata = $DotNetInfo }
+            })
+          Diagnostics   = @()
+        }
+      }
+
+      $Result = Get-WinGetGenericInstallerManifestInfo -Path $Script:InstallerPath -Architecture x64 -Logger $Script:Logger
+
+      $Result.SelectedMsiPath | Should -BeNullOrEmpty
+      $Result.Diagnostics.Id | Should -Contain 'DotNetInstaller.NestedMsi.ArpVisibility.hidden'
+      $ProductCodes = @($Result.InputObject | ForEach-Object {
+          $Property = $_.PSObject.Properties['ProductCode']
+          if ($null -ne $Property) { $Property.Value }
+        })
+      $ProductCodes | Should -Not -Contain '{HIDDEN}'
+    }
+
     It 'Updates generic EXE metadata from a detected Advanced Installer parser result' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
@@ -146,7 +273,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       }
 
       $X86Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $X86Installer -OldInstaller ($X86Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
-      $X64Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $X64Installer -OldInstaller ($X64Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Installers @($X86Result) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+      $X64Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $X64Installer -OldInstaller ($X64Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $X86Result.ProductCode | Should -Be 'ARP.Product.x86'
       $X64Result.ProductCode | Should -Be 'ARP.Product.x64'
@@ -221,7 +348,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Existing.Advanced.Product'
-      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Contain 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems. Existing installed-state fields are preserved until both nested packages are analyzed.'
+      ($Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message -join "`n") | Should -Match 'Advanced Installer selects an MSIX/AppX package on supported Windows versions and an MSI on older systems'
       Should -Invoke Get-AdvancedInstallerMsiInfo -Exactly 0
     }
 
@@ -272,6 +399,88 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New Squirrel Publisher'
     }
 
+    It 'Updates generic EXE metadata from a detected InstallBuilder parser result' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
+              Name    = 'InstallBuilder'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Metadata = [pscustomobject]@{
+                  InstallerType          = 'exe'
+                  ProductCode            = 'Parser Probe IB 4.5.6'
+                  DisplayName            = 'Parser Probe IB'
+                  DisplayVersion         = '4.5.6'
+                  Publisher              = 'Dumplings Validation'
+                  Scope                  = 'machine'
+                  DefaultInstallLocation = '%ProgramFiles(x86)%\probe'
+                }
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture           = 'x86'
+        InstallerType          = 'exe'
+        InstallerUrl           = $Script:InstallerUrl
+        Scope                  = 'user'
+        ProductCode            = 'Parser Probe IB 4.5.5'
+        InstallationMetadata   = [ordered]@{ DefaultInstallLocation = '%ProgramFiles(x86)%\probe-old' }
+        AppsAndFeaturesEntries = @([ordered]@{
+            DisplayName    = 'Parser Probe IB'
+            DisplayVersion = '4.5.5'
+            Publisher      = 'Dumplings Validation'
+            ProductCode    = 'Parser Probe IB 4.5.5'
+          })
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
+      $Result.ProductCode | Should -Be 'Parser Probe IB 4.5.6'
+      $Result.InstallationMetadata.DefaultInstallLocation | Should -Be '%ProgramFiles(x86)%\probe'
+      $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'Parser Probe IB 4.5.6'
+      $Result.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '4.5.6'
+    }
+
+    It 'Updates a Setup Factory ProductCode while preserving authored silent switches' {
+      Mock Get-WinGetInstallerAnalysis {
+        [pscustomobject]@{
+          ParserResults    = @([pscustomobject]@{
+              Name    = 'Setup Factory'
+              Success = $true
+              Result  = [pscustomobject]@{
+                Metadata = [pscustomobject]@{
+                  InstallerType  = 'exe'
+                  ProductCode    = 'OutCALL2.0'
+                  DisplayName    = 'OutCALL'
+                  DisplayVersion = '2.0'
+                  Publisher      = 'Bicom Systems'
+                  Scope          = 'machine'
+                }
+              }
+            })
+          FamilyCandidates = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture      = 'x86'
+        InstallerType     = 'exe'
+        InstallerUrl      = $Script:InstallerUrl
+        Scope             = 'machine'
+        ProductCode       = 'OutCALL1.9'
+        InstallerSwitches = [ordered]@{ Silent = '/S' }
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      @($Script:LogMessages.Where({ $_.Level -eq 'Warning' })).Count | Should -Be 0
+      $Result.ProductCode | Should -Be 'OutCALL2.0'
+      $Result.Scope | Should -Be 'machine'
+      $Result.InstallerSwitches.Silent | Should -Be '/S'
+    }
+
     It 'Preserves an existing ProductCode for Chromium <Variant>' -ForEach @(
       @{ Variant = 'ChromiumMiniInstaller'; ExistingProductCode = 'Google Chrome SxS' }
       @{ Variant = 'ChromiumUpdater'; ExistingProductCode = 'Zoho Ulaa' }
@@ -286,10 +495,11 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
                 Variant          = $Variant
                 ProductCode      = $null
                 UnresolvedFields = @('ProductCode')
-                Warnings         = @()
+                Diagnostics      = @()
               }
             })
           FamilyCandidates = @()
+          Diagnostics      = @()
         }
       }
       $Installer = [ordered]@{
@@ -322,7 +532,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
             SelectedMsiPath = 'payload.msi'
             SelectionMethod = 'SetupIni'
           }
-          Warnings            = @()
+          Diagnostics         = @()
         }
       }
       Mock Get-InstallShieldMsiInfo {
@@ -337,6 +547,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
           PackageArchitecture          = 'x64'
           SelectedMsiPath              = 'payload.msi'
           SelectionMethod              = 'SetupIni'
+          Diagnostics                  = @()
         }
       }
       $Installer = [ordered]@{
@@ -382,14 +593,16 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
               Name    = 'InstallShield'
               Success = $true
               Result  = [pscustomobject]@{
-                Family   = 'InstallShield'
-                Metadata = [pscustomobject]@{ HasMsi = $true; Variant = 'Basic MSI or InstallScript MSI'; Warnings = @() }
-                MsiInfo  = $MsiInfo
+                Family      = 'InstallShield'
+                Metadata    = [pscustomobject]@{ HasMsi = $true; Variant = 'Basic MSI or InstallScript MSI'; Diagnostics = @() }
+                MsiInfo     = $MsiInfo
+                Diagnostics = @()
               }
             })
           DetectedFamilies   = @()
           RoutingHints       = @()
           RejectedCandidates = @()
+          Diagnostics        = @()
         }
       }
       Mock Get-InstallShieldInfo { throw 'The outer InstallShield package must not be extracted again' }
@@ -440,7 +653,9 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
               InstallerType = 'exe'
             })
           UnresolvedFields             = @('DisplayVersion', 'Scope', 'DefaultInstallLocation')
-          Warnings                     = @('InstallScript ARP defaults require VM validation')
+          Diagnostics                  = @(
+            New-InstallerDiagnostic -Id 'InstallShield.InstallScript.ArpDefaults' -Source InstallShield -Message 'InstallScript ARP defaults require VM validation' -Kind ManualValidation -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries
+          )
         }
         [pscustomobject]@{
           InstallerType     = 'InstallShield'
@@ -448,7 +663,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
           HasMsi            = $false
           MsiFiles          = @()
           InstallScriptInfo = $InstallScriptInfo
-          Warnings          = @('InstallScript ARP defaults require VM validation')
+          Diagnostics       = $InstallScriptInfo.Diagnostics
         }
       }
       Mock Get-InstallShieldMsiInfo { throw 'The MSI parser should not be called' }
@@ -469,14 +684,17 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result.ProductCode | Should -Be '{INSTALLSCRIPT-PRODUCT}'
       $Result.AppsAndFeaturesEntries[0].DisplayName | Should -Be 'InstallScript Product'
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'InstallScript Publisher'
-      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Contain 'InstallShield InstallScript: InstallScript ARP defaults require VM validation'
+      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Contain '[InstallShield.InstallScript.ArpDefaults] InstallShield: InstallScript ARP defaults require VM validation'
       Should -Invoke Get-InstallShieldMsiInfo -Exactly 0
     }
 
     It 'Logs rejected generic EXE routing hints at verbose level without a classification warning' {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
-          ParserResults      = @([pscustomobject]@{ Name = 'CreateInstall'; Success = $false; Error = 'No supported GEA archive' })
+          ParserResults      = @([pscustomobject]@{
+              Name = 'CreateInstall'; Success = $false
+              Diagnostics = @((New-InstallerDiagnostic -Id 'InstallerDetection.CreateInstall.ParserRejected' -Source CreateInstall -Message 'No supported GEA archive' -Kind Fallback -Areas Detection))
+            })
           DetectedFamilies   = @()
           RoutingHints       = @([pscustomobject]@{ Family = 'CreateInstall'; Confidence = 'low' })
           RejectedCandidates = @([pscustomobject]@{
@@ -484,7 +702,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
               EvidenceKind     = 'Heuristic'
               IsOuterContainer = $false
               ParserName       = 'CreateInstall'
-              Error            = 'No supported GEA archive'
+              Diagnostics      = @((New-InstallerDiagnostic -Id 'InstallerDetection.CreateInstall.ParserRejected' -Source CreateInstall -Message 'No supported GEA archive' -Kind Fallback -Areas Detection))
             })
         }
       }
@@ -539,14 +757,14 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Existing.Product'
-      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike '*synthetic analyzer failure*'
+      ($Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message -join "`n") | Should -BeLike '*synthetic analyzer failure*'
     }
 
-    It 'Extracts only the selected nested installer from a ZIP archive' {
+    It 'Extracts a literal bracketed nested installer path from a ZIP archive' {
       $ArchivePath = Join-Path $TestDrive 'large-archive-without-extension'
       $Archive = [IO.Compression.ZipFile]::Open($ArchivePath, [IO.Compression.ZipArchiveMode]::Create)
       try {
-        $NestedEntry = $Archive.CreateEntry('payload/setup.exe')
+        $NestedEntry = $Archive.CreateEntry('payload/setup[x64].exe')
         $NestedStream = $NestedEntry.Open()
         try { $NestedStream.Write([byte[]](1, 2, 3, 4)) } finally { $NestedStream.Dispose() }
 
@@ -566,6 +784,8 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
       Mock Get-NSISInfo {
         param($Path)
         $Script:ParsedNestedPath = $Path
+        $Script:NestedExistedDuringParsing = Test-Path -LiteralPath $Path
+        $Script:UnrelatedExistedDuringParsing = Test-Path -LiteralPath (Join-Path (Split-Path (Split-Path $Path -Parent) -Parent) 'unrelated\large.bin')
         [pscustomobject]@{
           ProductCode                = 'Nested.NSIS.Product'
           DisplayName                = 'Nested NSIS Product'
@@ -579,7 +799,7 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
         Architecture         = 'x64'
         InstallerType        = 'zip'
         NestedInstallerType  = 'nullsoft'
-        NestedInstallerFiles = @([ordered]@{ RelativeFilePath = 'payload\setup.exe' })
+        NestedInstallerFiles = @([ordered]@{ RelativeFilePath = 'payload\setup[x64].exe' })
         InstallerUrl         = $ArchiveUrl
         ProductCode          = 'Old.Nested.Product'
       }
@@ -588,7 +808,9 @@ Describe 'WinGet generic installer manifest updates' -Tag Unit {
 
       try {
         $Result.ProductCode | Should -Be 'Nested.NSIS.Product'
-        $Script:ParsedNestedPath | Should -Exist
+        $Script:NestedExistedDuringParsing | Should -BeTrue
+        $Script:UnrelatedExistedDuringParsing | Should -BeFalse
+        Test-Path -LiteralPath $Script:ParsedNestedPath | Should -BeFalse
         $ExtractionRoot = Split-Path (Split-Path $Script:ParsedNestedPath -Parent) -Parent
         Join-Path $ExtractionRoot 'unrelated\large.bin' | Should -Not -Exist
       } finally {

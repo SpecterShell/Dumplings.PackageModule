@@ -42,7 +42,7 @@ function Get-CabinetEntry {
     # raw source name for decoder lookup while exposing a safe extraction-relative name.
     # CabFileInfo.FullName may be a synthetic "cabinet-path\entry" filesystem
     # path. Rebuild the authored lookup identity from its catalog path and name;
-    # PackageForTheWeb root entries intentionally retain a leading separator.
+    # PackageForTheWeb root entries retain a leading separator.
     $CatalogPath = [string]$Entry.Path
     $SourceName = if ([string]::IsNullOrEmpty($CatalogPath)) {
       [string]$Entry.Name

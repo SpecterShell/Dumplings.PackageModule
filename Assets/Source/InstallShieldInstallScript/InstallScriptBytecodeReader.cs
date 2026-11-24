@@ -295,6 +295,9 @@ namespace Dumplings.InstallShield.InstallScript
             }
             if (opcode == 0x0001 || opcode == 0x0005)
             {
+                // Linked aLuZ/kUtZ INX programs retain the isDcc opcode table,
+                // where action 1 is a relative GOTO. Standalone OBS objects use
+                // action 1 as NOP and normalize it in their separate reader.
                 DecodeBranch(reader, instruction, opcode == 0x0005);
                 return;
             }

@@ -52,7 +52,7 @@ Describe 'MSIX/AppX dependency filtering' {
     $Info.PackageKind | Should -Be 'Package'
     $Info.InstallerTypeEvidence | Should -Be 'WinGetCompatibleFallback'
     $Info.InstallerTypeAmbiguous | Should -BeTrue
-    $Info.Warnings | Should -Contain 'The archive is an AppX/MSIX package, but AppX and MSIX cannot be distinguished from package content alone. Using the WinGet-compatible msix fallback.'
+    $Info.Diagnostics.Message | Should -Contain 'The archive is an AppX/MSIX package, but AppX and MSIX cannot be distinguished from package content alone. Using the WinGet-compatible msix fallback.'
     $Info.Name | Should -Be 'Example.App'
     $Info.Version | Should -Be '1.2.3.4'
     $Info.PackageFamilyName | Should -Be 'Example.App_s2ne61n4j7kre'
@@ -164,7 +164,7 @@ Describe 'MSIX/AppX dependency filtering' {
     $Info.Dependencies.PackageDependencies.PackageIdentifier | Should -Not -Contain 'Contoso.CustomFramework'
     ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.WindowsAppRuntime.1.6').MinimumVersion | Should -Be '6000.0.0.0'
     $Info.UnknownPackageDependencies.PackageIdentifier | Should -Contain 'Contoso.CustomFramework'
-    $Info.Warnings[0] | Should -BeLike '*Contoso.CustomFramework*not included*'
+    ($Info.Diagnostics | Where-Object Id -EQ 'MSIX.Dependency.UnknownPackage').Message | Should -BeLike '*Contoso.CustomFramework*not included*'
   }
 
   It 'Should keep the highest minimum version for duplicate allowed dependencies' {
@@ -195,7 +195,7 @@ Describe 'MSIX/AppX dependency filtering' {
     ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.VCLibs.Desktop.14').MinimumVersion | Should -BeExactly '14.0.33728.0'
     ($Info.Dependencies.PackageDependencies | Where-Object PackageIdentifier -EQ 'Microsoft.VCLibs.14').MinimumVersion | Should -BeExactly '14.0.30704.0'
     $Info.UnknownPackageDependencies | Should -BeNullOrEmpty
-    $Info.Warnings | Should -BeNullOrEmpty
+    $Info.Diagnostics | Should -BeNullOrEmpty
   }
 
   It 'Should resolve every approved framework identity to its corresponding WinGet package' {

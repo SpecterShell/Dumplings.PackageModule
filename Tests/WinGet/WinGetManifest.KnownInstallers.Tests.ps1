@@ -64,7 +64,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
         ElevationRequirement = 'elevationRequired'
       }
 
-      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -Logger $Script:Logger
+      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -DiagnosticCollection ([Collections.Generic.List[object]]::new())
 
       $Installer.ProductCode | Should -Be '{NEW-PRODUCT}'
       $Installer.ElevationRequirement | Should -Be 'elevatesSelf'
@@ -93,7 +93,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
           ProductCode          = "Updated.$($Installer.Scope).Product"
           ElevationRequirement = 'elevatesSelf'
         }
-        Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Generic EXE' -Logger $Script:Logger
+        Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Generic EXE' -DiagnosticCollection ([Collections.Generic.List[object]]::new())
       }
 
       $Installers[0].ProductCode | Should -Be 'Updated.user.Product'
@@ -113,7 +113,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
         ElevationRequirement = 'elevationRequired'
       }
 
-      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -Logger $Script:Logger
+      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -DiagnosticCollection ([Collections.Generic.List[object]]::new())
 
       $Installer.ProductCode | Should -Be '{NEW-PRODUCT}'
       $Installer.Contains('ElevationRequirement') | Should -BeFalse
@@ -154,8 +154,34 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result.AppsAndFeaturesEntries[0].Publisher | Should -Be 'New NSIS Publisher'
       $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'New.NSIS.Product'
       Should -Invoke Get-NSISInfo -Exactly 1
-      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x64' }
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x64' -and $FileSystemComplete }
       Should -Invoke Get-WinGetInstallerAnalysis -Exactly 0
+    }
+
+    It 'Warns about an electron-builder architecture mismatch without changing the entry architecture' {
+      Mock Get-NSISInfo {
+        [pscustomobject]@{
+          InstallerType              = 'nullsoft'
+          ProductCode                = 'ElectronBuilder.Product'
+          WritesAppsAndFeaturesEntry = $true
+          Diagnostics                = @(
+            New-InstallerDiagnostic -Id 'NSIS.ElectronBuilder.ArchitectureMismatch' -Source NSIS -Message 'The electron-builder installer packages x64, not the requested x86 architecture.' -Kind Mismatch -Areas Metadata, Installability -AffectedFields Architecture
+          )
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture  = 'x86'
+        InstallerType = 'nullsoft'
+        InstallerUrl  = $Script:InstallerUrl
+        ProductCode   = 'Old.Product'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.Architecture | Should -Be 'x86'
+      $Result.ProductCode | Should -Be 'ElectronBuilder.Product'
+      @($Script:LogMessages | Where-Object { $_.Message -match 'NSIS.ElectronBuilder.ArchitectureMismatch' -and $_.Level -eq 'Warning' }) | Should -HaveCount 1
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x86' }
     }
 
     It 'Uses each installer entry architecture when one NSIS URL exposes different ProductCodes' {
@@ -169,8 +195,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
           DisplayVersion             = '2.21'
           Publisher                  = 'CometNetwork'
           WritesAppsAndFeaturesEntry = $true
-          Warnings                   = @()
-          Notices                    = @()
+          Diagnostics                = @()
         }
       }
 
@@ -202,8 +227,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
           Publisher                  = 'DBeaver Corp'
           Scope                      = $Scope
           WritesAppsAndFeaturesEntry = $true
-          Warnings                   = @()
-          Notices                    = @()
+          Diagnostics                = @()
         }
       }
 
@@ -224,6 +248,38 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter { $Scope -eq 'machine' }
     }
 
+    It 'Passes authored NSIS custom switches through the virtual silent command line' {
+      Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
+      Mock Get-NSISInfo {
+        param($Path, $Architecture, $Scope, $CommandLine)
+        [pscustomobject]@{
+          InstallerType              = 'Nullsoft'
+          ProductCode                = 'MultiCommander x64'
+          DisplayName                = 'MultiCommander (x64)'
+          DisplayVersion             = '16.2.0.3205'
+          Publisher                  = 'Mathias Svensson'
+          Scope                      = $Scope
+          WritesAppsAndFeaturesEntry = $true
+          Diagnostics                = @()
+        }
+      }
+      $Installer = [ordered]@{
+        Architecture      = 'x64'
+        InstallerType     = 'nullsoft'
+        Scope             = 'user'
+        InstallerSwitches = [ordered]@{ Custom = '/InstallMode=User' }
+        InstallerUrl      = $Script:InstallerUrl
+        ProductCode       = 'MultiCommander x64'
+      }
+
+      $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
+
+      $Result.ProductCode | Should -Be 'MultiCommander x64'
+      Should -Invoke Get-NSISInfo -Exactly 1 -ParameterFilter {
+        $Scope -eq 'user' -and $CommandLine -match '^".+" /S /InstallMode=User$'
+      }
+    }
+
     It 'Does not reuse same-URL NSIS metadata across different scopes' {
       Mock Get-WinGetInstallerAnalysis { throw 'The analyzer should not run after a successful declared parser' }
       Mock Get-NSISInfo {
@@ -235,8 +291,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
           DisplayVersion             = '26.1.3'
           Publisher                  = 'DBeaver Corp'
           WritesAppsAndFeaturesEntry = $true
-          Warnings                   = @()
-          Notices                    = @()
+          Diagnostics                = @()
         }
       }
       $OldInstallers = @(
@@ -361,7 +416,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
 
       $Result.ProductCode | Should -Be 'Nested.Product'
       $Result.AppsAndFeaturesEntries[0].ProductCode | Should -Be 'Nested.Product'
-      $Script:LogMessages.Message | Should -Contain 'Inno Setup reports that the outer installer does not write a visible Apps & Features entry; existing ARP metadata belongs to a nested payload or custom registration'
+      ($Script:LogMessages.Message -join "`n") | Should -Match 'Inno Setup reports that the outer installer does not write a visible Apps & Features entry'
       Should -Invoke Get-InnoInfo -Exactly 1
     }
 
@@ -372,7 +427,9 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
           WritesAppsAndFeaturesEntry    = $false
           DelegatesAppsAndFeaturesEntry = $true
           ExtractedFiles                = @('$PLUGINSDIR\setup.exe')
-          Warnings                      = @('Nested installer owns ARP registration')
+          Diagnostics                   = @(
+            New-InstallerDiagnostic -Id 'NSIS.NestedPayload.ArpOwner' -Source NSIS -Message 'Nested installer owns ARP registration' -Kind Risk -Areas Metadata, Installability -AffectedFields ProductCode, AppsAndFeaturesEntries
+          )
         }
       }
       $Installer = [ordered]@{
@@ -387,8 +444,8 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
 
       $Result.ProductCode | Should -Be 'Nested.Product'
       $Result.AppsAndFeaturesEntries[0].DisplayVersion | Should -Be '1.0.0'
-      $Script:LogMessages.Message | Should -Contain 'NSIS: Nested installer owns ARP registration'
-      $Script:LogMessages.Message | Should -Contain 'NSIS reports that the outer installer does not write a visible Apps & Features entry; existing ARP metadata belongs to a nested payload or custom registration'
+      $Script:LogMessages.Message | Should -Contain '[NSIS.NestedPayload.ArpOwner] NSIS: Nested installer owns ARP registration'
+      ($Script:LogMessages.Message -join "`n") | Should -Match 'NSIS reports that the outer installer does not write a visible Apps & Features entry'
     }
 
     It 'Validates NSIS even when the task explicitly supplies matching fields' {
@@ -551,7 +608,11 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
     }
 
     It 'Uses NestedInstallerType when deciding whether to materialize an AppsAndFeaturesEntries type' {
-      Mock Expand-TempArchive { $TestDrive }
+      Mock Expand-TempArchive {
+        $Root = (New-Item -Path (Join-Path $TestDrive 'nested-extraction') -ItemType Directory -Force).FullName
+        [IO.File]::WriteAllBytes((Join-Path $Root 'nested.msi'), [byte[]](1, 2, 3, 4))
+        $Root
+      }
       Mock Get-MsiInstallerInfo {
         [pscustomobject]@{
           ProductCode                  = '{NEW-NESTED-WIX-PRODUCT}'
@@ -621,7 +682,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
         ProductCode = '{NEW-WIX-PRODUCT}'
       }
 
-      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -Logger $Script:Logger
+      Set-WinGetInstallerManifestMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -Metadata $Metadata -ParserName 'Windows Installer' -DiagnosticCollection ([Collections.Generic.List[object]]::new())
 
       $Installer.ProductCode | Should -Be '{NEW-WIX-PRODUCT}'
       $Installer.PackageFamilyName | Should -Be 'MicrosoftCorporationII.WindowsSubsystemForLinux_8wekyb3d8bbwe'
@@ -705,7 +766,8 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Old.NSIS.Product'
-      $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'nullsoft' installer: The NSIS installer header could not be located at a valid aligned archive start Static format analysis was unavailable. Existing installer fields are preserved."
+      ($Script:LogMessages.Message -join "`n") | Should -Match "Failed to parse metadata from the manifest-declared 'nullsoft' installer: The NSIS installer header could not be located"
+      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Match 'nullsoft.ParserIncomplete'
     }
 
     It 'Treats a failed NSIS metadata parse as recoverable when structural evidence matches NSIS' {
@@ -732,7 +794,8 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Existing.NSIS.Product'
-      $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'nullsoft' installer: Unsupported NSIS command layout Structural evidence matches the declared family: NSIS/Nullsoft: DEADBEEF + NullsoftInst. Existing installer fields are preserved."
+      ($Script:LogMessages.Message -join "`n") | Should -Match "Failed to parse metadata from the manifest-declared 'nullsoft' installer: Unsupported NSIS command layout Structural evidence matches the declared family"
+      $Script:LogMessages.Where({ $_.Level -eq 'Warning' }).Message | Should -Match 'nullsoft.ParserIncomplete'
     }
 
     It 'Does not treat a low-confidence CreateInstall candidate as an NSIS mismatch' {
@@ -745,7 +808,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
               Family                  = 'CreateInstall'
               Confidence              = 'low'
               MatchedMarkers          = @('.ciq')
-              SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe # CreateInstall' }
+              SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe' }
             })
           RejectedCandidates = @([pscustomobject]@{
               Family           = 'CreateInstall'
@@ -766,7 +829,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Existing.NSIS.Product'
-      $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'nullsoft' installer: Unsupported NSIS command layout No high-confidence structural evidence proved or disproved the declared family. Existing installer fields are preserved."
+      ($Script:LogMessages.Message -join "`n") | Should -Match "Failed to parse metadata from the manifest-declared 'nullsoft' installer: Unsupported NSIS command layout No high-confidence structural evidence"
     }
 
     It 'Throws when the declared parser positively identifies a different family' {
@@ -798,7 +861,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.InstallerType | Should -Be 'msix'
-      $Script:LogMessages.Message | Should -Contain "Failed to parse metadata from the manifest-declared 'msix' installer: The package is not a valid MSIX package Static format analysis was unavailable. Existing installer fields are preserved."
+      ($Script:LogMessages.Message -join "`n") | Should -Match "Failed to parse metadata from the manifest-declared 'msix' installer: The package is not a valid MSIX package"
     }
 
     It 'Throws when an HTML response is supplied for a manifest-declared Inno installer' {
@@ -814,12 +877,12 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       }
     }
 
-    It 'Returns a uniform result shape with warnings for every known family' {
-      Mock Get-MsiInstallerInfo { [pscustomobject]@{ ProductCode = '{P}'; InstallerBuilder = 'WiX'; Warnings = @() } }
-      Mock Get-BurnInfo { [pscustomobject]@{ InstallerType = 'Burn'; ProductCode = '{B}'; Warnings = @() } }
-      Mock Get-NSISInfo { [pscustomobject]@{ InstallerType = 'Nullsoft'; ProductCode = 'N'; DisplayName = 'N'; DisplayVersion = '1.0'; Warnings = @() } }
-      Mock Get-InnoInfo { [pscustomobject]@{ InstallerType = 'Inno'; ProductCode = 'I'; Warnings = @() } }
-      Mock Get-MSIXInfo { [pscustomobject]@{ InstallerType = 'msix'; Version = '1.0.0.0'; Warnings = @() } }
+    It 'Returns a uniform result shape with diagnostics for every known family' {
+      Mock Get-MsiInstallerInfo { [pscustomobject]@{ ProductCode = '{P}'; InstallerBuilder = 'WiX'; Diagnostics = @() } }
+      Mock Get-BurnInfo { [pscustomobject]@{ InstallerType = 'Burn'; ProductCode = '{B}'; Diagnostics = @() } }
+      Mock Get-NSISInfo { [pscustomobject]@{ InstallerType = 'Nullsoft'; ProductCode = 'N'; DisplayName = 'N'; DisplayVersion = '1.0'; Diagnostics = @() } }
+      Mock Get-InnoInfo { [pscustomobject]@{ InstallerType = 'Inno'; ProductCode = 'I'; Diagnostics = @() } }
+      Mock Get-MSIXInfo { [pscustomobject]@{ InstallerType = 'msix'; Version = '1.0.0.0'; Diagnostics = @() } }
 
       foreach ($Case in @(
           @{ Type = 'msi'; Parser = 'Windows Installer' },
@@ -832,12 +895,12 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
         $Info = Get-WinGetKnownInstallerManifestInfo -Path $Script:InstallerPath -InstallerType $Case.Type
         $Info.ParserName | Should -Be $Case.Parser
         @($Info.InputObject).Count | Should -Be 1
-        $Info.PSObject.Properties.Name | Should -Contain 'Warnings'
-        $Info.Warnings | Should -Be @()
+        $Info.PSObject.Properties.Name | Should -Contain 'Diagnostics'
+        $Info.Diagnostics | Should -Be @()
       }
     }
 
-    It 'Forwards Inno parser warnings like NSIS warnings' {
+    It 'Forwards Inno parser diagnostics like NSIS diagnostics' {
       Mock Get-InnoInfo {
         [pscustomobject]@{
           InstallerType              = 'Inno'
@@ -846,7 +909,9 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
           DisplayVersion             = '1.0.0'
           Publisher                  = 'Inno Publisher'
           WritesAppsAndFeaturesEntry = $true
-          Warnings                   = @('Inno parser caveat')
+          Diagnostics                = @(
+            New-InstallerDiagnostic -Id 'Inno.Parser.Caveat' -Source Inno -Message 'Inno parser caveat' -Kind Incomplete -Areas Metadata -AffectedFields ProductCode
+          )
         }
       }
       $Installer = [ordered]@{
@@ -859,16 +924,31 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result = Update-WinGetInstallerManifestInstallerMetadata -Installer $Installer -OldInstaller ($Installer | Copy-Object) -InstallerEntry ([ordered]@{}) -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger
 
       $Result.ProductCode | Should -Be 'Inno.Product'
-      $Script:LogMessages.Message | Should -Contain 'Inno Setup: Inno parser caveat'
+      $Script:LogMessages.Message | Should -Contain '[Inno.Parser.Caveat] Inno: Inno parser caveat'
+      Should -Invoke Get-InnoInfo -Exactly 1 -ParameterFilter { $Architecture -eq 'x64' }
     }
 
-    It 'Logs identical parser diagnostics once across scope-specific installer entries' {
+    It 'Omits unsupported Inno diagnostic target architectures: <Architecture>' -ForEach @(
+      @{ Architecture = 'neutral' }
+      @{ Architecture = 'arm' }
+    ) {
+      Mock Get-InnoInfo { [pscustomobject]@{ InstallerType = 'Inno'; Diagnostics = @() } }
+
+      $Result = Get-WinGetKnownInstallerManifestInfo -Path $Script:InstallerPath -InstallerType inno -Architecture $Architecture
+
+      $Result.ParserName | Should -Be 'Inno Setup'
+      Should -Invoke Get-InnoInfo -Exactly 1 -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Architecture') }
+    }
+
+    It 'Logs identical parser diagnostics once per scope-specific installer entry' {
       Mock Get-NSISInfo {
         [pscustomobject]@{
           InstallerType              = 'Nullsoft'
           ProductCode                = $null
           WritesAppsAndFeaturesEntry = $false
-          Warnings                   = @('Nested payload warning')
+          Diagnostics                = @(
+            New-InstallerDiagnostic -Id 'NSIS.NestedPayload.Warning' -Source NSIS -Message 'Nested payload warning' -Kind Incomplete -Areas Metadata -AffectedFields ProductCode
+          )
         }
       }
       $OldInstallers = @(
@@ -895,9 +975,11 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result = @(Update-WinGetInstallerManifestInstallers -OldInstallers $OldInstallers -InstallerEntries $InstallerEntries -InstallerFiles $Script:InstallerFiles -Logger $Script:Logger)
 
       $Result.Count | Should -Be 2
-      @($Script:LogMessages.Where({ $_.Message -ceq 'NSIS: Nested payload warning' })).Count | Should -Be 1
-      @($Script:LogMessages.Where({ $_.Message -ceq 'NSIS reports that the outer installer does not write a visible Apps & Features entry; existing ARP metadata belongs to a nested payload or custom registration' })).Count | Should -Be 1
-      @($Script:LogMessages.Where({ $_.Level -ceq 'Verbose' -and $_.Message -like 'Updating installer #*' })).Count | Should -Be 2
+      foreach ($Index in 1, 2) {
+        @($Script:LogMessages.Where({ $_.Message -ceq "[Installer #$Index/2] [NSIS.NestedPayload.Warning] NSIS: Nested payload warning" })).Count | Should -Be 1
+      }
+      @($Script:LogMessages.Where({ $_.Message -like '*NSIS reports that the outer installer does not write a visible Apps & Features entry*' })).Count | Should -Be 2
+      @($Script:LogMessages.Where({ $_.Level -ceq 'Verbose' -and $_.Message -match '^\[Installer #\d/2\] Updating installer #' })).Count | Should -Be 2
       Should -Invoke Get-NSISInfo -Exactly 2
     }
 
@@ -920,7 +1002,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       Mock Get-WinGetInstallerAnalysis {
         [pscustomobject]@{
           DetectedFileType = [pscustomobject]@{ Type = 'PE' }
-          FamilyCandidates = @([pscustomobject]@{ Family = '7z SFX'; Confidence = 'medium'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe # 7z SFX' } })
+          FamilyCandidates = @([pscustomobject]@{ Family = '7z SFX'; Confidence = 'medium'; SuggestedManifestFields = [pscustomobject]@{ InstallerType = 'exe' } })
         }
       }
       $Installer = [ordered]@{
@@ -967,7 +1049,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
       $Result.AppsAndFeaturesEntries[1].UpgradeCode | Should -Be '{THIRD-UPGRADE}'
       $Result.InstallerSha256 | Should -Not -BeNullOrEmpty
       $Result.InstallerSha256 | Should -Not -Be $OldSha256
-      $Script:LogMessages.Message | Should -Contain 'Windows Installer metadata did not match any existing AppsAndFeaturesEntries item'
+      ($Script:LogMessages.Message -join "`n") | Should -Match 'Windows Installer metadata did not match any existing AppsAndFeaturesEntries item'
     }
 
     It 'Throws on a cross-major-type mismatch between Burn and WiX' {
@@ -1008,7 +1090,7 @@ Describe 'WinGet known installer manifest updates' -Tag Unit {
 
       $Result.InstallerType | Should -Be 'wix'
       $Result.ProductCode | Should -Be '{NEW-PRODUCT}'
-      $Script:LogMessages.Message | Should -Contain "The Windows Installer parser identified 'msi' while the manifest declares 'wix'; the declared type is retained"
+      ($Script:LogMessages.Message -join "`n") | Should -Match "The Windows Installer parser identified 'msi' while the manifest declares 'wix'; the declared type is retained"
     }
 
     It 'Throws when a manifest-declared MSIX installer is detected as another type' {

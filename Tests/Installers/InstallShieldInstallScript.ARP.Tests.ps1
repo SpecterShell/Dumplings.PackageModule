@@ -95,7 +95,7 @@ Company=Stale response publisher
     $Hidden.UninstallString | Should -BeNullOrEmpty
     $Hidden.DisplayIcon | Should -BeNullOrEmpty
     $Hidden.AppsAndFeaturesEntries | Should -BeNullOrEmpty
-    $Hidden.Warnings -join ' ' | Should -Match 'SystemComponent=1'
+    $Hidden.Diagnostics.Message -join ' ' | Should -Match 'SystemComponent=1'
   }
 
   It 'preserves registry-only metadata from an explicit visible uninstall entry' {
@@ -170,7 +170,7 @@ Company=Stale response publisher
     $ArpInfo.ProductCode | Should -BeNullOrEmpty
     $ArpInfo.WritesAppsAndFeaturesEntry | Should -BeNullOrEmpty
     $ArpInfo.AppsAndFeaturesEntries | Should -BeNullOrEmpty
-    $ArpInfo.Warnings | Should -Contain "Setup.ini ProductGUID 'not-a-guid' is not a valid GUID and is not used as ProductCode evidence."
+    $ArpInfo.Diagnostics.Message | Should -Contain "Setup.ini ProductGUID 'not-a-guid' is not a valid GUID and is not used as ProductCode evidence."
   }
 
   It 'keeps project identity separate when compiled ARP registration evidence is absent' {

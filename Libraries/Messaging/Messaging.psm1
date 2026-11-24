@@ -216,7 +216,7 @@ function Split-MessageText {
       }
 
       # Reserve room for closing either a fenced or inline code construct. The reserve is
-      # intentionally applied to all Markdown chunks because the state is known only after slicing.
+      # applied to all Markdown chunks because the state is known only after slicing.
       $ClosingReserve = $MarkdownAware ? 4 : 0
       $BodyBudget = $MaximumLength - (Get-MessageTextLength -Text $Prefix -LengthMode $LengthMode) - $ClosingReserve
       if ($BodyBudget -lt 1) { throw "The maximum message length ${MaximumLength} is too small for Markdown continuation markers" }
@@ -567,4 +567,92 @@ function Split-HtmlMessage {
   }
 }
 
-Export-ModuleMember -Function 'Get-MessageTextLength', 'Split-MessageText', 'ConvertTo-SanitizedMessageHtml', 'Split-HtmlMessage'
+function Get-PackageTaskIdentifier {
+  <#
+  .SYNOPSIS
+    Resolve the effective WinGet destination used for submission and notifications.
+  .PARAMETER Config
+    Task configuration with destination aliases in established precedence order.
+  .PARAMETER Fallback
+    Optional task name for notifications and reporting, never for submission.
+  #>
+  param ([Collections.IDictionary]$Config, [string]$Fallback)
+  if ($Config) {
+    foreach ($Key in 'WinGetNewPackageIdentifier', 'WinGetNewIdentifier', 'WinGetPackageIdentifier', 'WinGetIdentifier') {
+      if ($Config.Contains($Key) -and -not [string]::IsNullOrWhiteSpace([string]$Config[$Key])) { return [string]$Config[$Key] }
+    }
+  }
+  return $Fallback
+}
+
+function ConvertTo-PackageTaskMessage {
+  <#
+  .SYNOPSIS
+    Render the same task-state projection using Markdown or Telegram MarkdownV2.
+  .PARAMETER Task
+    PackageTask or a detached object exposing Config, CurrentState, and Logs.
+  .PARAMETER Format
+    Output dialect. Existing Telegram limits and standard Markdown spacing remain distinct.
+  .OUTPUTS
+    A string. This function never sends or queues a message.
+  #>
+  param ([Parameter(Mandatory)]$Task, [ValidateSet('Markdown', 'Telegram')][string]$Format = 'Markdown')
+  $Telegram = $Format -eq 'Telegram'
+  $Bold = if ($Telegram) { '*' } else { '**' }
+  $EscapeCommand = if ($Telegram) { 'ConvertTo-TelegramEscapedText' } else { 'ConvertTo-MarkdownEscapedText' }
+  # Both public escapers are pipeline filters, not positional-argument functions.
+  $Escape = { param($Value) $Value | & $EscapeCommand }
+  $Message = [Text.StringBuilder]::new(2048)
+  if ($Task.Config.Contains('WinGetIdentifier')) {
+    $Identifier = if ($Telegram) { & $Escape $Task.Config.WinGetIdentifier } else { $Task.Config.WinGetIdentifier }
+    $null = $Message.AppendLine("$Bold$Identifier$Bold")
+  }
+  $null = $Message.AppendLine()
+  foreach ($Field in 'Version', 'RealVersion') {
+    if ($Field -eq 'Version' -or $Task.CurrentState.Contains($Field)) {
+      $Text = & $Escape $Task.CurrentState[$Field]
+      $null = $Message.AppendLine("${Bold}${Field}:${Bold} $Text")
+    }
+  }
+  $Count = $Task.CurrentState.Installer.Count
+  $Limit = if ($Telegram) { [Math]::Min($Count, 10) } else { $Count }
+  for ($i = 0; $i -lt $Limit; $i++) {
+    $Installer = $Task.CurrentState.Installer[$i]
+    $Match = if ($Installer.Contains('Query')) { $Installer.Query } else { $Installer }
+    if ($Match -is [scriptblock]) { $Selector = 'ScriptBlock' }
+    elseif ($Match -is [Collections.IDictionary]) {
+      $Parts = [Collections.Generic.List[string]]::new()
+      foreach ($Field in 'InstallerLocale', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope') {
+        $Parts.Add($(if ($Match.Contains($Field)) { & $Escape $Match[$Field] } else { '\*' }))
+      }
+      $Selector = $Parts -join ', '
+    } else { throw 'Invalid Query type' }
+    $null = $Message.AppendLine("${Bold}Installer \#$($i + 1)/$Count \($Selector\):${Bold}")
+    $null = $Message.AppendLine((& $Escape ($Installer.InstallerUrl.Replace(' ', '%20'))))
+  }
+  if ($Task.CurrentState.Contains('ReleaseTime')) {
+    $Value = $Task.CurrentState.ReleaseTime
+    $Text = & $Escape $(if ($Value -is [datetime]) { $Value.ToString('yyyy-MM-dd') } else { $Value })
+    $null = $Message.AppendLine("${Bold}ReleaseDate:${Bold} $Text")
+  }
+  foreach ($Entry in $Task.CurrentState.Locale) {
+    if ($Entry.Contains('Key') -and $Entry.Key -in 'ReleaseNotes', 'ReleaseNotesUrl') {
+      $Key = & $Escape $Entry.Key
+      $Locale = if ($Entry.Contains('Locale')) { & $Escape $Entry.Locale } else { '\*' }
+      $null = $Message.AppendLine("${Bold}$Key \($Locale\):${Bold}")
+      $null = $Message.AppendLine((& $Escape $Entry.Value))
+    }
+  }
+  if ($Telegram) { $null = $Message.AppendLine() }
+  if ($Task.Logs.Count -gt 0) {
+    $null = $Message.AppendLine("${Bold}Log:${Bold}")
+    foreach ($Log in $Task.Logs) {
+      $Text = if ($Log.Length -gt 1024) { $Log.Substring(0, 1024) + '...[truncated]' } else { $Log }
+      $null = $Message.AppendLine((& $Escape $Text))
+    }
+  }
+  $Result = $Message.ToString().Trim()
+  return $(if ($Telegram) { $Result } else { $Result.ReplaceLineEndings("`n`n") })
+}
+
+Export-ModuleMember -Function 'Get-MessageTextLength', 'Split-MessageText', 'ConvertTo-SanitizedMessageHtml', 'Split-HtmlMessage', 'Get-PackageTaskIdentifier', 'ConvertTo-PackageTaskMessage'

@@ -16,7 +16,7 @@ AfterAll {
   Remove-Module -ModuleInfo $Script:UtilityModule -Force -ErrorAction SilentlyContinue
 }
 
-Describe 'Pinned Patchright runtime cache' {
+Describe 'Pinned Patchright runtime cache' -Tag Unit {
   It 'uses a versioned official package URI and a SHA-256 lock' {
     $Lock = Import-PowerShellDataFile -LiteralPath $Script:LockPath
 

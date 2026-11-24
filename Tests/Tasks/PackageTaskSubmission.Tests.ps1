@@ -56,7 +56,7 @@ BeforeAll {
   }
 }
 
-Describe 'PackageTask WinGet submission claims' {
+Describe 'PackageTask WinGet submission claims' -Tag Unit {
   BeforeEach {
     $Global:DumplingsPreference = [ordered]@{ EnableSubmit = $true }
     $Global:DumplingsStorage = [hashtable]::Synchronized(@{})
@@ -142,7 +142,7 @@ Describe 'PackageTask WinGet submission claims' {
   }
 }
 
-Describe 'PackageTask Check domain-change warning' {
+Describe 'PackageTask Check domain-change warning' -Tag Unit {
   BeforeEach {
     $Global:DumplingsPreference = [ordered]@{}
   }
@@ -154,7 +154,31 @@ Describe 'PackageTask Check domain-change warning' {
 
     $null = $Task.Check()
 
-    $Task.Logs -join "`n" | Should -Match "⚠️ The installer source identity 'github\.com/example/new' changed from the trusted history"
+    $Task.Logs | Should -Contain "⚠️ [Installer #1/1] The installer source identity 'github.com/example/old' changed to 'github.com/example/new'"
+  }
+
+  It 'labels a changed source with its current installer position' {
+    $Task = New-CheckTestTask -Name MultipleInstallers `
+      -LastInstallerUrl 'https://download.invantive.com/setup-x64.msi' `
+      -CurrentInstallerUrl 'https://download.invantive.com/setup-x64-new.msi'
+    $Task.LastState.Installer += [ordered]@{ InstallerUrl = 'https://download.invantive.com/setup-arm64.msi' }
+    $Task.CurrentState.Installer += [ordered]@{ InstallerUrl = 'https://download.invantive.eu/setup-arm64.msi' }
+
+    $null = $Task.Check()
+
+    $Task.Logs | Should -Contain "⚠️ [Installer #2/2] The installer source identity 'download.invantive.com' changed to 'download.invantive.eu'"
+    @($Task.Logs.Where({ $_ -like '*source identity*' })).Count | Should -Be 1
+  }
+
+  It 'preserves all trusted sources when reporting a new source' {
+    $Task = New-CheckTestTask -Name MultipleSources `
+      -LastInstallerUrl 'https://download.example.com/setup.exe' `
+      -CurrentInstallerUrl 'https://new.example.com/setup.exe'
+    $Task.LastState.Installer += [ordered]@{ InstallerUrl = 'https://cdn.example.com/setup.exe' }
+
+    $null = $Task.Check()
+
+    $Task.Logs | Should -Contain "⚠️ [Installer #1/1] The installer source identities 'download.example.com', 'cdn.example.com' changed to 'new.example.com'"
   }
 
   It 'marks error logs with a cross mark and leaves info logs unmarked' {
@@ -173,6 +197,18 @@ Describe 'PackageTask Check domain-change warning' {
     $Task = New-CheckTestTask -Name SameIdentity `
       -LastInstallerUrl 'https://github.com/example/repo/releases/download/v1/app.exe' `
       -CurrentInstallerUrl 'https://github.com/example/repo/releases/download/v2/app.exe'
+
+    $null = $Task.Check()
+
+    $Task.Logs -join "`n" | Should -Not -Match 'source identity'
+  }
+
+  It 'does not warn when GitLab generic package versions change within one project' {
+    $Task = New-CheckTestTask -Name GitLabPackage `
+      -LastInstallerUrl 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.0.0/windows_10_cmake_Release_graphviz-install-16.0.0-win32.exe' `
+      -CurrentInstallerUrl 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.1.0/windows_10_cmake_Release_graphviz-install-16.1.0-win32.exe'
+    $Task.LastState.Installer += [ordered]@{ InstallerUrl = 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.0.0/windows_10_cmake_Release_graphviz-install-16.0.0-win64.exe' }
+    $Task.CurrentState.Installer += [ordered]@{ InstallerUrl = 'https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/16.1.0/windows_10_cmake_Release_graphviz-install-16.1.0-win64.exe' }
 
     $null = $Task.Check()
 

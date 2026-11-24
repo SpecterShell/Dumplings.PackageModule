@@ -211,6 +211,7 @@ namespace Dumplings.InstallShield.InstallScript
             internal int MaximumInstructions;
             internal int MaximumCallDepth;
             internal int MaximumEffects;
+            internal HashSet<string> NoticeSet;
             internal HashSet<string> WarningSet;
             internal HashSet<string> EffectSet;
             internal Dictionary<int, int> FunctionInvocations;
@@ -244,6 +245,7 @@ namespace Dumplings.InstallShield.InstallScript
                 MaximumInstructions = maximumInstructions,
                 MaximumCallDepth = maximumCallDepth,
                 MaximumEffects = maximumEffects,
+                NoticeSet = new HashSet<string>(StringComparer.Ordinal),
                 WarningSet = new HashSet<string>(StringComparer.Ordinal),
                 EffectSet = new HashSet<string>(StringComparer.Ordinal),
                 FunctionInvocations = new Dictionary<int, int>(),
@@ -259,6 +261,10 @@ namespace Dumplings.InstallShield.InstallScript
             var roots = SelectEntryPoints(program, entryPoints);
             foreach (var function in roots)
             {
+                // MSI custom actions are independent interpreter roots. Reset
+                // the per-function watchdog so one action cannot consume the
+                // helper-call budget of a later action in the same binary.
+                context.FunctionInvocations.Clear();
                 context.Result.EntryPoints.Add(function.Name);
                 ExecuteFunction(context, function, new Value[0], new MachineState(), function.Name, 0, new HashSet<int>());
                 if (context.Result.Truncated) break;
@@ -568,12 +574,12 @@ namespace Dumplings.InstallShield.InstallScript
             context.FunctionInvocations[function.Index] = invocationCount;
             if (invocationCount > 32)
             {
-                AddWarning(context, "Repeated InstallScript helper calls were bounded at " + function.Name + ".");
+                AddControlFlowBoundNotice(context);
                 return new List<Outcome> { new Outcome { State = initialState, ReturnValue = Value.Unknown("invocation-limit:" + function.Name) } };
             }
             if (!callStack.Add(function.Index))
             {
-                AddWarning(context, "Recursive InstallScript call was bounded at " + function.Name + ".");
+                AddControlFlowBoundNotice(context);
                 return new List<Outcome> { new Outcome { State = initialState, ReturnValue = Value.Unknown("recursive:" + function.Name) } };
             }
 
@@ -582,6 +588,10 @@ namespace Dumplings.InstallShield.InstallScript
             var catchEndIndexes = FindCatchEndIndexes(function);
             var branchBaseLabels = new int[function.Instructions.Count];
             var currentLabel = function.LabelIndex;
+            // Relative GOTO 0 targets the most recent label. A function's entry
+            // label is part of that address space even when no explicit label
+            // record appears on its first decoded instruction.
+            if (function.LabelIndex >= 0) labels[function.LabelIndex] = 0;
             for (var index = 0; index < function.Instructions.Count; index++)
             {
                 foreach (var label in function.Instructions[index].LabelIndexes)
@@ -610,7 +620,7 @@ namespace Dumplings.InstallShield.InstallScript
                     work.Visits.TryGetValue(work.InstructionIndex, out visits);
                     if (visits >= 2)
                     {
-                        AddWarning(context, "InstallScript loop was bounded in " + function.Name + ".");
+                        AddControlFlowBoundNotice(context);
                         break;
                     }
                     work.Visits[work.InstructionIndex] = visits + 1;
@@ -647,7 +657,7 @@ namespace Dumplings.InstallShield.InstallScript
                         // entry points are analyzed independently, while an
                         // unresolved condition is reported instead of causing
                         // exponential path multiplication.
-                        AddWarning(context, "InstallScript unknown conditions were evaluated through their false branch for bounded static evidence.");
+                        AddNotice(context, "InstallScript unknown conditions were evaluated through their false branch for bounded static evidence.");
                         if (!TryJump(labels, branchBaseLabels[work.InstructionIndex], instruction.BranchTarget, work))
                             work.InstructionIndex++;
                         continue;
@@ -672,7 +682,7 @@ namespace Dumplings.InstallShield.InstallScript
                             // Catch bodies execute only after a runtime exception.
                             // Imported code is never invoked by this emulator, so
                             // keep exception-only effects out of normal ARP evidence.
-                            AddWarning(context, "InstallScript catch-only effects were excluded from normal-path metadata.");
+                            AddNotice(context, "InstallScript catch-only effects were excluded from normal-path metadata.");
                             work.InstructionIndex = endIndex + 1;
                         }
                         else
@@ -1721,6 +1731,20 @@ namespace Dumplings.InstallShield.InstallScript
         private static void AddWarning(Context context, string warning)
         {
             if (context.WarningSet.Add(warning)) context.Result.Warnings.Add(warning);
+        }
+
+        private static void AddControlFlowBoundNotice(Context context)
+        {
+            // Generated runtime helpers contain loops and recursion that cannot
+            // be completed without concrete filesystem or registry state. All
+            // three watchdog paths describe the same conservative limitation;
+            // report it once instead of producing one warning per helper name.
+            AddNotice(context, "InstallScript loops, recursion, or repeated helper calls were bounded during static analysis.");
+        }
+
+        private static void AddNotice(Context context, string notice)
+        {
+            if (context.NoticeSet.Add(notice)) context.Result.Notices.Add(notice);
         }
     }
 

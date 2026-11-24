@@ -113,7 +113,7 @@ function ConvertFrom-PEReaderLayout {
     $Directories[$Pair.Key] = [pscustomobject]@{ Index = $Value.Index; Name = $Value.Name; Rva = [uint32]$Value.Rva; Size = [uint32]$Value.Size; Offset = [long]$Value.Offset }
   }
   $Sections = @($NativeLayout.Sections | ForEach-Object {
-      [pscustomobject]@{ Name = $_.Name; VirtualAddress = [uint32]$_.VirtualAddress; VirtualSize = [uint32]$_.VirtualSize; RawOffset = [uint32]$_.RawOffset; RawSize = [uint32]$_.RawSize }
+      [pscustomobject]@{ Name = $_.Name; VirtualAddress = [uint32]$_.VirtualAddress; VirtualSize = [uint32]$_.VirtualSize; RawOffset = [uint32]$_.RawOffset; RawSize = [uint32]$_.RawSize; Characteristics = [uint32]$_.Characteristics }
     })
   [pscustomobject]@{
     PeOffset = [long]$NativeLayout.PeOffset; Machine = [uint16]$NativeLayout.Machine; MachineName = Get-PEMachineName $NativeLayout.Machine
@@ -242,6 +242,7 @@ function Get-PEManagedResourceInfo {
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumResourceBytes = 1073741824
   )
   process {
+    Import-InstallerInfrastructure
     $ReaderInput = Open-PEReaderInput -Path $Path -Stream $Stream
     if (-not $ReaderInput.Stream.CanRead -or -not $ReaderInput.Stream.CanSeek) {
       if ($ReaderInput.OwnsStream) { $ReaderInput.Stream.Dispose() }

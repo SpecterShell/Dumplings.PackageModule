@@ -9,7 +9,7 @@ BeforeAll {
   . (Join-Path $Script:DumplingsModuleRoot 'Index.ps1')
 
   function New-AuthoringTestModel {
-    param ([int]$InstallerCount = 1)
+    param ([int]$InstallerCount = 1, [string]$ManifestVersion)
 
     $Installers = for ($Index = 0; $Index -lt $InstallerCount; $Index++) {
       [ordered]@{
@@ -19,7 +19,9 @@ BeforeAll {
         InstallerSha256 = ([char](65 + $Index)).ToString() * 64
       }
     }
-    New-WinGetManifest -PackageIdentifier 'Contoso.AuthoringTest' -PackageVersion '1.2.3' `
+    $Arguments = @{}
+    if ($ManifestVersion) { $Arguments.ManifestVersion = $ManifestVersion }
+    New-WinGetManifest @Arguments -PackageIdentifier 'Contoso.AuthoringTest' -PackageVersion '1.2.3' `
       -DefaultLocalization ([ordered]@{
         PackageLocale    = 'en-US'
         Publisher        = 'Contoso'
@@ -53,14 +55,40 @@ BeforeAll {
       RoutingHints       = @()
       RejectedCandidates = @()
       PortableEvidence   = $null
-      WrapperWarnings    = @()
-      BlockingIssues     = @()
+      Diagnostics        = @()
       SuggestedNextSteps = @()
     }
   }
 }
 
-Describe 'WinGet manifest model authoring' {
+Describe 'WinGet manifest model authoring' -Tag Unit {
+  It 'authors schema 1.28.0 consistently across every document and header by default' {
+    $Manifest = New-AuthoringTestModel
+    $Manifest = Add-WinGetManifestLocale -Manifest $Manifest -Localization ([ordered]@{ PackageLocale = 'zh-CN'; ShortDescription = 'Localized authoring test.' })
+    $Bundle = ConvertTo-WinGetManifestYaml -Manifest $Manifest
+
+    $Manifest.ManifestVersion | Should -Be '1.28.0'
+    foreach ($Document in @(
+        @{ Type = 'version'; Content = $Bundle.Version }
+        @{ Type = 'installer'; Content = $Bundle.Installer }
+        @{ Type = 'defaultLocale'; Content = $Bundle.Locale['en-US'] }
+        @{ Type = 'locale'; Content = $Bundle.Locale['zh-CN'] }
+      )) {
+      $Document.Content | Should -Match ([regex]::Escape("https://aka.ms/winget-manifest.$($Document.Type).1.28.0.schema.json"))
+      $Document.Content | Should -Match '(?m)^ManifestVersion: 1\.28\.0\r?$'
+    }
+    (Get-WinGetManifestValidationResult -Manifest $Manifest).IsValid | Should -BeTrue
+  }
+
+  It 'retains an explicitly requested historical authoring version' {
+    $Manifest = New-AuthoringTestModel -ManifestVersion '1.12.0'
+    $Bundle = ConvertTo-WinGetManifestYaml -Manifest $Manifest
+
+    $Manifest.ManifestVersion | Should -Be '1.12.0'
+    $Bundle.Version | Should -Match 'winget-manifest\.version\.1\.12\.0\.schema\.json'
+    (Get-WinGetManifestValidationResult -Manifest $Manifest).IsValid | Should -BeTrue
+  }
+
   It 'creates a complete logical model and rejects incomplete output' {
     $Manifest = New-AuthoringTestModel
     $Manifest.PSTypeNames | Should -Contain 'Dumplings.WinGet.ManifestModel'
@@ -200,7 +228,7 @@ Describe 'WinGet manifest model authoring' {
   }
 }
 
-Describe 'Get-WinGetInstallerManifestSuggestion' {
+Describe 'Get-WinGetInstallerManifestSuggestion' -Tag Unit {
   BeforeEach {
     $Script:InstallerPath = Join-Path $TestDrive 'installer.bin'
     [IO.File]::WriteAllBytes($Script:InstallerPath, [byte[]](1, 2, 3, 4))
@@ -210,15 +238,14 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     @{ FamilyType = 'nullsoft'; Expected = 'nullsoft' }
     @{ FamilyType = 'inno'; Expected = 'inno' }
     @{ FamilyType = 'burn'; Expected = 'burn' }
-    @{ FamilyType = 'exe # Advanced Installer'; Expected = 'exe' }
-    @{ FamilyType = 'exe # Squirrel'; Expected = 'exe' }
+    @{ FamilyType = 'exe'; Expected = 'exe' }
   ) {
     Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
       New-AuthoringAnalyzerResult -InstallerType $FamilyType
     }
 
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath
-    $Suggestion.BlockingIssues | Should -BeNullOrEmpty
+    $Suggestion.HasBlockingDiagnostics | Should -BeFalse
     $Suggestion.Installers[0]['InstallerType'] | Should -Be $Expected
     $Suggestion.Installers[0].Contains('InstallerSwitches') | Should -BeFalse
     $Suggestion.Installers[0].Contains('InstallModes') | Should -BeFalse
@@ -253,7 +280,47 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
       -Override ([ordered]@{ ProductCode = 'Override.Product'; UnsupportedOSArchitectures = @('arm64') })
     $Suggestion.Installers[0]['ProductCode'] | Should -Be 'Override.Product'
     $Suggestion.Installers[0].Contains('UnsupportedOSArchitectures') | Should -BeFalse
-    $Suggestion.BlockingIssues -join "`n" | Should -Match 'UnsupportedOSArchitectures'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.UnsupportedOSArchitecturesProhibited').Message | Should -Match 'UnsupportedOSArchitectures'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
+  }
+
+  It 'analyzes authored passthrough arguments before projecting installer identity' {
+    Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
+      New-AuthoringAnalyzerResult -InstallerType exe -Extra @{ ProductCode = $null }
+    }
+    $Tail = '/s /v"/qn ARPSYSTEMCOMPONENT=1"'
+    $Override = [ordered]@{ InstallerSwitches = [ordered]@{ Silent = '/passthrough'; Custom = $Tail } }
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath -Override $Override
+    $Suggestion.Installers[0].Contains('ProductCode') | Should -BeFalse
+    $Suggestion.Installers[0]['InstallerSwitches']['Custom'] | Should -BeExactly $Tail
+    Should -Invoke Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring -Times 1 -Exactly -ParameterFilter {
+      $CommandLine -ceq ('"' + $Script:InstallerPath + '" /passthrough /s /v"/qn ARPSYSTEMCOMPONENT=1"')
+    }
+  }
+
+  It 'exposes Dell family defaults and embedded alternatives as separate authoring suggestions' {
+    Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
+      $Result = New-AuthoringAnalyzerResult -InstallerType exe
+      $Metadata = [pscustomobject]@{
+        InstallerType = 'exe'; PackageArchitecture = 'x64'; ProductCode = 'Contoso.Product'
+        InstallerSwitches = [ordered]@{ Silent = '/s'; SilentWithProgress = '/s'; Log = '/l="<LOGPATH>"' }
+        InstallModes = @('interactive', 'silent'); Diagnostics = @(); ExecutionChain = @()
+        NestedFamily = 'MSI'; NestedInstallerInfo = [pscustomobject]@{ InstallerType = 'msi' }
+        CommandBehavior = [pscustomobject]@{ UsesPassthrough = $false; DefaultVendorArguments = '/qn ALLUSERS=1'; VendorArguments = '/qn ALLUSERS=1' }
+      }
+      $Result.ParserResults[0].Result = [pscustomobject]@{ Family = 'Dell Update Package'; InstallerType = 'exe'; Metadata = $Metadata }
+      $Result.DetectedFamilies[0].Family = 'Dell Update Package'
+      & (Get-Module WinGetAnalysis) { param($Analysis) Add-WinGetInstallerProjection -InputObject $Analysis } $Result
+    }
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath
+    $Suggestion.Suggestions.FamilyDefaults.InstallerSwitches.Silent | Should -Be '/passthrough /quiet /norestart'
+    $Suggestion.Suggestions.FamilyDefaults.InstallerSwitches.Contains('Custom') | Should -BeFalse
+    $Alternative = @($Suggestion.Suggestions.ManifestVariants | Where-Object Name -EQ EmbeddedMup)[0]
+    $Alternative.ManifestFields.InstallerSwitches.Silent | Should -Be '/s'
+    $Alternative.Evidence.VendorArguments | Should -Be '/qn ALLUSERS=1'
+    # Authoring must not silently replace the parser's analyzed command with
+    # advisory defaults or combine both command routes into one entry.
+    $Suggestion.Installers[0]['InstallerSwitches']['Silent'] | Should -Be '/s'
   }
 
   It 'requires explicit architecture when evidence is ambiguous' {
@@ -261,10 +328,22 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
       New-AuthoringAnalyzerResult -Architecture $null -Extra @{ SupportedArchitectures = @('x86', 'x64') }
     }
     $Blocked = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath
-    $Blocked.BlockingIssues -join "`n" | Should -Match 'concrete.*architecture'
+    ($Blocked.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.ArchitectureRequired').Message | Should -Match 'concrete.*architecture'
+    $Blocked.HasBlockingDiagnostics | Should -BeTrue
 
     $Resolved = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath -Architecture x86, x64
     @($Resolved.Installers.Architecture) | Should -Be @('x86', 'x64')
+  }
+
+  It 'accepts an explicit ARM32 WinGet architecture' {
+    Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
+      New-AuthoringAnalyzerResult -Architecture $null -Extra @{ SupportedArchitectures = @() }
+    }
+
+    $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/setup.exe' -InstallerPath $Script:InstallerPath -Architecture arm
+
+    $Suggestion.Installers[0]['Architecture'] | Should -Be 'arm'
+    $Suggestion.HasBlockingDiagnostics | Should -BeFalse
   }
 
   It 'authors trusted MSIX identity, platform, capabilities, and known dependencies' {
@@ -288,14 +367,17 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     $Entry['Dependencies']['PackageDependencies'][0]['PackageIdentifier'] | Should -Be 'Microsoft.WindowsAppRuntime.1.7'
   }
 
-  It 'preserves analyzer hard blocking issues' {
+  It 'preserves analyzer blocking diagnostics' {
     Mock Get-WinGetInstallerAnalysis -ModuleName WinGetManifestAuthoring {
       $Result = New-AuthoringAnalyzerResult -FileType MSIXAppX -InstallerType msix
-      $Result.BlockingIssues = @('Reject: package signature is not trusted.')
+      $Result.Diagnostics = @(
+        New-InstallerDiagnostic -Id 'MSIX.Signature.Untrusted' -Source MSIX -Message 'Reject: package signature is not trusted.' -Kind Invalid -Areas Security, Installability
+      )
       $Result
     }
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/app.msix' -InstallerPath $Script:InstallerPath
-    $Suggestion.BlockingIssues | Should -Contain 'Reject: package signature is not trusted.'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'MSIX.Signature.Untrusted').Message | Should -Be 'Reject: package signature is not trusted.'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'requires a nested file when a ZIP has multiple installer candidates' {
@@ -313,14 +395,16 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
               NestedInstallerFiles = @([pscustomobject]@{ FullName = 'x86.exe' }, [pscustomobject]@{ FullName = 'x64.exe' })
               PortableCandidates   = @()
               InstallerType        = 'zip'
+              Diagnostics          = @()
             }
           })
         DetectedFamilies = @(); FamilyCandidates = @(); RoutingHints = @(); RejectedCandidates = @()
-        PortableEvidence = $null; WrapperWarnings = @(); BlockingIssues = @(); SuggestedNextSteps = @()
+        PortableEvidence = $null; Diagnostics = @(); SuggestedNextSteps = @()
       }
     }
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/multiple.zip' -InstallerPath $ZipPath
-    $Suggestion.BlockingIssues -join "`n" | Should -Match 'specify NestedInstallerFile'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.Zip.CandidateAmbiguous').Message | Should -Match 'specify NestedInstallerFile'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'consumes the real ZIP analyzer envelope without StrictMode property failures' {
@@ -335,7 +419,8 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     $Suggestion.Analysis.ParserResults[0].Name | Should -Be 'ZIP/archive'
     $Suggestion.Analysis.ParserResults[0].Success | Should -BeTrue
     $Suggestion.Analysis.ParserResults[0].Result.Family | Should -Be 'ZIP/archive'
-    $Suggestion.BlockingIssues -join "`n" | Should -Match 'no supported nested installer or portable PE candidate'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.Zip.NoSupportedCandidate').Message | Should -Match 'no supported nested installer or portable PE candidate'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'turns a legacy raw ZIP parser result into a blocking issue' {
@@ -344,13 +429,14 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
         DetectedFileType = [pscustomobject]@{ Type = 'ZipArchive' }
         ParserResults = @([pscustomobject]@{ Family = 'ZIP/archive'; NestedInstallerFiles = @(); PortableCandidates = @() })
         DetectedFamilies = @(); FamilyCandidates = @(); RoutingHints = @(); RejectedCandidates = @()
-        PortableEvidence = $null; WrapperWarnings = @(); BlockingIssues = @(); SuggestedNextSteps = @()
+        PortableEvidence = $null; Diagnostics = @(); SuggestedNextSteps = @()
       }
     }
 
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/legacy.zip' -InstallerPath $Script:InstallerPath
 
-    $Suggestion.BlockingIssues -join "`n" | Should -Match 'catalog could not be parsed'
+    ($Suggestion.Diagnostics | Where-Object Id -EQ 'WinGetAuthoring.Zip.CatalogUnavailable').Message | Should -Match 'catalog could not be parsed'
+    $Suggestion.HasBlockingDiagnostics | Should -BeTrue
   }
 
   It 'downloads, hashes, analyzes once, and cleans its temporary file' {
@@ -389,10 +475,11 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
                 Family               = 'ZIP/archive'
                 NestedInstallerFiles = @([pscustomobject]@{ FullName = 'setup.exe' })
                 PortableCandidates   = @()
+                Diagnostics          = @()
               }
             })
           DetectedFamilies = @(); FamilyCandidates = @(); RoutingHints = @(); RejectedCandidates = @()
-          PortableEvidence = $null; WrapperWarnings = @(); BlockingIssues = @(); SuggestedNextSteps = @()
+          PortableEvidence = $null; Diagnostics = @(); SuggestedNextSteps = @()
         }
       } else {
         New-AuthoringAnalyzerResult -InstallerType inno
@@ -400,7 +487,7 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
     }
 
     $Suggestion = Get-WinGetInstallerManifestSuggestion -InstallerUrl 'https://example.test/package.zip' -InstallerPath $ZipPath
-    $Suggestion.BlockingIssues | Should -BeNullOrEmpty
+    $Suggestion.HasBlockingDiagnostics | Should -BeFalse
     $Suggestion.Installers[0]['InstallerType'] | Should -Be 'zip'
     $Suggestion.Installers[0]['NestedInstallerType'] | Should -Be 'inno'
     $Suggestion.Installers[0]['NestedInstallerFiles'][0]['RelativeFilePath'] | Should -Be 'setup.exe'
@@ -408,7 +495,7 @@ Describe 'Get-WinGetInstallerManifestSuggestion' {
   }
 }
 
-Describe 'Save-WinGetManifest and CLI' {
+Describe 'Save-WinGetManifest and CLI' -Tag Unit {
   It 'atomically writes, replaces stale locales, and reads the saved model' {
     $Path = Join-Path $TestDrive 'saved-manifests'
     $Manifest = New-AuthoringTestModel
@@ -451,7 +538,7 @@ Describe 'Save-WinGetManifest and CLI' {
     $Manifest = New-AuthoringTestModel
     $null = Save-WinGetManifest -Manifest $Manifest -Path $Path
     $InvalidInstaller = [ordered]@{}
-    foreach ($Key in $Manifest.Installers[0].Keys) { $InvalidInstaller[$Key] = Copy-WinGetManifestValue -Value $Manifest.Installers[0][$Key] }
+    foreach ($Key in $Manifest.Installers[0].Keys) { $InvalidInstaller[$Key] = Copy-Object -Value $Manifest.Installers[0][$Key] }
     $InvalidInstaller['InstallerSha256'] = 'invalid'
     $Invalid = New-WinGetManifestModel -PackageIdentifier $Manifest.PackageIdentifier -PackageVersion $Manifest.PackageVersion `
       -ManifestVersion $Manifest.ManifestVersion -InstallerDefaults ([ordered]@{}) -Installers @($InvalidInstaller) `

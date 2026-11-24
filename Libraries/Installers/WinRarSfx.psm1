@@ -163,7 +163,7 @@ function Get-WinRarSfxInfo {
     # nested payload owns installation identity and registration.
     [pscustomobject][ordered]@{
       Path                         = $Installer.FullName
-      InstallerType                = 'winrar-sfx'
+      InstallerType                = 'exe'
       ProductCode                  = $null
       UpgradeCode                  = $null
       DisplayName                  = $null
@@ -174,13 +174,14 @@ function Get-WinRarSfxInfo {
       WritesAppsAndFeaturesEntry   = $false
       AppsAndFeaturesProductCode   = $null
       AppsAndFeaturesInstallerType = $null
-      Warnings                     = [string[]]@(
-        if ($Config.Commands.Count -eq 0) { 'The WinRAR SFX comment does not contain Setup or Presetup commands.' }
-        foreach ($Command in $Config.Commands) {
-          if (-not $Command.Command.IsResolved) { "The $($Command.Stage) command did not resolve to an embedded archive entry: $($Command.Command.CommandLine)" }
-        }
-      )
+      Diagnostics                  = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]@(
+            if ($Config.Commands.Count -eq 0) { 'The WinRAR SFX comment does not contain Setup or Presetup commands.' }
+            foreach ($Command in $Config.Commands) {
+              if (-not $Command.Command.IsResolved) { "The $($Command.Stage) command did not resolve to an embedded archive entry: $($Command.Command.CommandLine)" }
+            }
+          )) -Source 'WinRarSfx' -Kind Incomplete -Areas Metadata)
       UnresolvedFields             = [string[]]@()
+      Family                       = 'WinRAR SFX'
       Format                       = $ArchiveLayout.Format
       ArchiveOffset                = $ArchiveOffset
       Configuration                = $Config.Values

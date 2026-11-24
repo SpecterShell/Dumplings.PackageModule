@@ -114,6 +114,26 @@ function Get-NamespaceIdentity {
   return "${HostName}/$($Namespace -join '/')"
 }
 
+function Get-GitLabApiProjectIdentity {
+  <#
+  .SYNOPSIS
+    Extract a stable project identity from a GitLab REST API URL
+  .PARAMETER HostName
+    The lowercased GitLab host name
+  .PARAMETER Segments
+    The parsed path segments beginning with api/v4/projects/<project-id>
+  #>
+  [OutputType([string])]
+  param ([string]$HostName, [string[]]$Segments)
+
+  # Generic package URLs append package name, version, and filename after the
+  # project identifier. Those values identify an artifact, not its source.
+  if ($Segments.Count -ge 4 -and $Segments[0] -ceq 'api' -and $Segments[1] -ceq 'v4' -and $Segments[2] -ceq 'projects') {
+    return "${HostName}/projects/$($Segments[3])"
+  }
+  return $null
+}
+
 function Get-SourceForgeIdentity {
   <#
   .SYNOPSIS
@@ -447,7 +467,12 @@ function Get-InstallerSourceIdentity {
       return Get-OwnerRepoIdentity -HostName $HostName -Segments $Segments -StopMarkers @('releases', 'download', 'blob', 'raw')
     }
 
-    if ($HostName.Contains('gitlab') -or $HostName.Contains('gitea') -or $HostName.Contains('codeberg') -or $HostName.Contains('gitcode') -or $HostName.Contains('gitee')) {
+    if ($HostName.Contains('gitlab')) {
+      if ($Identity = Get-GitLabApiProjectIdentity -HostName $HostName -Segments $Segments) { return $Identity }
+      return Get-NamespaceIdentity -HostName $HostName -Segments $Segments -StopMarkers @('-', 'releases', 'archive', 'downloads', 'blob', 'raw')
+    }
+
+    if ($HostName.Contains('gitea') -or $HostName.Contains('codeberg') -or $HostName.Contains('gitcode') -or $HostName.Contains('gitee')) {
       return Get-NamespaceIdentity -HostName $HostName -Segments $Segments -StopMarkers @('-', 'releases', 'archive', 'downloads', 'blob', 'raw')
     }
 

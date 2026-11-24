@@ -15,7 +15,7 @@ BeforeAll {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Data\Object.psm1') -Force
 }
 
-Describe 'ConvertFrom-Ini' {
+Describe 'ConvertFrom-Ini' -Tag Unit {
   It 'merges repeated sections and applies each duplicate-key policy' {
     $Content = "[Section]`r`nValue=`r`n[section]`r`nValue=second`r`nOther=kept"
 
@@ -65,7 +65,7 @@ Describe 'ConvertFrom-Ini' {
   }
 }
 
-Describe 'Bounded text file reading' {
+Describe 'Bounded text file reading' -Tag Unit {
   It 'lets StreamReader detect a UTF-32 byte-order mark' {
     $Path = Join-Path $TestDrive 'utf32.ini'
     $Encoding = [Text.UTF32Encoding]::new($false, $true, $true)

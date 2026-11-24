@@ -354,4 +354,23 @@ $DumplingsBrowserUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'DumplingsInternetExplorerUserAgent', Justification = 'This variable is part of the public module contract')]
 $DumplingsInternetExplorerUserAgent = 'Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko'
 
-Export-ModuleMember -Function Split-Uri, Join-Uri, Get-RedirectedUrl, Get-WebResponseHeader, Get-RedirectedUrls, Get-RedirectedUrl1st, Get-EmbeddedJson, Get-EmbeddedLinks, Read-ResponseContent -Variable DumplingsDefaultUserAgent, DumplingsBrowserUserAgent, DumplingsInternetExplorerUserAgent
+function Test-RetryDelayBudget {
+  <#
+  .SYNOPSIS
+    Check a requested delay without clamping it or exceeding cumulative limits.
+  .PARAMETER DelaySeconds
+    Requested nonnegative delay. Non-finite and negative server values are rejected.
+  .PARAMETER UsedSeconds
+    Delay already consumed by this operation.
+  .PARAMETER MaximumSeconds
+    Per-retry limit.
+  .PARAMETER MaximumTotalSeconds
+    Total delay budget. Eligibility and waiting remain transport-owned.
+  #>
+  [OutputType([bool])]
+  param ([double]$DelaySeconds, [double]$UsedSeconds, [double]$MaximumSeconds, [double]$MaximumTotalSeconds)
+  return [double]::IsFinite($DelaySeconds) -and $DelaySeconds -ge 0 -and $UsedSeconds -ge 0 -and
+    $DelaySeconds -le $MaximumSeconds -and $DelaySeconds -le ($MaximumTotalSeconds - $UsedSeconds)
+}
+
+Export-ModuleMember -Function Split-Uri, Join-Uri, Get-RedirectedUrl, Get-WebResponseHeader, Get-RedirectedUrls, Get-RedirectedUrl1st, Get-EmbeddedJson, Get-EmbeddedLinks, Read-ResponseContent, Test-RetryDelayBudget -Variable DumplingsDefaultUserAgent, DumplingsBrowserUserAgent, DumplingsInternetExplorerUserAgent

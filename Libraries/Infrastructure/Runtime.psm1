@@ -59,6 +59,9 @@ function Import-InstallerManagedAssembly {
     Load a pinned managed assembly from the submodule asset directory once
   .PARAMETER Name
     File name of the managed assembly below the asset root.
+  .PARAMETER Path
+    Explicit assembly path, resolved against PowerShell's filesystem location. Use this for
+    source-shipped providers outside the standard Assemblies directory.
   .PARAMETER TypeName
     Fully qualified type used to detect whether the assembly is already loaded.
   .PARAMETER AssetRoot
@@ -66,24 +69,25 @@ function Import-InstallerManagedAssembly {
     globally visible mirrored loader may belong to either independently consumable submodule.
   #>
   [OutputType([System.Reflection.Assembly])]
+  [CmdletBinding(DefaultParameterSetName = 'Asset')]
   param (
-    [Parameter(Mandatory)][string]$Name,
-    [Parameter(Mandatory)][string]$TypeName,
-    [string]$AssetRoot
+    [Parameter(Position = 0, Mandatory, ParameterSetName = 'Asset')][string]$Name,
+    [Parameter(Position = 0, Mandatory, ParameterSetName = 'Path')][string]$Path,
+    [Parameter(Position = 1, Mandatory)][string]$TypeName,
+    [Parameter(Position = 2, ParameterSetName = 'Asset')][string]$AssetRoot
   )
 
   $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
   if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
-  $AssemblyName = $Name
+  $AssemblyName = if ($PSCmdlet.ParameterSetName -eq 'Path') { (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName } else { $Name }
   $SimpleAssemblyName = [IO.Path]::GetFileNameWithoutExtension($AssemblyName)
   Use-InstallerRuntimeLoadLock {
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
 
-    # Another module can load a compatible DTF/SharpCompress dependency from a
-    # different path before PowerShell has cached its public types. Reuse that
-    # assembly by identity rather than asking Add-Type to load the same strong
-    # name into the default AssemblyLoadContext a second time.
+    # A compatible dependency may already be loaded from another path before
+    # PowerShell caches its public types. Reuse its identity to avoid loading
+    # the same strong name twice into the default AssemblyLoadContext.
     $LoadedAssembly = [AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -ceq $SimpleAssemblyName } | Select-Object -First 1
     if ($LoadedAssembly) {
       if (-not $LoadedAssembly.GetType($TypeName, $false, $false)) {
@@ -96,7 +100,7 @@ function Import-InstallerManagedAssembly {
     } else {
       [IO.Path]::GetFullPath($AssetRoot)
     }
-    $AssemblyPath = Join-Path -Path $ResolvedAssetRoot -ChildPath 'Assemblies' -AdditionalChildPath $AssemblyName
+    $AssemblyPath = if ([IO.Path]::IsPathFullyQualified($AssemblyName)) { $AssemblyName } else { Join-Path -Path $ResolvedAssetRoot -ChildPath 'Assemblies' -AdditionalChildPath $AssemblyName }
     if (-not (Test-Path -LiteralPath $AssemblyPath -PathType Leaf)) { throw "The managed dependency is missing: $AssemblyPath" }
     Add-Type -Path $AssemblyPath -PassThru -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Assembly
   }
@@ -111,13 +115,17 @@ function Import-InstallerManagedSource {
     process current directory can differ from PowerShell's provider location.
   .PARAMETER TypeName
     A fully qualified type published by the source set and used as the load sentinel.
+  .PARAMETER CompilerOptions
+    Optional C# compiler switches required by the complete source set, such as /unsafe for a
+    reviewed pointer-based implementation. Callers should omit this for ordinary managed code.
   .OUTPUTS
     The assembly containing TypeName.
   #>
   [OutputType([System.Reflection.Assembly])]
   param (
     [Parameter(Mandatory)][string[]]$Path,
-    [Parameter(Mandatory)][string]$TypeName
+    [Parameter(Mandatory)][string]$TypeName,
+    [string[]]$CompilerOptions
   )
 
   $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
@@ -135,7 +143,9 @@ function Import-InstallerManagedSource {
     # A competing runspace may have compiled this source set while this caller waited.
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if ($LoadedType.Type) { return $LoadedType.Type.Assembly }
-    Add-Type -Path @($SourceFiles) -ErrorAction Stop
+    $AddTypeParameters = @{ LiteralPath = @($SourceFiles); ErrorAction = 'Stop' }
+    if ($CompilerOptions) { $AddTypeParameters.CompilerOptions = $CompilerOptions }
+    Add-Type @AddTypeParameters
     $LoadedType = [System.Management.Automation.PSTypeName]$TypeName
     if (-not $LoadedType.Type) { throw "Managed source compilation did not publish the expected type '$TypeName'." }
     return $LoadedType.Type.Assembly

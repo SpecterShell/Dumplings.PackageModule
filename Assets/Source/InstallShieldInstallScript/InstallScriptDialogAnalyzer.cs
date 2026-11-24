@@ -144,9 +144,9 @@ namespace Dumplings.InstallShield.InstallScript
         /// <summary>
         /// Reconstructs program-style wizard branches through the callback
         /// contract documented by InstallShield's EventsObjectPriv.rul and
-        /// EventsSetupPriv.rul framework sources. The runtime condition values
-        /// are intentionally not guessed; branch classification relies only on
-        /// the response-dialog families reached by each callback child.
+        /// EventsSetupPriv.rul framework sources. Classify branches from the
+        /// response-dialog families reached by each callback child. Leave
+        /// runtime condition values unresolved.
         /// </summary>
         private static List<InstallScriptDialogTrace> GetFrameworkWizardTraces(
             InstallScriptProgram program,

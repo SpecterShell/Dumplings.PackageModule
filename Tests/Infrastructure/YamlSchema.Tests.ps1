@@ -4,7 +4,16 @@ BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Data\YamlSchema.psm1') -Force
 }
 
-Describe 'Get-YamlSchemaValidationResult' {
+Describe 'Get-YamlSchemaValidationResult' -Tag Unit {
+  It 'resolves repeated references once per operation without reusing a mutated root schema' {
+    $Schema = @{ definitions = @{ Text = @{ type = 'string' } }; type = 'array'; items = @{ '$ref' = '#/definitions/Text' } }
+    Mock Get-YamlSchemaValue -ModuleName YamlSchema { $InputObject.definitions.Text }
+    (Get-YamlSchemaValidationResult -InputObject @('one', 'two') -Schema $Schema).IsValid | Should -BeTrue
+    Should -Invoke Get-YamlSchemaValue -ModuleName YamlSchema -Times 1 -Exactly
+    $Schema.definitions.Text.type = 'integer'
+    (Get-YamlSchemaValidationResult -InputObject @('one', 'two') -Schema $Schema).IsValid | Should -BeFalse
+    Should -Invoke Get-YamlSchemaValue -ModuleName YamlSchema -Times 2 -Exactly
+  }
   It 'validates supported scalar, object, and array keywords' {
     $Schema = [ordered]@{
       type                 = 'object'
@@ -59,7 +68,7 @@ Describe 'Get-YamlSchemaValidationResult' {
   }
 }
 
-Describe 'ConvertTo-SortedYamlObject' {
+Describe 'ConvertTo-SortedYamlObject' -Tag Unit {
   It 'orders known keys while preserving unknown keys and every array order' {
     $Schema = [ordered]@{ type = 'object'; properties = [ordered]@{ A = [ordered]@{ type = 'string' }; B = [ordered]@{ type = 'array'; items = [ordered]@{ type = 'string' } } } }
     $InputObject = [ordered]@{ Unknown2 = 2; B = @('z', 'a'); Unknown1 = 1; A = 'first' }

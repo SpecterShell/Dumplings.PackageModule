@@ -229,7 +229,7 @@ Describe 'Message queue PowerShell orchestration' {
   }
 }
 
-Describe 'PackageTask queued messaging' {
+Describe 'PackageTask queued messaging' -Tag Unit {
   BeforeAll {
     $Script:DumplingsTestRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
     $Script:DumplingsModuleRoot = [IO.Path]::GetFullPath((Join-Path $Script:DumplingsTestRoot '..'))
@@ -261,7 +261,24 @@ Describe 'PackageTask queued messaging' {
           HasSessionKey = $PesterBoundParameters.ContainsKey('SessionKey')
           UsesMarkdown  = $PesterBoundParameters.ContainsKey('AsMarkdown')
         })
+      return [pscustomobject]@{ State = 'Pending' }
     }
+  }
+
+  It 'suppresses identical state notifications but preserves custom messages and retries failures' {
+    $Task = New-MessageQueueTestTask -Name Identical -Config ([ordered]@{ WinGetIdentifier = 'Example.Package' })
+    $Task.Message()
+    $Task.Message()
+    $Global:MessageQueueTestCalls.Count | Should -Be 1
+    $Task.LastQueuedTicket.State = 'Failed'
+    $Task.Message()
+    $Global:MessageQueueTestCalls.Count | Should -Be 2
+    $Task.Message('custom')
+    $Task.Message('custom')
+    $Global:MessageQueueTestCalls.Count | Should -Be 4
+    $Task.ResetMessage()
+    $Task.Message()
+    $Global:MessageQueueTestCalls.Count | Should -Be 5
   }
 
   It 'uses effective WinGet identifier precedence for state coalescing' {

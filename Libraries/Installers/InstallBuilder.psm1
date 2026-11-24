@@ -1,591 +1,483 @@
 # SPDX-License-Identifier: Apache-2.0
 # Format research: https://gist.github.com/mickael9/0b902da7c13207d1b86e
+# Metakit format and X/MIT-licensed reference: https://www.equi4.com/metakit/format.html
+# https://github.com/jcw/metakit
 # Static BitRock/VMware InstallBuilder parser. InstallBuilder embeds its project
 # VFS in a TclKit/Metakit container; this module reads bounded project records
 # and CookFS pages but never loads Tcl, TclKit, or the installer executable.
 # Binary structure consumed here (CookFS integers are BE):
 #
 #   PE/TclKit
-#   +-- Metakit VFS -> zlib project.xml
-#   `-- CookFS pages -> page-size table (u32 BE)* -> compressed index
-#       -> index magic "CFS2.200" -> 16-byte footer -> "CFS0002"
+#   `-- Metakit VFS -> dirs[name:S,parent:I,files[name:S,size:I,date:I,contents:B]]
+#       +-- exact project.xml and origindist control records
+#       +-- stored/zlib legacy payload records
+#       `-- optional CookFS pages -> page-size table (u32 BE)* -> compressed index
+#           -> index magic "CFS2.200" -> 16-byte footer -> "CFS0002"
 #
 # Footer-relative fields are IndexSize@-16, PageCount@-12, and compression@-8.
 # CookFS records begin with a compression ID (stored/Deflate/BZip2/custom LZMA).
 # Encrypted/custom records are rejected; page/index/count/path limits are enforced.
 
 # Apply default function parameters
+
+# Public InstallBuilder commands. Implementation modules are imported locally.
+Import-Module (Join-Path $PSScriptRoot 'InstallBuilderPayload.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'InstallBuilderProject.psm1') -ErrorAction Stop
+
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
-$Script:InstallBuilderMaximumCandidates = 4096
 $Script:InstallBuilderMaximumProjectBytes = 16777216
-$Script:InstallBuilderMarkerSearchRadius = 16777216
-$Script:InstallBuilderMaximumCookfsIndexBytes = 67108864
-$Script:InstallBuilderMaximumCookfsPages = 1000000
-$Script:InstallBuilderMaximumCookfsPageBytes = 536870912
-$Script:InstallBuilderMaximumCookfsEntries = 200000
-$Script:InstallBuilderCookfsPageCacheSize = 16
-$Script:InstallBuilderCookfsPageCacheBytes = 67108864
-$Script:InstallBuilderMaximumLzmaDictionaryBytes = 134217728
 
-function Get-InstallBuilderCandidateOffset {
+$Script:InstallBuilderMaximumPayloadAnalysisBytes = 536870912
+
+$Script:InstallBuilderStrictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+
+function Get-InstallBuilderPrimaryPayloadAnalysis {
   <#
   .SYNOPSIS
-    Return plausible zlib stream offsets near an embedded project.xml record
-  .DESCRIPTION
-    Metakit stores VFS file names and compressed payloads separately. The
-    project.xml name is a stable nearby anchor; a full-file fallback supports
-    layouts that place its compressed record elsewhere in the container.
+    Analyze source-referenced installed executables and bounded adjacent sidecars.
   .PARAMETER Path
-    Path to the installer or format artifact read by this function.
-  #>
-  [OutputType([long[]])]
-  param ([Parameter(Mandatory)][string]$Path)
-
-  $File = Get-Item -LiteralPath $Path -Force
-  $ProjectMarker = [Text.Encoding]::ASCII.GetBytes('project.xml')
-  $ZlibStart = [byte[]](0x78)
-  $Offsets = [System.Collections.Generic.HashSet[long]]::new()
-  # Metakit stores names separately from compressed records. Use each project.xml name as a local
-  # search anchor instead of trying every zlib-looking byte in a large payload.
-  $ProjectOffsets = @(Find-BinaryPattern -Path $File.FullName -Pattern $ProjectMarker -Maximum 32 -Reverse)
-  foreach ($ProjectOffset in $ProjectOffsets) {
-    $StartOffset = [Math]::Max(0, $ProjectOffset - 65536)
-    $Length = [Math]::Min($Script:InstallBuilderMarkerSearchRadius, $File.Length - $StartOffset)
-    foreach ($Offset in @(Find-BinaryPattern -Path $File.FullName -Pattern $ZlibStart -StartOffset $StartOffset -Length $Length -Maximum $Script:InstallBuilderMaximumCandidates)) {
-      $null = $Offsets.Add($Offset)
-    }
-  }
-
-  # A project record can be outside the nearby VFS-name table in older
-  # InstallBuilder releases. Fall back to a bounded whole-file candidate scan.
-  if ($Offsets.Count -eq 0) {
-    foreach ($Offset in @(Find-BinaryPattern -Path $File.FullName -Pattern $ZlibStart -Maximum $Script:InstallBuilderMaximumCandidates)) {
-      $null = $Offsets.Add($Offset)
-    }
-  }
-
-  $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-  try {
-    foreach ($Offset in ($Offsets | Sort-Object)) {
-      if ($Offset + 2 -gt $Stream.Length) { continue }
-      $Header = Read-BinaryBytes -Stream $Stream -Offset $Offset -Count 2
-      $Combined = (([int]$Header[0] -shl 8) -bor [int]$Header[1])
-      # RFC 1950 validation: CMF/FLG must be divisible by 31 and this parser
-      # deliberately rejects preset-dictionary streams it cannot validate.
-      if (($Combined % 31) -eq 0 -and ($Header[1] -band 0x20) -eq 0) { [long]$Offset }
-    }
-  } finally {
-    $Stream.Dispose()
-  }
-}
-
-function Read-InstallBuilderZlibProject {
-  <#
-  .SYNOPSIS
-    Read one bounded zlib record and return project XML when present
-  .PARAMETER Path
-    Path to the installer or format artifact read by this function.
-  .PARAMETER Offset
-    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
-  .PARAMETER MaximumExpandedBytes
-    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
-  .PARAMETER CollisionAction
-    Behavior when an output path already exists or is selected more than once.
+    Resolved installer path.
+  .PARAMETER Payload
+    Logical payload catalog produced by the current top-level parse.
+  .PARAMETER PrimaryExecutableCandidate
+    Logical executable paths referenced by shortcuts or execution actions.
+  .PARAMETER Cookfs
+    Parsed CookFS layout, or null for legacy Metakit media.
+  .PARAMETER MetakitLayouts
+    Validated Metakit layouts used for legacy selected extraction.
+  .PARAMETER MaximumAnalysisBytes
+    Maximum aggregate bytes materialized for architecture and dependency analysis.
   #>
   [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)][string]$Path,
-    [Parameter(Mandatory)][long]$Offset,
-    [ValidateRange(1024, [long]::MaxValue)][long]$MaximumExpandedBytes = $Script:InstallBuilderMaximumProjectBytes
+    [AllowNull()][object[]]$Payload,
+    [AllowNull()][string[]]$PrimaryExecutableCandidate,
+    [AllowNull()][object]$Cookfs,
+    [AllowNull()][object[]]$MetakitLayouts,
+    [ValidateRange(1048576, [long]::MaxValue)][long]$MaximumAnalysisBytes = $Script:InstallBuilderMaximumPayloadAnalysisBytes
   )
 
-  $File = Get-Item -LiteralPath $Path -Force
-  $Source = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-  $Output = [IO.MemoryStream]::new()
-  try {
-    # The zlib decoder stops at its own stream end; the output bound prevents an unrelated or
-    # malicious candidate from expanding without limit.
-    $Range = New-BoundedReadStream -Stream $Source -Offset $Offset -Length ($Source.Length - $Offset) -LeaveOpen
-    try { $null = Expand-InstallerCompressedStream -Algorithm Zlib -Stream $Range -Destination $Output -MaximumBytes $MaximumExpandedBytes }
-    finally { $Range.Dispose() }
-    $Content = [Text.Encoding]::UTF8.GetString($Output.ToArray()).TrimStart([char]0xFEFF, [char]0)
-    $Start = $Content.IndexOf('<project', [StringComparison]::OrdinalIgnoreCase)
-    if ($Start -lt 0) { return $null }
-    $EndTag = '</project>'
-    $End = $Content.IndexOf($EndTag, $Start, [StringComparison]::OrdinalIgnoreCase)
-    if ($End -lt 0) { return $null }
-    [pscustomobject]@{ Offset = $Offset; Content = $Content.Substring($Start, $End - $Start + $EndTag.Length); Length = $Output.Length }
-  } catch {
-    return $null
-  } finally {
-    $Output.Dispose()
-    $Source.Dispose()
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  $DefaultPayload = @($Payload | Where-Object ConditionState -EQ 'True')
+  $Primary = [Collections.Generic.List[object]]::new()
+  foreach ($Candidate in @($PrimaryExecutableCandidate | Select-Object -Unique)) {
+    $Match = @($DefaultPayload | Where-Object Path -CEQ $Candidate)
+    if ($Match.Count -eq 1) { $Primary.Add($Match[0]) }
   }
-}
-
-function Get-InstallBuilderProjectData {
-  <#
-  .SYNOPSIS
-    Locate and decompress the InstallBuilder project XML from a Metakit VFS
-  .PARAMETER Path
-    Path to the installer or format artifact read by this function.
-  .PARAMETER MaximumExpandedBytes
-    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory)][string]$Path,
-    [ValidateRange(1024, [long]::MaxValue)][long]$MaximumExpandedBytes = $Script:InstallBuilderMaximumProjectBytes
-  )
-
-  $File = Get-Item -LiteralPath $Path -Force
-  $Marker = [Text.Encoding]::ASCII.GetBytes('project.xml')
-  if (-not @(Find-BinaryPattern -Path $File.FullName -Pattern $Marker -Maximum 1)) {
-    throw 'The file does not contain an InstallBuilder project.xml VFS marker'
+  if ($Primary.Count -eq 0) {
+    return [pscustomobject]@{ ArchitectureInfo = @(); Architectures = @(); DependencyInfo = @(); InspectedFiles = @(); Diagnostics = @() }
   }
-  # Accept the first candidate that expands to a complete project root, not merely XML fragments.
-  foreach ($Offset in @(Get-InstallBuilderCandidateOffset -Path $File.FullName)) {
-    $Project = Read-InstallBuilderZlibProject -Path $File.FullName -Offset $Offset -MaximumExpandedBytes $MaximumExpandedBytes
-    if ($Project) { return $Project }
+  if ($Primary.Count -gt 4) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.PrimaryExecutableLimit' -Source InstallBuilder -Message 'Only the first four source-referenced primary executables were inspected.' -Kind Information -Areas Metadata -AffectedFields @('Architecture', 'Dependencies') -Evidence ([pscustomobject]@{ CandidateCount = $Primary.Count; Limit = 4 })))
+    $Primary = [Collections.Generic.List[object]]@($Primary | Select-Object -First 4)
   }
-  throw 'The InstallBuilder Metakit VFS contains project.xml but no supported bounded zlib project record was found'
-}
 
-function Get-InstallBuilderXmlValue {
-  <#
-  .SYNOPSIS
-    Read one trimmed InstallBuilder project XML value.
-  .PARAMETER Xml
-    XML node used as the XPath context.
-  .PARAMETER XPath
-    Relative or absolute XPath identifying the requested scalar node.
-  #>
-  [OutputType([string])]
-  param ([Parameter(Mandatory)][System.Xml.XmlNode]$Xml, [Parameter(Mandatory)][string]$XPath)
-  $Node = $Xml.SelectSingleNode($XPath)
-  if (-not $Node) { return $null }
-  $Value = $Node.InnerText.Trim()
-  if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
-  return $Value
-}
-
-function Get-InstallBuilderRegistryWrite {
-  <#
-  .SYNOPSIS
-    Read literal registrySet actions from an InstallBuilder project
-  .PARAMETER Xml
-    Parsed format configuration used to resolve static installer metadata and payload selection.
-  #>
-  [OutputType([pscustomobject[]])]
-  param ([Parameter(Mandatory)][xml]$Xml)
-  # Registry metadata is returned only from literal project actions; Tcl substitutions remain
-  # unresolved strings for downstream manual review.
-  foreach ($Action in @($Xml.SelectNodes('//registrySet'))) {
-    $Key = Get-InstallBuilderXmlValue -Xml $Action -XPath 'key'
-    if ([string]::IsNullOrWhiteSpace($Key)) { continue }
-    [pscustomobject]@{
-      Root  = if ($Key -match '^HKEY_LOCAL_MACHINE|^HKLM') { 'HKLM' } elseif ($Key -match '^HKEY_CURRENT_USER|^HKCU') { 'HKCU' } else { $null }
-      Key   = $Key -replace '^HKEY_LOCAL_MACHINE\\?', '' -replace '^HKLM\\?', '' -replace '^HKEY_CURRENT_USER\\?', '' -replace '^HKCU\\?', ''
-      Name  = Get-InstallBuilderXmlValue -Xml $Action -XPath 'name'
-      Value = Get-InstallBuilderXmlValue -Xml $Action -XPath 'value'
-      Type  = Get-InstallBuilderXmlValue -Xml $Action -XPath 'type'
+  $Selected = [Collections.Generic.List[object]]::new()
+  $SelectedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  [long]$SelectedBytes = 0
+  foreach ($Item in $Primary) {
+    $ItemLength = $Item.PSObject.Properties['Length'] ? [long]$Item.Length : [long]$Item.Size
+    if ($SelectedBytes -gt $MaximumAnalysisBytes - $ItemLength) { continue }
+    if ($SelectedPaths.Add([string]$Item.Path)) { $Selected.Add($Item); $SelectedBytes += $ItemLength }
+    $Directory = [IO.Path]::GetDirectoryName(([string]$Item.Path).Replace('/', '\'))
+    foreach ($Related in @($DefaultPayload | Where-Object {
+          $RelatedPath = ([string]$_.Path).Replace('/', '\')
+          [IO.Path]::GetDirectoryName($RelatedPath) -ieq $Directory -and $RelatedPath -match '(?i)\.(?:dll|deps\.json|runtimeconfig\.json)$'
+        } | Select-Object -First 64)) {
+      $RelatedLength = $Related.PSObject.Properties['Length'] ? [long]$Related.Length : [long]$Related.Size
+      if ($SelectedBytes -gt $MaximumAnalysisBytes - $RelatedLength) { break }
+      if ($SelectedPaths.Add([string]$Related.Path)) { $Selected.Add($Related); $SelectedBytes += $RelatedLength }
     }
   }
-}
-
-function Get-InstallBuilderScopeInfo {
-  <#
-  .SYNOPSIS
-    Derive scope evidence from structured InstallBuilder project settings.
-  .PARAMETER Xml
-    Parsed project.xml document. Literal root-install and HKCU/HKLM branches are inspected without executing Tcl.
-  #>
-  [OutputType([pscustomobject])]
-  param ([Parameter(Mandatory)][xml]$Xml)
-  $RequireAdministrator = Get-InstallBuilderXmlValue -Xml $Xml -XPath '/project/requireInstallationByRootUser'
-  if ($RequireAdministrator -match '^(1|true|yes)$') {
-    return [pscustomobject]@{ Scope = 'machine'; SupportedScopes = @('machine'); Confidence = 'high'; Evidence = 'requireInstallationByRootUser=1' }
-  }
-  # A root-install branch with both ARP hives is evidence of elevation-dependent dual scope. One
-  # literal hive without such a branch is treated as a fixed scope.
-  $ProjectText = $Xml.OuterXml
-  $HasMachineArpPath = $ProjectText -match '(?is)HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
-  $HasUserArpPath = $ProjectText -match '(?is)HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
-  $UsesRootScopeBranch = $ProjectText -match '(?is)\$\{installer_is_root_install\}'
-  if ($UsesRootScopeBranch -and $HasMachineArpPath -and $HasUserArpPath) {
-    return [pscustomobject]@{ Scope = 'user'; SupportedScopes = @('user', 'machine'); Confidence = 'medium'; Evidence = 'Project branches on ${installer_is_root_install} and contains HKCU/HKLM uninstall paths.' }
-  }
-  if ($HasMachineArpPath) { return [pscustomobject]@{ Scope = 'machine'; SupportedScopes = @('machine'); Confidence = 'medium'; Evidence = 'Project contains an HKLM uninstall path.' } }
-  if ($HasUserArpPath) { return [pscustomobject]@{ Scope = 'user'; SupportedScopes = @('user'); Confidence = 'medium'; Evidence = 'Project contains an HKCU uninstall path.' } }
-  return [pscustomobject]@{ Scope = $null; SupportedScopes = @(); Confidence = 'unknown'; Evidence = 'InstallBuilder project does not contain statically provable uninstall scope evidence.' }
-}
-
-function Read-InstallBuilderBigEndianUInt32 {
-  <#
-  .SYNOPSIS
-    Read a bounded unsigned 32-bit integer from a CookFS byte buffer
-  .PARAMETER Bytes
-    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
-  .PARAMETER Position
-    Current record position or zero-based index within the validated table.
-  #>
-  [OutputType([uint32])]
-  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Position)
-  if ($Position.Value -lt 0 -or $Position.Value + 4 -gt $Bytes.Length) { throw 'The CookFS index is truncated while reading an integer' }
-  $Offset = $Position.Value
-  $Position.Value += 4
-  return ([uint32]$Bytes[$Offset] -shl 24) -bor ([uint32]$Bytes[$Offset + 1] -shl 16) -bor ([uint32]$Bytes[$Offset + 2] -shl 8) -bor [uint32]$Bytes[$Offset + 3]
-}
-
-function Skip-InstallBuilderCookfsByteRange {
-  <#
-  .SYNOPSIS
-    Advance a CookFS index cursor across one validated byte range.
-  .PARAMETER Bytes
-    Complete expanded CookFS index byte array.
-  .PARAMETER Position
-    Mutable record-relative cursor. It is advanced by Count on success.
-  .PARAMETER Count
-    Number of bytes to skip. Negative or out-of-range values throw.
-  #>
-  param ([Parameter(Mandatory)][byte[]]$Bytes, [Parameter(Mandatory)][ref]$Position, [Parameter(Mandatory)][int]$Count)
-  if ($Count -lt 0 -or $Position.Value + $Count -gt $Bytes.Length) { throw 'The CookFS index is truncated while reading an entry' }
-  $Position.Value += $Count
-}
-
-function Expand-InstallBuilderCookfsRecord {
-  <#
-  .SYNOPSIS
-    Decompress one CookFS stored page or index record
-  .PARAMETER StoredBytes
-    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
-  .PARAMETER MaximumExpandedBytes
-    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
-  #>
-  [OutputType([byte[]])]
-  param (
-    [Parameter(Mandatory)][byte[]]$StoredBytes,
-    [Parameter(Mandatory)][ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes
-  )
-
-  if ($StoredBytes.Length -eq 0) { throw 'The CookFS stored record is empty' }
-  # CookFS prepends a one-byte handler ID to every index/page record. Handler 255 is accepted only
-  # when the following bytes form InstallBuilder's unencrypted LZMA-alone record.
-  $CompressionId = $StoredBytes[0]
-  if ($CompressionId -notin 0, 1, 2, 255) { throw "The CookFS record uses unknown compression identifier $CompressionId" }
-  if ($CompressionId -eq 0) {
-    if ($StoredBytes.Length - 1 -gt $MaximumExpandedBytes) { throw 'The CookFS uncompressed record exceeds the configured output limit' }
-    $Result = [byte[]]::new($StoredBytes.Length - 1)
-    if ($Result.Length) { [Array]::Copy($StoredBytes, 1, $Result, 0, $Result.Length) }
-    return , $Result
-  }
-  if ($CompressionId -eq 2 -and $StoredBytes.Length -lt 5) { throw 'The CookFS BZip2 record is truncated' }
-  [long]$ExpectedLength = -1
-  if ($CompressionId -eq 255) {
-    # InstallBuilder's unencrypted custom CookFS handler is lzmadec. Its stored
-    # page is the CookFS marker followed by an LZMA-alone header and payload.
-    if ($StoredBytes.Length -lt 14 -or $StoredBytes[1] -gt 224) { throw 'The CookFS custom record is unsupported or encrypted' }
-    $DictionarySize = [BitConverter]::ToUInt32($StoredBytes, 2)
-    if ($DictionarySize -eq 0 -or $DictionarySize -gt $Script:InstallBuilderMaximumLzmaDictionaryBytes) { throw 'The CookFS LZMA dictionary size is invalid or exceeds the configured limit' }
-    $ExpectedLength = [BitConverter]::ToInt64($StoredBytes, 6)
-    if ($ExpectedLength -lt 0 -or $ExpectedLength -gt $MaximumExpandedBytes) { throw 'The CookFS LZMA record output size is invalid or exceeds the configured limit' }
+  if ($Selected.Count -eq 0) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.AnalysisLimit' -Source InstallBuilder -Message 'The source-referenced primary executable payloads exceed the configured static-analysis limit.' -Kind Unsupported -Areas Metadata -AffectedFields @('Architecture', 'Dependencies') -Evidence ([pscustomobject]@{ MaximumAnalysisBytes = $MaximumAnalysisBytes })))
+    return [pscustomobject]@{ ArchitectureInfo = @(); Architectures = @(); DependencyInfo = @(); InspectedFiles = @(); Diagnostics = $Diagnostics.ToArray() }
   }
 
-  # BZip2 carries a four-byte CookFS prefix; custom LZMA carries properties and expected length.
-  $PayloadOffset = if ($CompressionId -eq 2) { 5 } elseif ($CompressionId -eq 255) { 14 } else { 1 }
-  $InputStream = [IO.MemoryStream]::new($StoredBytes, $PayloadOffset, $StoredBytes.Length - $PayloadOffset, $false)
-  $Output = [IO.MemoryStream]::new()
+  $TemporaryDirectory = New-TempFolder
   try {
-    $ExpandArguments = @{ Stream = $InputStream; Destination = $Output; MaximumBytes = $MaximumExpandedBytes }
-    switch ($CompressionId) {
-      1 { $ExpandArguments.Algorithm = 'Deflate' }
-      2 { $ExpandArguments.Algorithm = 'BZip2' }
-      255 {
-        $ExpandArguments.Algorithm = 'Lzma'
-        $ExpandArguments.Properties = [byte[]]$StoredBytes[1..5]
-        $ExpandArguments.CompressedSize = $StoredBytes.Length - $PayloadOffset
-        $ExpandArguments.UncompressedSize = $ExpectedLength
+    $Files = @(Export-InstallBuilderPayloadSelection -Path $Path -Entry $Selected.ToArray() -Cookfs $Cookfs -MetakitLayouts $MetakitLayouts -DestinationPath $TemporaryDirectory -MaximumExpandedBytes $MaximumAnalysisBytes)
+    $ArchitectureInfo = [Collections.Generic.List[object]]::new()
+    $DependencyInfo = [Collections.Generic.List[object]]::new()
+    foreach ($Item in $Primary) {
+      if (-not $SelectedPaths.Contains([string]$Item.Path)) { continue }
+      $ExpectedPath = Resolve-SafeExtractionPath -DestinationPath $TemporaryDirectory -RelativePath ([string]$Item.Path)
+      $PrimaryFile = @($Files | Where-Object FullName -EQ $ExpectedPath)
+      if ($PrimaryFile.Count -ne 1) { continue }
+      $Directory = $PrimaryFile[0].DirectoryName
+      $RelatedFiles = @($Files | Where-Object { $_.FullName -cne $PrimaryFile[0].FullName -and $_.DirectoryName -ieq $Directory })
+      try {
+        $ArchitectureInfo.Add((Get-PEArchitectureInfo -Path $PrimaryFile[0].FullName -RelatedFile @($RelatedFiles | Where-Object Extension -IEQ '.dll' | Select-Object -ExpandProperty FullName)))
+      } catch {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.ArchitectureUnavailable' -Source InstallBuilder -Message "Payload architecture analysis failed for '$($Item.Path)': $($_.Exception.Message)" -Kind Incomplete -Areas Metadata -AffectedFields Architecture))
+      }
+      try {
+        $DependencyInfo.Add((Get-PEDependencyInfo -Path $PrimaryFile[0].FullName -RelatedFile @($RelatedFiles | Select-Object -ExpandProperty FullName)))
+      } catch {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.DependenciesUnavailable' -Source InstallBuilder -Message "Payload dependency analysis failed for '$($Item.Path)': $($_.Exception.Message)" -Kind Incomplete -Areas Metadata -AffectedFields Dependencies))
       }
     }
-    $null = Expand-InstallerCompressedStream @ExpandArguments
-    return , ($Output.ToArray())
-  } finally {
-    $Output.Dispose()
-    $InputStream.Dispose()
-  }
+    foreach ($Child in @($ArchitectureInfo) + @($DependencyInfo)) {
+      foreach ($Diagnostic in @($Child.Diagnostics)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } }
+    }
+    return [pscustomobject]@{
+      ArchitectureInfo = $ArchitectureInfo.ToArray()
+      Architectures    = [string[]]@($ArchitectureInfo.RecommendedWinGetArchitectures | Where-Object { $_ -in 'x86', 'x64', 'arm64' } | Sort-Object -Unique)
+      DependencyInfo   = $DependencyInfo.ToArray()
+      InspectedFiles   = [string[]]@($Selected.Path)
+      Diagnostics      = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
+    }
+  } finally { Remove-Item -LiteralPath $TemporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-function Test-InstallBuilderCookfsLzmaRecord {
+function Get-InstallBuilderShortcutInfo {
   <#
   .SYNOPSIS
-    Test whether a custom CookFS page is the unencrypted InstallBuilder LZMA form
-  .PARAMETER StoredBytes
-    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
-  #>
-  [OutputType([bool])]
-  param ([Parameter(Mandatory)][byte[]]$StoredBytes)
-  if ($StoredBytes.Length -lt 14 -or $StoredBytes[0] -ne 255 -or $StoredBytes[1] -gt 224) { return $false }
-  $DictionarySize = [BitConverter]::ToUInt32($StoredBytes, 2)
-  $ExpectedLength = [BitConverter]::ToInt64($StoredBytes, 6)
-  return $DictionarySize -gt 0 -and $DictionarySize -le $Script:InstallBuilderMaximumLzmaDictionaryBytes -and $ExpectedLength -ge 0 -and $ExpectedLength -le $Script:InstallBuilderMaximumCookfsPageBytes
-}
-
-function Read-InstallBuilderCookfsIndexNode {
-  <#
-  .SYNOPSIS
-    Recursively decode one CookFS CFS2.200 directory node.
-  .PARAMETER Bytes
-    Complete expanded CookFS index bytes; all record offsets are relative to this array.
-  .PARAMETER Position
-    Mutable big-endian index cursor advanced through the node and its children.
-  .PARAMETER Prefix
-    Already validated logical parent path for child names.
-  .PARAMETER Entry
-    Caller-owned typed collection receiving decoded file records.
+    Read compiled shortcut targets and their inherited runtime conditions.
+  .PARAMETER Xml
+    Parsed InstallBuilder project document.
+  .PARAMETER Context
+    Deterministic project variables and condition evidence.
+  .PARAMETER Payload
+    Logical payload catalog used only to identify embedded shortcut targets.
   #>
   [OutputType([pscustomobject[]])]
   param (
-    [Parameter(Mandatory)][byte[]]$Bytes,
-    [Parameter(Mandatory)][ref]$Position,
-    [Parameter(Mandatory)][AllowEmptyString()][string]$Prefix,
-    [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Entry
+    [Parameter(Mandatory)][xml]$Xml,
+    [Parameter(Mandatory)]$Context,
+    [AllowEmptyCollection()][object[]]$Payload = @()
   )
 
-  # Directory nodes are recursive lists. A sentinel block count denotes a child directory; normal
-  # entries contain page/offset/length triples.
-  $ItemCount = Read-InstallBuilderBigEndianUInt32 -Bytes $Bytes -Position $Position
-  if ($ItemCount -gt $Script:InstallBuilderMaximumCookfsEntries -or $Entry.Count + $ItemCount -gt $Script:InstallBuilderMaximumCookfsEntries) { throw 'The CookFS index exceeds the configured entry-count limit' }
-  for ($ItemIndex = 0; $ItemIndex -lt $ItemCount; $ItemIndex++) {
-    if ($Position.Value -ge $Bytes.Length) { throw 'The CookFS index is truncated while reading a file name' }
-    $NameLength = [int]$Bytes[$Position.Value]
-    $Position.Value++
-    if ($NameLength -eq 0 -or $Position.Value + $NameLength + 1 -gt $Bytes.Length) { throw 'The CookFS index contains an invalid file name' }
-    $Name = [Text.Encoding]::UTF8.GetString($Bytes, $Position.Value, $NameLength)
-    $Position.Value += $NameLength
-    if ($Bytes[$Position.Value] -ne 0) { throw 'The CookFS index file name is not null terminated' }
-    $Position.Value++
-    if ($Name.IndexOf([char]0) -ge 0 -or $Name.IndexOfAny([char[]]@('/', '\', ':')) -ge 0 -or $Name -in '.', '..') { throw 'The CookFS index contains an unsafe file name' }
-    Skip-InstallBuilderCookfsByteRange -Bytes $Bytes -Position $Position -Count 8 # mtime
-    $BlockCount = Read-InstallBuilderBigEndianUInt32 -Bytes $Bytes -Position $Position
-    $RelativePath = if ([string]::IsNullOrEmpty($Prefix)) { $Name } else { "$Prefix/$Name" }
-    if ($BlockCount -eq [uint32]::MaxValue) {
-      # Descend only after the child name has passed path-component validation.
-      Read-InstallBuilderCookfsIndexNode -Bytes $Bytes -Position $Position -Prefix $RelativePath -Entry $Entry
+  $PayloadPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($Item in @($Payload)) { $null = $PayloadPaths.Add(([string]$Item.Path).Replace('\', '/')) }
+
+  foreach ($Shortcut in @($Xml.SelectNodes('//shortcut'))) {
+    $Condition = Get-InstallBuilderNodeCondition -Node $Shortcut -Context $Context
+    $Resolve = {
+      param([string]$Name)
+      $Raw = (Get-InstallBuilderXmlValue -Xml $Shortcut -XPath $Name) ?? $Shortcut.GetAttribute($Name)
+      (Resolve-InstallBuilderProjectValue -Value $Raw -Variables $Context.Variables).Value
+    }
+    $Target = (& $Resolve 'windowsExec') ?? (& $Resolve 'exec')
+    $PayloadPath = Resolve-InstallBuilderPayloadPath -Path $Target -Context $Context -PayloadPath $PayloadPaths
+    [pscustomobject][ordered]@{
+      Name              = & $Resolve 'name'
+      Target            = $Target
+      Arguments         = & $Resolve 'windowsExecArgs'
+      WorkingDirectory  = (& $Resolve 'windowsPath') ?? (& $Resolve 'path')
+      Icon              = (& $Resolve 'windowsIcon') ?? (& $Resolve 'icon')
+      Platforms         = & $Resolve 'platforms'
+      PayloadPath       = $PayloadPath
+      IsEmbeddedPayload = [bool]$PayloadPath
+      ConditionState    = $Condition.State
+      Conditions        = $Condition.Conditions
+    }
+  }
+}
+
+function Get-InstallBuilderRequirementInfo {
+  <#
+  .SYNOPSIS
+    Project structured Java and Windows-version requirements without resolving host state.
+  .PARAMETER Xml
+    Parsed InstallBuilder project document.
+  .PARAMETER Context
+    Deterministic project variables and target-platform evidence used for inherited conditions.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][xml]$Xml,
+    [Parameter(Mandatory)]$Context
+  )
+
+  $Java = [Collections.Generic.List[object]]::new()
+  foreach ($Action in @($Xml.SelectNodes('//autodetectJava'))) {
+    $Condition = Get-InstallBuilderNodeCondition -Node $Action -Context $Context
+    $Versions = [Collections.Generic.List[object]]::new()
+    foreach ($ValidVersion in @($Action.SelectNodes('validVersionList/validVersion'))) {
+      $Versions.Add([pscustomobject][ordered]@{
+          MinimumVersion = Get-InstallBuilderXmlValue -Xml $ValidVersion -XPath 'minVersion'
+          MaximumVersion = Get-InstallBuilderXmlValue -Xml $ValidVersion -XPath 'maxVersion'
+          Vendor         = Get-InstallBuilderXmlValue -Xml $ValidVersion -XPath 'vendor'
+          Bitness        = Get-InstallBuilderXmlValue -Xml $ValidVersion -XPath 'bitness'
+          RequireJdk     = Test-InstallBuilderTrueValue (Get-InstallBuilderXmlValue -Xml $ValidVersion -XPath 'requireJDK')
+        })
+    }
+    $Java.Add([pscustomobject][ordered]@{
+        PromptUser     = Test-InstallBuilderTrueValue (Get-InstallBuilderXmlValue -Xml $Action -XPath 'promptUser')
+        ValidVersions  = $Versions.ToArray()
+        ConditionState = $Condition.State
+        Conditions     = $Condition.Conditions
+      })
+  }
+
+  # autodetectDotNetFramework is a declarative version-range probe. Preserve the accepted ranges
+  # as dependency evidence without mapping them to a particular package-provider identifier.
+  $DotNetFramework = [Collections.Generic.List[object]]::new()
+  foreach ($Action in @($Xml.SelectNodes('//autodetectDotNetFramework'))) {
+    $Condition = Get-InstallBuilderNodeCondition -Node $Action -Context $Context
+    $Versions = [Collections.Generic.List[object]]::new()
+    foreach ($ValidVersion in @($Action.SelectNodes('validDotNetVersionList/validDotNetVersion'))) {
+      $Versions.Add([pscustomobject][ordered]@{
+          MinimumVersion = Get-InstallBuilderXmlValue -Xml $ValidVersion -XPath 'minVersion'
+          MaximumVersion = Get-InstallBuilderXmlValue -Xml $ValidVersion -XPath 'maxVersion'
+        })
+    }
+    $DotNetFramework.Add([pscustomobject][ordered]@{
+        ValidVersions  = $Versions.ToArray()
+        ConditionState = $Condition.State
+        Conditions     = $Condition.Conditions
+      })
+  }
+
+  $Windows = [Collections.Generic.List[object]]::new()
+  foreach ($Rule in @($Xml.SelectNodes('//compareVersions'))) {
+    $Version1 = (Get-InstallBuilderXmlValue -Xml $Rule -XPath 'version1') ?? $Rule.GetAttribute('version1')
+    $Version2 = (Get-InstallBuilderXmlValue -Xml $Rule -XPath 'version2') ?? $Rule.GetAttribute('version2')
+    if ($Version1 -notmatch '\$\{windows_os_version_number\}' -and $Version2 -notmatch '\$\{windows_os_version_number\}') { continue }
+    $Windows.Add([pscustomobject][ordered]@{
+        Version1 = $Version1
+        Version2 = $Version2
+        Logic    = (Get-InstallBuilderXmlValue -Xml $Rule -XPath 'logic') ?? $Rule.GetAttribute('logic')
+        State    = (Resolve-InstallBuilderRuleState -Rule $Rule -Context $Context).State
+        Xml      = $Rule.OuterXml
+      })
+  }
+  [pscustomobject][ordered]@{
+    Java                = $Java.ToArray()
+    DotNetFramework     = $DotNetFramework.ToArray()
+    WindowsVersionRules = $Windows.ToArray()
+  }
+}
+
+function Get-InstallBuilderArpInfo {
+  <#
+  .SYNOPSIS
+    Reconstruct built-in and literal custom InstallBuilder ARP entries.
+  .PARAMETER Xml
+    Parsed InstallBuilder project document.
+  .PARAMETER Context
+    Shared project context containing deterministic variables and PE evidence.
+  .PARAMETER RegistryWrite
+    Effective registrySet actions. Conditional actions remain evidence but do not become authoritative entries.
+  .PARAMETER RegistryDelete
+    Parsed registryDelete actions used to account for changes after built-in uninstaller creation.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][xml]$Xml,
+    [Parameter(Mandatory)]$Context,
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$RegistryWrite,
+    [AllowEmptyCollection()][object[]]$RegistryDelete = @()
+  )
+
+  $InstallationType = Get-InstallBuilderProjectProperty -Xml $Xml -Name installationType
+  $CreateUninstaller = Test-InstallBuilderTrueValue (Get-InstallBuilderProjectProperty -Xml $Xml -Name createUninstaller)
+  $CreateWindowsArpEntry = Test-InstallBuilderTrueValue (Get-InstallBuilderProjectProperty -Xml $Xml -Name createWindowsARPEntry)
+  $HasBuiltInUninstaller = $InstallationType -ieq 'normal' -and $CreateUninstaller
+  $WritesBuiltInArp = $HasBuiltInUninstaller -and $CreateWindowsArpEntry
+  $EntryMap = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+
+  $BuiltInProductCode = $null
+  if ($WritesBuiltInArp) {
+    $PrefixResult = Resolve-InstallBuilderProjectValue -Value (Get-InstallBuilderProjectProperty -Xml $Xml -Name windowsARPRegistryPrefix) -Variables $Context.Variables
+    $DisplayNameResult = Resolve-InstallBuilderProjectValue -Value (Get-InstallBuilderProjectProperty -Xml $Xml -Name productDisplayName) -Variables $Context.Variables
+    if ($PrefixResult.Value) {
+      $BuiltInProductCode = $PrefixResult.Value
+      $ResolveProperty = {
+        param([string]$Name)
+        (Resolve-InstallBuilderProjectValue -Value (Get-InstallBuilderProjectProperty -Xml $Xml -Name $Name) -Variables $Context.Variables).Value
+      }
+      $UninstallerName = $Context.UninstallerName
+      if ($UninstallerName -and -not $UninstallerName.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) { $UninstallerName += '.exe' }
+      $UninstallerPath = if ($Context.UninstallerDirectory -and $UninstallerName) { "$($Context.UninstallerDirectory.TrimEnd('/', '\'))\$UninstallerName".Replace('/', '\') } else { $null }
+      $EntryMap["HKLM|$($Context.RegistryView)|$BuiltInProductCode"] = [pscustomobject][ordered]@{
+        ProductCode          = $BuiltInProductCode
+        DisplayName          = $DisplayNameResult.Value
+        DisplayVersion       = $Context.Identity.Version.Value
+        Publisher            = $Context.Identity.Vendor.Value
+        InstallerType        = 'exe'
+        RegistryHive         = 'HKLM'
+        RegistryView         = $Context.RegistryView
+        RegistryKey          = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$BuiltInProductCode"
+        UninstallString      = $UninstallerPath ? "`"$UninstallerPath`"" : $null
+        QuietUninstallString = $null
+        DisplayIcon          = & $ResolveProperty 'productDisplayIcon'
+        InstallLocation      = $Context.InstallLocation
+        UrlInfoAbout         = & $ResolveProperty 'productUrlInfoAbout'
+        Comments             = & $ResolveProperty 'productComments'
+        Contact              = & $ResolveProperty 'productContact'
+        HelpLink             = & $ResolveProperty 'productUrlHelpLink'
+        SystemComponent      = $null
+        NoModify             = 1
+        NoRepair             = 1
+        EstimatedSize        = $null
+        InstallDate          = $null
+        IsVisible            = $true
+        ConditionState       = 'True'
+        Conditions           = @()
+        Source               = 'BuiltInWindowsARP'
+      }
+      $UnresolvedBuiltInValues = [ordered]@{}
+      if (@($DisplayNameResult.UnresolvedVariables).Count) { $UnresolvedBuiltInValues.DisplayName = $DisplayNameResult.UnresolvedVariables }
+      if (@($Context.Identity.Version.UnresolvedVariables).Count) { $UnresolvedBuiltInValues.DisplayVersion = $Context.Identity.Version.UnresolvedVariables }
+      if (@($Context.Identity.Vendor.UnresolvedVariables).Count) { $UnresolvedBuiltInValues.Publisher = $Context.Identity.Vendor.UnresolvedVariables }
+      if ($UnresolvedBuiltInValues.Count) {
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.ARP.BuiltInValuesUnresolved' -Source InstallBuilder -Message 'The built-in ARP key is known, but one or more display values depend on unresolved runtime variables.' -Kind Incomplete -Areas Metadata -AffectedFields @('AppsAndFeaturesEntries') -Evidence ([pscustomobject]$UnresolvedBuiltInValues)))
+      }
+    } else {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.ARP.BuiltInPrefixUnresolved' -Source InstallBuilder -Message "The built-in ARP registry prefix contains unresolved variables: $($PrefixResult.UnresolvedVariables -join ', ')" -Kind Incomplete -Areas Metadata -AffectedFields @('ProductCode', 'AppsAndFeaturesEntries')))
+    }
+  }
+
+  # Custom registrySet actions can replace, hide, or supplement the built-in entry. Group all
+  # records first so a SystemComponent override on the built-in key affects visibility.
+  $CustomGroups = @($RegistryWrite | Where-Object { $_.Lifecycle -eq 'Installation' -and $_.Key -match '(^|\\)Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\.+' } | Group-Object -Property { "$($_.Root)|$($_.RawKey)" })
+  foreach ($Group in $CustomGroups) {
+    $RawKey = [string]$Group.Group[0].RawKey
+    $KeyResult = Resolve-InstallBuilderProjectValue -Value $RawKey -Variables $Context.Variables
+    if (-not $KeyResult.Value) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.ARP.CustomKeyUnresolved' -Source InstallBuilder -Message "A custom ARP registry key contains unresolved variables: $($KeyResult.UnresolvedVariables -join ', ')" -Kind Incomplete -Areas Metadata -AffectedFields @('ProductCode', 'AppsAndFeaturesEntries') -Evidence ([pscustomobject]@{ Key = $RawKey; Variables = $KeyResult.UnresolvedVariables })))
       continue
     }
-    if ($BlockCount -gt 1048576 -or $BlockCount * 12 -gt $Bytes.Length - $Position.Value) { throw 'The CookFS index contains an invalid block list' }
-    $Blocks = [System.Collections.Generic.List[object]]::new()
-    [long]$Length = 0
-    for ($BlockIndex = 0; $BlockIndex -lt $BlockCount; $BlockIndex++) {
-      $Page = Read-InstallBuilderBigEndianUInt32 -Bytes $Bytes -Position $Position
-      $Offset = Read-InstallBuilderBigEndianUInt32 -Bytes $Bytes -Position $Position
-      $Size = Read-InstallBuilderBigEndianUInt32 -Bytes $Bytes -Position $Position
-      $Length += $Size
-      if ($Length -gt [long]::MaxValue -or $Size -gt $Script:InstallBuilderMaximumCookfsPageBytes) { throw 'The CookFS index contains an oversized file block' }
-      $Blocks.Add([pscustomobject]@{ Page = $Page; Offset = $Offset; Length = $Size })
+    $ProductCode = Split-Path -Path $KeyResult.Value.Replace('/', '\') -Leaf
+    if ([string]::IsNullOrWhiteSpace($ProductCode)) { continue }
+    $Root = @($Group.Group.Root | Where-Object { $_ } | Select-Object -Unique)
+    $WowMode = @($Group.Group.WowMode | Where-Object { $_ } | Select-Object -Unique)
+    $RegistryView = if ($WowMode -contains '32') { '32-bit' } elseif ($WowMode -contains '64') { '64-bit' } else { $Context.RegistryView }
+    $Identity = "$($Root.Count -eq 1 ? $Root[0] : '')|$RegistryView|$ProductCode"
+    $Existing = $EntryMap.ContainsKey($Identity) ? $EntryMap[$Identity] : $null
+    $Values = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    if ($Existing) { foreach ($Property in $Existing.PSObject.Properties) { $Values[$Property.Name] = $Property.Value } }
+    foreach ($Write in @($Group.Group | Where-Object ConditionState -EQ 'True')) {
+      if ([string]::IsNullOrWhiteSpace($Write.Name)) { continue }
+      $ValueResult = Resolve-InstallBuilderProjectValue -Value $Write.Value -Variables $Context.Variables
+      if ($null -ne $ValueResult.Value) { $Values[$Write.Name] = $ValueResult.Value }
     }
-    $Entry.Add([pscustomobject]@{ Path = $RelativePath; Length = $Length; Blocks = $Blocks.ToArray() })
+    $UnknownWrites = @($Group.Group | Where-Object ConditionState -EQ 'Unknown')
+    $HasTrueWrite = @($Group.Group | Where-Object ConditionState -EQ 'True').Count -gt 0
+    if (-not $HasTrueWrite -and -not $Existing -and -not $UnknownWrites.Count) { continue }
+    $SystemComponent = $Values.ContainsKey('SystemComponent') ? $Values['SystemComponent'] : $null
+    $VisibilityUnknown = @($UnknownWrites | Where-Object Name -IEQ 'SystemComponent').Count -gt 0
+    $SystemComponentNumber = 0L
+    $IsHidden = if ($null -eq $SystemComponent) {
+      $false
+    } elseif ([long]::TryParse([string]$SystemComponent, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$SystemComponentNumber)) {
+      $SystemComponentNumber -ne 0
+    } else {
+      Test-InstallBuilderTrueValue ([string]$SystemComponent)
+    }
+    $IsVisible = $VisibilityUnknown ? $null : -not $IsHidden
+    $EntryMap[$Identity] = [pscustomobject][ordered]@{
+      ProductCode          = $ProductCode
+      DisplayName          = $Values.ContainsKey('DisplayName') ? $Values['DisplayName'] : $null
+      DisplayVersion       = $Values.ContainsKey('DisplayVersion') ? $Values['DisplayVersion'] : $null
+      Publisher            = $Values.ContainsKey('Publisher') ? $Values['Publisher'] : $null
+      InstallerType        = 'exe'
+      RegistryHive         = $Root.Count -eq 1 ? $Root[0] : $null
+      RegistryView         = $RegistryView
+      RegistryKey          = ($KeyResult.Value -replace '^HKEY_LOCAL_MACHINE\\?', '' -replace '^HKLM\\?', '' -replace '^HKEY_CURRENT_USER\\?', '' -replace '^HKCU\\?', '')
+      UninstallString      = $Values.ContainsKey('UninstallString') ? $Values['UninstallString'] : $null
+      QuietUninstallString = $Values.ContainsKey('QuietUninstallString') ? $Values['QuietUninstallString'] : $null
+      DisplayIcon          = $Values.ContainsKey('DisplayIcon') ? $Values['DisplayIcon'] : $null
+      InstallLocation      = $Values.ContainsKey('InstallLocation') ? $Values['InstallLocation'] : $null
+      UrlInfoAbout         = $Values.ContainsKey('UrlInfoAbout') ? $Values['UrlInfoAbout'] : $null
+      Comments             = $Values.ContainsKey('Comments') ? $Values['Comments'] : $null
+      Contact              = $Values.ContainsKey('Contact') ? $Values['Contact'] : $null
+      HelpLink             = $Values.ContainsKey('HelpLink') ? $Values['HelpLink'] : $null
+      SystemComponent      = $SystemComponent
+      NoModify             = $Values.ContainsKey('NoModify') ? $Values['NoModify'] : $null
+      NoRepair             = $Values.ContainsKey('NoRepair') ? $Values['NoRepair'] : $null
+      EstimatedSize        = $Values.ContainsKey('EstimatedSize') ? $Values['EstimatedSize'] : $null
+      InstallDate          = $Values.ContainsKey('InstallDate') ? $Values['InstallDate'] : $null
+      IsVisible            = $IsVisible
+      ConditionState       = ($Existing -or $HasTrueWrite) ? 'True' : 'Unknown'
+      Conditions           = @($Group.Group.Conditions)
+      Source               = $Existing ? 'BuiltInWindowsARP+RegistrySet' : 'RegistrySet'
+    }
+    if ($UnknownWrites.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.ARP.ConditionalValues' -Source InstallBuilder -Message "The custom uninstall key '$ProductCode' has condition-dependent values; unconditional identity remains usable, but affected ARP values require runtime evidence." -Kind Ambiguous -Areas Metadata -AffectedFields @('AppsAndFeaturesEntries') -Evidence ([pscustomobject]@{ ProductCode = $ProductCode; ConditionalValueNames = @($UnknownWrites.Name | Where-Object { $_ } | Select-Object -Unique) })))
+    }
   }
-}
 
-function Get-InstallBuilderCookfsInfo {
-  <#
-  .SYNOPSIS
-    Parse the unencrypted CookFS page and file index embedded in an installer
-  .PARAMETER Path
-    Path to the installer or format artifact read by this function.
-  #>
-  [OutputType([pscustomobject])]
-  param ([Parameter(Mandatory)][string]$Path)
+  # InstallBuilder creates its built-in uninstaller and ARP entry after postInstallationActionList
+  # and before postUninstallerCreationActionList. Only the latter list can remove the final built-in
+  # registration; earlier deletes are followed by built-in recreation.
+  if ($BuiltInProductCode) {
+    $BuiltInIdentity = "HKLM|$($Context.RegistryView)|$BuiltInProductCode"
+    $BuiltInKey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$BuiltInProductCode"
+    $ArpValueProperty = @{
+      DisplayName          = 'DisplayName'
+      DisplayVersion       = 'DisplayVersion'
+      Publisher            = 'Publisher'
+      UninstallString      = 'UninstallString'
+      QuietUninstallString = 'QuietUninstallString'
+      DisplayIcon          = 'DisplayIcon'
+      InstallLocation      = 'InstallLocation'
+      URLInfoAbout         = 'UrlInfoAbout'
+      Comments             = 'Comments'
+      Contact              = 'Contact'
+      HelpLink             = 'HelpLink'
+      SystemComponent      = 'SystemComponent'
+      NoModify             = 'NoModify'
+      NoRepair             = 'NoRepair'
+      EstimatedSize        = 'EstimatedSize'
+      InstallDate          = 'InstallDate'
+    }
+    foreach ($Delete in @($RegistryDelete | Where-Object { $_.Lifecycle -eq 'Installation' -and $_.Phase -eq 'postUninstallerCreationActionList' -and $_.Root -eq 'HKLM' -and $_.RegistryView -eq $Context.RegistryView -and $_.ResolvedKey })) {
+      $DeleteKey = $Delete.ResolvedKey.Trim('\')
+      $DeletesWholeKey = [string]::IsNullOrWhiteSpace([string]$Delete.Name)
+      $MatchesKey = if ($DeletesWholeKey) {
+        $BuiltInKey -ieq $DeleteKey -or $BuiltInKey.StartsWith($DeleteKey + '\', [StringComparison]::OrdinalIgnoreCase)
+      } else {
+        $BuiltInKey -ieq $DeleteKey
+      }
+      if (-not $MatchesKey -or -not $EntryMap.ContainsKey($BuiltInIdentity)) { continue }
 
-  $File = Get-Item -LiteralPath $Path -Force
-  $FooterMarker = [Text.Encoding]::ASCII.GetBytes('CFS0002')
-  $Markers = @(Find-BinaryPattern -Path $File.FullName -Pattern $FooterMarker -Maximum 32 -Reverse)
-  $Stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-  try {
-    foreach ($MarkerOffset in $Markers) {
-      $EndOffset = $MarkerOffset + $FooterMarker.Length
-      if ($EndOffset -lt 16 -or $EndOffset -gt $Stream.Length) { continue }
-      try {
-        $IndexSize = Read-BinaryInteger -Stream $Stream -Offset ($EndOffset - 16) -Size 4 -Endian BigEndian
-        $PageCount = Read-BinaryInteger -Stream $Stream -Offset ($EndOffset - 12) -Size 4 -Endian BigEndian
-        $IndexCompression = Read-BinaryInteger -Stream $Stream -Offset ($EndOffset - 8) -Size 1
-        if ($IndexSize -le 0 -or $IndexSize -gt $Script:InstallBuilderMaximumCookfsIndexBytes -or $PageCount -gt $Script:InstallBuilderMaximumCookfsPages) { continue }
-        $IndexOffset = $EndOffset - 16 - [long]$IndexSize - ([long]$PageCount * 20)
-        if ($IndexOffset -lt 0) { continue }
-        $SizeOffset = $IndexOffset + ([long]$PageCount * 16)
-        $StoredIndexOffset = $SizeOffset + ([long]$PageCount * 4)
-        if ($StoredIndexOffset + $IndexSize -gt $EndOffset - 16) { continue }
-        $PageSizes = [long[]]::new($PageCount)
-        $PageOffsets = [long[]]::new($PageCount)
-        for ($Index = 0; $Index -lt $PageCount; $Index++) {
-          $PageSizes[$Index] = Read-BinaryInteger -Stream $Stream -Offset ($SizeOffset + ($Index * 4)) -Size 4 -Endian BigEndian
-          if ($PageSizes[$Index] -le 0 -or $PageSizes[$Index] -gt $Script:InstallBuilderMaximumCookfsPageBytes) { throw 'The CookFS page table contains an invalid page size' }
-        }
-        # The page table follows all stored page bytes, so derive the page-data
-        # start by walking backward from the index area after validating totals.
-        $PageDataStart = $IndexOffset
-        for ($Index = $PageCount - 1; $Index -ge 0; $Index--) { $PageDataStart -= $PageSizes[$Index] }
-        if ($PageDataStart -lt 0) { throw 'The CookFS page data starts before the file' }
-        $Cursor = $PageDataStart
-        for ($Index = 0; $Index -lt $PageCount; $Index++) { $PageOffsets[$Index] = $Cursor; $Cursor += $PageSizes[$Index] }
-        if ($Cursor -ne $IndexOffset) { throw 'The CookFS page data size does not match the index offset' }
-        $StoredIndex = Read-BinaryBytes -Stream $Stream -Offset $StoredIndexOffset -Count ([int]$IndexSize)
-        if ($StoredIndex[0] -ne $IndexCompression) { throw 'The CookFS footer compression identifier does not match the stored index' }
-        $IndexData = Expand-InstallBuilderCookfsRecord -StoredBytes $StoredIndex -MaximumExpandedBytes $Script:InstallBuilderMaximumCookfsIndexBytes
-        if ($IndexData.Length -lt 8 -or [Text.Encoding]::ASCII.GetString($IndexData, 0, 8) -ne 'CFS2.200') { throw 'The CookFS file index signature is invalid' }
-        $Position = 8
-        $Entries = [System.Collections.Generic.List[object]]::new()
-        Read-InstallBuilderCookfsIndexNode -Bytes $IndexData -Position ([ref]$Position) -Prefix '' -Entry $Entries
-        $CompressionIds = [System.Collections.Generic.HashSet[int]]::new()
-        $CompressionTypes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        $HasUnsupportedCompression = $false
-        for ($Index = 0; $Index -lt $PageCount; $Index++) {
-          $HeaderLength = [Math]::Min(14, $PageSizes[$Index])
-          $PageHeader = Read-BinaryBytes -Stream $Stream -Offset $PageOffsets[$Index] -Count ([int]$HeaderLength)
-          $CompressionId = [int]$PageHeader[0]
-          $null = $CompressionIds.Add($CompressionId)
-          switch ($CompressionId) {
-            0 { $null = $CompressionTypes.Add('None') }
-            1 { $null = $CompressionTypes.Add('Deflate') }
-            2 { $null = $CompressionTypes.Add('BZip2') }
-            255 {
-              if (Test-InstallBuilderCookfsLzmaRecord -StoredBytes $PageHeader) { $null = $CompressionTypes.Add('Lzma') } else { $null = $CompressionTypes.Add('Custom'); $HasUnsupportedCompression = $true }
-            }
-            default { $null = $CompressionTypes.Add("Unknown:$CompressionId"); $HasUnsupportedCompression = $true }
-          }
-        }
-        return [pscustomobject]@{
-          EndOffset                 = $EndOffset
-          IndexOffset               = $IndexOffset
-          PageDataOffset            = $PageDataStart
-          PageCount                 = $PageCount
-          IndexSize                 = $IndexSize
-          CompressionIds            = @($CompressionIds | Sort-Object)
-          CompressionTypes          = @($CompressionTypes | Sort-Object)
-          HasUnsupportedCompression = $HasUnsupportedCompression
-          PageSizes                 = $PageSizes
-          PageOffsets               = $PageOffsets
-          Entries                   = $Entries.ToArray()
-          PageCache                 = [System.Collections.Generic.Dictionary[int, byte[]]]::new()
-          PageCacheOrder            = [System.Collections.Generic.Queue[int]]::new()
-          PageCacheBytes            = 0L
-        }
-      } catch {
+      $Entry = $EntryMap[$BuiltInIdentity]
+      if ($Delete.ConditionState -ne 'True' -or @($Delete.UnresolvedVariables).Count) {
+        $Entry.ConditionState = 'Unknown'
+        if ($DeletesWholeKey -or $Delete.Name -in 'DisplayName', 'SystemComponent') { $Entry.IsVisible = $null }
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.ARP.PostCreationDeleteConditional' -Source InstallBuilder -Message "A condition-dependent post-uninstaller action can delete built-in ARP registry evidence for '$BuiltInProductCode'." -Kind Ambiguous -Areas Metadata -AffectedFields @('ProductCode', 'AppsAndFeaturesEntries') -Evidence $Delete))
         continue
       }
+      if ($DeletesWholeKey) {
+        $null = $EntryMap.Remove($BuiltInIdentity)
+      } elseif ($ArpValueProperty.ContainsKey([string]$Delete.Name)) {
+        $Property = $ArpValueProperty[[string]$Delete.Name]
+        $Entry.$Property = $null
+        if ($Property -eq 'DisplayName') { $Entry.IsVisible = $false }
+      }
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.ARP.PostCreationDeleteApplied' -Source InstallBuilder -Message "A post-uninstaller action deletes built-in ARP registry evidence for '$BuiltInProductCode'; final ARP projection reflects the deletion." -Kind Information -Areas Metadata -AffectedFields @('ProductCode', 'AppsAndFeaturesEntries') -Evidence $Delete))
     }
-  } finally {
-    $Stream.Dispose()
   }
-  throw 'The file does not contain a supported CookFS CFS0002 footer and file index'
-}
 
-function Get-InstallBuilderCookfsPage {
-  <#
-  .SYNOPSIS
-    Decode one bounded CookFS page and retain a small in-memory cache
-  .PARAMETER Path
-    Path to the installer or format artifact read by this function.
-  .PARAMETER Cookfs
-    Validated CookFS layout containing page offsets, stored sizes, and the bounded page cache owned by the caller.
-  .PARAMETER Page
-    Current structured format node or record being interpreted.
-  #>
-  [OutputType([byte[]])]
-  param ([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Cookfs, [Parameter(Mandatory)][uint32]$Page)
-  if ($Page -ge $Cookfs.PageCount) { throw "The CookFS file index references missing page $Page" }
-  # Pages are shared by many files. Reuse a bounded FIFO cache to avoid repeated decompression
-  # without retaining an unbounded portion of a large installer.
-  if ($Cookfs.PageCache.ContainsKey([int]$Page)) { return , $Cookfs.PageCache[[int]$Page] }
-  $Stream = [IO.File]::Open((Get-Item -LiteralPath $Path -Force).FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-  try {
-    $StoredPage = Read-BinaryBytes -Stream $Stream -Offset $Cookfs.PageOffsets[$Page] -Count ([int]$Cookfs.PageSizes[$Page])
-    $PageBytes = Expand-InstallBuilderCookfsRecord -StoredBytes $StoredPage -MaximumExpandedBytes $Script:InstallBuilderMaximumCookfsPageBytes
-  } finally {
-    $Stream.Dispose()
+  $UniqueEntries = @($EntryMap.Values | Sort-Object RegistryHive, RegistryView, ProductCode)
+  $VisibleEntries = @($UniqueEntries | Where-Object { $_.IsVisible -eq $true -and $_.ConditionState -eq 'True' })
+  $UncertainEntries = @($UniqueEntries | Where-Object { $null -eq $_.IsVisible -or $_.ConditionState -eq 'Unknown' })
+  $HiddenEntries = @($UniqueEntries | Where-Object IsVisible -EQ $false)
+  if ($HiddenEntries.Count -and -not $VisibleEntries.Count) {
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.ARP.HiddenOnly' -Source InstallBuilder -Message 'The installer writes only hidden uninstall registration evidence; hidden SystemComponent entries are not projected as WinGet AppsAndFeaturesEntries.' -Kind Information -Areas Metadata -AffectedFields @('ProductCode', 'AppsAndFeaturesEntries') -Evidence ([pscustomobject]@{ ProductCodes = @($HiddenEntries.ProductCode) })))
   }
-  while ($Cookfs.PageCacheOrder.Count -gt 0 -and (
-      $Cookfs.PageCacheOrder.Count -ge $Script:InstallBuilderCookfsPageCacheSize -or
-      $Cookfs.PageCacheBytes + $PageBytes.Length -gt $Script:InstallBuilderCookfsPageCacheBytes
-    )) {
-    $ExpiredPage = $Cookfs.PageCacheOrder.Dequeue()
-    $Cookfs.PageCacheBytes -= $Cookfs.PageCache[$ExpiredPage].Length
-    $null = $Cookfs.PageCache.Remove($ExpiredPage)
-  }
-  if ($PageBytes.Length -le $Script:InstallBuilderCookfsPageCacheBytes) {
-    $Cookfs.PageCache[[int]$Page] = $PageBytes
-    $Cookfs.PageCacheOrder.Enqueue([int]$Page)
-    $Cookfs.PageCacheBytes += $PageBytes.Length
-  }
-  return , $PageBytes
-}
-
-function Get-InstallBuilderCookfsLogicalEntry {
-  <#
-  .SYNOPSIS
-    Merge BitRock ___bitrockBigFileN physical segments into logical files
-  .PARAMETER Entry
-    Validated archive or catalog entry whose bounded content is read or exported.
-  #>
-  [OutputType([pscustomobject[]])]
-  param ([Parameter(Mandatory)][object[]]$Entry)
-  $Physical = @{}
-  foreach ($Item in $Entry) { $Physical[$Item.Path] = $Item }
-  $Logical = [System.Collections.Generic.List[object]]::new()
-  # BitRock splits large logical files into numbered physical CookFS entries. Only a base entry
-  # starts a logical file; consecutive numbered suffixes are appended in order.
-  foreach ($Item in $Entry) {
-    $Match = [regex]::Match($Item.Path, '^(?<Base>.+)___bitrockBigFile(?<Index>[1-9][0-9]*)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($Match.Success) { continue }
-    $Segments = [System.Collections.Generic.List[object]]::new()
-    $Segments.Add($Item)
-    $PartIndex = 1
-    while ($Physical.ContainsKey("$($Item.Path)___bitrockBigFile$PartIndex")) {
-      $Segments.Add($Physical["$($Item.Path)___bitrockBigFile$PartIndex"])
-      $PartIndex++
-    }
-    $Logical.Add([pscustomobject]@{ Path = $Item.Path; Length = [long](@($Segments | Measure-Object -Property Length -Sum).Sum); Segments = $Segments.ToArray() })
-  }
-  return $Logical.ToArray()
-}
-
-function Copy-InstallBuilderCookfsEntry {
-  <#
-  .SYNOPSIS
-    Copy one logical CookFS file to an output stream with output limits
-  .PARAMETER Path
-    Path to the installer or format artifact read by this function.
-  .PARAMETER Cookfs
-    Validated CookFS layout used to resolve and decode each physical page referenced by the logical file.
-  .PARAMETER Entry
-    Validated archive or catalog entry whose bounded content is read or exported.
-  .PARAMETER Destination
-    Caller-owned output stream. The function writes sequential file bytes and does not dispose the stream.
-  .PARAMETER TotalWritten
-    Mutable cumulative output-byte counter used to enforce the extraction limit.
-  .PARAMETER MaximumExpandedBytes
-    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
-  #>
-  param (
-    [Parameter(Mandatory)][string]$Path,
-    [Parameter(Mandatory)]$Cookfs,
-    [Parameter(Mandatory)]$Entry,
-    [Parameter(Mandatory)][System.IO.Stream]$Destination,
-    [Parameter(Mandatory)][ref]$TotalWritten,
-    [Parameter(Mandatory)][long]$MaximumExpandedBytes
-  )
-  # Reassemble segments block-by-block from decoded pages while maintaining one operation-wide
-  # output counter.
-  foreach ($Segment in $Entry.Segments) {
-    foreach ($Block in $Segment.Blocks) {
-      $Page = Get-InstallBuilderCookfsPage -Path $Path -Cookfs $Cookfs -Page $Block.Page
-      if ([long]$Block.Offset + [long]$Block.Length -gt $Page.Length) { throw "The CookFS block for '$($Entry.Path)' exceeds its decoded page" }
-      if ($TotalWritten.Value + $Block.Length -gt $MaximumExpandedBytes) { throw 'InstallBuilder extraction exceeds the configured output limit' }
-      $Destination.Write($Page, [int]$Block.Offset, [int]$Block.Length)
-      $TotalWritten.Value += $Block.Length
-    }
+  $VisibleBuiltInEntry = if ($BuiltInProductCode) { $VisibleEntries | Where-Object ProductCode -EQ $BuiltInProductCode | Select-Object -First 1 } else { $null }
+  # Prefer the runtime-owned built-in entry while it survives. If a final action removes or hides
+  # that row, one unambiguous custom visible entry becomes the package's effective ARP identity.
+  $Primary = if ($VisibleBuiltInEntry) { $VisibleBuiltInEntry } elseif ($VisibleEntries.Count -eq 1) { $VisibleEntries[0] } else { $null }
+  [pscustomobject]@{
+    InstallationType      = $InstallationType
+    HasBuiltInUninstaller = $HasBuiltInUninstaller
+    WritesBuiltInArp      = $WritesBuiltInArp
+    WritesAppsAndFeatures = if ($VisibleEntries.Count) { $true } elseif ($UncertainEntries.Count -or $InstallationType -ieq 'upgrade') { $null } else { $false }
+    ProductCode           = $Primary ? $Primary.ProductCode : $null
+    PrimaryEntry          = $Primary
+    Entries               = $UniqueEntries
+    VisibleEntries        = $VisibleEntries
+    HiddenEntries         = $HiddenEntries
+    UncertainEntries      = $UncertainEntries
+    Diagnostics           = $Diagnostics.ToArray()
   }
 }
 
@@ -598,25 +490,66 @@ function Get-InstallBuilderInfo {
     held by the embedded Metakit VFS. It never mounts TclKit or executes Tcl.
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
+  .PARAMETER AnalyzePrimaryExecutables
+    Selectively extract source-referenced application executables and adjacent sidecars, then run
+    bounded PE architecture and dependency analysis. This is opt-in because large application
+    payloads can materially increase parsing time and temporary disk use.
+  .PARAMETER MaximumPayloadAnalysisBytes
+    Maximum aggregate bytes materialized when AnalyzePrimaryExecutables is specified.
   #>
   [OutputType([pscustomobject])]
-  param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
+  param (
+    [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
+    [switch]$AnalyzePrimaryExecutables,
+    [ValidateRange(1048576, [long]::MaxValue)][long]$MaximumPayloadAnalysisBytes = $Script:InstallBuilderMaximumPayloadAnalysisBytes
+  )
   process {
     $File = Get-Item -LiteralPath $Path -Force
     # project.xml is authoritative for identity, scope actions, and registry writes. CookFS is an
     # independent optional payload index and is not required for metadata-only parsing.
     $Project = Get-InstallBuilderProjectData -Path $File.FullName
     $Xml = [xml]$Project.Content
-    $ShortName = Get-InstallBuilderXmlValue -Xml $Xml -XPath '/project/shortName'
-    $FullName = Get-InstallBuilderXmlValue -Xml $Xml -XPath '/project/fullName'
-    $Version = Get-InstallBuilderXmlValue -Xml $Xml -XPath '/project/version'
-    $ScopeInfo = Get-InstallBuilderScopeInfo -Xml $Xml
-    $RegistryWrites = @(Get-InstallBuilderRegistryWrite -Xml $Xml)
-    $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $RegistryWrites
-    $AppsAndFeaturesWrites = @($RegistryWrites | Where-Object { $_.Key -match '(^|\\)Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall(\\|$)' })
-    $HasBuiltInUninstaller = [bool]($Xml.SelectSingleNode('/project/postUninstallerCreationActionList') -or $Xml.SelectSingleNode('/project/preUninstallationActionList'))
-    $Warnings = [System.Collections.Generic.List[string]]::new()
+    $RawFullName = Get-InstallBuilderXmlValue -Xml $Xml -XPath '/project/fullName'
+    $Context = Get-InstallBuilderProjectContext -Xml $Xml -Path $File.FullName
+    $ShortName = $Context.Identity.ShortName.Value
+    $FullName = $Context.Identity.FullName.Value
+    $Version = $Context.Identity.Version.Value
+    $Vendor = $Context.Identity.Vendor.Value
+    $DisplayName = $null -ne $RawFullName ? $FullName : $ShortName
+    $RegistryOperations = @(Get-InstallBuilderRegistryOperation -Xml $Xml -Context $Context)
+    $RegistryWrites = @($RegistryOperations | Where-Object Operation -EQ 'Set')
+    $RegistryDeletes = @($RegistryOperations | Where-Object Operation -EQ 'Delete')
+    $RegistryState = Resolve-InstallBuilderRegistryState -RegistryOperation $RegistryOperations
+    # Preserve conditional and unresolved sets as uncertain ARP evidence, while deterministic
+    # deletes are applied before either ARP or class-association projection.
+    $RegistryProjectionWrites = @($RegistryState.Writes) + @($RegistryState.DeferredOperations | Where-Object Operation -EQ 'Set')
+    $ArpInfo = Get-InstallBuilderArpInfo -Xml $Xml -Context $Context -RegistryWrite $RegistryProjectionWrites -RegistryDelete $RegistryDeletes
+    $ScopeInfo = Get-InstallBuilderScopeInfo -Xml $Xml -Context $Context -ArpInfo $ArpInfo
+    # ARP and association projection use only writes that persist after a successful installation.
+    # Other phases remain available in RegistryWrites for manual analysis.
+    $InstallationRegistryOperations = @($RegistryOperations | Where-Object Lifecycle -EQ 'Installation')
+    $ResolvedAssociationWrites = @($RegistryState.Writes | ForEach-Object {
+        [pscustomobject]@{ Root = $_.Root; Key = $_.ResolvedKey; Name = $_.Name; Value = $_.ResolvedValue; Type = $_.Type; Source = $_ }
+      })
+    $RegistryAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $ResolvedAssociationWrites
+    $Diagnostics = [System.Collections.Generic.List[object]]::new()
+    $UnresolvedFields = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $UnresolvedIdentity = [ordered]@{}
+    $DisplayNameIdentity = $null -ne $RawFullName ? $Context.Identity.FullName : $Context.Identity.ShortName
+    if (@($DisplayNameIdentity.UnresolvedVariables).Count) { $null = $UnresolvedFields.Add('DisplayName'); $UnresolvedIdentity.DisplayName = $DisplayNameIdentity.UnresolvedVariables }
+    if (@($Context.Identity.Version.UnresolvedVariables).Count) { $null = $UnresolvedFields.Add('DisplayVersion'); $UnresolvedIdentity.DisplayVersion = $Context.Identity.Version.UnresolvedVariables }
+    if (@($Context.Identity.Vendor.UnresolvedVariables).Count) { $null = $UnresolvedFields.Add('Publisher'); $UnresolvedIdentity.Publisher = $Context.Identity.Vendor.UnresolvedVariables }
+    if ($UnresolvedIdentity.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Metadata.IdentityUnresolved' -Source InstallBuilder -Message 'One or more package identity fields depend on unresolved runtime variables and were not returned as literal metadata.' -Kind Incomplete -Areas Metadata -AffectedFields @($UnresolvedIdentity.Keys) -Evidence ([pscustomobject]$UnresolvedIdentity)))
+    }
+    $ProjectMetakitLayout = $Project.PSObject.Properties['MetakitLayout']
+    $ProjectMetakitLayouts = $Project.PSObject.Properties['MetakitLayouts']
+    $ProjectMetakitEntries = $Project.PSObject.Properties['MetakitEntries']
+    $ProjectOriginDirectory = $Project.PSObject.Properties['OriginDirectory']
+    $MetakitLayouts = $ProjectMetakitLayouts ? @($ProjectMetakitLayouts.Value) : @(Get-InstallBuilderMetakitLayout -Path $File.FullName)
     $Cookfs = $null
+    $MetakitInfo = $null
+    $LegacyPayloadFiles = @()
     try {
       $Cookfs = Get-InstallBuilderCookfsInfo -Path $File.FullName
     } catch {
@@ -625,14 +558,77 @@ function Get-InstallBuilderInfo {
       # corruption evidence and remains visible to callers.
       $FooterMarker = [Text.Encoding]::ASCII.GetBytes('CFS0002')
       if (@(Find-BinaryPattern -Path $File.FullName -Pattern $FooterMarker -Maximum 1).Count -gt 0) {
-        $Warnings.Add("CookFS payload index was not available: $($_.Exception.Message)")
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.CookfsIndexInvalid' -Source InstallBuilder -Message "The CookFS payload index was not available: $($_.Exception.Message)" -Kind Invalid -Areas Extraction -AffectedFields @()))
       }
     }
-    if (-not $AppsAndFeaturesWrites -and $HasBuiltInUninstaller) { $Warnings.Add('InstallBuilder built-in uninstaller configuration is present, but its visible ARP key is not an explicit registrySet action. Validate ARP details in a VM.') }
-    foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add($Warning) }
-    if ($Project.Content -match 'MI_oJ|tcltwofish|installbuilder\.payloadinfo') { $Warnings.Add('The installer contains encrypted-payload markers. Project metadata was recovered, but CookFS payload extraction is unsupported without the project password.') }
-    if ($Cookfs -and $Cookfs.HasUnsupportedCompression) { $Warnings.Add('The CookFS payload uses unsupported custom or encrypted compression and cannot be extracted without the project password.') }
-    $PayloadFiles = if ($Cookfs) { @(Get-InstallBuilderCookfsLogicalEntry -Entry $Cookfs.Entries) } else { @() }
+    if (-not $Cookfs -and $MetakitLayouts.Count) {
+      $LegacyArchive = $null
+      try {
+        if ($ProjectMetakitEntries -and $ProjectMetakitEntries.Value) {
+          $MetakitEntries = @($ProjectMetakitEntries.Value)
+          $OriginDirectory = $ProjectOriginDirectory.Value
+          $MetakitHeaderOffset = $ProjectMetakitLayout.Value.HeaderOffset
+          $MetakitLength = $ProjectMetakitLayout.Value.Length
+          $MetakitRootPosition = $ProjectMetakitLayout.Value.RootPosition
+          $MetakitRootLength = $ProjectMetakitLayout.Value.RootLength
+        } else {
+          $LegacyArchive = Open-InstallBuilderMetakitArchive -Path $File.FullName -Layout $MetakitLayouts -RequiredEntryPath 'origindist'
+          $MetakitEntries = @($LegacyArchive.Entries)
+          $OriginEntry = @($MetakitEntries | Where-Object Path -CEQ 'origindist')
+          if ($OriginEntry.Count -ne 1) { throw 'The legacy TclKit VFS does not contain one unambiguous origindist control record' }
+          $OriginDirectory = $Script:InstallBuilderStrictUtf8.GetString($LegacyArchive.ReadEntry([int]$OriginEntry[0].Index, 4096)).Trim([char]0).Trim()
+          $MetakitHeaderOffset = $LegacyArchive.HeaderOffset
+          $MetakitLength = $LegacyArchive.Length
+          $MetakitRootPosition = $LegacyArchive.RootPosition
+          $MetakitRootLength = $LegacyArchive.RootLength
+        }
+        if ([string]::IsNullOrWhiteSpace($OriginDirectory) -or $OriginDirectory.IndexOfAny([char[]]'\/') -ge 0) { throw 'The legacy TclKit origindist control record is invalid' }
+        $LegacyPayloadFiles = @(Get-InstallBuilderLegacyPayloadEntry -Entry $MetakitEntries -Xml $Xml -Context $Context -OriginDirectory $OriginDirectory)
+        $MetakitInfo = [pscustomobject][ordered]@{
+          HeaderOffset     = $MetakitHeaderOffset
+          Length           = $MetakitLength
+          RootPosition     = $MetakitRootPosition
+          RootLength       = $MetakitRootLength
+          EntryCount       = $MetakitEntries.Count
+          PayloadFileCount = $LegacyPayloadFiles.Count
+          OriginDirectory  = $OriginDirectory
+          CompressionTypes = @($LegacyPayloadFiles.Compression | Sort-Object -Unique)
+        }
+        if ($LegacyPayloadFiles.Count -eq 0) {
+          $null = $UnresolvedFields.Add('PayloadFiles')
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.LegacyDistAbsent' -Source 'InstallBuilder' -Message 'The legacy Metakit VFS is valid, but no package payload records match the compiled dist/<shortName>/<folderName> layout.' -Kind Incomplete -Areas Extraction -AffectedFields @()))
+        }
+        $UnsupportedLegacyCompression = @($LegacyPayloadFiles | Where-Object Compression -EQ 'Unknown')
+        if ($UnsupportedLegacyCompression.Count) {
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.LegacyCompressionUnsupported' -Source 'InstallBuilder' -Message "$($UnsupportedLegacyCompression.Count) legacy Metakit payload record(s) use unsupported compression framing and cannot be extracted." -Kind Unsupported -Areas Extraction -AffectedFields @()))
+        }
+      } catch {
+        $null = $UnresolvedFields.Add('PayloadFiles')
+        $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.LegacyMetakitUnsupported' -Source 'InstallBuilder' -Message "The legacy Metakit VFS payload catalog could not be decoded: $($_.Exception.Message)" -Kind Unsupported -Areas Extraction -AffectedFields @()))
+      } finally {
+        if ($LegacyArchive) { $LegacyArchive.Dispose() }
+      }
+    }
+    foreach ($Diagnostic in @($ArpInfo.Diagnostics)) { $Diagnostics.Add($Diagnostic) }
+    foreach ($Diagnostic in @($RegistryAssociationInfo.Diagnostics)) { $Diagnostics.Add($Diagnostic) }
+    $ExcludedRegistryOperations = @($RegistryOperations | Where-Object Lifecycle -NE 'Installation')
+    if ($ExcludedRegistryOperations.Count) {
+      $ExcludedPhases = @($ExcludedRegistryOperations.Phase | Sort-Object -Unique)
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Registry.NonInstallPhaseExcluded' -Source InstallBuilder -Message "$($ExcludedRegistryOperations.Count) registry operation(s) belong to non-installation or unresolved action phases and were excluded from authoritative ARP and association projection." -Kind Information -Areas Metadata -AffectedFields @('ProductCode', 'AppsAndFeaturesEntries', 'Protocols', 'FileExtensions') -Evidence ([pscustomobject]@{ Phases = $ExcludedPhases; Count = $ExcludedRegistryOperations.Count })))
+    }
+    if ($Project.Content -match 'MI_oJ|tcltwofish|installbuilder\.payloadinfo') {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.Encrypted' -Source InstallBuilder -Message 'The installer contains encrypted-payload markers. Project metadata was recovered, but payload extraction requires the project password.' -Kind Unsupported -Areas Extraction -AffectedFields @()))
+    }
+    if ($Cookfs -and $Cookfs.HasUnsupportedCompression) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.CompressionUnsupported' -Source InstallBuilder -Message 'The CookFS payload uses unsupported custom or encrypted compression and cannot be extracted without the project password.' -Kind Unsupported -Areas Extraction -AffectedFields @()))
+    }
+    if ($Cookfs -and $Cookfs.HasUnsupportedHash) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.HashUnsupported' -Source InstallBuilder -Message "The CookFS payload declares unsupported page hash algorithm '$($Cookfs.PageHashAlgorithm)'; extraction cannot verify page integrity." -Kind Unsupported -Areas Extraction -AffectedFields @()))
+    }
+    $PayloadCatalog = if ($Cookfs) { @(Get-InstallBuilderCookfsLogicalEntry -Entry $Cookfs.Entries -Xml $Xml -Context $Context) } else { @($LegacyPayloadFiles) }
+    $PayloadFiles = @($PayloadCatalog | Where-Object ConditionState -EQ 'True')
+    $ConditionalPayloadFiles = @($PayloadCatalog | Where-Object ConditionState -EQ 'Unknown')
+    $ExcludedPayloadFiles = @($PayloadCatalog | Where-Object ConditionState -EQ 'False')
     if ($Cookfs) {
       # Detect split segments whose base entry is missing; those cannot be safely reassembled.
       $PhysicalPaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -640,45 +636,198 @@ function Get-InstallBuilderInfo {
       foreach ($Entry in $Cookfs.Entries) {
         $Match = [regex]::Match($Entry.Path, '^(?<Base>.+)___bitrockBigFile[1-9][0-9]*$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         if ($Match.Success -and -not $PhysicalPaths.Contains($Match.Groups['Base'].Value)) {
-          $Warnings.Add("CookFS payload contains an orphaned BitRock split segment: $($Entry.Path)")
+          $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.OrphanedSplitSegment' -Source InstallBuilder -Message "CookFS payload contains an orphaned BitRock split segment: $($Entry.Path)" -Kind Invalid -Areas Extraction -AffectedFields @() -Evidence ([pscustomobject]@{ Path = $Entry.Path })))
         }
       }
     }
-    $UninstallerKeyName = if ($ShortName) { $ShortName } else { $FullName }
-    $ProductCode = if ($UninstallerKeyName -and $Version) { "$UninstallerKeyName $Version" } else { $UninstallerKeyName }
-    $WritesAppsAndFeaturesEntry = if ($AppsAndFeaturesWrites.Count) { $true } elseif ($HasBuiltInUninstaller) { $null } else { $false }
+    if ($Context.InstallLocationResult.UnresolvedVariables.Count) {
+      $null = $UnresolvedFields.Add('DefaultInstallLocation')
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Metadata.InstallLocationUnresolved' -Source InstallBuilder -Message "The installation directory contains unresolved runtime variables: $($Context.InstallLocationResult.UnresolvedVariables -join ', ')" -Kind Incomplete -Areas Metadata -AffectedFields @('DefaultInstallLocation') -Evidence ([pscustomobject]@{ Variables = $Context.InstallLocationResult.UnresolvedVariables })))
+    }
+    # Execution matching needs every packaged path so a conditional nested payload remains visible,
+    # while PayloadFiles itself represents only the default-install selection.
+    $ExecutionInfo = Get-InstallBuilderExecutionInfo -Xml $Xml -Context $Context -Payload $PayloadCatalog
+    $ProjectActions = @(Get-InstallBuilderProjectActionInfo -Xml $Xml -Context $Context)
+    $DynamicProjectLogic = @(Get-InstallBuilderDynamicLogicInfo -Xml $Xml -Context $Context -ProjectAction $ProjectActions)
+    $ActionAssociationInfo = Get-InstallBuilderFileAssociationInfo -Xml $Xml -Context $Context
+    $SystemEffectInfo = Get-InstallBuilderSystemEffectInfo -ProjectAction $ProjectActions
+    foreach ($Diagnostic in @($ActionAssociationInfo.Diagnostics)) { $Diagnostics.Add($Diagnostic) }
+    foreach ($Field in @($ActionAssociationInfo.UnresolvedFields)) { $null = $UnresolvedFields.Add($Field) }
+    # Registry writes and the native association action are separate runtime routes. Preserve both
+    # evidence sets while exposing one authoritative installed-state list to provider projections.
+    $FileExtensions = @($RegistryAssociationInfo.FileExtensions) + @($ActionAssociationInfo.FileExtensions) | Sort-Object -Unique
+    $FileExtensionAssociations = @($RegistryAssociationInfo.FileExtensionAssociations) + @($ActionAssociationInfo.FileExtensionAssociations)
+    $AssociationInfo = [pscustomobject][ordered]@{
+      Protocols                 = @($RegistryAssociationInfo.Protocols)
+      FileExtensions            = [string[]]$FileExtensions
+      ProtocolAssociations      = @($RegistryAssociationInfo.ProtocolAssociations)
+      FileExtensionAssociations = [object[]]$FileExtensionAssociations
+      RegistryWrites            = @($RegistryAssociationInfo.RegistryWrites)
+      ActionAssociations        = @($ActionAssociationInfo.FileExtensionAssociations)
+      Diagnostics               = @(Merge-InstallerDiagnostics -Diagnostic (@($RegistryAssociationInfo.Diagnostics) + @($ActionAssociationInfo.Diagnostics)))
+    }
+    $Shortcuts = @(Get-InstallBuilderShortcutInfo -Xml $Xml -Context $Context -Payload $PayloadCatalog)
+    $PrimaryExecutableCandidates = @(
+      @($Shortcuts | Where-Object { $_.IsEmbeddedPayload -and $_.PayloadPath -match '(?i)\.exe$' } | ForEach-Object PayloadPath)
+      @($ExecutionInfo.Actions | Where-Object { $_.IsEmbeddedPayload -and $_.PayloadPath -match '(?i)\.exe$' -and $_.Purpose -in 'InstallerAction', 'ApplicationLaunch' } | ForEach-Object PayloadPath)
+    ) | Select-Object -Unique
+    $PayloadAnalysis = if ($AnalyzePrimaryExecutables) {
+      Get-InstallBuilderPrimaryPayloadAnalysis -Path $File.FullName -Payload $PayloadCatalog -PrimaryExecutableCandidate $PrimaryExecutableCandidates -Cookfs $Cookfs -MetakitLayouts $MetakitLayouts -MaximumAnalysisBytes $MaximumPayloadAnalysisBytes
+    } else {
+      [pscustomobject]@{ ArchitectureInfo = @(); Architectures = @(); DependencyInfo = @(); InspectedFiles = @(); Diagnostics = @() }
+    }
+    foreach ($Diagnostic in @($PayloadAnalysis.Diagnostics)) { if ($Diagnostic) { $Diagnostics.Add($Diagnostic) } }
+    $ReviewableLogic = @($DynamicProjectLogic | Where-Object EvidenceKind -In 'Rule', 'ScriptOrExpression')
+    if ($ReviewableLogic.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Project.DynamicLogic' -Source InstallBuilder -Message "$($ReviewableLogic.Count) project rule or script expression(s) require source review; inspect DynamicProjectLogic for exact source and referenced variable evidence." -Kind ManualValidation -Areas @('Metadata', 'Installability') -AffectedFields @($ReviewableLogic.AffectedFields | Sort-Object -Unique) -Evidence ([pscustomobject]@{ Count = $ReviewableLogic.Count })))
+    }
+    $Requirements = Get-InstallBuilderRequirementInfo -Xml $Xml -Context $Context
+    if ($ExecutionInfo.NestedInstallerCandidates.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Execution.NestedInstallerCandidates' -Source InstallBuilder -Message "The compiled project executes $($ExecutionInfo.NestedInstallerCandidates.Count) embedded installer-like payload(s); inspect NestedInstallerCandidates before assigning outer ARP ownership or switches." -Kind ManualValidation -Areas @('Metadata', 'Installability') -AffectedFields @('ProductCode', 'AppsAndFeaturesEntries', 'InstallerSwitches') -Evidence ([pscustomobject]@{ Payloads = @($ExecutionInfo.NestedInstallerCandidates.PayloadPath) })))
+    }
+    if ($Requirements.Java.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Requirement.Java' -Source InstallBuilder -Message "The compiled project contains $($Requirements.Java.Count) Java runtime detection action(s); review RuntimeRequirements before deciding whether the package needs an external dependency." -Kind Information -Areas Installability -AffectedFields @('Dependencies') -Evidence $Requirements.Java))
+    }
+    if ($Requirements.DotNetFramework.Count) {
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Requirement.DotNetFramework' -Source InstallBuilder -Message "The compiled project contains $($Requirements.DotNetFramework.Count) .NET Framework runtime detection action(s); review RuntimeRequirements before deciding whether the package needs an external dependency." -Kind Information -Areas Installability -AffectedFields @('Dependencies') -Evidence $Requirements.DotNetFramework))
+    }
+    $ConditionalRegistryOperations = @($InstallationRegistryOperations | Where-Object ConditionState -EQ 'Unknown')
+    if ($ConditionalRegistryOperations.Count) {
+      $AffectedFields = @($ConditionalRegistryOperations | ForEach-Object { Get-InstallBuilderRegistryAffectedField -Operation $_ } | Sort-Object -Unique)
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Registry.ConditionsUnresolved' -Source InstallBuilder -Message "$($ConditionalRegistryOperations.Count) registry operation(s) depend on runtime rules; those operations are retained as evidence but excluded from authoritative ARP and association projection." -Kind Incomplete -Areas Metadata -AffectedFields $AffectedFields))
+    }
+    $UnresolvedRegistryOperations = @($InstallationRegistryOperations | Where-Object { @($_.UnresolvedVariables).Count })
+    if ($UnresolvedRegistryOperations.Count) {
+      $AffectedFields = @($UnresolvedRegistryOperations | ForEach-Object { Get-InstallBuilderRegistryAffectedField -Operation $_ } | Sort-Object -Unique)
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Registry.ValuesUnresolved' -Source InstallBuilder -Message "$($UnresolvedRegistryOperations.Count) installation-time registry operation(s) contain runtime variables and were excluded where exact registry state could not be established." -Kind Incomplete -Areas Metadata -AffectedFields $AffectedFields -Evidence ([pscustomobject]@{ Variables = @($UnresolvedRegistryOperations.UnresolvedVariables | Sort-Object -Unique) })))
+    }
+    if ($ConditionalPayloadFiles.Count) {
+      $null = $UnresolvedFields.Add('PayloadFiles')
+      $Diagnostics.Add((New-InstallerDiagnostic -Id 'InstallBuilder.Payload.ConditionsUnresolved' -Source InstallBuilder -Message "$($ConditionalPayloadFiles.Count) packaged payload file(s) depend on unresolved component, platform, or runtime conditions and were excluded from the default-install payload projection." -Kind Incomplete -Areas Extraction -AffectedFields @() -Evidence ([pscustomobject]@{ Count = $ConditionalPayloadFiles.Count })))
+    }
+    if ($ScopeInfo.Confidence -eq 'unknown') { $null = $UnresolvedFields.Add('Scope') }
+    if ($null -eq $ArpInfo.WritesAppsAndFeatures) {
+      $null = $UnresolvedFields.Add('ProductCode')
+      $null = $UnresolvedFields.Add('AppsAndFeaturesEntries')
+    }
+    foreach ($Field in @($Diagnostics | Where-Object { $_.Id -in 'InstallBuilder.ARP.BuiltInPrefixUnresolved', 'InstallBuilder.ARP.BuiltInValuesUnresolved', 'InstallBuilder.ARP.CustomKeyUnresolved', 'InstallBuilder.ARP.ConditionalValues', 'InstallBuilder.ARP.PostCreationDeleteConditional', 'InstallBuilder.Registry.ConditionsUnresolved', 'InstallBuilder.Registry.ValuesUnresolved' } | ForEach-Object AffectedFields)) {
+      $null = $UnresolvedFields.Add([string]$Field)
+    }
+    $AllowedModes = Get-InstallBuilderProjectProperty -Xml $Xml -Name allowedInstallationModes -NoDefault
+    $AllowedModeTokens = @([string]$AllowedModes -split '[\s,;]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $SupportsInteractive = $AllowedModeTokens.Count -eq 0 -or @($AllowedModeTokens | Where-Object { $_ -ine 'unattended' }).Count -gt 0
+    $SupportsUnattended = $AllowedModeTokens.Count -eq 0 -or $AllowedModeTokens -icontains 'unattended'
+    # Legacy Metakit runtimes document unattended mode but predate unattendedModeUI. CookFS-era
+    # projects can force silent or progress UI independently of the compiled project default.
+    $SupportsUnattendedModeUi = $null -ne $Cookfs -or -not [string]::IsNullOrWhiteSpace((Get-InstallBuilderProjectProperty -Xml $Xml -Name unattendedModeUI -NoDefault))
+    $InstallModes = [Collections.Generic.List[string]]::new()
+    if ($SupportsInteractive) { $InstallModes.Add('interactive') }
+    if ($SupportsUnattended) {
+      $InstallModes.Add('silent')
+      if ($SupportsUnattendedModeUi) { $InstallModes.Add('silentWithProgress') }
+    }
+    $InstallerSwitches = [ordered]@{}
+    if ($SupportsUnattended) {
+      $InstallerSwitches.Silent = $SupportsUnattendedModeUi ? '--mode unattended --unattendedmodeui none' : '--mode unattended'
+      if ($SupportsUnattendedModeUi) { $InstallerSwitches.SilentWithProgress = '--mode unattended --unattendedmodeui minimal' }
+      else { $InstallerSwitches.SilentWithProgress = $InstallerSwitches.Silent }
+    }
+    $InstallCliOption = if ($Context.InstallParameter) { Get-InstallBuilderXmlValue -Xml $Context.InstallParameter -XPath 'cliOptionName' } else { $null }
+    if ([string]::IsNullOrWhiteSpace($InstallCliOption) -and $Context.InstallParameter) { $InstallCliOption = 'installdir' }
+    if ($InstallCliOption) { $InstallerSwitches.InstallLocation = "--$InstallCliOption `"<INSTALLPATH>`"" }
+    $InstallerSwitches.Log = '--debugtrace "<LOGPATH>"'
+    $ElevationRequirement = if ($Context.RequestedExecutionLevel -ieq 'requireAdministrator') { 'elevatesSelf' } elseif (Test-InstallBuilderTrueValue (Get-InstallBuilderProjectProperty -Xml $Xml -Name requireInstallationByRootUser)) { 'elevationRequired' } else { $null }
+    $ManifestArpEntries = @($ArpInfo.VisibleEntries | ForEach-Object {
+        $Entry = [ordered]@{}
+        foreach ($Name in 'DisplayName', 'Publisher', 'DisplayVersion', 'ProductCode', 'InstallerType') {
+          if ($null -ne $_.$Name -and -not [string]::IsNullOrWhiteSpace([string]$_.$Name)) { $Entry[$Name] = $_.$Name }
+        }
+        [pscustomobject]$Entry
+      })
     [pscustomobject][ordered]@{
       Path                         = $File.FullName
-      InstallerType                = 'InstallBuilder'
-      ProductCode                  = $ProductCode
+      InstallerType                = 'exe'
+      ProductCode                  = $ArpInfo.ProductCode
       UpgradeCode                  = $null
-      DisplayName                  = if ($FullName) { $FullName } else { $ShortName }
+      DisplayName                  = $DisplayName
       DisplayVersion               = $Version
-      Publisher                    = Get-InstallBuilderXmlValue -Xml $Xml -XPath '/project/vendor'
+      Publisher                    = $Vendor
       Scope                        = $ScopeInfo.Scope
-      DefaultInstallLocation       = (Get-InstallBuilderXmlValue -Xml $Xml -XPath "//directoryParameter[@name='installdir']/default"), (Get-InstallBuilderXmlValue -Xml $Xml -XPath "//directoryParameter[name='InstallDir']/default") | Where-Object { $_ } | Select-Object -First 1
-      WritesAppsAndFeaturesEntry   = $WritesAppsAndFeaturesEntry
-      AppsAndFeaturesProductCode   = $WritesAppsAndFeaturesEntry -eq $true ? $ProductCode : $null
-      AppsAndFeaturesInstallerType = $WritesAppsAndFeaturesEntry -eq $true ? 'exe' : $null
-      Warnings                     = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-      UnresolvedFields             = [string[]]@()
-      ProductCodeEvidence          = if ($ProductCode) { 'InstallBuilder candidate uninstaller-key convention: <shortName-or-fullName> <version>; validate visible ARP key in a VM.' } else { $null }
+      DefaultInstallLocation       = $Context.InstallLocation
+      WritesAppsAndFeaturesEntry   = $ArpInfo.WritesAppsAndFeatures
+      AppsAndFeaturesProductCode   = $ArpInfo.WritesAppsAndFeatures -eq $true ? $ArpInfo.ProductCode : $null
+      AppsAndFeaturesInstallerType = $ArpInfo.WritesAppsAndFeatures -eq $true ? 'exe' : $null
+      Diagnostics                  = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
+      UnresolvedFields             = [string[]]@($UnresolvedFields | Sort-Object)
+      Family                       = 'InstallBuilder'
+      FormatGeneration             = $Cookfs ? 'CookFS2' : ($MetakitLayouts.Count ? 'LegacyMetakit' : 'ProjectRecord')
+      ContainerRoute               = $Cookfs ? 'PE/MetakitVfs/CookFS2' : ($MetakitLayouts.Count ? 'PE/MetakitVfs' : 'ProjectRecord')
+      ProjectSchemaVersion         = Get-InstallBuilderXmlValue -Xml $Xml -XPath '/project/projectSchemaVersion'
+      ProductCodeEvidence          = if ($ArpInfo.ProductCode) { 'InstallBuilder built-in windowsARPRegistryPrefix or unconditional literal registrySet ARP key.' } else { $null }
       SupportedScopes              = $ScopeInfo.SupportedScopes
       ScopeConfidence              = $ScopeInfo.Confidence
       ScopeEvidence                = $ScopeInfo.Evidence
-      SupportsSilentInstallation   = $true
+      ShortcutScope                = Get-InstallBuilderProjectProperty -Xml $Xml -Name installationScope
+      RequestedExecutionLevel      = $Context.RequestedExecutionLevel
+      ElevationRequirement         = $ElevationRequirement
+      RegistryView                 = $Context.RegistryView
+      SupportsSilentInstallation   = $SupportsUnattended
+      InstallModes                 = $InstallModes.ToArray()
+      InstallerSwitches            = $InstallerSwitches
+      InstallerSuccessCodes        = @()
+      RegistryOperations           = $RegistryOperations
       RegistryWrites               = $RegistryWrites
+      RegistryDeletes              = $RegistryDeletes
+      EffectiveRegistryWrites      = @($RegistryState.Writes)
       RegistryAssociationInfo      = $RegistryAssociationInfo
-      Protocols                    = $RegistryAssociationInfo.Protocols
-      FileExtensions               = $RegistryAssociationInfo.FileExtensions
-      HasBuiltInUninstaller        = $HasBuiltInUninstaller
+      AssociationInfo              = $AssociationInfo
+      Protocols                    = $AssociationInfo.Protocols
+      ProtocolAssociations         = $AssociationInfo.ProtocolAssociations
+      FileExtensions               = $AssociationInfo.FileExtensions
+      FileExtensionAssociations    = $AssociationInfo.FileExtensionAssociations
+      EnvironmentChanges           = $SystemEffectInfo.EnvironmentChanges
+      PathChanges                  = $SystemEffectInfo.PathChanges
+      WindowsServices              = $SystemEffectInfo.WindowsServices
+      ScheduledTasks               = $SystemEffectInfo.ScheduledTasks
+      FontChanges                  = $SystemEffectInfo.FontChanges
+      SharedDllChanges             = $SystemEffectInfo.SharedDllChanges
+      WindowsAclChanges            = $SystemEffectInfo.WindowsAclChanges
+      SystemEffects                = $SystemEffectInfo
+      HasBuiltInUninstaller        = $ArpInfo.HasBuiltInUninstaller
+      WritesBuiltInArp             = $ArpInfo.WritesBuiltInArp
+      AppsAndFeaturesEntries       = $ManifestArpEntries
+      ArpEntries                   = $ArpInfo.Entries
+      VisibleArpEntries            = $ArpInfo.VisibleEntries
+      HiddenArpEntries             = $ArpInfo.HiddenEntries
+      UncertainArpEntries          = $ArpInfo.UncertainEntries
+      Shortcuts                    = $Shortcuts
+      PrimaryExecutableCandidates  = [string[]]$PrimaryExecutableCandidates
+      PayloadArchitectureInfo      = $PayloadAnalysis.ArchitectureInfo
+      PayloadArchitectures         = $PayloadAnalysis.Architectures
+      PayloadDependencyInfo        = $PayloadAnalysis.DependencyInfo
+      PayloadAnalysisFiles         = $PayloadAnalysis.InspectedFiles
+      ProjectActions               = $ProjectActions
+      DynamicProjectLogic          = $DynamicProjectLogic
+      ExecutionActions             = $ExecutionInfo.Actions
+      ExecutedPayloads             = $ExecutionInfo.ExecutedPayloads
+      NestedInstallerCandidates    = $ExecutionInfo.NestedInstallerCandidates
+      RuntimeRequirements          = $Requirements
       ProjectOffset                = $Project.Offset
       ProjectLength                = $Project.Length
-      ExtractedFiles               = @('project.xml')
+      ExtractedFiles               = @('project.xml') + @($PayloadCatalog | ForEach-Object Path)
+      PayloadCatalog               = $PayloadCatalog
+      PackagedPayloadFiles         = @($PayloadCatalog | ForEach-Object Path)
       PayloadFiles                 = @($PayloadFiles | ForEach-Object Path)
       PayloadFileCount             = $PayloadFiles.Count
-      CookfsInfo                   = if ($Cookfs) { [pscustomobject]@{ EndOffset = $Cookfs.EndOffset; IndexOffset = $Cookfs.IndexOffset; PageDataOffset = $Cookfs.PageDataOffset; PageCount = $Cookfs.PageCount; IndexSize = $Cookfs.IndexSize; CompressionIds = $Cookfs.CompressionIds; CompressionTypes = $Cookfs.CompressionTypes; HasUnsupportedCompression = $Cookfs.HasUnsupportedCompression } } else { $null }
-      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallBuilder'; ParserMajor = 2; Sources = @('Metakit VFS project.xml marker', 'bounded zlib project record', 'CookFS CFS0002 footer and file index') }
+      PackagedPayloadFileCount     = $PayloadCatalog.Count
+      ConditionalPayloadFiles      = @($ConditionalPayloadFiles | ForEach-Object Path)
+      ConditionalPayloadFileCount  = $ConditionalPayloadFiles.Count
+      ExcludedPayloadFiles         = @($ExcludedPayloadFiles | ForEach-Object Path)
+      ExcludedPayloadFileCount     = $ExcludedPayloadFiles.Count
+      CookfsInfo                   = if ($Cookfs) { [pscustomobject]@{ EndOffset = $Cookfs.EndOffset; IndexOffset = $Cookfs.IndexOffset; PageDataOffset = $Cookfs.PageDataOffset; PageCount = $Cookfs.PageCount; IndexSize = $Cookfs.IndexSize; CompressionIds = $Cookfs.CompressionIds; CompressionTypes = $Cookfs.CompressionTypes; HasUnsupportedCompression = $Cookfs.HasUnsupportedCompression; PageHashAlgorithm = $Cookfs.PageHashAlgorithm; HasUnsupportedHash = $Cookfs.HasUnsupportedHash; IndexMetadata = $Cookfs.IndexMetadata } } else { $null }
+      MetakitInfo                  = $MetakitInfo
+      MetakitLayouts               = $MetakitLayouts
+      ParserVersionInfo            = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.InstallBuilder'; ParserMajor = 7; Sources = @('Metakit VFS JL/LJ header, column descriptors, and TclKit file schema', 'bounded zlib project record', 'CookFS CFS0002 footer, file index, entry timestamps, metadata, and page hashes', 'phase-aware nested project action and payload selection model', 'ordered registry set/delete state', 'source-preserving dynamic project logic evidence', 'native file-association add/remove, environment, PATH, and Windows-service actions', 'Java and .NET Framework runtime requirement actions') }
     }
   }
 }
@@ -706,11 +855,13 @@ function Expand-InstallBuilderInstaller {
     [ValidateRange(1024, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
   process {
+    $Path = (Get-Item -LiteralPath $Path -Force).FullName
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath = Join-Path ([IO.Path]::GetTempPath()) ("Dumplings-InstallBuilder-$([guid]::NewGuid().ToString('N'))") }
     $DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     $Extracted = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     [long]$TotalWritten = 0
     $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $Project = $null
 
     # project.xml and CookFS payloads share one output budget but have independent recovery paths.
     if (Test-ExtractionPattern -Path 'project.xml' -Pattern $Name) {
@@ -728,25 +879,79 @@ function Expand-InstallBuilderInstaller {
     }
 
     $Cookfs = $null
+    $MetakitLayouts = @()
     try { $Cookfs = Get-InstallBuilderCookfsInfo -Path $Path } catch {
-      if ($Extracted.Count -eq 0) { throw }
+      $MetakitLayouts = @(Get-InstallBuilderMetakitLayout -Path $Path)
+      if (-not $MetakitLayouts.Count -and $Extracted.Count -eq 0) { throw }
     }
     if ($Cookfs) {
-      $LogicalEntries = @(Get-InstallBuilderCookfsLogicalEntry -Entry $Cookfs.Entries | Where-Object { Test-ExtractionPattern -Path $_.Path -Pattern $Name })
+      if (-not $Project) { $Project = Get-InstallBuilderProjectData -Path $Path -MaximumExpandedBytes ([Math]::Min($MaximumExpandedBytes, $Script:InstallBuilderMaximumProjectBytes)) }
+      $Xml = [xml]$Project.Content
+      $Context = Get-InstallBuilderProjectContext -Xml $Xml -Path $Path
+      $LogicalEntries = @(Get-InstallBuilderCookfsLogicalEntry -Entry $Cookfs.Entries -Xml $Xml -Context $Context | Where-Object {
+          (Test-ExtractionPattern -Path $_.Path -Pattern $Name) -or (Test-ExtractionPattern -Path $_.PhysicalPath -Pattern $Name)
+        })
       if ($LogicalEntries.Count -gt 0 -and $Cookfs.HasUnsupportedCompression) { throw 'The CookFS payload uses unsupported custom or encrypted compression and cannot be extracted without the project password' }
       # Export logical rather than physical split-file names.
-      foreach ($Entry in $LogicalEntries) {
-        $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Path `
-          -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
-        if (-not $Target.ShouldWrite) { continue }
-        $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
-        $Destination = [IO.File]::Open($Target.Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        try {
-          Copy-InstallBuilderCookfsEntry -Path $Path -Cookfs $Cookfs -Entry $Entry -Destination $Destination -TotalWritten ([ref]$TotalWritten) -MaximumExpandedBytes $MaximumExpandedBytes
-        } finally {
-          $Destination.Dispose()
+      $Source = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+      try {
+        foreach ($Entry in $LogicalEntries) {
+          $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Path `
+            -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+          if (-not $Target.ShouldWrite) { continue }
+          $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+          $Destination = [IO.File]::Open($Target.Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+          try {
+            Copy-InstallBuilderCookfsEntry -Stream $Source -Cookfs $Cookfs -Entry $Entry -Destination $Destination -TotalWritten ([ref]$TotalWritten) -MaximumExpandedBytes $MaximumExpandedBytes
+          } finally {
+            $Destination.Dispose()
+          }
+          $ExtractedFile = Get-Item -LiteralPath $Target.Path -Force
+          if ($Entry.ModificationTimeUtc) { $ExtractedFile.LastWriteTimeUtc = $Entry.ModificationTimeUtc }
+          $Extracted.Add($ExtractedFile)
         }
-        $Extracted.Add((Get-Item -LiteralPath $Target.Path -Force))
+      } finally {
+        $Source.Dispose()
+      }
+    }
+    if (-not $Cookfs -and $MetakitLayouts.Count) {
+      $LegacyArchive = $null
+      try {
+        if (-not $Project) { $Project = Get-InstallBuilderProjectData -Path $Path -MaximumExpandedBytes ([Math]::Min($MaximumExpandedBytes, $Script:InstallBuilderMaximumProjectBytes)) }
+        $Xml = [xml]$Project.Content
+        $Context = Get-InstallBuilderProjectContext -Xml $Xml -Path $Path
+        $LegacyArchive = Open-InstallBuilderMetakitArchive -Path $Path -Layout $MetakitLayouts -RequiredEntryPath 'origindist'
+        $OriginEntry = @($LegacyArchive.Entries | Where-Object Path -CEQ 'origindist')
+        if ($OriginEntry.Count -ne 1) { throw 'The legacy TclKit VFS does not contain one unambiguous origindist control record' }
+        $OriginDirectory = $Script:InstallBuilderStrictUtf8.GetString($LegacyArchive.ReadEntry([int]$OriginEntry[0].Index, 4096)).Trim([char]0).Trim()
+        if ([string]::IsNullOrWhiteSpace($OriginDirectory) -or $OriginDirectory.IndexOfAny([char[]]'\/') -ge 0) { throw 'The legacy TclKit origindist control record is invalid' }
+        $LegacyEntries = @(Get-InstallBuilderLegacyPayloadEntry -Entry @($LegacyArchive.Entries) -Xml $Xml -Context $Context -OriginDirectory $OriginDirectory | Where-Object {
+            (Test-ExtractionPattern -Path $_.Path -Pattern $Name) -or (Test-ExtractionPattern -Path $_.PhysicalPath -Pattern $Name)
+          })
+        foreach ($Entry in $LegacyEntries) {
+          if ($Entry.Compression -eq 'Unknown') { throw "The legacy Metakit payload '$($Entry.PhysicalPath)' uses unsupported compression framing" }
+          if ($TotalWritten -gt $MaximumExpandedBytes - $Entry.Size) { throw 'The InstallBuilder payload exceeds the configured output limit' }
+          $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Entry.Path `
+            -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
+          if (-not $Target.ShouldWrite) { continue }
+          $null = New-Item -Path ([IO.Path]::GetDirectoryName($Target.Path)) -ItemType Directory -Force
+          $Destination = [IO.File]::Open($Target.Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+          try {
+            $Written = $LegacyArchive.CopyEntry([int]$Entry.Index, $Destination, $MaximumExpandedBytes - $TotalWritten)
+            $TotalWritten += $Written
+          } catch {
+            # The stream denies sharing, so close it before deleting partial output.
+            $Destination.Dispose()
+            $Destination = $null
+            Remove-Item -LiteralPath $Target.Path -Force -ErrorAction SilentlyContinue
+            throw
+          } finally {
+            if ($Destination) { $Destination.Dispose() }
+          }
+          $Extracted.Add((Get-Item -LiteralPath $Target.Path -Force))
+        }
+      } finally {
+        if ($LegacyArchive) { $LegacyArchive.Dispose() }
       }
     }
     if ($Extracted.Count -eq 0) { throw "No InstallBuilder project or payload file matches selector '$Name'" }
@@ -757,13 +962,23 @@ function Expand-InstallBuilderInstaller {
 function Test-InstallBuilder {
   <#
   .SYNOPSIS
-    Test whether a file contains a supported InstallBuilder project record
+    Test whether a PE contains a supported structured InstallBuilder container
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
   #>
   [OutputType([bool])]
   param([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
-  process { try { $null = Get-InstallBuilderInfo -Path $Path; $true } catch { $false } }
+  process {
+    try {
+      # A recoverable project record is useful to low-level callers, but detection additionally
+      # requires a real PE and a validated Metakit or CookFS container relationship.
+      if (-not (Get-PELayout -Path $Path)) { return $false }
+      $Info = Get-InstallBuilderInfo -Path $Path
+      return [bool]($Info.CookfsInfo -or @($Info.MetakitLayouts).Count)
+    } catch {
+      return $false
+    }
+  }
 }
 
 function Read-ProtocolsFromInstallBuilder {
@@ -800,6 +1015,7 @@ function Read-ProductVersionFromInstallBuilder {
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallBuilderInfo -Path $Path).DisplayVersion }
 }
+
 function Read-ProductNameFromInstallBuilder {
   <#
   .SYNOPSIS
@@ -810,6 +1026,7 @@ function Read-ProductNameFromInstallBuilder {
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallBuilderInfo -Path $Path).DisplayName }
 }
+
 function Read-PublisherFromInstallBuilder {
   <#
   .SYNOPSIS
@@ -820,6 +1037,7 @@ function Read-PublisherFromInstallBuilder {
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallBuilderInfo -Path $Path).Publisher }
 }
+
 function Read-ProductCodeFromInstallBuilder {
   <#
   .SYNOPSIS
@@ -830,6 +1048,7 @@ function Read-ProductCodeFromInstallBuilder {
   param([Parameter(ValueFromPipeline, Mandatory)][string]$Path)
   process { (Get-InstallBuilderInfo -Path $Path).ProductCode }
 }
+
 function Read-ScopeFromInstallBuilder {
   <#
   .SYNOPSIS

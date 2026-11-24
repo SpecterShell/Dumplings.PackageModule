@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 
@@ -62,6 +63,35 @@ namespace Dumplings.InstallerInfrastructure
         protected override void Dispose(bool disposing)
         {
             if (disposing && !leaveOpen) source.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
+    // Some third-party decoder APIs do not expose leave-open ownership. Wrap a caller-owned stream
+    // so disposing the decoder releases its own state without closing the underlying source.
+    public sealed class NonDisposingStream : Stream
+    {
+        private readonly Stream source;
+
+        public NonDisposingStream(Stream source)
+        {
+            this.source = source ?? throw new ArgumentNullException(nameof(source));
+        }
+
+        public override bool CanRead => source.CanRead;
+        public override bool CanSeek => source.CanSeek;
+        public override bool CanWrite => source.CanWrite;
+        public override long Length => source.Length;
+        public override long Position { get => source.Position; set => source.Position = value; }
+        public override void Flush() => source.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => source.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => source.Seek(offset, origin);
+        public override void SetLength(long value) => source.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => source.Write(buffer, offset, count);
+
+        protected override void Dispose(bool disposing)
+        {
+            // Ownership remains with the caller by design.
             base.Dispose(disposing);
         }
     }
@@ -144,9 +174,48 @@ namespace Dumplings.InstallerInfrastructure
         }
     }
 
+    public sealed class Crc32Result
+    {
+        public uint Checksum { get; }
+        public long Length { get; }
+
+        public Crc32Result(uint checksum, long length)
+        {
+            Checksum = checksum;
+            Length = length;
+        }
+    }
+
     public static class BinaryIO
     {
         private static readonly uint[] CrcTable = CreateCrcTable();
+
+        // Read directly from caller-owned storage. Slicing allocates no temporary byte array and
+        // subtraction-based bounds remain safe even when the supplied offset is Int64.MaxValue.
+        public static object ReadInteger(byte[] bytes, long offset, int size, bool bigEndian, bool signed)
+        {
+            if (bytes == null) throw new ArgumentNullException(nameof(bytes));
+            if (size != 1 && size != 2 && size != 4 && size != 8) throw new ArgumentOutOfRangeException(nameof(size));
+            if (offset < 0 || offset > bytes.LongLength - size) throw new EndOfStreamException("Binary integer read is outside the buffer.");
+            ReadOnlySpan<byte> data = bytes.AsSpan((int)offset, size);
+            // Return each CLR type separately. Numeric conditional expressions
+            // can widen values or change signedness before boxing.
+            switch (size)
+            {
+                case 1:
+                    if (signed) return unchecked((sbyte)data[0]);
+                    return data[0];
+                case 2:
+                    if (signed) return bigEndian ? BinaryPrimitives.ReadInt16BigEndian(data) : BinaryPrimitives.ReadInt16LittleEndian(data);
+                    return bigEndian ? BinaryPrimitives.ReadUInt16BigEndian(data) : BinaryPrimitives.ReadUInt16LittleEndian(data);
+                case 4:
+                    if (signed) return bigEndian ? BinaryPrimitives.ReadInt32BigEndian(data) : BinaryPrimitives.ReadInt32LittleEndian(data);
+                    return bigEndian ? BinaryPrimitives.ReadUInt32BigEndian(data) : BinaryPrimitives.ReadUInt32LittleEndian(data);
+                default:
+                    if (signed) return bigEndian ? BinaryPrimitives.ReadInt64BigEndian(data) : BinaryPrimitives.ReadInt64LittleEndian(data);
+                    return bigEndian ? BinaryPrimitives.ReadUInt64BigEndian(data) : BinaryPrimitives.ReadUInt64LittleEndian(data);
+            }
+        }
 
         public static byte[] ReadExactly(Stream stream, long offset, int count, bool restorePosition)
         {
@@ -285,8 +354,14 @@ namespace Dumplings.InstallerInfrastructure
 
         public static uint Crc32(Stream stream, bool restorePosition, long maximumBytes, byte[] suffix)
         {
+            return Crc32WithLength(stream, restorePosition, maximumBytes, suffix).Checksum;
+        }
+
+        public static Crc32Result Crc32WithLength(Stream stream, bool restorePosition, long maximumBytes, byte[] suffix)
+        {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (!stream.CanRead) throw new ArgumentException("The stream must be readable.", nameof(stream));
+            if (maximumBytes < 0) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
             long original = stream.CanSeek ? stream.Position : 0;
             uint crc = uint.MaxValue;
             long total = 0;
@@ -304,7 +379,7 @@ namespace Dumplings.InstallerInfrastructure
                 {
                     for (int i = 0; i < suffix.Length; i++) crc = CrcTable[(crc ^ suffix[i]) & 0xFF] ^ (crc >> 8);
                 }
-                return crc ^ uint.MaxValue;
+                return new Crc32Result(crc ^ uint.MaxValue, total + (suffix?.Length ?? 0));
             }
             finally
             {

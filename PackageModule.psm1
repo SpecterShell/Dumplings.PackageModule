@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
+param ([switch]$Reload)
 
 # The manifest owns deterministic dependency ordering and the public export surface. This root
 # module initializes the few process-wide types required before task models are loaded.
 
-if (-not ([System.Management.Automation.PSTypeName]'Dumplings.Versioning.WinGetVersion').Type) {
-  Add-Type -Path (Join-Path $PSScriptRoot 'Assets' 'Source' 'Versioning' 'Versioning.cs')
-}
+Import-Module (Join-Path $PSScriptRoot 'Libraries' 'Infrastructure' 'Runtime.psm1') -Global -Force:$Reload -ErrorAction Stop
+$null = Import-InstallerManagedSource -Path (Join-Path $PSScriptRoot 'Assets' 'Source' 'Versioning' 'Versioning.cs') -TypeName 'Dumplings.Versioning.WinGetVersion'
 
 # Preserve the historical short type names used throughout task scripts.
-$TypeAcceleratorsClass = [psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')
-$TypeAccelerators = $TypeAcceleratorsClass::Get
-@(
-  [Dumplings.Versioning.WinGetVersion]
-  [Dumplings.Versioning.ChunkVersion]
-) | ForEach-Object -Process {
-  if (-not $TypeAccelerators.ContainsKey($_.Name)) { $TypeAcceleratorsClass::Add($_.Name, $_) }
+Use-InstallerRuntimeLoadLock {
+  $TypeAcceleratorsClass = [psobject].Assembly.GetType('System.Management.Automation.TypeAccelerators')
+  $TypeAccelerators = $TypeAcceleratorsClass::Get
+  @(
+    [Dumplings.Versioning.WinGetVersion]
+    [Dumplings.Versioning.ChunkVersion]
+  ) | ForEach-Object -Process {
+    if (-not $TypeAccelerators.ContainsKey($_.Name)) { $TypeAcceleratorsClass::Add($_.Name, $_) }
+  }
 }
 
 $ModulePaths = @(
@@ -23,6 +25,7 @@ $ModulePaths = @(
   'Libraries\Infrastructure\FileSystem.psm1'
   'Libraries\Infrastructure\Archive.psm1'
   'Libraries\Infrastructure\PE.psm1'
+  'Libraries\Infrastructure\InstallerDiagnostics.psm1'
   'Libraries\Infrastructure\InstallerEvidence.psm1'
   'Libraries\Infrastructure\Cabinet.psm1'
   'Libraries\Infrastructure\InstallerBridge.psm1'
@@ -47,8 +50,10 @@ $ModulePaths = @(
   'Libraries\Installers\InstallShieldInstallScript.psm1'
   'Libraries\Installers\InstallShieldMsi.psm1'
   'Libraries\Installers\MSI.psm1'
+  'Libraries\Installers\AKInstaller.psm1'
   'Libraries\Installers\ActualInstaller.psm1'
   'Libraries\Installers\AdvancedInstaller.psm1'
+  'Libraries\Installers\AstrumInstallWizard.psm1'
   'Libraries\Installers\Burn.psm1'
   'Libraries\Installers\ChromiumUpdater.psm1'
   'Libraries\Installers\ChromiumMiniInstaller.psm1'
@@ -77,6 +82,8 @@ $ModulePaths = @(
   'Libraries\Installers\Tauri.psm1'
   'Libraries\Installers\Wise.psm1'
   'Libraries\Installers\ZeroInstall.psm1'
+  'Libraries\Installers\TigerSetup.psm1'
+  'Libraries\Installers\DellUpdatePackage.psm1'
   'Libraries\Infrastructure\InstallerAnalyzer.psm1'
   'Libraries\Browser\WebDriver.psm1'
   'Libraries\Browser\Playwright.psm1'
@@ -91,11 +98,13 @@ $ModulePaths = @(
   'Libraries\WinGet\WinGetMatching.psm1'
   'Libraries\WinGet\WinGetManifestSerialization.psm1'
   'Libraries\WinGet\WinGetDownload.psm1'
+  'Libraries\Networking\InstallerTracking.psm1'
   'Libraries\WinGet\WinGetGitHubRepo.psm1'
   'Libraries\WinGet\WinGetLocalRepo.psm1'
   'Libraries\WinGet\WinGetManifestValidation.psm1'
   'Libraries\WinGet\WinGetManifestUpdate.psm1'
   'Libraries\WinGet\WinGetManifestAuthoring.psm1'
+  'Libraries\WinGet\WinGetPendingPackage.psm1'
   'Libraries\WinGet\WinGetSubmission.psm1'
 )
 
@@ -103,5 +112,5 @@ foreach ($RelativePath in $ModulePaths) {
   # Implementation modules retain command ownership and share one caller command table. The root
   # module is only a deterministic loader; creating a second proxy for every command breaks native
   # help/completion metadata and makes each function discoverable under two module names.
-  Import-Module (Join-Path $PSScriptRoot $RelativePath) -Force -Global -ErrorAction Stop
+  Import-Module (Join-Path $PSScriptRoot $RelativePath) -Force:$Reload -Global -ErrorAction Stop
 }

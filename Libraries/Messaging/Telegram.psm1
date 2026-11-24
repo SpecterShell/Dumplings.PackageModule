@@ -3,6 +3,8 @@
 # Long-message and Markdown failure behavior was independently implemented after reviewing
 # https://github.com/NousResearch/hermes-agent under its repository license.
 
+Import-Module (Join-Path $PSScriptRoot '..' 'Networking' 'Web.psm1') -ErrorAction Stop
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -164,7 +166,7 @@ function Invoke-TelegramApi {
         }
 
         $Delay = $RetryIntervalSec
-        if ($Delay -gt $MaximumRetryDelaySeconds -or $TotalDelay + $Delay -gt $MaximumTotalRetryDelaySeconds) {
+        if (-not (Test-RetryDelayBudget -DelaySeconds $Delay -UsedSeconds $TotalDelay -MaximumSeconds $MaximumRetryDelaySeconds -MaximumTotalSeconds $MaximumTotalRetryDelaySeconds)) {
           throw [System.InvalidOperationException]::new("Telegram ${Method} transport failure exceeded the retry-delay limit: ${SanitizedMessage}")
         }
         if ($RateLimitContext) { $RateLimitContext.SetRetryAfter([timespan]::FromSeconds($Delay)) } else { Start-Sleep -Seconds $Delay }
@@ -184,7 +186,7 @@ function Invoke-TelegramApi {
       } else {
         $RetryIntervalSec
       }
-      if ($RequestedDelay -gt $MaximumRetryDelaySeconds -or $TotalDelay + $RequestedDelay -gt $MaximumTotalRetryDelaySeconds) {
+      if (-not (Test-RetryDelayBudget -DelaySeconds $RequestedDelay -UsedSeconds $TotalDelay -MaximumSeconds $MaximumRetryDelaySeconds -MaximumTotalSeconds $MaximumTotalRetryDelaySeconds)) {
         throw (Get-TelegramApiException -ErrorCode $ErrorCode -Description "${Description} (requested retry delay ${RequestedDelay}s exceeds the configured limit)")
       }
 
@@ -426,9 +428,8 @@ function Send-TelegramMessage {
     $null = $AsPlainText.IsPresent
     if ($null -eq $Session) { $Session = [System.Collections.Generic.List[System.Tuple[string, long]]]::new() }
 
-    # Materialize the complete conditional output as an array. PowerShell unwraps a one-item array
-    # emitted by an individual branch into a scalar string; indexing that scalar would send only its
-    # first character (normally "*" for PackageTask Markdown) to Telegram.
+    # Wrap the complete conditional output in an array. Otherwise PowerShell can
+    # unwrap a single string, and indexing it sends only its first character.
     [string[]]$Messages = @(
       if ([string]::IsNullOrWhiteSpace($Message)) {
         # An empty desired state removes every message currently owned by this session.

@@ -2,709 +2,57 @@
 # Static DeployMaster parser derived from controlled DeployMaster 7.7 builds,
 # validated legacy packages, and the documented installer command-line behavior.
 # Reference: https://www.deploymaster.com/manual.html
+# Version history: https://www.deploymaster.com/history.html
 #
-# Binary structure consumed here (absolute offsets, LE integers):
+# Binary structure consumed here (absolute offsets and little-endian integers):
 #
-#   [0x80] PackageOffset:u32 -> package
-#   [0x84] IntegrityLength:u32  [0x88] CRC32:u32
-#   [0x8C] ExpectedFileSize:u64 [0x94] Reserved/observed:u32
-#   package -> LZMA properties[5] -> 70/74-byte observed control header
-#           -> bounded metadata and file-data streams
+#   PE image (DeployMaster 6.0 and later)
+#   +-- [0x80] package locator
+#   |   +-- PackageOffset:u32 -> overlay
+#   |   +-- IntegrityLength:u32 and CRC32:u32
+#   |   `-- ExpectedFileSize:u64 and Reserved:u32
+#   +-- optional zero padding to an eight-byte boundary
+#   +-- optional Authenticode certificate table outside ExpectedFileSize
+#   `-- overlay at PackageOffset
+#       +-- raw-LZMA properties[5]
+#       +-- catalog-selected 66-, 70-, or 74-byte control header
+#       +-- architecture-specific compressed runtime core(s)
+#       +-- optional UTF-16 expiration message selected by header date fields
+#       +-- language and identity data blocks
+#       +-- current package settings and portable-folder block
+#       +-- metadata-resident readme, license, and support-DLL records
+#       +-- component block and CRLF file-name block
+#       +-- parallel file catalog: offsets, sizes, dates, attributes, CRC32
+#       +-- install-tree, registry, and file-association blocks
+#       +-- prerequisite, completion, uninstall, and update records
+#       `-- file payload ranges at absolute catalog offsets
+#
+#   DataBlock := Size:i32
+#     Size == 0  -> empty
+#     Size < 0   -> -Size stored bytes
+#     Size > 0   -> CompressedSize:i32 + raw-LZMA bytes yielding Size bytes
+#
+#   Classic DeployMaster 2.x overlay
+#   +-- BZip2-compressed installer runtime
+#   +-- FF FF FF FF end marker
+#   +-- Length:u32 + zlib language record
+#   +-- Length:u32 + zlib form-feed identity record
+#   +-- legacy installation metadata records
+#   +-- Length:u32 + zlib CRLF file-name catalog
+#   +-- zlib behavior records, including registry and file associations
+#   `-- contiguous Length:u32 + zlib payload records through logical EOF
 #
 # The CRC covers only the declared integrity range. Undocumented header fields
 # remain observed evidence; scope/architecture fields are decoded only for
 # controlled layouts whose size and record boundaries validate.
 
 # Apply default function parameters
+
+# Public DeployMaster commands. Implementation modules are imported locally.
+Import-Module (Join-Path $PSScriptRoot 'DeployMasterModern.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'DeployMasterClassic.psm1') -ErrorAction Stop
+
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
-
-function Get-DeployMasterScopeInfo {
-  <#
-  .SYNOPSIS
-    Convert the DeployMaster package scope byte to WinGet scope evidence
-  .NOTES
-    Controlled current-user, all-users, and dual-scope builds encode 0, 1,
-    and 2 respectively at the normalized package-header scope offset.
-  .PARAMETER Value
-    Format-specific field or value interpreted according to the current record/version.
-  #>
-  [OutputType([pscustomobject])]
-  param ([Parameter(Mandatory)][ValidateRange(0, 255)][int]$Value)
-
-  switch ($Value) {
-    0 { [pscustomobject]@{ Scope = 'user'; DefaultScope = 'user'; SupportedScopes = @('user'); SupportsDualScope = $false } }
-    1 { [pscustomobject]@{ Scope = 'machine'; DefaultScope = 'machine'; SupportedScopes = @('machine'); SupportsDualScope = $false } }
-    2 { [pscustomobject]@{ Scope = $null; DefaultScope = $null; SupportedScopes = @('user', 'machine'); SupportsDualScope = $true } }
-    default { [pscustomobject]@{ Scope = $null; DefaultScope = $null; SupportedScopes = @(); SupportsDualScope = $false } }
-  }
-}
-
-function Get-DeployMasterPackageLocator {
-  <#
-  .SYNOPSIS
-    Read and validate the fixed DeployMaster package locator at file offset 0x80
-  .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
-  .PARAMETER MaximumIntegrityBytes
-    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory)][IO.Stream]$Stream,
-    [ValidateRange(74, [long]::MaxValue)][long]$MaximumIntegrityBytes = 1073741824
-  )
-
-  # The locator is a fixed absolute structure in the PE stub. Validate all declared ranges and the
-  # complete-file size before hashing or following the package pointer.
-  if (-not $Stream.CanSeek -or $Stream.Length -lt 0x98) { throw 'The file is too small for a DeployMaster package locator.' }
-  $PackageOffset = [long](Read-BinaryInteger -Stream $Stream -Offset 0x80 -Size 4)
-  $IntegrityLength = [long](Read-BinaryInteger -Stream $Stream -Offset 0x84 -Size 4)
-  $ExpectedCrc32 = [uint32](Read-BinaryInteger -Stream $Stream -Offset 0x88 -Size 4)
-  $ExpectedFileSize = [uint64](Read-BinaryInteger -Stream $Stream -Offset 0x8C -Size 8)
-  $Reserved = [uint32](Read-BinaryInteger -Stream $Stream -Offset 0x94 -Size 4)
-
-  if ($PackageOffset -lt 512 -or $IntegrityLength -lt 70 -or $IntegrityLength -gt $MaximumIntegrityBytes) {
-    throw 'The DeployMaster package locator contains invalid range values.'
-  }
-  if ($PackageOffset + $IntegrityLength -gt $Stream.Length) { throw 'The DeployMaster integrity region is truncated.' }
-  if ($ExpectedFileSize -ne [uint64]$Stream.Length) { throw 'The DeployMaster package locator file-size check failed.' }
-
-  # CRC32 authenticates only the declared package-control region, not trailing file payloads.
-  $IntegrityStream = New-BoundedReadStream -Stream $Stream -Offset $PackageOffset -Length $IntegrityLength -LeaveOpen
-  try { $ActualCrc32 = [uint32](Get-BinaryCrc32 -Stream $IntegrityStream -MaximumBytes $IntegrityLength) }
-  finally { $IntegrityStream.Dispose() }
-  if ($ActualCrc32 -ne $ExpectedCrc32) { throw 'The DeployMaster package integrity CRC32 check failed.' }
-
-  [pscustomobject]@{
-    LocatorOffset     = 0x80L
-    PackageOffset     = $PackageOffset
-    IntegrityLength   = $IntegrityLength
-    PackageDataOffset = $PackageOffset + $IntegrityLength
-    ExpectedCrc32     = $ExpectedCrc32
-    ActualCrc32       = $ActualCrc32
-    ExpectedFileSize  = $ExpectedFileSize
-    Reserved          = $Reserved
-  }
-}
-
-function Get-DeployMasterPackageHeader {
-  <#
-  .SYNOPSIS
-    Normalize legacy and current DeployMaster package-control layouts
-  .DESCRIPTION
-    Current packages have a 74-byte control header. Older packages omit one
-    four-byte platform field and therefore use the same fields shifted by four
-    bytes in a 70-byte header. Candidate core ranges select the valid layout.
-  .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
-  .PARAMETER Locator
-    Current structured format node or record being interpreted.
-  .PARAMETER MaximumCoreBytes
-    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory)][IO.Stream]$Stream,
-    [Parameter(Mandatory)][psobject]$Locator,
-    [ValidateRange(1, [long]::MaxValue)][long]$MaximumCoreBytes = 1073741824
-  )
-
-  $Properties = Read-BinaryBytes -Stream $Stream -Offset $Locator.PackageOffset -Count 5
-  $DictionarySize = [uint32][BitConverter]::ToUInt32($Properties, 1)
-  if ($Properties[0] -gt 224 -or $DictionarySize -lt 65536 -or $DictionarySize -gt 1073741824) {
-    throw 'The DeployMaster package has invalid LZMA properties.'
-  }
-
-  # Probe both controlled layouts through their range invariants. Never select a generation from
-  # PE version strings alone because the four-byte shift changes every following field.
-  $Layouts = @(
-    [pscustomobject]@{ Name = 'Current'; Shift = 0; HeaderSize = 74; Version = '7.7+' },
-    [pscustomobject]@{ Name = 'Legacy'; Shift = -4; HeaderSize = 70; Version = 'Legacy' }
-  )
-  $Candidates = [Collections.Generic.List[object]]::new()
-  foreach ($Layout in $Layouts) {
-    $PrimaryOffset = [long](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x16 + $Layout.Shift) -Size 4)
-    $PrimaryCompressedSize = [long](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x1A + $Layout.Shift) -Size 4)
-    $PrimaryUncompressedSize = [long](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x1E + $Layout.Shift) -Size 4)
-    $SecondaryOffsetValue = [uint32](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x22 + $Layout.Shift) -Size 4)
-    $SecondaryOffset = [long]$SecondaryOffsetValue
-    $SecondaryCompressedSize = [long](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x26 + $Layout.Shift) -Size 4)
-    $SecondaryUncompressedSize = [long](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x2A + $Layout.Shift) -Size 4)
-    $LanguageOffset = [long](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x2E + $Layout.Shift) -Size 4)
-    $IntegrityEnd = $Locator.PackageOffset + $Locator.IntegrityLength
-    $CoreEntries = [Collections.Generic.List[object]]::new()
-    # Core offsets are absolute and must remain within the CRC-protected integrity region.
-    if ($PrimaryOffset -ne 0) {
-      if ($PrimaryOffset -lt $Locator.PackageOffset + $Layout.HeaderSize -or $PrimaryCompressedSize -le 0 -or
-        $PrimaryUncompressedSize -le 0 -or $PrimaryUncompressedSize -gt $MaximumCoreBytes -or
-        $PrimaryOffset + $PrimaryCompressedSize -gt $IntegrityEnd) { continue }
-      $CoreEntries.Add([pscustomobject]@{ Architecture = 'x86'; Offset = $PrimaryOffset; CompressedSize = $PrimaryCompressedSize; UncompressedSize = $PrimaryUncompressedSize })
-    } elseif ($PrimaryCompressedSize -ne 0 -or $PrimaryUncompressedSize -ne 0) { continue }
-    if ($SecondaryOffsetValue -notin 0, [uint32]::MaxValue) {
-      if ($SecondaryOffset -lt $Locator.PackageOffset + $Layout.HeaderSize -or $SecondaryCompressedSize -le 0 -or
-        $SecondaryUncompressedSize -le 0 -or $SecondaryUncompressedSize -gt $MaximumCoreBytes -or
-        $SecondaryOffset + $SecondaryCompressedSize -gt $IntegrityEnd) { continue }
-      $CoreEntries.Add([pscustomobject]@{ Architecture = 'x64'; Offset = $SecondaryOffset; CompressedSize = $SecondaryCompressedSize; UncompressedSize = $SecondaryUncompressedSize })
-    } elseif ($SecondaryCompressedSize -ne 0 -or $SecondaryUncompressedSize -ne 0) { continue }
-    if ($CoreEntries.Count -eq 0) { continue }
-    $LastCoreEnd = ($CoreEntries | ForEach-Object { $_.Offset + $_.CompressedSize } | Measure-Object -Maximum).Maximum
-    if ($LanguageOffset -lt $LastCoreEnd -or $LanguageOffset + 8 -gt $IntegrityEnd) { continue }
-
-    $ScopeValue = [int](Read-BinaryInteger -Stream $Stream -Offset ($Locator.PackageOffset + 0x15 + $Layout.Shift) -Size 1)
-    if ($ScopeValue -gt 2) { continue }
-    $Candidates.Add([pscustomobject]@{
-        Layout               = $Layout.Name
-        FormatVersion        = $Layout.Version
-        HeaderSize           = $Layout.HeaderSize
-        ScopeValue           = $ScopeValue
-        CoreEntries          = $CoreEntries.ToArray()
-        SecondaryOffsetValue = $SecondaryOffsetValue
-        LanguageBlockOffset  = $LanguageOffset
-      })
-  }
-  if ($Candidates.Count -ne 1) { throw 'The DeployMaster package-control layout could not be normalized unambiguously.' }
-
-  $Candidate = $Candidates[0]
-  $ScopeInfo = Get-DeployMasterScopeInfo -Value $Candidate.ScopeValue
-  $PrimaryCore = @($Candidate.CoreEntries | Where-Object Architecture -EQ 'x86' | Select-Object -First 1)
-  $SecondaryCore = @($Candidate.CoreEntries | Where-Object Architecture -EQ 'x64' | Select-Object -First 1)
-  # A missing x64 core and the x86-only sentinel distinguish OS support from the architecture of
-  # the installer stub itself.
-  $ApplicationArchitectureMode = if ($PrimaryCore.Count -and $SecondaryCore.Count) {
-    'x86AndX64Application'
-  } elseif ($SecondaryCore.Count) {
-    'x64Application'
-  } elseif ($Candidate.SecondaryOffsetValue -eq [uint32]::MaxValue) {
-    'x86ApplicationForX86WindowsOnly'
-  } else {
-    'x86ApplicationForX86AndX64Windows'
-  }
-  $OperatingSystemArchitectures = switch ($ApplicationArchitectureMode) {
-    'x86ApplicationForX86WindowsOnly' { @('x86') }
-    'x64Application' { @('x64') }
-    default { @('x86', 'x64') }
-  }
-  $FirstCore = $Candidate.CoreEntries | Select-Object -First 1
-  [pscustomobject]@{
-    Layout                                = $Candidate.Layout
-    FormatVersion                         = $Candidate.FormatVersion
-    HeaderSize                            = $Candidate.HeaderSize
-    LzmaProperties                        = $Properties
-    LzmaPropertyByte                      = [byte]$Properties[0]
-    DictionarySize                        = $DictionarySize
-    ScopeValue                            = $Candidate.ScopeValue
-    Scope                                 = $ScopeInfo.Scope
-    DefaultScope                          = $ScopeInfo.DefaultScope
-    SupportedScopes                       = $ScopeInfo.SupportedScopes
-    SupportsDualScope                     = $ScopeInfo.SupportsDualScope
-    CoreOffset                            = $FirstCore.Offset
-    CoreCompressedSize                    = $FirstCore.CompressedSize
-    CoreUncompressedSize                  = $FirstCore.UncompressedSize
-    CoreEntries                           = $Candidate.CoreEntries
-    ApplicationArchitectureMode           = $ApplicationArchitectureMode
-    ApplicationArchitectures              = @($Candidate.CoreEntries | Select-Object -ExpandProperty Architecture)
-    SupportedOperatingSystemArchitectures = $OperatingSystemArchitectures
-    LanguageBlockOffset                   = $Candidate.LanguageBlockOffset
-  }
-}
-
-function Read-DeployMasterCompressedBlock {
-  <#
-  .SYNOPSIS
-    Decode one size-prefixed raw LZMA block within the integrity region
-  .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
-  .PARAMETER Offset
-    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
-  .PARAMETER Properties
-    Format-specific field or value interpreted according to the current record/version.
-  .PARAMETER Limit
-    Absolute end offset of the integrity/package region. The complete size-prefixed block must end at or before this boundary.
-  .PARAMETER MaximumBytes
-    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory)][IO.Stream]$Stream,
-    [Parameter(Mandatory)][long]$Offset,
-    [Parameter(Mandatory)][byte[]]$Properties,
-    [Parameter(Mandatory)][long]$Limit,
-    [ValidateRange(1, [long]::MaxValue)][long]$MaximumBytes = 16777216
-  )
-
-  if ($Offset -lt 0 -or $Offset + 8 -gt $Limit) { throw 'The DeployMaster compressed-block header is outside the package bounds.' }
-  $UncompressedSize = [long](Read-BinaryInteger -Stream $Stream -Offset $Offset -Size 4)
-  $CompressedSize = [long](Read-BinaryInteger -Stream $Stream -Offset ($Offset + 4) -Size 4)
-  if ($UncompressedSize -le 0 -or $UncompressedSize -gt $MaximumBytes -or $CompressedSize -le 0 -or $Offset + 8 + $CompressedSize -gt $Limit) {
-    throw 'The DeployMaster compressed block contains invalid size values.'
-  }
-
-  # Give the decoder only the declared compressed bytes and require its output to match the record
-  # header exactly.
-  $InputStream = New-BoundedReadStream -Stream $Stream -Offset ($Offset + 8) -Length $CompressedSize -LeaveOpen
-  $OutputStream = [IO.MemoryStream]::new()
-  try {
-    $null = Expand-InstallerCompressedStream -Algorithm Lzma -Stream $InputStream -Destination $OutputStream -MaximumBytes $MaximumBytes -Properties $Properties -CompressedSize $CompressedSize -UncompressedSize $UncompressedSize
-    $Bytes = $OutputStream.ToArray()
-  } finally {
-    $InputStream.Dispose()
-    $OutputStream.Dispose()
-  }
-
-  [pscustomobject]@{
-    Offset           = $Offset
-    DataOffset       = $Offset + 8
-    CompressedSize   = $CompressedSize
-    UncompressedSize = $UncompressedSize
-    EndOffset        = $Offset + 8 + $CompressedSize
-    Bytes            = $Bytes
-  }
-}
-
-function ConvertFrom-DeployMasterIdentity {
-  <#
-  .SYNOPSIS
-    Convert the structured DeployMaster identity block to package metadata
-  .PARAMETER Bytes
-    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
-  .PARAMETER ScopeValue
-    Scope or elevation evidence used to classify user, machine, or conditional installation.
-  #>
-  [OutputType([pscustomobject])]
-  param (
-    [Parameter(Mandatory)][byte[]]$Bytes,
-    [Parameter(Mandatory)][int]$ScopeValue
-  )
-
-  # Form-feed delimiters define the identity schema. Strict UTF-8 prevents replacement characters
-  # from silently changing paths or ARP values.
-  $Utf8 = [Text.UTF8Encoding]::new($false, $true)
-  try { $Fields = $Utf8.GetString($Bytes).Split([char]12) }
-  catch { throw 'The DeployMaster identity block is not valid UTF-8.' }
-  if ($Fields.Count -lt 19) { throw 'The DeployMaster identity block is incomplete.' }
-
-  $MachineLocationField = [string]$Fields[11]
-  $LocationMarker = if ($MachineLocationField.Length) { [int][char]$MachineLocationField[0] } else { 0 }
-  $MachineInstallLocation = $MachineLocationField.TrimStart([char[]](0, 1, 2, 3))
-  $UserInstallLocation = [string]$Fields[12]
-  $LicenseFileName = ([string]$Fields[8]).TrimStart('*')
-  $ReleaseDate = $null
-  $ReleaseDateValue = 0.0
-  # Release dates are stored as OLE Automation dates; invalid values remain absent evidence.
-  if ([double]::TryParse([string]$Fields[5], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$ReleaseDateValue)) {
-    try { $ReleaseDate = [datetime]::FromOADate($ReleaseDateValue).Date } catch {}
-  }
-
-  [pscustomobject]@{
-    Publisher                  = [string]$Fields[0]
-    PublisherUrl               = [string]$Fields[1]
-    DisplayName                = [string]$Fields[2]
-    PackageUrl                 = [string]$Fields[3]
-    DisplayVersion             = [string]$Fields[4]
-    ReleaseDateValue           = [string]$Fields[5]
-    ReleaseDate                = $ReleaseDate
-    Copyright                  = [string]$Fields[6]
-    LicenseUrl                 = [string]$Fields[7]
-    LicenseFileName            = $LicenseFileName
-    MachineInstallLocation     = $MachineInstallLocation
-    UserInstallLocation        = $UserInstallLocation
-    CommonFilesLocation        = [string]$Fields[13]
-    CommonPublisherLocation    = [string]$Fields[14]
-    MachineMenuLocation        = [string]$Fields[15]
-    UserMenuLocation           = [string]$Fields[16]
-    CommonDataLocation         = [string]$Fields[17]
-    UserDataLocation           = [string]$Fields[18]
-    LocationMarker             = $LocationMarker
-    LocationMarkerMatchesScope = $LocationMarker -eq @{
-      0 = 2
-      1 = 1
-      2 = 3
-    }[$ScopeValue]
-    Fields                     = $Fields
-  }
-}
-
-function Get-DeployMasterFileEntry {
-  <#
-  .SYNOPSIS
-    Read the bounded DeployMaster file-offset and size tables
-  .DESCRIPTION
-    The file table stores a run of absolute offsets followed by parallel raw
-    and stored-size arrays. File names immediately precede the arrays; the
-    mandatory license file name is carried by the identity block.
-  .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
-  .PARAMETER Identity
-    Installer identity value used to select or report the matching static metadata record.
-  .PARAMETER IdentityEnd
-    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
-  .PARAMETER PackageDataOffset
-    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
-  .PARAMETER Properties
-    Format-specific field or value interpreted according to the current record/version.
-  .PARAMETER TableKind
-    Detected format variant controlling version-specific parsing rules.
-  .PARAMETER MaximumEntries
-    Declared record count or parser count limit; malformed or excessive counts are rejected.
-  .PARAMETER MaximumMetadataBytes
-    Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
-  #>
-  [OutputType([pscustomobject[]])]
-  param (
-    [Parameter(Mandatory)][IO.Stream]$Stream,
-    [Parameter(Mandatory)][psobject]$Identity,
-    [Parameter(Mandatory)][long]$IdentityEnd,
-    [Parameter(Mandatory)][long]$PackageDataOffset,
-    [Parameter(Mandatory)][byte[]]$Properties,
-    [Parameter(Mandatory)][ValidateSet('Current', 'Legacy')][string]$TableKind,
-    [ValidateRange(2, 4096)][int]$MaximumEntries = 4096,
-    [ValidateRange(1, [long]::MaxValue)][long]$MaximumMetadataBytes = 33554432
-  )
-
-  $MetadataLength = $PackageDataOffset - $IdentityEnd
-  if ($MetadataLength -le 0 -or $MetadataLength -gt $MaximumMetadataBytes -or $MetadataLength -gt [int]::MaxValue) {
-    throw 'The DeployMaster file-table region is outside the configured bounds.'
-  }
-  # Search only the bounded metadata gap between identity and package data for parallel offset and
-  # size arrays. Structural agreement across all arrays identifies the table.
-  $Metadata = Read-BinaryBytes -Stream $Stream -Offset $IdentityEnd -Count ([int]$MetadataLength)
-  $Candidates = [Collections.Generic.List[object]]::new()
-  for ($Index = 0; $Index + 48 -le $Metadata.Length; $Index++) {
-    $FirstOffset = [uint64][BitConverter]::ToUInt64($Metadata, $Index)
-    $SecondOffset = [uint64][BitConverter]::ToUInt64($Metadata, $Index + 8)
-    if ($FirstOffset -lt [uint64]$IdentityEnd -or $SecondOffset -le $FirstOffset -or $SecondOffset -ge [uint64]$Stream.Length) { continue }
-
-    $Boundaries = [Collections.Generic.List[long]]::new()
-    $Cursor = $Index
-    # Absolute payload offsets form a strictly increasing run terminated by the first non-offset.
-    while ($Boundaries.Count -lt $MaximumEntries -and $Cursor + 8 -le $Metadata.Length) {
-      $Value = [uint64][BitConverter]::ToUInt64($Metadata, $Cursor)
-      if ($Value -lt [uint64]$IdentityEnd -or $Value -ge [uint64]$Stream.Length -or ($Boundaries.Count -and $Value -le [uint64]$Boundaries[$Boundaries.Count - 1])) { break }
-      $Boundaries.Add([long]$Value)
-      $Cursor += 8
-    }
-    if ($Boundaries.Count -lt 2 -or $Boundaries -notcontains $PackageDataOffset) { continue }
-
-    # Current tables have one size per boundary; legacy tables prepend a separately located license
-    # block and therefore have one additional record.
-    foreach ($CandidateTableKind in $TableKind) {
-      $EntryCount = if ($CandidateTableKind -eq 'Current') { $Boundaries.Count } else { $Boundaries.Count + 1 }
-      if ($EntryCount -gt $MaximumEntries -or $Cursor + (16 * $EntryCount) -gt $Metadata.Length) { continue }
-      $RawSizes = [Collections.Generic.List[long]]::new()
-      $StoredSizes = [Collections.Generic.List[long]]::new()
-      $Valid = $true
-      for ($EntryIndex = 0; $EntryIndex -lt $EntryCount; $EntryIndex++) {
-        $Value = [uint64][BitConverter]::ToUInt64($Metadata, $Cursor + (8 * $EntryIndex))
-        if ($Value -eq 0 -or $Value -gt [uint64][long]::MaxValue) { $Valid = $false; break }
-        $RawSizes.Add([long]$Value)
-      }
-      if (-not $Valid) { continue }
-      $StoredSizeOffset = $Cursor + (8 * $EntryCount)
-      for ($EntryIndex = 0; $EntryIndex -lt $EntryCount; $EntryIndex++) {
-        $Value = [uint64][BitConverter]::ToUInt64($Metadata, $StoredSizeOffset + (8 * $EntryIndex))
-        if ($Value -eq 0 -or $Value -gt [uint64]$RawSizes[$EntryIndex]) { $Valid = $false; break }
-        $StoredSizes.Add([long]$Value)
-      }
-      if (-not $Valid) { continue }
-
-      $Offsets = [Collections.Generic.List[long]]::new()
-      if ($CandidateTableKind -eq 'Current') {
-        foreach ($Boundary in $Boundaries) { $Offsets.Add($Boundary) }
-      } else {
-        # Legacy packages keep the mandatory license block before the file
-        # boundary table as [stored-size][raw-size][raw LZMA bytes].
-        $LicenseOffsets = [Collections.Generic.List[long]]::new()
-        for ($LicenseHeader = 0; $LicenseHeader + 8 + $StoredSizes[0] -le $Index; $LicenseHeader++) {
-          if ([BitConverter]::ToUInt32($Metadata, $LicenseHeader) -eq $StoredSizes[0] -and
-            [BitConverter]::ToUInt32($Metadata, $LicenseHeader + 4) -eq $RawSizes[0]) {
-            $LicenseOffsets.Add($IdentityEnd + $LicenseHeader + 8)
-          }
-        }
-        if ($LicenseOffsets.Count -ne 1) { continue }
-        $Offsets.Add($LicenseOffsets[0])
-        foreach ($Boundary in $Boundaries) { $Offsets.Add($Boundary) }
-      }
-      for ($EntryIndex = 0; $EntryIndex -lt $EntryCount; $EntryIndex++) {
-        if ($Offsets[$EntryIndex] + $StoredSizes[$EntryIndex] -gt $Stream.Length) { $Valid = $false; break }
-      }
-      if ($Valid) {
-        $Candidates.Add([pscustomobject]@{
-            TableKind   = $CandidateTableKind
-            TableOffset = $Index
-            Offsets     = $Offsets.ToArray()
-            RawSizes    = $RawSizes.ToArray()
-            StoredSizes = $StoredSizes.ToArray()
-          })
-      }
-    }
-  }
-  if ($Candidates.Count -ne 1) { throw 'The DeployMaster file table could not be located unambiguously.' }
-
-  $Candidate = $Candidates[0]
-  $Names = [Collections.Generic.List[string]]::new()
-  if (-not [string]::IsNullOrWhiteSpace($Identity.LicenseFileName)) { $Names.Add($Identity.LicenseFileName) }
-  $RemainingNameCount = $Candidate.Offsets.Count - $Names.Count
-  $Utf8 = [Text.UTF8Encoding]::new($false, $true)
-  $PayloadNames = @()
-
-  # Smaller current packages keep the CRLF-delimited payload names directly
-  # before the arrays. Multi-architecture and legacy packages compress them.
-  try {
-    # Prefer the simple CRLF-delimited name table used by smaller current packages.
-    $NameCursor = $Candidate.TableOffset
-    $ReverseNames = [Collections.Generic.List[string]]::new()
-    for ($NameIndex = 0; $NameIndex -lt $RemainingNameCount; $NameIndex++) {
-      if ($NameCursor -lt 2 -or $Metadata[$NameCursor - 2] -ne 13 -or $Metadata[$NameCursor - 1] -ne 10) { throw 'The plain file-name table is absent.' }
-      $LineEnd = $NameCursor - 2
-      $LineStart = $LineEnd
-      while ($LineStart -gt 0) {
-        $Byte = $Metadata[$LineStart - 1]
-        if ($Byte -lt 32 -or $Byte -eq 127 -or $Byte -eq 255) { break }
-        $LineStart--
-      }
-      if ($LineStart -eq $LineEnd) { throw 'The plain file-name table contains an empty entry.' }
-      $ReverseNames.Add($Utf8.GetString($Metadata, $LineStart, $LineEnd - $LineStart))
-      $NameCursor = $LineStart
-    }
-    $PayloadNames = @($ReverseNames.ToArray())
-    [array]::Reverse($PayloadNames)
-  } catch { $PayloadNames = @() }
-
-  if ($PayloadNames.Count -ne $RemainingNameCount) {
-    # Multi-architecture and legacy packages compress the name list immediately before the arrays.
-    # Require one and only one decodable candidate with the expected number of names.
-    $DecodedNameLists = [Collections.Generic.List[object]]::new()
-    $MinimumHeaderOffset = [Math]::Max(0, $Candidate.TableOffset - 1048576)
-    for ($BlockOffset = $MinimumHeaderOffset; $BlockOffset + 8 -le $Candidate.TableOffset; $BlockOffset++) {
-      $RawSize = [uint32][BitConverter]::ToUInt32($Metadata, $BlockOffset)
-      $StoredSize = [uint32][BitConverter]::ToUInt32($Metadata, $BlockOffset + 4)
-      $BlockEnd = $BlockOffset + 8 + $StoredSize
-      if ($RawSize -eq 0 -or $RawSize -gt 1048576 -or $StoredSize -eq 0 -or $StoredSize -gt $RawSize -or $BlockEnd -gt $Candidate.TableOffset -or $Candidate.TableOffset - $BlockEnd -gt 16) { continue }
-      $InputStream = [IO.MemoryStream]::new($Metadata, $BlockOffset + 8, [int]$StoredSize, $false, $true)
-      $OutputStream = [IO.MemoryStream]::new()
-      try {
-        $null = Expand-InstallerCompressedStream -Algorithm Lzma -Stream $InputStream -Destination $OutputStream -MaximumBytes 1048576 -Properties $Properties -CompressedSize $StoredSize -UncompressedSize $RawSize
-        $Text = $Utf8.GetString($OutputStream.ToArray())
-        $DecodedNames = @($Text -split "`r`n" | Where-Object { -not [string]::IsNullOrEmpty($_) })
-        if ($DecodedNames.Count -eq $RemainingNameCount) { $DecodedNameLists.Add($DecodedNames) }
-      } catch {
-      } finally {
-        $InputStream.Dispose()
-        $OutputStream.Dispose()
-      }
-    }
-    if ($DecodedNameLists.Count -ne 1) { throw 'The DeployMaster file-name table could not be decoded unambiguously.' }
-    $PayloadNames = @($DecodedNameLists[0])
-  }
-  foreach ($PayloadName in $PayloadNames) { $Names.Add($PayloadName) }
-  if ($Names.Count -ne $Candidate.Offsets.Count) { throw 'The DeployMaster file-name and offset table counts differ.' }
-
-  for ($EntryIndex = 0; $EntryIndex -lt $Names.Count; $EntryIndex++) {
-    [pscustomobject]@{
-      Index            = $EntryIndex
-      Name             = $Names[$EntryIndex]
-      FullName         = $Names[$EntryIndex]
-      Offset           = $Candidate.Offsets[$EntryIndex]
-      CompressedSize   = $Candidate.StoredSizes[$EntryIndex]
-      UncompressedSize = $Candidate.RawSizes[$EntryIndex]
-      Compression      = if ($Candidate.StoredSizes[$EntryIndex] -eq $Candidate.RawSizes[$EntryIndex]) { 'Store' } else { 'Lzma' }
-    }
-  }
-}
-
-function ConvertFrom-DeployMasterFileAssociationBlock {
-  <#
-  .SYNOPSIS
-    Parse a structured DeployMaster file-type metadata record
-  .PARAMETER Bytes
-    Bounded format record or payload bytes interpreted by this function; the input array is not modified.
-  #>
-  [OutputType([pscustomobject[]])]
-  param ([Parameter(Mandatory)][byte[]]$Bytes)
-
-  # The block begins with a bounded association count followed by sequential
-  # variable-length records. Any trailing or truncated data rejects the block.
-  if ($Bytes.Length -lt 2) { throw 'The DeployMaster file-type record is too small.' }
-  $Utf8 = [Text.UTF8Encoding]::new($false, $true)
-  $Cursor = 0
-  $Count = [int]$Bytes[$Cursor++]
-  if ($Count -lt 1 -or $Count -gt 64) { throw 'The DeployMaster file-type count is invalid.' }
-
-  function ReadAssociationUInt16([ref]$Position) {
-    <#
-    .SYNOPSIS
-      Read a sequential unsigned 16-bit little-endian association field.
-    .PARAMETER Position
-      Mutable block-relative byte cursor advanced by two after a bounded read.
-    #>
-    if ($Position.Value + 2 -gt $Bytes.Length) { throw 'The DeployMaster file-type record is truncated.' }
-    $Value = [uint16][BitConverter]::ToUInt16($Bytes, $Position.Value)
-    $Position.Value += 2
-    return $Value
-  }
-  function ReadAssociationInt16([ref]$Position) {
-    <#
-    .SYNOPSIS
-      Read a sequential signed 16-bit little-endian association field.
-    .PARAMETER Position
-      Mutable block-relative byte cursor advanced by two after a bounded read.
-    #>
-    if ($Position.Value + 2 -gt $Bytes.Length) { throw 'The DeployMaster file-type record is truncated.' }
-    $Value = [int16][BitConverter]::ToInt16($Bytes, $Position.Value)
-    $Position.Value += 2
-    return $Value
-  }
-  function ReadAssociationString([ref]$Position) {
-    <#
-    .SYNOPSIS
-      Read a uint16-length-prefixed UTF-8 association string.
-    .PARAMETER Position
-      Mutable block-relative cursor advanced across the length field and string bytes.
-    #>
-    $Length = [int](ReadAssociationUInt16 -Position $Position)
-    if ($Position.Value + $Length -gt $Bytes.Length) { throw 'The DeployMaster file-type string is truncated.' }
-    $Value = $Utf8.GetString($Bytes, $Position.Value, $Length)
-    $Position.Value += $Length
-    return $Value
-  }
-
-  $Associations = [Collections.Generic.List[object]]::new()
-  # Each association contains architecture-specific icon references and a nested
-  # action list. Preserve file indexes for later catalog resolution.
-  for ($AssociationIndex = 0; $AssociationIndex -lt $Count; $AssociationIndex++) {
-    if ($Cursor -ge $Bytes.Length -or $Bytes[$Cursor] -notin 0, 1) { throw 'The DeployMaster file-type default flag is invalid.' }
-    $CreateByDefault = [bool]$Bytes[$Cursor++]
-    $Description = ReadAssociationString -Position ([ref]$Cursor)
-    $Extension = ReadAssociationString -Position ([ref]$Cursor)
-    if ($Extension -notmatch '^\.[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$') { throw 'The DeployMaster file-type extension is invalid.' }
-    $Icon32FileIndex = ReadAssociationInt16 -Position ([ref]$Cursor)
-    if ($Cursor -ge $Bytes.Length) { throw 'The DeployMaster 32-bit icon record is truncated.' }
-    $Icon32ResourceIndex = [int]$Bytes[$Cursor++]
-    $Icon64FileIndex = ReadAssociationInt16 -Position ([ref]$Cursor)
-    if ($Cursor -ge $Bytes.Length) { throw 'The DeployMaster 64-bit icon record is truncated.' }
-    $Icon64ResourceIndex = [int]$Bytes[$Cursor++]
-    if ($Cursor -ge $Bytes.Length) { throw 'The DeployMaster file-type action count is missing.' }
-    $ActionCount = [int]$Bytes[$Cursor++]
-    if ($ActionCount -gt 64) { throw 'The DeployMaster file-type action count is invalid.' }
-    $Actions = [Collections.Generic.List[object]]::new()
-    # Actions carry separate x86/x64 executable indexes plus literal parameters;
-    # parsing records them as evidence and never invokes the commands.
-    for ($ActionIndex = 0; $ActionIndex -lt $ActionCount; $ActionIndex++) {
-      $Actions.Add([pscustomobject]@{
-          Name                  = ReadAssociationString -Position ([ref]$Cursor)
-          Executable32FileIndex = ReadAssociationInt16 -Position ([ref]$Cursor)
-          Executable64FileIndex = ReadAssociationInt16 -Position ([ref]$Cursor)
-          Parameters            = ReadAssociationString -Position ([ref]$Cursor)
-        })
-    }
-    $Associations.Add([pscustomobject]@{
-        Extension           = $Extension.ToLowerInvariant()
-        FileExtension       = $Extension.TrimStart('.').ToLowerInvariant()
-        Description         = $Description
-        CreateByDefault     = $CreateByDefault
-        Icon32FileIndex     = $Icon32FileIndex
-        Icon32ResourceIndex = $Icon32ResourceIndex
-        Icon64FileIndex     = $Icon64FileIndex
-        Icon64ResourceIndex = $Icon64ResourceIndex
-        Actions             = $Actions.ToArray()
-      })
-  }
-  # Exact consumption authenticates the candidate found by the outer scanner and
-  # prevents a valid prefix in unrelated package data from being accepted.
-  if ($Cursor -ne $Bytes.Length) { throw 'The DeployMaster file-type record has trailing data.' }
-  $Associations.ToArray()
-}
-
-function Get-DeployMasterFileAssociation {
-  <#
-  .SYNOPSIS
-    Locate and decode structured file-type records in package metadata
-  .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
-  .PARAMETER IdentityEnd
-    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
-  .PARAMETER PackageDataOffset
-    Byte offset in the coordinate system named by this function: absolute file, PE/resource, overlay, or record relative.
-  .PARAMETER Properties
-    Format-specific field or value interpreted according to the current record/version.
-  .PARAMETER MaximumBlocks
-    Declared record count or parser count limit; malformed or excessive counts are rejected.
-  #>
-  [OutputType([pscustomobject[]])]
-  param (
-    [Parameter(Mandatory)][IO.Stream]$Stream,
-    [Parameter(Mandatory)][long]$IdentityEnd,
-    [Parameter(Mandatory)][long]$PackageDataOffset,
-    [Parameter(Mandatory)][byte[]]$Properties,
-    [ValidateRange(1, 128)][int]$MaximumBlocks = 128
-  )
-
-  $MetadataLength = $PackageDataOffset - $IdentityEnd
-  if ($MetadataLength -le 0 -or $MetadataLength -gt 33554432 -or $MetadataLength -gt [int]::MaxValue) { return }
-  $Metadata = Read-BinaryBytes -Stream $Stream -Offset $IdentityEnd -Count ([int]$MetadataLength)
-  $Associations = [Collections.Generic.List[object]]::new()
-  $DecodedBlockCount = 0
-  for ($BlockOffset = 0; $BlockOffset + 9 -le $Metadata.Length -and $DecodedBlockCount -lt $MaximumBlocks; $BlockOffset++) {
-    $RawSize = [uint32][BitConverter]::ToUInt32($Metadata, $BlockOffset)
-    $StoredSize = [uint32][BitConverter]::ToUInt32($Metadata, $BlockOffset + 4)
-    if ($RawSize -eq 0 -or $RawSize -gt 1048576 -or $StoredSize -eq 0 -or $StoredSize -gt $RawSize -or $BlockOffset + 8 + $StoredSize -gt $Metadata.Length) { continue }
-    $InputStream = [IO.MemoryStream]::new($Metadata, $BlockOffset + 8, [int]$StoredSize, $false, $true)
-    $OutputStream = [IO.MemoryStream]::new()
-    try {
-      $null = Expand-InstallerCompressedStream -Algorithm Lzma -Stream $InputStream -Destination $OutputStream -MaximumBytes 1048576 -Properties $Properties -CompressedSize $StoredSize -UncompressedSize $RawSize
-      $DecodedBlockCount++
-      $Parsed = @(ConvertFrom-DeployMasterFileAssociationBlock -Bytes $OutputStream.ToArray())
-      foreach ($Association in $Parsed) { $Associations.Add($Association) }
-      $BlockOffset += 7 + $StoredSize
-    } catch {
-    } finally {
-      $InputStream.Dispose()
-      $OutputStream.Dispose()
-    }
-  }
-  $Associations.ToArray()
-}
-
-function Read-DeployMasterPackageData {
-  <#
-  .SYNOPSIS
-    Parse one DeployMaster package from an already-open installer stream
-  .PARAMETER Stream
-    Caller-owned binary stream. Sequential readers may advance its byte position; helpers do not dispose it.
-  #>
-  [OutputType([pscustomobject])]
-  param ([Parameter(Mandatory)][IO.Stream]$Stream)
-
-  $Locator = Get-DeployMasterPackageLocator -Stream $Stream
-  $Header = Get-DeployMasterPackageHeader -Stream $Stream -Locator $Locator
-  $IntegrityEnd = $Locator.PackageOffset + $Locator.IntegrityLength
-  $LanguageBlock = Read-DeployMasterCompressedBlock -Stream $Stream -Offset $Header.LanguageBlockOffset -Properties $Header.LzmaProperties -Limit $IntegrityEnd
-  $IdentityBlock = Read-DeployMasterCompressedBlock -Stream $Stream -Offset $LanguageBlock.EndOffset -Properties $Header.LzmaProperties -Limit $IntegrityEnd
-  $Identity = ConvertFrom-DeployMasterIdentity -Bytes $IdentityBlock.Bytes -ScopeValue $Header.ScopeValue
-  $Warnings = [Collections.Generic.List[string]]::new()
-  if (-not $Identity.LocationMarkerMatchesScope) { $Warnings.Add('The DeployMaster identity scope marker does not match the package-control scope byte.') }
-  try { $FileEntries = @(Get-DeployMasterFileEntry -Stream $Stream -Identity $Identity -IdentityEnd $IdentityBlock.EndOffset -PackageDataOffset $Locator.PackageDataOffset -Properties $Header.LzmaProperties -TableKind $Header.Layout) }
-  catch {
-    $FileEntries = @()
-    $Warnings.Add("The DeployMaster payload file table was not decoded: $($_.Exception.Message)")
-  }
-  try { $FileAssociations = @(Get-DeployMasterFileAssociation -Stream $Stream -IdentityEnd $IdentityBlock.EndOffset -PackageDataOffset $Locator.PackageDataOffset -Properties $Header.LzmaProperties) }
-  catch {
-    $FileAssociations = @()
-    $Warnings.Add("The DeployMaster file-type table was not decoded: $($_.Exception.Message)")
-  }
-
-  [pscustomobject]@{
-    Locator          = $Locator
-    Header           = $Header
-    LanguageBlock    = $LanguageBlock
-    IdentityBlock    = $IdentityBlock
-    Identity         = $Identity
-    FileEntries      = $FileEntries
-    FileAssociations = $FileAssociations
-    Warnings         = @($Warnings)
-  }
-}
 
 function ConvertTo-DeployMasterRegistryWrite {
   <#
@@ -716,21 +64,459 @@ function ConvertTo-DeployMasterRegistryWrite {
     Exact name or wildcard used to select format records or payload entries.
   .PARAMETER Value
     Format-specific field or value interpreted according to the current record/version.
+  .PARAMETER Root
+    Concrete registry hive or conditional root used by the projected write.
+  .PARAMETER Key
+    Registry key relative to the selected root.
+  .PARAMETER Type
+    Registry value type written by the DeployMaster runtime.
+  .PARAMETER Evidence
+    Source description attached to the registry operation.
+  .PARAMETER Condition
+    Optional scope condition for a dual-scope registration variant.
   #>
   param (
     [Parameter(Mandatory)][psobject]$PackageData,
     [Parameter(Mandatory)][string]$Name,
-    [AllowNull()][object]$Value
+    [AllowNull()][object]$Value,
+    [string]$Root = $PackageData.Identity.RegistryRoot,
+    [string]$Key = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$($PackageData.Identity.DisplayName)",
+    [ValidateSet('REG_SZ', 'REG_DWORD', 'REG_BINARY')][string]$Type = 'REG_SZ',
+    [string]$Evidence = 'DeployMaster structured identity and built-in uninstaller configuration',
+    [string]$Condition
   )
 
-  $Root = switch ($PackageData.Header.ScopeValue) { 0 { 'HKCU' } 1 { 'HKLM' } default { 'SHCTX' } }
   [pscustomobject]@{
-    Root     = $Root
-    Key      = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$($PackageData.Identity.DisplayName)"
-    Name     = $Name
-    Value    = $Value
-    Type     = 'REG_SZ'
-    Evidence = 'DeployMaster structured identity and built-in uninstaller configuration'
+    Root      = $Root
+    Key       = $Key
+    Name      = $Name
+    Value     = $Value
+    Type      = $Type
+    Condition = $Condition
+    Evidence  = $Evidence
+  }
+}
+
+function Get-DeployMasterBuiltInRegistration {
+  <#
+  .SYNOPSIS
+    Reconstruct one scope-specific DeployMaster uninstall registration.
+  .PARAMETER PackageData
+    Parsed DeployMaster package model containing the structured identity and format route.
+  .PARAMETER Scope
+    Normal-install scope whose concrete registry hive and installation path are projected.
+  .PARAMETER InstallLocation
+    Manifest-safe destination path compiled for this scope.
+  .PARAMETER RegistryView
+    Registry view selected by the compiled application architecture mode.
+  .PARAMETER TargetArchitecture
+    Concrete application architecture used to select an architecture-specific generated uninstaller.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][psobject]$PackageData,
+    [Parameter(Mandatory)][ValidateSet('user', 'machine')][string]$Scope,
+    [Parameter(Mandatory)][string]$InstallLocation,
+    [Parameter(Mandatory)][string]$RegistryView,
+    [ValidateSet('x86', 'x64')][string]$TargetArchitecture
+  )
+
+  $Root = $Scope -eq 'machine' ? 'HKLM' : 'HKCU'
+  $Condition = $PackageData.Identity.SupportsDualScope ? "Normal installation uses $Scope scope" : $null
+  $UninstallKey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$($PackageData.Identity.DisplayName)"
+  $UninstallerFileName = switch ($PackageData.Header.ApplicationArchitectureMode) {
+    'x86AndX64Application' {
+      if (-not $TargetArchitecture) { throw 'A concrete target architecture is required for a mixed-architecture DeployMaster uninstall registration.' }
+      # Mixed media stores distinguishable UnDeploy32/UnDeploy64 payload records, but the runtime
+      # installs the selected x86 payload under the ordinary UnDeploy.exe name.
+      $TargetArchitecture -eq 'x64' ? 'UnDeploy64.exe' : 'UnDeploy.exe'
+    }
+    'x64Application' { 'UnDeploy64.exe' }
+    default { 'UnDeploy.exe' }
+  }
+  $UninstallerPath = "$($InstallLocation.TrimEnd('\'))\$UninstallerFileName"
+  $DeploymentLogPath = "$($InstallLocation.TrimEnd('\'))\Deploy.log"
+
+  # DeployMaster 7.2 quotes both paths. Controlled VM installations of archived 6.0.1 and 6.5.1
+  # media prove that the earlier runtime left the executable path unquoted but quoted the log.
+  $UninstallString = switch ($PackageData.Header.UninstallCommandRoute) {
+    'QuotedExecutableAndLog' { "`"$UninstallerPath`" `"$DeploymentLogPath`"" }
+    'UnquotedExecutableQuotedLog' { "$UninstallerPath `"$DeploymentLogPath`"" }
+    default { throw "Unsupported DeployMaster uninstall command route '$($PackageData.Header.UninstallCommandRoute)'." }
+  }
+  $Writes = [Collections.Generic.List[object]]::new()
+  # The runtime writes HelpLink and URLInfoUpdate from the application URL and falls back to the
+  # publisher URL when no application URL is configured; the dual-conditional gate is byte-identical
+  # in the 6.0.1 through 7.7.0 runtime decompiles.
+  $HelpLinkValue = $PackageData.Identity.PackageUrl
+  if ([string]::IsNullOrWhiteSpace([string]$HelpLinkValue)) {
+    $HelpLinkValue = $PackageData.Identity.PublisherUrl
+  }
+  $ValueRecords = @(
+    [pscustomobject]@{ Name = 'DisplayName'; Value = $PackageData.Identity.DisplayName; Type = 'REG_SZ' }
+    [pscustomobject]@{ Name = 'UninstallString'; Value = $UninstallString; Type = 'REG_SZ' }
+    [pscustomobject]@{ Name = 'NoModify'; Value = 1; Type = 'REG_DWORD' }
+    [pscustomobject]@{ Name = 'NoRepair'; Value = 1; Type = 'REG_DWORD' }
+    [pscustomobject]@{ Name = 'InstallLocation'; Value = $InstallLocation; Type = 'REG_SZ' }
+    [pscustomobject]@{ Name = 'DisplayVersion'; Value = $PackageData.Identity.DisplayVersion; Type = 'REG_SZ' }
+    [pscustomobject]@{ Name = 'Publisher'; Value = $PackageData.Identity.Publisher; Type = 'REG_SZ' }
+    [pscustomobject]@{ Name = 'HelpLink'; Value = $HelpLinkValue; Type = 'REG_SZ' }
+    [pscustomobject]@{ Name = 'URLInfoUpdate'; Value = $HelpLinkValue; Type = 'REG_SZ' }
+    [pscustomobject]@{ Name = 'URLInfoAbout'; Value = $PackageData.Identity.PublisherUrl; Type = 'REG_SZ' }
+  )
+  # The runtime writes the first two dot-separated DisplayVersion components as string values;
+  # live installs confirm "12.34.56" -> "12"/"34" and "DEMO 6.1.2" -> "DEMO 6"/"1".
+  $VersionComponents = @(([string]$PackageData.Identity.DisplayVersion) -split '\.')
+  $VersionMajorValue = $VersionComponents.Count -ge 2 ? $VersionComponents[0] : $null
+  $VersionMinorValue = $VersionComponents.Count -ge 2 ? $VersionComponents[1] : $null
+  if ($null -ne $VersionMajorValue) {
+    $ValueRecords += [pscustomobject]@{ Name = 'VersionMajor'; Value = $VersionMajorValue; Type = 'REG_SZ' }
+    $ValueRecords += [pscustomobject]@{ Name = 'VersionMinor'; Value = $VersionMinorValue; Type = 'REG_SZ' }
+  }
+  foreach ($Record in $ValueRecords) {
+    if ($null -eq $Record.Value -or ($Record.Value -is [string] -and [string]::IsNullOrWhiteSpace($Record.Value))) { continue }
+    $Writes.Add((ConvertTo-DeployMasterRegistryWrite -PackageData $PackageData -Root $Root -Key $UninstallKey -Name $Record.Name -Value $Record.Value -Type $Record.Type -Condition $Condition))
+  }
+
+  # DeployMaster records the deployment log under its vendor key so later installations can find
+  # an existing package. The adjacent Stub value contains the runtime source path and is generated
+  # during installation, so it is reported as dynamic evidence rather than guessed here.
+  $TrackingWrite = ConvertTo-DeployMasterRegistryWrite -PackageData $PackageData -Root $Root -Key 'Software\JGsoft\DeployIT' -Name $PackageData.Identity.DisplayName -Value $DeploymentLogPath -Condition $Condition -Evidence 'DeployMaster built-in deployment-log tracking convention'
+  [pscustomobject][ordered]@{
+    Scope                      = $Scope
+    Root                       = $Root
+    RegistryView               = $RegistryView
+    Architecture               = $TargetArchitecture
+    ProductCode                = $PackageData.Identity.DisplayName
+    UninstallKey               = $UninstallKey
+    DisplayName                = $PackageData.Identity.DisplayName
+    DisplayVersion             = $PackageData.Identity.DisplayVersion
+    Publisher                  = $PackageData.Identity.Publisher
+    HelpLink                   = $HelpLinkValue
+    URLInfoUpdate              = $HelpLinkValue
+    URLInfoAbout               = $PackageData.Identity.PublisherUrl
+    InstallLocation            = $InstallLocation
+    UninstallerPath            = $UninstallerPath
+    DeploymentLogPath          = $DeploymentLogPath
+    UninstallString            = $UninstallString
+    QuietUninstallString       = $null
+    DisplayIcon                = $null
+    NoModify                   = $true
+    NoRepair                   = $true
+    VersionMajor               = $VersionMajorValue
+    VersionMinor               = $VersionMinorValue
+    RegistryWrites             = $Writes.ToArray()
+    DeploymentTrackingWrite    = $TrackingWrite
+    RuntimeGeneratedValueNames = @('EstimatedSize', 'InstallDate', 'Stub')
+    Evidence                   = 'DeployMaster structured identity plus controlled user-scope and machine-scope installations'
+  }
+}
+
+function Get-DeployMasterCustomAppsAndFeaturesEntry {
+  <#
+  .SYNOPSIS
+    Project explicit Registry-tab uninstall writes into ARP entries.
+  .PARAMETER RegistryWrite
+    Parsed DeployMaster registry writes. Conditional keep-existing writes are retained as raw evidence but excluded from authoritative ARP values.
+  #>
+  [OutputType([pscustomobject[]])]
+  param ([AllowNull()][object[]]$RegistryWrite)
+
+  $Groups = @($RegistryWrite | Where-Object {
+      -not $_.OnlyIfMissing -and $_.Key -match '^(?i:Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\)(?<ProductCode>[^\\]+)$'
+    } | Group-Object Root, Key)
+  foreach ($Group in $Groups) {
+    $Values = [ordered]@{}
+    foreach ($Write in $Group.Group) { $Values[[string]$Write.Name] = $Write.Value }
+    # Windows hides entries without DisplayName and entries explicitly marked as system components.
+    # Keep their registry writes in CustomRegistryWrites, but do not present them as visible ARP rows.
+    $SystemComponent = 0L
+    $IsHidden = $Values.Contains('SystemComponent') -and [long]::TryParse([string]$Values.SystemComponent, [ref]$SystemComponent) -and $SystemComponent -ne 0
+    if (-not $Values.Contains('DisplayName') -or [string]::IsNullOrWhiteSpace([string]$Values.DisplayName) -or $IsHidden) { continue }
+    $ProductCode = ([string]$Group.Group[0].Key -split '\\')[-1]
+    $Entry = [ordered]@{ ProductCode = $ProductCode; InstallerType = 'exe' }
+    foreach ($Name in 'DisplayName', 'DisplayVersion', 'Publisher') {
+      if ($Values.Contains($Name) -and -not [string]::IsNullOrWhiteSpace([string]$Values[$Name])) { $Entry[$Name] = [string]$Values[$Name] }
+    }
+    [pscustomobject]$Entry
+  }
+}
+
+function Merge-DeployMasterAppsAndFeaturesEntry {
+  <#
+  .SYNOPSIS
+    Merge built-in and explicit DeployMaster uninstall records by ProductCode.
+  .PARAMETER Entry
+    ARP projections in precedence order. Later explicit registry values replace corresponding built-in values.
+  #>
+  [OutputType([pscustomobject[]])]
+  param ([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entry)
+
+  $ByProductCode = [Collections.Specialized.OrderedDictionary]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($Candidate in $Entry) {
+    $ProductCode = [string]$Candidate.ProductCode
+    if ([string]::IsNullOrWhiteSpace($ProductCode)) { continue }
+    $Values = [ordered]@{}
+    if ($ByProductCode.Contains($ProductCode)) {
+      foreach ($Property in $ByProductCode[$ProductCode].PSObject.Properties) { $Values[$Property.Name] = $Property.Value }
+    }
+    foreach ($Property in $Candidate.PSObject.Properties) {
+      if ($null -ne $Property.Value -and -not ($Property.Value -is [string] -and [string]::IsNullOrWhiteSpace($Property.Value))) {
+        $Values[$Property.Name] = $Property.Value
+      }
+    }
+    $ByProductCode[$ProductCode] = [pscustomobject]$Values
+  }
+  return [object[]]@($ByProductCode.Values)
+}
+
+function Get-DeployMasterClassicBuiltInRegistration {
+  <#
+  .SYNOPSIS
+    Reconstruct the built-in uninstall registration written by the classic 2.5 runtime.
+  .PARAMETER PackageData
+    Validated classic package model containing identity and installation-path evidence.
+  .OUTPUTS
+    The exact static HKLM 32-bit ARP values and deployment-log tracking value confirmed by a
+    controlled 2.5.3 installation. Runtime-only Stub data is named but not guessed.
+  #>
+  [OutputType([pscustomobject])]
+  param ([Parameter(Mandatory)][psobject]$PackageData)
+
+  $Identity = $PackageData.Identity
+  $ProductCode = [string]$Identity.DisplayName
+  $InstallLocation = [string]$Identity.MachineInstallLocation
+  if ([string]::IsNullOrWhiteSpace($ProductCode) -or [string]::IsNullOrWhiteSpace($InstallLocation)) { return }
+  $DisplayName = (@($Identity.Publisher, $Identity.DisplayName, $Identity.DisplayVersion) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join ' '
+  $DeploymentLogPath = "$InstallLocation\Deploy.log"
+  $UninstallerPath = '%WINDOWS%\UnDeploy.exe'
+  $UninstallString = "$UninstallerPath `"$DeploymentLogPath`""
+  $Key = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductCode"
+  $Writes = @(
+    [pscustomobject]@{ Root = 'HKLM'; RegistryView = '32-bit'; Key = $Key; Name = 'DisplayName'; Value = $DisplayName; Type = 'REG_SZ' }
+    [pscustomobject]@{ Root = 'HKLM'; RegistryView = '32-bit'; Key = $Key; Name = 'UninstallString'; Value = $UninstallString; Type = 'REG_SZ' }
+  )
+  $TrackingWrite = [pscustomobject]@{
+    Root = 'HKLM'; RegistryView = '32-bit'; Key = 'Software\JGsoft\DeployIT'; Name = $ProductCode
+    Value = $DeploymentLogPath; Type = 'REG_SZ'
+  }
+  return [pscustomobject]@{
+    ProductCode                = $ProductCode
+    Root                       = 'HKLM'
+    RegistryView               = '32-bit'
+    Scope                      = 'machine'
+    Architecture               = 'x86'
+    Key                        = $Key
+    DisplayName                = $DisplayName
+    DisplayVersion             = $null
+    Publisher                  = $null
+    InstallLocation            = $null
+    UninstallerPath            = $UninstallerPath
+    DeploymentLogPath          = $DeploymentLogPath
+    UninstallString            = $UninstallString
+    QuietUninstallString       = $null
+    DisplayIcon                = $null
+    NoModify                   = $null
+    NoRepair                   = $null
+    RegistryWrites             = $Writes
+    DeploymentTrackingWrite    = $TrackingWrite
+    RuntimeGeneratedValueNames = @('Stub')
+    Evidence                   = 'Classic 2.5 runtime decompile plus controlled 2.5.3 HKLM 32-bit installed-state evidence'
+  }
+}
+
+function ConvertTo-DeployMasterClassicInfo {
+  <#
+  .SYNOPSIS
+    Compose provider-neutral parser evidence for a validated classic DeployMaster package.
+  .PARAMETER File
+    Resolved installer FileInfo object.
+  .PARAMETER PackageData
+    Classic package model returned by Read-DeployMasterClassicPackageData.
+  .PARAMETER VersionInfo
+    Trusted outer PE version information.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory)][IO.FileInfo]$File,
+    [Parameter(Mandatory)][psobject]$PackageData,
+    [Parameter(Mandatory)][Diagnostics.FileVersionInfo]$VersionInfo
+  )
+
+  $Identity = $PackageData.Identity
+  $CustomRegistryWrites = @($PackageData.BehaviorMetadata.Registry.RegistryWrites)
+  $DeletedRegistryKeys = @($PackageData.BehaviorMetadata.Registry.DeletedKeys)
+  $FileAssociations = @($PackageData.BehaviorMetadata.FileAssociations)
+  $InstalledFiles = @($PackageData.BehaviorMetadata.InstalledFiles)
+  $Shortcuts = @($PackageData.BehaviorMetadata.Shortcuts)
+  $UrlShortcuts = @($PackageData.BehaviorMetadata.UrlShortcuts)
+  $InstallationItems = @($InstalledFiles) + @($Shortcuts) + @($UrlShortcuts)
+  $InstallationFolderByPath = [Collections.Specialized.OrderedDictionary]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($Folder in @($PackageData.BehaviorMetadata.InstallationFolders)) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$Folder.FullName) -and -not $InstallationFolderByPath.Contains([string]$Folder.FullName)) {
+      $InstallationFolderByPath.Add([string]$Folder.FullName, $Folder)
+    }
+  }
+  $BuiltInRegistration = Get-DeployMasterClassicBuiltInRegistration -PackageData $PackageData
+  $BuiltInAppsAndFeaturesEntry = [pscustomobject]@{ ProductCode = $BuiltInRegistration.ProductCode; DisplayName = $BuiltInRegistration.DisplayName; InstallerType = 'exe' }
+  $CustomAppsAndFeaturesEntries = @(Get-DeployMasterCustomAppsAndFeaturesEntry -RegistryWrite $CustomRegistryWrites)
+  $AppsAndFeaturesEntries = @(Merge-DeployMasterAppsAndFeaturesEntry -Entry (@($BuiltInAppsAndFeaturesEntry) + $CustomAppsAndFeaturesEntries))
+  $RegistryWrites = @($BuiltInRegistration.RegistryWrites) + @($BuiltInRegistration.DeploymentTrackingWrite) + $CustomRegistryWrites
+  $CustomAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $CustomRegistryWrites
+  $FileExtensions = @((@($FileAssociations | Select-Object -ExpandProperty FileExtension) + @($CustomAssociationInfo.FileExtensions)) | Sort-Object -Unique)
+  $RegistryAssociationInfo = [pscustomobject]@{
+    Protocols                 = @($CustomAssociationInfo.Protocols)
+    FileExtensions            = $FileExtensions
+    ProtocolAssociations      = @($CustomAssociationInfo.ProtocolAssociations)
+    FileExtensionAssociations = @($FileAssociations) + @($CustomAssociationInfo.FileExtensionAssociations)
+    RegistryWrites            = @($CustomAssociationInfo.RegistryWrites)
+    Diagnostics               = @($CustomAssociationInfo.Diagnostics)
+  }
+  $Diagnostics = [Collections.Generic.List[object]]::new()
+  $Diagnostics.Add((New-InstallerDiagnostic -Id 'DeployMaster.Installability.ClassicInteractiveOnly' -Source 'DeployMaster' -Message 'The classic DeployMaster 2.5 runtime has no unattended command-line route and is interactive-only.' -Kind Unsupported -Areas Installability -AffectedFields InstallerSwitches, InstallModes -Evidence $PackageData.Route))
+  $Diagnostics.Add((New-InstallerDiagnostic -Id 'DeployMaster.Metadata.ClassicEffectsPartial' -Source 'DeployMaster' -Message 'Classic components, recursive destination trees, files, shortcuts, URL shortcuts, registry operations, and file associations are decoded. Prerequisites and completion records remain unresolved.' -Kind Incomplete -Areas Metadata -AffectedFields Prerequisites, ExecutedPayloads -Evidence $PackageData.Route))
+  foreach ($Diagnostic in @($RegistryAssociationInfo.Diagnostics)) { $Diagnostics.Add($Diagnostic) }
+  $UnresolvedFields = [Collections.Generic.List[string]]::new()
+  $UnresolvedFields.Add('Prerequisites')
+  $SupportDlls = @(
+    if (-not [string]::IsNullOrWhiteSpace($Identity.SupportDll32FileName)) {
+      [pscustomobject]@{ Architecture = 'x86'; FileName = $Identity.SupportDll32FileName }
+    }
+  )
+  if ($SupportDlls.Count) {
+    # The classic runtime invokes the packaged support DLL the same way modern media does, so its
+    # custom validation and post-install effects need the same manual-validation warning.
+    $Diagnostics.Add((New-InstallerDiagnostic -Id 'DeployMaster.Installability.SupportDllEffectsOpaque' -Source 'DeployMaster' -Message 'The installer invokes one or more DeployMaster support DLLs. Their custom validation, folder, registry, and post-install effects require separate static inspection or VM validation.' -Kind ManualValidation -Areas Metadata, Installability, Security -Evidence $SupportDlls))
+    $UnresolvedFields.Add('SupportDllEffects')
+  }
+  return [pscustomobject][ordered]@{
+    Path                                  = $File.FullName
+    InstallerType                         = 'exe'
+    ProductCode                           = $BuiltInRegistration.ProductCode
+    UpgradeCode                           = $null
+    DisplayName                           = $Identity.DisplayName
+    DisplayVersion                        = $Identity.DisplayVersion
+    Publisher                             = $Identity.Publisher
+    Scope                                 = 'machine'
+    DefaultInstallLocation                = $Identity.MachineInstallLocation
+    WritesAppsAndFeaturesEntry            = $true
+    AppsAndFeaturesProductCode            = $BuiltInRegistration.ProductCode
+    AppsAndFeaturesInstallerType          = 'exe'
+    AppsAndFeaturesEntries                = $AppsAndFeaturesEntries
+    UninstallString                       = $BuiltInRegistration.UninstallString
+    QuietUninstallString                  = $null
+    DisplayIcon                           = $null
+    HelpLink                              = $null
+    URLInfoUpdate                         = $null
+    URLInfoAbout                          = $null
+    Diagnostics                           = @(Merge-InstallerDiagnostics -Diagnostic $Diagnostics.ToArray())
+    UnresolvedFields                      = $UnresolvedFields.ToArray()
+    Family                                = 'DeployMaster'
+    ProductCodeEvidence                   = $BuiltInRegistration.Evidence
+    PublisherUrl                          = $Identity.PublisherUrl
+    PackageUrl                            = $Identity.PackageUrl
+    Copyright                             = $Identity.Copyright
+    Description                           = $Identity.Description
+    ReadmeFileName                        = $Identity.ReadmeFileName
+    LicenseFileName                       = $Identity.LicenseFileName
+    LicenseRequiredEveryInstall           = $false
+    SupportDlls                           = $SupportDlls
+    ReleaseDate                           = $Identity.ReleaseDate
+    MachineInstallLocation                = $Identity.MachineInstallLocation
+    UserInstallLocation                   = $Identity.UserInstallLocation
+    RawMachineInstallLocation             = $Identity.RawMachineInstallLocation
+    RawUserInstallLocation                = $Identity.RawUserInstallLocation
+    CommonFilesLocation                   = $null
+    CommonPublisherLocation               = $null
+    MachineMenuLocation                   = $Identity.MachineMenuLocation
+    UserMenuLocation                      = $Identity.UserMenuLocation
+    RawMachineMenuLocation                = $Identity.RawMachineMenuLocation
+    RawUserMenuLocation                   = $Identity.RawUserMenuLocation
+    CommonDataLocation                    = $null
+    UserDataLocation                      = $null
+    RuntimeProductName                    = ([string]$VersionInfo.ProductName).Trim()
+    FileDescription                       = ([string]$VersionInfo.FileDescription).Trim()
+    DefaultScope                          = 'machine'
+    SupportedScopes                       = @('machine')
+    SupportsDualScope                     = $false
+    RequiresAdministrativeRights          = $true
+    InstallerArchitecture                 = $PackageData.Runtime.Architecture
+    ApplicationArchitectureMode           = $null
+    ApplicationArchitectures              = @()
+    SupportedArchitectures                = @()
+    SupportedOperatingSystemArchitectures = @()
+    RegistryView                          = '32-bit'
+    SupportedWindowsVersions              = @()
+    SupportsFutureWindowsVersions         = $null
+    MinimumWindows10VersionCode           = $null
+    MaximumWindows10VersionCode           = $null
+    MinimumWindows11VersionCode           = $null
+    MaximumWindows11VersionCode           = $null
+    RequestedExecutionLevel               = Get-PERequestedExecutionLevel -Path $File.FullName
+    InstallerSwitches                     = [ordered]@{}
+    InstallModes                          = @('interactive')
+    CommandLineSwitches                   = [pscustomobject]@{}
+    UninstallerSwitches                   = [ordered]@{}
+    BuiltInRegistration                   = $BuiltInRegistration
+    BuiltInRegistrationVariants           = @($BuiltInRegistration)
+    DeploymentLogPath                     = $BuiltInRegistration.DeploymentLogPath
+    RuntimeGeneratedArpFields             = @()
+    RegistryWrites                        = $RegistryWrites
+    CustomRegistryWrites                  = $CustomRegistryWrites
+    DeletedRegistryKeys                   = $DeletedRegistryKeys
+    RegistryAssociationInfo               = $RegistryAssociationInfo
+    Protocols                             = $RegistryAssociationInfo.Protocols
+    FileExtensions                        = $RegistryAssociationInfo.FileExtensions
+    FileAssociations                      = $FileAssociations
+    Components                            = @($PackageData.Components)
+    InstallationItemGroups                = @($PackageData.BehaviorMetadata.InstallItemGroups)
+    InstallationItems                     = $InstallationItems
+    InstallationFolders                   = @($InstallationFolderByPath.Values)
+    InstalledFiles                        = $InstalledFiles
+    Shortcuts                             = $Shortcuts
+    UrlShortcuts                          = $UrlShortcuts
+    ExecutedPayloads                      = @()
+    Prerequisites                         = @()
+    DotNetFrameworkRequirement            = $null
+    CompletionActions                     = $null
+    UninstallConfiguration                = $null
+    UpdatePolicy                          = $null
+    ExpirationPolicy                      = $null
+    PackageSettings                       = $null
+    RuntimeFeatures                       = [pscustomobject]@{ PortableSwitch = $false }
+    FileEntries                           = $PackageData.FileEntries
+    ExtractedFiles                        = @($PackageData.FileEntries | Select-Object -ExpandProperty FullName)
+    ClassicFileCatalog                    = [pscustomobject]@{
+      CatalogOffset       = $PackageData.FileCatalog.CatalogOffset
+      CatalogLength       = $PackageData.FileCatalog.CatalogLength
+      EntryCount          = $PackageData.FileEntries.Count
+      AuxiliaryEntryCount = $PackageData.FileCatalog.AuxiliaryCount
+      ObservedTailBytes   = $PackageData.FileCatalog.ObservedTailBytes
+      DestinationRoot     = $PackageData.FileCatalog.DestinationRoot
+    }
+    OverlayInfo                           = [pscustomobject]@{
+      OverlayOffset         = $PackageData.OverlayOffset
+      OverlayLength         = $PackageData.LogicalEnd - $PackageData.OverlayOffset
+      PhysicalFileSize      = $File.Length
+      LogicalFileSize       = $PackageData.LogicalEnd
+      HasSignedEnvelope     = $PackageData.LogicalEnd -lt $File.Length
+      RuntimeCompressedSize = $PackageData.Runtime.CompressedSize
+      RuntimeExpandedSize   = $PackageData.Runtime.UncompressedSize
+      HeaderSize            = $null
+      FormatProfile         = $PackageData.Route.Id
+      FormatVersion         = 2
+      ObservedRuntimeRange  = $PackageData.Route.ObservedRuntimeRange
+      ProfileEvidence       = $PackageData.Route.Evidence
+      PackageDataOffset     = $PackageData.Runtime.MarkerOffset + 4
+    }
+    CanExpand                             = $true
+    ParserVersionInfo                     = [pscustomobject]@{
+      Parser         = 'Dumplings.PackageModule.DeployMaster'
+      ParserMajor    = 7
+      CatalogVersion = [int](Get-DeployMasterCatalogVersion)
+      FormatProfile  = $PackageData.Route.Id
+      Sources        = @('DeployMaster 2.x BZip2 runtime member', 'length-prefixed zlib metadata and payload records', 'classic component descriptors', 'classic offset, expanded-size, CRC32, and destination-root file catalog', 'flat classic file and shortcut streams', 'classic null-terminated registry stream', 'classic form-feed file-association stream', 'archived DeployMaster 2.5.x media')
+    }
   }
 }
 
@@ -746,110 +532,303 @@ function Get-DeployMasterInfo {
 
   process {
     $File = Get-Item -LiteralPath $Path -Force
+    $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
+    $RuntimeIdentity = "$($VersionInfo.ProductName)`n$($VersionInfo.FileDescription)`n$($VersionInfo.Comments)"
+    $ClassicPackageData = $null
     $Stream = [IO.File]::Open($File.FullName, 'Open', 'Read', 'ReadWrite')
     try {
-      # Parse the complete package model while one stream is open, then separately corroborate the
-      # overlay location and PE runtime identity.
-      $PackageData = Read-DeployMasterPackageData -Stream $Stream
-      $OverlayOffset = Get-PEOverlayOffset -Stream $Stream
-      $PELayout = Get-PELayout -Stream $Stream
+      $ClassicRoute = Get-DeployMasterClassicRoute -Stream $Stream -RuntimeIdentity $RuntimeIdentity
+      if ($ClassicRoute) {
+        $ClassicPackageData = Read-DeployMasterClassicPackageData -Stream $Stream -Route $ClassicRoute
+      } else {
+        # Parse the complete package model while one stream is open, then separately corroborate the
+        # overlay location and PE runtime identity.
+        $PackageData = Read-DeployMasterPackageData -Stream $Stream
+        $OverlayOffset = Get-PEOverlayOffset -Stream $Stream
+        $PELayout = Get-PELayout -Stream $Stream
+        $VersionStrings = Get-PEVersionStringTable -Path $File.FullName
+      }
     } finally { $Stream.Dispose() }
 
+    if ($ClassicPackageData) { return ConvertTo-DeployMasterClassicInfo -File $File -PackageData $ClassicPackageData -VersionInfo $VersionInfo }
+
     if ($OverlayOffset -ne $PackageData.Locator.PackageOffset) { throw 'The DeployMaster package locator does not point to the PE overlay.' }
-    $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
-    $VersionStrings = Get-PEVersionStringTable -Path $File.FullName
     $RuntimeProductName = ([string]$VersionInfo.ProductName).Trim()
     $RuntimeComments = ([string]$VersionStrings.Comments).Trim()
     if ($RuntimeProductName -notmatch '(?i)DeployMaster' -and $RuntimeComments -notmatch '(?i)DeployMaster') { throw 'The validated package overlay is not paired with a DeployMaster runtime identity.' }
 
     $Identity = $PackageData.Identity
-    $InstallLocation = switch ($PackageData.Header.ScopeValue) {
-      0 { $Identity.UserInstallLocation }
-      1 { $Identity.MachineInstallLocation }
-      default { $null }
-    }
-    # Built-in uninstall fields come from the structured identity block; custom registry actions
-    # remain explicitly unsupported and are not guessed from strings.
-    $RegistryWrites = @(
-      ConvertTo-DeployMasterRegistryWrite -PackageData $PackageData -Name DisplayName -Value $Identity.DisplayName
-      ConvertTo-DeployMasterRegistryWrite -PackageData $PackageData -Name DisplayVersion -Value $Identity.DisplayVersion
-      ConvertTo-DeployMasterRegistryWrite -PackageData $PackageData -Name Publisher -Value $Identity.Publisher
-      ConvertTo-DeployMasterRegistryWrite -PackageData $PackageData -Name InstallLocation -Value $InstallLocation
-    )
-    $FileExtensions = @($PackageData.FileAssociations | Select-Object -ExpandProperty FileExtension -Unique | Sort-Object)
-    $RegistryAssociationInfo = [pscustomobject]@{
-      Protocols                 = @()
-      FileExtensions            = $FileExtensions
-      ProtocolAssociations      = @()
-      FileExtensionAssociations = $PackageData.FileAssociations
-      RegistryWrites            = @()
-      Warnings                  = @()
-    }
-    $Warnings = [Collections.Generic.List[string]]::new()
-    foreach ($Warning in $PackageData.Warnings) { $Warnings.Add($Warning) }
-    if ($PackageData.Header.SupportsDualScope) { $Warnings.Add('This DeployMaster package supports both user and machine scope; validate the default scope and any elevation-sensitive behavior in a VM.') }
-    $Warnings.Add('DeployMaster custom registry action tables are not decoded; validate package-specific ARP overrides and first-run associations in a VM.')
-    if ($PackageData.FileAssociations.Actions | Where-Object { $_.Executable32FileIndex -lt 0 -and $_.Executable64FileIndex -lt 0 }) {
-      $Warnings.Add('One or more DeployMaster file-type actions do not resolve to packaged executable indexes and will not create an open command.')
-    }
     $InstallerArchitecture = switch ($PELayout.MachineName) { 'I386' { 'x86' } 'AMD64' { 'x64' } 'ARM64' { 'arm64' } default { $null } }
     # Distinguish a pure x64 installer from an x86 bootstrapper that deploys a 64-bit application.
     $ApplicationArchitectureMode = if ($PackageData.Header.ApplicationArchitectureMode -eq 'x64Application') {
       if ($InstallerArchitecture -eq 'x86') { 'x64ApplicationWithX86InstallerStub' } else { 'x64ApplicationWithX64Installer' }
     } else { $PackageData.Header.ApplicationArchitectureMode }
+    $RegistryView = switch ($ApplicationArchitectureMode) {
+      { $_ -in 'x86ApplicationForX86WindowsOnly', 'x86ApplicationForX86AndX64Windows' } { '32-bit'; break }
+      { $_ -in 'x64ApplicationWithX86InstallerStub', 'x64ApplicationWithX64Installer', 'x64Application' } { '64-bit'; break }
+      'x86AndX64Application' { 'architecture-selected'; break }
+      default { 'default' }
+    }
+    $InstallLocation = switch ($Identity.Scope) {
+      'user' { $Identity.UserInstallLocation }
+      'machine' { $Identity.MachineInstallLocation }
+      default { $null }
+    }
+    # "Always" portable media bypasses every host-system effect, including the built-in ARP entry.
+    # User-choice media retains both a normal installation route and a separate portable route.
+    $NormalInstallSupported = $null -eq $PackageData.Settings -or $PackageData.Settings.PortableInstallationMode -ne 'Always'
+    $BuiltInRegistrations = [Collections.Generic.List[object]]::new()
+    if ($NormalInstallSupported) {
+      $RegistrationArchitectures = switch ($ApplicationArchitectureMode) {
+        'x86AndX64Application' {
+          [pscustomobject]@{ Architecture = 'x86'; RegistryView = '32-bit' }
+          [pscustomobject]@{ Architecture = 'x64'; RegistryView = '64-bit' }
+        }
+        { $_ -in 'x64ApplicationWithX86InstallerStub', 'x64ApplicationWithX64Installer', 'x64Application' } { [pscustomobject]@{ Architecture = 'x64'; RegistryView = '64-bit' }; break }
+        default { [pscustomobject]@{ Architecture = 'x86'; RegistryView = '32-bit' } }
+      }
+      foreach ($RegistrationScope in $Identity.SupportedScopes) {
+        $RegistrationLocation = $RegistrationScope -eq 'machine' ? $Identity.MachineInstallLocation : $Identity.UserInstallLocation
+        if ([string]::IsNullOrWhiteSpace([string]$RegistrationLocation)) { continue }
+        foreach ($RegistrationArchitecture in $RegistrationArchitectures) {
+          $BuiltInRegistrations.Add((Get-DeployMasterBuiltInRegistration -PackageData $PackageData -Scope $RegistrationScope -InstallLocation $RegistrationLocation -RegistryView $RegistrationArchitecture.RegistryView -TargetArchitecture $RegistrationArchitecture.Architecture))
+        }
+      }
+    }
+    $PrimaryRegistration = if ($Identity.Scope -and $RegistrationArchitectures.Count -eq 1) { $BuiltInRegistrations | Where-Object Scope -EQ $Identity.Scope | Select-Object -First 1 } elseif ($BuiltInRegistrations.Count -eq 1) { $BuiltInRegistrations[0] } else { $null }
+    $BuiltInRegistryWrites = @($BuiltInRegistrations | ForEach-Object { @($_.RegistryWrites) + $_.DeploymentTrackingWrite })
+    $CustomRegistryWrites = if ($PackageData.StructuredMetadata) { @($PackageData.StructuredMetadata.Registry.RegistryWrites) } else { @() }
+    $RegistryWrites = if ($NormalInstallSupported) { @($BuiltInRegistryWrites) + @($CustomRegistryWrites) } else { @() }
+    $CustomAssociationInfo = Get-InstallerRegistryAssociationInfo -RegistryWrite $CustomRegistryWrites
+    $FileExtensions = @((@($PackageData.FileAssociations | Select-Object -ExpandProperty FileExtension) + @($CustomAssociationInfo.FileExtensions)) | Sort-Object -Unique)
+    $RegistryAssociationInfo = [pscustomobject]@{
+      Protocols                 = @($CustomAssociationInfo.Protocols)
+      FileExtensions            = $FileExtensions
+      ProtocolAssociations      = @($CustomAssociationInfo.ProtocolAssociations)
+      FileExtensionAssociations = @($PackageData.FileAssociations) + @($CustomAssociationInfo.FileExtensionAssociations)
+      RegistryWrites            = @($CustomAssociationInfo.RegistryWrites)
+      Diagnostics               = @($CustomAssociationInfo.Diagnostics)
+    }
+    $AppsAndFeaturesCandidates = [Collections.Generic.List[object]]::new()
+    if ($NormalInstallSupported) {
+      $AppsAndFeaturesCandidates.Add([pscustomobject]@{
+          ProductCode = $Identity.DisplayName; DisplayName = $Identity.DisplayName; DisplayVersion = $Identity.DisplayVersion
+          Publisher = $Identity.Publisher; InstallerType = 'exe'
+        })
+      foreach ($CustomEntry in @(Get-DeployMasterCustomAppsAndFeaturesEntry -RegistryWrite $CustomRegistryWrites)) { $AppsAndFeaturesCandidates.Add($CustomEntry) }
+    }
+    [object[]]$AppsAndFeaturesEntries = if ($AppsAndFeaturesCandidates.Count) { @(Merge-DeployMasterAppsAndFeaturesEntry -Entry $AppsAndFeaturesCandidates.ToArray()) } else { @() }
+    $Warnings = [Collections.Generic.List[object]]::new()
+    foreach ($Warning in $PackageData.Diagnostics) { $Warnings.Add($Warning) }
+    foreach ($Warning in $RegistryAssociationInfo.Diagnostics) { $Warnings.Add($Warning) }
+    if ($PackageData.Header.ExpirationPolicy.IsTimeLimited) {
+      $Warnings.Add((New-InstallerDiagnostic -Id 'DeployMaster.Installability.TimeLimited' -Source 'DeployMaster' -Message "This installer stops working after $($PackageData.Header.ExpirationPolicy.ExpirationDate.ToString('yyyy-MM-dd')); use a non-expiring release artifact when one is available." -Kind Risk -Areas Installability -Evidence $PackageData.Header.ExpirationPolicy))
+    }
+    $SupportDlls = @(
+      if (-not [string]::IsNullOrWhiteSpace($Identity.SupportDll32FileName)) { [pscustomobject]@{ Architecture = 'x86'; FileName = $Identity.SupportDll32FileName } }
+      if (-not [string]::IsNullOrWhiteSpace($Identity.SupportDll64FileName)) { [pscustomobject]@{ Architecture = 'x64'; FileName = $Identity.SupportDll64FileName } }
+    )
+    if ($SupportDlls.Count) {
+      $Warnings.Add((New-InstallerDiagnostic -Id 'DeployMaster.Installability.SupportDllEffectsOpaque' -Source 'DeployMaster' -Message 'The installer invokes one or more DeployMaster support DLLs. Their custom validation, folder, registry, and post-install effects require separate static inspection or VM validation.' -Kind ManualValidation -Areas Metadata, Installability, Security -Evidence $SupportDlls))
+    }
+    if (-not $NormalInstallSupported) {
+      $Warnings.Add((New-InstallerDiagnostic -Id 'DeployMaster.Metadata.PortableOnlyNoArp' -Source 'DeployMaster' -Message 'This package always creates a portable installation, so DeployMaster does not write its built-in Apps & Features entry or other host-system changes.' -Kind Information -Areas Metadata, Installability -AffectedFields ProductCode, AppsAndFeaturesEntries -Evidence $PackageData.Settings))
+    } elseif ($BuiltInRegistrations.Count -and -not $PrimaryRegistration -and -not $Identity.SupportsDualScope) {
+      $Warnings.Add((New-InstallerDiagnostic -Id 'DeployMaster.Metadata.ArpRegistrationUnresolved' -Source 'DeployMaster' -Message 'The built-in DeployMaster uninstall registration could not be resolved to a concrete supported scope.' -Kind Incomplete -Areas Metadata -AffectedFields ProductCode, AppsAndFeaturesEntries -Evidence $Identity))
+    }
+    if ($Identity.SupportsDualScope) { $Warnings.Add((New-InstallerDiagnostic -Id 'DeployMaster.Scope.Dual' -Source 'DeployMaster' -Message 'This DeployMaster package supports both user and machine scope; validate the default scope and any elevation-sensitive behavior in a VM.' -Kind ManualValidation -Areas Metadata, Installability -AffectedFields Scope -Evidence $Identity.SupportedScopes)) }
+    if ($PackageData.FileAssociations.Actions | Where-Object { $_.Executable32FileIndex -lt 0 -and $_.Executable64FileIndex -lt 0 }) {
+      $Warnings.Add((New-InstallerDiagnostic -Id 'DeployMaster.Association.ExecutableUnresolved' -Source 'DeployMaster' -Message 'One or more DeployMaster file-type actions do not resolve to packaged executable indexes and will not create an open command.' -Kind Incomplete -Areas Metadata -AffectedFields FileExtensions, Protocols -Evidence $PackageData.FileAssociations))
+    }
+    $UnresolvedFields = [Collections.Generic.List[string]]::new()
+    if (-not $PackageData.StructuredMetadata) {
+      foreach ($Field in 'Components', 'InstallationItems', 'RegistryWrites', 'Prerequisites', 'CompletionActions', 'UpdatePolicy') { $UnresolvedFields.Add($Field) }
+    }
+    if ($SupportDlls.Count) { $UnresolvedFields.Add('SupportDllEffects') }
+    $Components = [object[]]@()
+    $InstallationFolders = [object[]]@()
+    $InstalledFiles = [object[]]@()
+    $Shortcuts = [object[]]@()
+    $UrlShortcuts = [object[]]@()
+    $Prerequisites = [object[]]@()
+    $DeletedRegistryKeys = [object[]]@()
+    $CompletionActions = $null
+    $UninstallConfiguration = $null
+    $UpdatePolicy = $null
+    $ExecutedPayloads = [Collections.Generic.List[object]]::new()
+    if ($PackageData.StructuredMetadata) {
+      $Components = [object[]]@($PackageData.StructuredMetadata.Components)
+      $InstallationFolders = [object[]]@($PackageData.StructuredMetadata.InstallTree.Folders)
+      $InstalledFiles = [object[]]@($PackageData.StructuredMetadata.InstallTree.Files)
+      $Shortcuts = [object[]]@($PackageData.StructuredMetadata.InstallTree.Shortcuts)
+      $UrlShortcuts = [object[]]@($PackageData.StructuredMetadata.InstallTree.UrlShortcuts)
+      $Prerequisites = [object[]]@($PackageData.StructuredMetadata.TrailingMetadata.Prerequisites)
+      $DeletedRegistryKeys = [object[]]@($PackageData.StructuredMetadata.Registry.DeletedKeys)
+      $CompletionActions = $PackageData.StructuredMetadata.TrailingMetadata.Completion
+      $UninstallConfiguration = $PackageData.StructuredMetadata.TrailingMetadata.Uninstall
+      $UpdatePolicy = $PackageData.StructuredMetadata.TrailingMetadata.Update
+      foreach ($Execution in @(
+          [pscustomobject]@{ Stage = 'AfterInstall'; Architecture = 'x86'; FileIndex = $CompletionActions.Launch32FileIndex; Arguments = $CompletionActions.LaunchArguments },
+          [pscustomobject]@{ Stage = 'AfterInstall'; Architecture = 'x64'; FileIndex = $CompletionActions.Launch64FileIndex; Arguments = $CompletionActions.LaunchArguments },
+          [pscustomobject]@{ Stage = 'BeforeUninstall'; Architecture = 'x86'; FileIndex = $UninstallConfiguration.PreUninstall32FileIndex; Arguments = $UninstallConfiguration.PreUninstallArguments },
+          [pscustomobject]@{ Stage = 'BeforeUninstall'; Architecture = 'x64'; FileIndex = $UninstallConfiguration.PreUninstall64FileIndex; Arguments = $UninstallConfiguration.PreUninstallArguments }
+        )) {
+        if ($Execution.FileIndex -ge 0 -and $Execution.FileIndex -lt $PackageData.FileEntries.Count) {
+          $ExecutedPayloads.Add([pscustomobject]@{
+              Stage        = $Execution.Stage
+              Architecture = $Execution.Architecture
+              FileIndex    = $Execution.FileIndex
+              FileName     = $PackageData.FileEntries[$Execution.FileIndex].Name
+              Arguments    = $Execution.Arguments
+              Evidence     = 'DeployMaster completion or pre-uninstall file index'
+            })
+        }
+      }
+    }
+    $InstallationItems = [object[]]@($InstallationFolders) + @($InstalledFiles) + @($Shortcuts) + @($UrlShortcuts)
+    $HelpLink = if (-not $NormalInstallSupported) {
+      $null
+    } elseif ([string]::IsNullOrWhiteSpace([string]$Identity.PackageUrl)) {
+      $Identity.PublisherUrl
+    } else {
+      $Identity.PackageUrl
+    }
 
     [pscustomobject][ordered]@{
       Path                                  = $File.FullName
-      InstallerType                         = 'DeployMaster'
-      ProductCode                           = $Identity.DisplayName
+      InstallerType                         = 'exe'
+      ProductCode                           = $NormalInstallSupported ? $Identity.DisplayName : $null
       UpgradeCode                           = $null
       DisplayName                           = $Identity.DisplayName
       DisplayVersion                        = $Identity.DisplayVersion
       Publisher                             = $Identity.Publisher
-      Scope                                 = $PackageData.Header.Scope
+      Scope                                 = $Identity.Scope
       DefaultInstallLocation                = $InstallLocation
-      WritesAppsAndFeaturesEntry            = $true
-      AppsAndFeaturesProductCode            = $Identity.DisplayName
-      AppsAndFeaturesInstallerType          = 'exe'
-      Warnings                              = [string[]]@($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-      UnresolvedFields                      = [string[]]@()
-      ProductCodeEvidence                   = 'DeployMaster structured identity and built-in uninstall-key convention'
+      WritesAppsAndFeaturesEntry            = $NormalInstallSupported
+      AppsAndFeaturesProductCode            = $NormalInstallSupported ? $Identity.DisplayName : $null
+      AppsAndFeaturesInstallerType          = $NormalInstallSupported ? 'exe' : $null
+      AppsAndFeaturesEntries                = $AppsAndFeaturesEntries
+      UninstallString                       = $PrimaryRegistration ? $PrimaryRegistration.UninstallString : $null
+      QuietUninstallString                  = $null
+      DisplayIcon                           = $PrimaryRegistration ? $PrimaryRegistration.DisplayIcon : $null
+      HelpLink                              = $HelpLink
+      URLInfoUpdate                         = $HelpLink
+      URLInfoAbout                          = $NormalInstallSupported ? $Identity.PublisherUrl : $null
+      Diagnostics                           = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'DeployMaster' -Kind Incomplete -Areas Metadata))
+      UnresolvedFields                      = $UnresolvedFields.ToArray()
+      Family                                = 'DeployMaster'
+      ProductCodeEvidence                   = $NormalInstallSupported ? 'DeployMaster structured identity and built-in uninstall-key convention' : $null
       PublisherUrl                          = $Identity.PublisherUrl
       PackageUrl                            = $Identity.PackageUrl
       Copyright                             = $Identity.Copyright
+      ReadmeFileName                        = $Identity.ReadmeFileName
+      LicenseFileName                       = $Identity.LicenseFileName
+      LicenseRequiredEveryInstall           = $Identity.LicenseRequiredEveryInstall
+      SupportDlls                           = $SupportDlls
       ReleaseDate                           = $Identity.ReleaseDate
       MachineInstallLocation                = $Identity.MachineInstallLocation
       UserInstallLocation                   = $Identity.UserInstallLocation
+      RawMachineInstallLocation             = $Identity.RawMachineInstallLocation
+      RawUserInstallLocation                = $Identity.RawUserInstallLocation
+      CommonFilesLocation                   = $Identity.CommonFilesLocation
+      CommonPublisherLocation               = $Identity.CommonPublisherLocation
+      MachineMenuLocation                   = $Identity.MachineMenuLocation
+      UserMenuLocation                      = $Identity.UserMenuLocation
+      CommonDataLocation                    = $Identity.CommonDataLocation
+      UserDataLocation                      = $Identity.UserDataLocation
+      RawCommonFilesLocation                = $Identity.RawCommonFilesLocation
+      RawCommonPublisherLocation            = $Identity.RawCommonPublisherLocation
+      RawMachineMenuLocation                = $Identity.RawMachineMenuLocation
+      RawUserMenuLocation                   = $Identity.RawUserMenuLocation
+      RawCommonDataLocation                 = $Identity.RawCommonDataLocation
+      RawUserDataLocation                   = $Identity.RawUserDataLocation
       RuntimeProductName                    = $RuntimeProductName
       FileDescription                       = ([string]$VersionInfo.FileDescription).Trim()
-      DefaultScope                          = $PackageData.Header.DefaultScope
-      SupportedScopes                       = $PackageData.Header.SupportedScopes
-      SupportsDualScope                     = $PackageData.Header.SupportsDualScope
+      DefaultScope                          = $Identity.DefaultScope
+      SupportedScopes                       = $Identity.SupportedScopes
+      SupportsDualScope                     = $Identity.SupportsDualScope
+      RequiresAdministrativeRights          = $Identity.RequiresAdministrativeRights
       InstallerArchitecture                 = $InstallerArchitecture
       ApplicationArchitectureMode           = $ApplicationArchitectureMode
       ApplicationArchitectures              = $PackageData.Header.ApplicationArchitectures
       SupportedArchitectures                = $PackageData.Header.ApplicationArchitectures
       SupportedOperatingSystemArchitectures = $PackageData.Header.SupportedOperatingSystemArchitectures
+      RegistryView                          = $RegistryView
+      SupportedWindowsVersions              = $PackageData.Header.SupportedWindowsVersions
+      SupportsFutureWindowsVersions         = $PackageData.Header.SupportsFutureWindowsVersions
+      MinimumWindows10VersionCode           = $PackageData.Header.MinimumWindows10VersionCode
+      MaximumWindows10VersionCode           = $PackageData.Header.MaximumWindows10VersionCode
+      MinimumWindows11VersionCode           = $PackageData.Header.MinimumWindows11VersionCode
+      MaximumWindows11VersionCode           = $PackageData.Header.MaximumWindows11VersionCode
       RequestedExecutionLevel               = Get-PERequestedExecutionLevel -Path $File.FullName
+      InstallerSwitches                     = [ordered]@{ Silent = '/silent'; SilentWithProgress = '/silent'; InstallLocation = $PackageData.Settings.PortableInstallationMode -eq 'Always' ? '/portable "<INSTALLPATH>"' : '/appfolder "<INSTALLPATH>"' }
+      InstallModes                          = @('interactive', 'silent')
+      CommandLineSwitches                   = [pscustomobject]@{
+        Silent                   = @('/s', '/silent')
+        SuppressDesktopShortcuts = '/nodesktop'
+        ForceX86                 = if ($ApplicationArchitectureMode -eq 'x86AndX64Application') { '/32' } else { $null }
+        Portable                 = if ($PackageData.RuntimeFeatures.PortableSwitch) { '/portable "<PATH>"' } else { $null }
+        InstallForAllUsers       = if ($PackageData.Header.HasInstallForAllUsersSwitch -and $Identity.SupportsDualScope) { '/userall' } else { $null }
+        SkipElevation            = if ($PackageData.RuntimeFeatures.SkipElevationSwitch) { '/noadmin' } else { $null }
+        TemporaryFolder          = '/temp "<PATH>"'
+        InstallationFolders      = [ordered]@{
+          Application = '/appfolder "<PATH>"'
+          CommonFiles = '/appcommonfolder "<PATH>"'
+          StartMenu   = '/appmenu "<PATH>"'
+          UserData    = '/userdata "<PATH>"'
+        }
+      }
+      UninstallerSwitches                   = [ordered]@{ Silent = '/silent' }
+      BuiltInRegistration                   = $PrimaryRegistration
+      BuiltInRegistrationVariants           = $BuiltInRegistrations.ToArray()
+      DeploymentLogPath                     = $PrimaryRegistration ? $PrimaryRegistration.DeploymentLogPath : $null
+      RuntimeGeneratedArpFields             = $NormalInstallSupported ? @('EstimatedSize', 'InstallDate') : @()
       RegistryWrites                        = $RegistryWrites
+      CustomRegistryWrites                  = $CustomRegistryWrites
+      DeletedRegistryKeys                   = $DeletedRegistryKeys
       RegistryAssociationInfo               = $RegistryAssociationInfo
       Protocols                             = $RegistryAssociationInfo.Protocols
       FileExtensions                        = $RegistryAssociationInfo.FileExtensions
       FileAssociations                      = $PackageData.FileAssociations
+      Components                            = $Components
+      InstallationItems                     = $InstallationItems
+      InstallationFolders                   = $InstallationFolders
+      InstalledFiles                        = $InstalledFiles
+      Shortcuts                             = $Shortcuts
+      UrlShortcuts                          = $UrlShortcuts
+      ExecutedPayloads                      = $ExecutedPayloads.ToArray()
+      Prerequisites                         = $Prerequisites
+      DotNetFrameworkRequirement            = if ($PackageData.StructuredMetadata) { $PackageData.StructuredMetadata.TrailingMetadata.DotNetFramework } else { $null }
+      CompletionActions                     = $CompletionActions
+      UninstallConfiguration                = $UninstallConfiguration
+      UpdatePolicy                          = $UpdatePolicy
+      ExpirationPolicy                      = $PackageData.Header.ExpirationPolicy
+      PackageSettings                       = $PackageData.Settings
+      RuntimeFeatures                       = $PackageData.RuntimeFeatures
       FileEntries                           = $PackageData.FileEntries
       ExtractedFiles                        = @($PackageData.FileEntries | Select-Object -ExpandProperty FullName)
       OverlayInfo                           = [pscustomobject]@{
-        OverlayOffset     = $PackageData.Locator.PackageOffset
-        OverlayLength     = $File.Length - $PackageData.Locator.PackageOffset
-        IntegrityLength   = $PackageData.Locator.IntegrityLength
-        ExpectedCrc32     = $PackageData.Locator.ExpectedCrc32
-        ActualCrc32       = $PackageData.Locator.ActualCrc32
-        DictionarySize    = $PackageData.Header.DictionarySize
-        FormatVersion     = $PackageData.Header.FormatVersion
-        PackageDataOffset = $PackageData.Locator.PackageDataOffset
+        OverlayOffset         = $PackageData.Locator.PackageOffset
+        OverlayLength         = $File.Length - $PackageData.Locator.PackageOffset
+        IntegrityLength       = $PackageData.Locator.IntegrityLength
+        ExpectedCrc32         = $PackageData.Locator.ExpectedCrc32
+        ActualCrc32           = $PackageData.Locator.ActualCrc32
+        ExpectedFileSize      = $PackageData.Locator.ExpectedFileSize
+        PhysicalFileSize      = $PackageData.Locator.PhysicalFileSize
+        HasSignedEnvelope     = $PackageData.Locator.HasSignedEnvelope
+        CertificateOffset     = $PackageData.Locator.CertificateOffset
+        CertificateSize       = $PackageData.Locator.CertificateSize
+        DictionarySize        = $PackageData.Header.DictionarySize
+        HeaderSize            = $PackageData.Header.HeaderSize
+        FormatProfile         = $PackageData.Header.FormatProfile
+        FormatVersion         = $PackageData.Header.FormatVersion
+        UninstallCommandRoute = $PackageData.Header.UninstallCommandRoute
+        ObservedRuntimeRange  = $PackageData.Header.ObservedRuntimeRange
+        ProfileEvidence       = $PackageData.Header.ProfileEvidence
+        PackageDataOffset     = $PackageData.Locator.PackageDataOffset
       }
       CanExpand                             = $true
-      ParserVersionInfo                     = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.DeployMaster'; ParserMajor = 2; Sources = @('DeployMaster 0x80 package locator', 'CRC32-protected package-control header', 'bounded LZMA identity and file-type blocks', 'controlled scope and architecture builder outputs') }
+      ParserVersionInfo                     = [pscustomobject]@{ Parser = 'Dumplings.PackageModule.DeployMaster'; ParserMajor = 7; CatalogVersion = [int](Get-DeployMasterCatalogVersion); FormatProfile = $PackageData.Header.FormatProfile; Sources = @('DeployMaster 0x80 package locator', 'CRC32-protected package-control header', 'stored and bounded LZMA data blocks', 'controlled builder outputs and installed-state evidence', 'DeployMaster builder help and version history') }
     }
   }
 }
@@ -872,7 +851,7 @@ function Export-DeployMasterRange {
   param (
     [Parameter(Mandatory)][IO.Stream]$Stream,
     [Parameter(Mandatory)][psobject]$Entry,
-    [Parameter(Mandatory)][byte[]]$Properties,
+    [AllowEmptyCollection()][byte[]]$Properties = [byte[]]::new(0),
     [Parameter(Mandatory)][string]$DestinationPath,
     [Parameter(Mandatory)][long]$MaximumBytes
   )
@@ -880,15 +859,38 @@ function Export-DeployMasterRange {
   # A bounded source range prevents the decoder from consuming the next package record.
   $Output = [IO.File]::Open($DestinationPath, 'CreateNew', 'Write', 'None')
   $InputStream = New-BoundedReadStream -Stream $Stream -Offset $Entry.Offset -Length $Entry.CompressedSize -LeaveOpen
+  $Completed = $false
   try {
     if ($Entry.Compression -eq 'Store') {
-      $null = Copy-BoundedStream -Source $InputStream -Destination $Output -MaximumBytes $MaximumBytes -ExpectedBytes $Entry.UncompressedSize
+      $CopyArguments = @{ Source = $InputStream; Destination = $Output; MaximumBytes = $MaximumBytes }
+      if ($null -ne $Entry.UncompressedSize) { $CopyArguments.ExpectedBytes = [long]$Entry.UncompressedSize }
+      $null = Copy-BoundedStream @CopyArguments
     } else {
-      $null = Expand-InstallerCompressedStream -Algorithm Lzma -Stream $InputStream -Destination $Output -MaximumBytes $MaximumBytes -Properties $Properties -CompressedSize $Entry.CompressedSize -UncompressedSize $Entry.UncompressedSize
+      $ExpandArguments = @{
+        Algorithm      = [string]$Entry.Compression
+        Stream         = $InputStream
+        Destination    = $Output
+        MaximumBytes   = $MaximumBytes
+        CompressedSize = [long]$Entry.CompressedSize
+      }
+      if ($Properties.Count) { $ExpandArguments.Properties = $Properties }
+      if ($null -ne $Entry.UncompressedSize) { $ExpandArguments.UncompressedSize = [long]$Entry.UncompressedSize }
+      $null = Expand-InstallerCompressedStream @ExpandArguments
     }
+    $Completed = $true
   } finally {
     $InputStream.Dispose()
     $Output.Dispose()
+    if (-not $Completed) { Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction Ignore }
+  }
+  # The final catalog column is CRC32 over the expanded file. Reject damaged payloads before the
+  # caller can consume them, and remove the partial output on failure.
+  if ($Entry.PSObject.Properties['Crc32']) {
+    $ActualCrc32 = [uint32](Get-BinaryCrc32 -Path $DestinationPath -MaximumBytes $MaximumBytes)
+    if ($ActualCrc32 -ne [uint32]$Entry.Crc32) {
+      Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction Ignore
+      throw "The DeployMaster payload CRC32 check failed for '$($Entry.FullName)'."
+    }
   }
   Get-Item -LiteralPath $DestinationPath -Force
 }
@@ -926,15 +928,22 @@ function Expand-DeployMasterInstaller {
     $ExpandedBytes = 0L
     $ReservedPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     try {
-      $PackageData = Read-DeployMasterPackageData -Stream $Stream
+      $VersionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
+      $RuntimeIdentity = "$($VersionInfo.ProductName)`n$($VersionInfo.FileDescription)`n$($VersionInfo.Comments)"
+      $ClassicRoute = Get-DeployMasterClassicRoute -Stream $Stream -RuntimeIdentity $RuntimeIdentity
+      $PackageData = $ClassicRoute ? (Read-DeployMasterClassicPackageData -Stream $Stream -Route $ClassicRoute) : (Read-DeployMasterPackageData -Stream $Stream)
       # Normalize runtime cores, decoded metadata blocks, and application files into one extraction
       # catalog so selection and accounting follow the same path.
       $Items = [Collections.Generic.List[object]]::new()
       foreach ($Core in $PackageData.Header.CoreEntries) {
-        $Items.Add([pscustomobject]@{ FullName = "Runtime/DeployMasterCore-$($Core.Architecture).exe"; Kind = 'Compressed'; Offset = $Core.Offset; CompressedSize = $Core.CompressedSize; UncompressedSize = $Core.UncompressedSize; Compression = 'Lzma' })
+        $Compression = $Core.PSObject.Properties['Compression'] ? [string]$Core.Compression : 'Lzma'
+        $Items.Add([pscustomobject]@{ FullName = "Runtime/DeployMasterCore-$($Core.Architecture).exe"; Kind = 'Compressed'; Offset = $Core.Offset; CompressedSize = $Core.CompressedSize; UncompressedSize = $Core.UncompressedSize; Compression = $Compression })
       }
       $Items.Add([pscustomobject]@{ FullName = 'Metadata/Language.txt'; Kind = 'Bytes'; Bytes = $PackageData.LanguageBlock.Bytes; UncompressedSize = $PackageData.LanguageBlock.Bytes.Length })
       $Items.Add([pscustomobject]@{ FullName = 'Metadata/Identity.txt'; Kind = 'Bytes'; Bytes = $PackageData.IdentityBlock.Bytes; UncompressedSize = $PackageData.IdentityBlock.Bytes.Length })
+      if ($PackageData.PSObject.Properties['FileNameBlock']) {
+        $Items.Add([pscustomobject]@{ FullName = 'Metadata/FileNames.txt'; Kind = 'Bytes'; Bytes = $PackageData.FileNameBlock.Bytes; UncompressedSize = $PackageData.FileNameBlock.Bytes.Length })
+      }
       foreach ($Entry in $PackageData.FileEntries) {
         $Items.Add([pscustomobject]@{ FullName = "Payload/$($Entry.FullName)"; Kind = 'Compressed'; Offset = $Entry.Offset; CompressedSize = $Entry.CompressedSize; UncompressedSize = $Entry.UncompressedSize; Compression = $Entry.Compression })
       }
@@ -945,7 +954,7 @@ function Expand-DeployMasterInstaller {
         $Target = Resolve-InstallerExtractionTarget -DestinationPath $DestinationPath -RelativePath $Item.FullName `
           -CollisionAction $CollisionAction -ReservedPath $ReservedPaths
         if (-not $Target.ShouldWrite) { continue }
-        if ($ExpandedBytes + $Item.UncompressedSize -gt $MaximumExpandedBytes) { throw "The DeployMaster expansion exceeds the $MaximumExpandedBytes-byte output limit." }
+        if ($null -ne $Item.UncompressedSize -and $ExpandedBytes + [long]$Item.UncompressedSize -gt $MaximumExpandedBytes) { throw "The DeployMaster expansion exceeds the $MaximumExpandedBytes-byte output limit." }
         $OutputPath = $Target.Path
         $Parent = [IO.Path]::GetDirectoryName($OutputPath)
         if ($Parent) { $null = New-Item -Path $Parent -ItemType Directory -Force }
@@ -955,7 +964,7 @@ function Expand-DeployMasterInstaller {
         } else {
           $Result = Export-DeployMasterRange -Stream $Stream -Entry $Item -Properties $PackageData.Header.LzmaProperties -DestinationPath $OutputPath -MaximumBytes ($MaximumExpandedBytes - $ExpandedBytes)
         }
-        $ExpandedBytes += $Item.UncompressedSize
+        $ExpandedBytes += $Result.Length
         $Results.Add($Result)
       }
     } finally { $Stream.Dispose() }
@@ -972,7 +981,10 @@ function Test-DeployMaster {
   #>
   [OutputType([bool])]
   param ([Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path)
-  process { try { $null = Get-DeployMasterInfo -Path $Path; return $true } catch { return $false } }
+  process {
+    try { $null = Get-DeployMasterInfo -Path $Path; return $true }
+    catch { return $false }
+  }
 }
 
 function Read-ProtocolsFromDeployMaster {

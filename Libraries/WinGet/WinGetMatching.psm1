@@ -301,12 +301,12 @@ function Get-WinGetManifestBundleForMatching {
   # to the small internal view used by the matching helpers without rebuilding
   # a physical installer/default-locale manifest set.
   if ($Manifest.PSTypeNames -contains 'Dumplings.WinGet.ManifestModel') {
-    $DefaultLocale = Copy-WinGetManifestValue -Value $Manifest.DefaultLocalization
+    $DefaultLocale = Copy-Object -Value $Manifest.DefaultLocalization
     $DefaultLocale['ManifestType'] = 'defaultLocale'
     $Locales = [System.Collections.Generic.List[object]]::new()
     $Locales.Add($DefaultLocale)
     foreach ($Localization in @($Manifest.Localizations)) {
-      $Locale = Copy-WinGetManifestValue -Value $Localization
+      $Locale = Copy-Object -Value $Localization
       $Locale['ManifestType'] = 'locale'
       $Locales.Add($Locale)
     }

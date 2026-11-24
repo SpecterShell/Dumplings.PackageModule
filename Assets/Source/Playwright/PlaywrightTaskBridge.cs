@@ -25,8 +25,8 @@ namespace Dumplings.Playwright
                     throw new TimeoutException("The Playwright operation did not complete within " + timeout + ".");
             }
 
-            // GetAwaiter().GetResult() preserves the original exception rather than
-            // wrapping it in AggregateException as Task.Wait() would.
+            // Preserve the original exception with GetAwaiter().GetResult().
+            // Task.Wait() wraps it in AggregateException.
             task.GetAwaiter().GetResult();
 
             Type current = task.GetType();
@@ -36,8 +36,7 @@ namespace Dumplings.Playwright
                 {
                     PropertyInfo result = current.GetProperty("Result", BindingFlags.Public | BindingFlags.Instance);
                     object value = result == null ? null : result.GetValue(task, null);
-                    // Task.CompletedTask can be implemented internally as
-                    // Task<VoidTaskResult>; that implementation detail is not output.
+                    // Suppress the internal VoidTaskResult of Task.CompletedTask.
                     return value != null && value.GetType().FullName == "System.Threading.Tasks.VoidTaskResult" ? null : value;
                 }
                 current = current.BaseType;

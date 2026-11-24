@@ -1,0 +1,25 @@
+diff --git a/SabreTools.Serialization.Readers/WiseScript.cs b/SabreTools.Serialization.Readers/WiseScript.cs
+index 9b0220f..8c9084b 100644
+--- a/SabreTools.Serialization.Readers/WiseScript.cs
++++ b/SabreTools.Serialization.Readers/WiseScript.cs
+@@ -281,9 +281,6 @@ namespace SabreTools.Serialization.Readers
+                     if (switched)
+                         throw new IndexOutOfRangeException(nameof(op));
+ 
+-                    // Debug statement
+-                    Console.WriteLine($"Opcode {op} resulted in null data, trying with alternate values");
+-
+                     // Reset the state
+                     switched = true;
+                     shortDllCall = !shortDllCall;
+@@ -525,10 +522,6 @@ namespace SabreTools.Serialization.Readers
+                     _ => ParseExternalDllCall(entryString),
+                 };
+ 
+-                // Log if a truely unknown function is found
+-                if (obj.Entries[i] is ExternalDllCall edc && string.IsNullOrEmpty(obj.DllPath))
+-                    Console.WriteLine($"Unrecognized function: {obj.FunctionName} with parts: {string.Join(", ", edc.Args ?? [])}");
+-
+             }
+ 
+             return obj;

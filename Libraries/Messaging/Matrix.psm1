@@ -4,6 +4,8 @@
 # - https://github.com/NousResearch/hermes-agent
 # - https://cgit.rory.gay/matrix/LibMatrix.git (AGPL-3.0-only; behavioral reference only)
 
+Import-Module (Join-Path $PSScriptRoot '..' 'Networking' 'Web.psm1') -ErrorAction Stop
+
 # Apply default function parameters
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
@@ -155,7 +157,7 @@ function Invoke-MatrixApi {
         }
 
         $Delay = $RetryIntervalSec
-        if ($Delay -gt $MaximumRetryDelaySeconds -or $TotalDelay + $Delay -gt $MaximumTotalRetryDelaySeconds) {
+        if (-not (Test-RetryDelayBudget -DelaySeconds $Delay -UsedSeconds $TotalDelay -MaximumSeconds $MaximumRetryDelaySeconds -MaximumTotalSeconds $MaximumTotalRetryDelaySeconds)) {
           throw [System.InvalidOperationException]::new("Matrix request transport failure exceeded the retry-delay limit: $($_.Exception.Message)")
         }
         if ($RateLimitContext -and $Method -ne 'Get') { $RateLimitContext.SetRetryAfter([timespan]::FromSeconds($Delay)) } else { Start-Sleep -Seconds $Delay }
@@ -176,7 +178,7 @@ function Invoke-MatrixApi {
       } else {
         $RetryIntervalSec
       }
-      if ($RequestedDelay -gt $MaximumRetryDelaySeconds -or $TotalDelay + $RequestedDelay -gt $MaximumTotalRetryDelaySeconds) {
+      if (-not (Test-RetryDelayBudget -DelaySeconds $RequestedDelay -UsedSeconds $TotalDelay -MaximumSeconds $MaximumRetryDelaySeconds -MaximumTotalSeconds $MaximumTotalRetryDelaySeconds)) {
         throw (Get-MatrixApiException -ErrorCode ([string]$Response.errcode) -Description "$($Response.error) (requested retry delay ${RequestedDelay}s exceeds the configured limit)")
       }
 
@@ -572,4 +574,4 @@ function Send-MatrixMessage {
   }
 }
 
-Export-ModuleMember -Function *
+Export-ModuleMember -Function Get-MatrixApiException, Invoke-MatrixApi, Test-MatrixRoomEncrypted, Assert-MatrixPlaintextAllowed, ConvertTo-MatrixMessageContent, Invoke-MatrixMessageWrite, New-MatrixMessage, Remove-MatrixMessage, Update-MatrixMessage, Send-MatrixMessage

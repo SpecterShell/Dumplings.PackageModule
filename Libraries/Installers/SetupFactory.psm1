@@ -3,10 +3,9 @@
 # Process boundary:
 #
 #   Setup Factory path -> InstallerBridge -> SetupFactory.GetInfo/Expand
-#                        <- versioned overlay, irsetup.dat, and ARP evidence
+#                        <- companion-media/overlay, compiled metadata, and ARP evidence
 #
-# The GPL parser owns v7/v8/v9 signatures, file records, compression, CRC, and
-# session-variable/Lua interpretation. This MIT bridge does not copy those details.
+# The GPL parser owns the v3.1 Crusher media route, v4-v10 signatures, file records, compression, CRC, legacy product/uninstall blocks, and session-variable/Lua interpretation. This Apache-2.0 bridge does not copy those details.
 # See Modules/InstallerParsers/Libraries/Installers/SetupFactory.psm1.
 
 # Apply default function parameters
@@ -15,7 +14,7 @@ if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDe
 function Get-SetupFactoryInfo {
   <#
   .SYNOPSIS
-    Get static metadata from a Setup Factory 7-9 installer
+    Get static metadata from Setup Factory 3.1-10 media
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
   #>
@@ -31,13 +30,15 @@ function Get-SetupFactoryInfo {
 function Expand-SetupFactoryInstaller {
   <#
   .SYNOPSIS
-    Expand a Setup Factory 7-9 installer through the separate GPL parser
+    Expand Setup Factory 3.1-10 media through the separate GPL parser
   .PARAMETER Path
     Path to the installer or format artifact read by this function.
   .PARAMETER DestinationPath
     Destination path for bounded extraction or decoded output; payload-relative names are resolved beneath this path.
   .PARAMETER Name
-    Exact name or wildcard used to select format records or payload entries.
+    Exact name or wildcard used to select installed paths, or outer record names with RawEntries.
+  .PARAMETER RawEntries
+    Extract outer bootstrap records such as irsetup.exe and irsetup.dat plus separately framed bundled prerequisite payloads instead of installed application files.
   .PARAMETER MaximumExpandedBytes
     Maximum permitted input or expanded output in bytes; exceeding this bound rejects the installer.
   .PARAMETER CollisionAction
@@ -48,6 +49,7 @@ function Expand-SetupFactoryInstaller {
     [Parameter(Position = 0, ValueFromPipeline, Mandatory)][string]$Path,
     [string]$DestinationPath,
     [string]$Name = '*',
+    [switch]$RawEntries,
     [ValidateSet('Prompt', 'Error', 'Skip', 'Overwrite', 'Rename')][string]$CollisionAction = 'Prompt',
     [ValidateRange(1, [long]::MaxValue)][long]$MaximumExpandedBytes = 17179869184
   )
@@ -58,6 +60,7 @@ function Expand-SetupFactoryInstaller {
       CollisionAction      = $CollisionAction
       MaximumExpandedBytes = $MaximumExpandedBytes
     }
+    if ($RawEntries) { $Arguments.RawEntries = $true }
     if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) {
       $Arguments.DestinationPath = Resolve-InstallerFileSystemPath -Path $DestinationPath -AllowNonexistent
     }

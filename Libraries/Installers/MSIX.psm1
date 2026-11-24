@@ -173,7 +173,7 @@ function Get-MSIXPackageLayout {
         throw 'The archive does not contain an AppxManifest.xml or AppxBundleManifest.xml file'
       }
 
-      $Warnings = [System.Collections.Generic.List[string]]::new()
+      $Warnings = [System.Collections.Generic.List[object]]::new()
       $PayloadInstallerTypes = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
       if ($HasBundleManifest) {
         # Bundle package declarations are primary type evidence; nested root filenames are retained
@@ -207,7 +207,7 @@ function Get-MSIXPackageLayout {
         HasSignature       = @($EntryNames | Where-Object { $_ -ieq 'AppxSignature.p7x' }).Count -gt 0
         ManifestPath       = $HasBundleManifest ? 'AppxMetadata/AppxBundleManifest.xml' : 'AppxManifest.xml'
         BundlePayloadTypes = @($PayloadInstallerTypes | Sort-Object)
-        Warnings           = @($Warnings)
+        Diagnostics        = @(ConvertTo-InstallerDiagnostic -InputObject @(@($Warnings)) -Source 'MSIX' -Kind Incomplete -Areas Metadata)
       }
     } finally {
       $Archive.Dispose()
@@ -258,9 +258,9 @@ function Get-MSIXPackageTypeInfo {
   )
 
   process {
-    $Warnings = [System.Collections.Generic.List[string]]::new()
+    $Warnings = [System.Collections.Generic.List[object]]::new()
     $Layout = if (Test-Path -LiteralPath $Path -PathType Leaf) { Get-MSIXPackageLayout -Path $Path } else { $null }
-    if ($Layout) { foreach ($Warning in $Layout.Warnings) { $Warnings.Add($Warning) } }
+    if ($Layout) { foreach ($Warning in $Layout.Diagnostics) { $Warnings.Add($Warning) } }
 
     # Extension and content type distinguish AppX from MSIX when available. Their physical OPC
     # structures are otherwise equivalent, so content alone can prove only package/bundle.
@@ -328,7 +328,7 @@ function Get-MSIXPackageTypeInfo {
       Evidence        = $Evidence
       IsAmbiguous     = $IsAmbiguous
       ContentEvidence = $Layout
-      Warnings        = @($Warnings | Select-Object -Unique)
+      Diagnostics     = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'MSIX' -Kind Incomplete -Areas Metadata))
     }
   }
 }
@@ -650,8 +650,10 @@ function ConvertTo-MSIXManifestDependencyInfo {
     })
 
   $Unknown = @($UnknownById.Values | Sort-Object -Property PackageIdentifier)
-  $Warnings = @($Unknown | ForEach-Object -Process {
-      "Unknown MSIX/AppX package dependency '$($_.PackageIdentifier)' was found and was not included in manifest Dependencies."
+  $Diagnostics = @($Unknown | ForEach-Object -Process {
+      New-InstallerDiagnostic -Id 'MSIX.Dependency.UnknownPackage' -Source 'MSIX' `
+        -Message "Unknown MSIX/AppX package dependency '$($_.PackageIdentifier)' was found and was not included in manifest Dependencies." `
+        -Kind Incomplete -Areas Metadata -AffectedFields Dependencies -Evidence $_
     })
 
   [pscustomobject]@{
@@ -659,7 +661,7 @@ function ConvertTo-MSIXManifestDependencyInfo {
       PackageDependencies = $Allowed
     }
     UnknownPackageDependencies = $Unknown
-    Warnings                   = $Warnings
+    Diagnostics                = [object[]]$Diagnostics
   }
 }
 
@@ -675,7 +677,7 @@ function ConvertTo-MSIXManifestAssociationInfo {
 
   $Protocols = [System.Collections.Generic.List[object]]::new()
   $FileExtensions = [System.Collections.Generic.List[object]]::new()
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
   $SeenProtocols = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   $SeenExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
@@ -730,7 +732,7 @@ function ConvertTo-MSIXManifestAssociationInfo {
     FileExtensions            = @($FileExtensions | Select-Object -ExpandProperty FileExtension -Unique | Sort-Object)
     ProtocolAssociations      = @($Protocols)
     FileExtensionAssociations = @($FileExtensions)
-    Warnings                  = @($Warnings | Select-Object -Unique)
+    Diagnostics               = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'MSIX' -Kind Incomplete -Areas Metadata))
   }
 }
 
@@ -842,7 +844,7 @@ function Get-MSIXInfo {
       WritesAppsAndFeaturesEntry      = $true
       AppsAndFeaturesProductCode      = $null
       AppsAndFeaturesInstallerType    = $PackageTypeInfo.InstallerType.ToLowerInvariant()
-      Warnings                        = [string[]]@($PackageTypeInfo.Warnings + $DependencyInfo.Warnings + $AssociationInfo.Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+      Diagnostics                     = @(Merge-InstallerDiagnostics -Diagnostic @($PackageTypeInfo.Diagnostics, $DependencyInfo.Diagnostics, $AssociationInfo.Diagnostics))
       UnresolvedFields                = [string[]]@()
       PackageKind                     = $PackageTypeInfo.PackageKind
       InstallerTypeEvidence           = $PackageTypeInfo.Evidence

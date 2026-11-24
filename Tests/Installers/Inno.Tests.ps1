@@ -28,6 +28,40 @@ BeforeAll {
 }
 
 Describe 'Inno bridge' {
+  It 'Should preserve conditional pre-install registry evidence without excluding x86' {
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\Inno\SergeyMoskalev.CarambaSwitcher.Pro\2026.09.26.2\CarambaSwitcherProSetup-latest.exe'
+    if (-not (Test-DumplingsTestFixtureCacheEntry -Path $Fixture -Sha256 'AB3A737478ED11892242A2289ED2CF4190CB55445D34A2EED125FDA1979DFAF3')) {
+      Set-ItResult -Skipped -Because 'The pinned Caramba Switcher Pro fixture is unavailable; its latest URL is mutable.'
+      return
+    }
+    $Info = Get-InnoInfo -Path $Fixture -Architecture x86
+    $Info.ProductCode | Should -Be '{B7E4B0C2-9B1A-4F3E-8D2A-1C5E7A9F60D3}_is1'
+    $Info.UnsupportedArchitectures | Should -BeNullOrEmpty
+    $Info.SupportedArchitectures | Should -Contain 'x86'
+    $Info.ConditionalArchitectureRequirementEvidence | Should -HaveCount 1
+    $Info.ConditionalArchitectureRequirementEvidence[0].EntryPoint | Should -Be 'PREPARETOINSTALL'
+    @($Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Conditional64BitRegistry') | Should -HaveCount 1
+    $X64 = Get-InnoInfo -Path $Fixture -Architecture x64
+    $X64.ConditionalArchitectureRequirementEvidence | Should -HaveCount 1
+    @($X64.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Conditional64BitRegistry') | Should -HaveCount 0
+  }
+
+  It 'Should propagate proven startup registry architecture restrictions through the bridge' {
+    $Fixture = Get-DumplingsTestFixture -RelativePath 'Installers\Inno\CHERRY.UTILITY\3.12\CHERRY_Utility_Software_x32-3.12.exe' -Uri 'https://www.cherry.de/fileadmin/media/Corporate/Software/CHERRY_Utility_Software_x32-3.12.exe' -Sha256 '2FA52325747EE96B560F8BA8C304FEDC10D4AB75389258BFD8001168AF4BB238'
+    $Info = Get-InnoInfo -Path $Fixture -Architecture x86
+    $Info.UnsupportedArchitectures | Should -Be @('x86')
+    $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
+    $Info.ArchitectureRequirementEvidence | Should -HaveCount 1
+    $Info.RegistryArchitectureRequirement.Evidence[0].Api | Should -Be 'REGDELETEVALUE'
+    $Info.RegistryArchitectureRequirement.Evidence[0].RootKeyHex | Should -Be '0x82000002'
+    @($Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitRegistry') | Should -HaveCount 1
+    Test-InnoUnsupportedArchitecture -Path $Fixture -Architecture x86 | Should -BeTrue
+
+    $X64 = Get-InnoInfo -Path $Fixture -Architecture x64
+    $X64.UnsupportedArchitectures | Should -Be @('x86')
+    @($X64.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitRegistry') | Should -HaveCount 0
+  }
+
   It 'Should normalize escaped AppId and user Program Files metadata through the bridge' {
     $Fixture = Get-InstallerFixture -Name 'kiro-ide-1.0.138-stable-win32-x64.exe' -Url 'https://prod.download.desktop.kiro.dev/releases/stable/win32-x64/signed/1.0.138/kiro-ide-1.0.138-stable-win32-x64.exe'
     $Info = Get-InnoInfo -Path $Fixture
@@ -35,9 +69,9 @@ Describe 'Inno bridge' {
     $Info.PSObject.Properties.Name[0..13] | Should -Be @(
       'Path', 'InstallerType', 'ProductCode', 'UpgradeCode', 'DisplayName', 'DisplayVersion',
       'Publisher', 'Scope', 'DefaultInstallLocation', 'WritesAppsAndFeaturesEntry',
-      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Warnings', 'UnresolvedFields'
+      'AppsAndFeaturesProductCode', 'AppsAndFeaturesInstallerType', 'Diagnostics', 'UnresolvedFields'
     )
-    $Info.Warnings.GetType() | Should -Be ([string[]])
+    $Info.Diagnostics.GetType() | Should -Be ([object[]])
     $Info.UnresolvedFields.GetType() | Should -Be ([string[]])
     $Info.ProductCode | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}_is1'
     $Info.AppId | Should -Be '{A2CA08B5-C756-463E-B13D-F051F4F11F0B}'
@@ -61,6 +95,33 @@ Describe 'Inno bridge' {
     Read-SupportedScopesFromInno -Path $Fixture | Should -Be @('user', 'machine')
     Read-UnsupportedArchitecturesFromInno -Path $Fixture | Should -BeNullOrEmpty
     Test-InnoAppsAndFeaturesEntry -Path $Fixture | Should -BeTrue
+  }
+
+  It 'Should propagate required x64-only constant compatibility through the bridge' {
+    $Fixture = Resolve-DumplingsTestFixturePath -RelativePath 'Installers\Inno\ProWare.AmortizationPlus\1.0.0.0\ap_setup.exe'
+    if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+      Set-ItResult -Skipped -Because 'The optional ProWare Amortization Plus fixture is not cached.'
+      return
+    }
+    (Get-FileHash -LiteralPath $Fixture -Algorithm SHA256).Hash | Should -Be '22C8B9FF5A528D1EBC2D604765AD2BD9EDFB2D577073B3CEDEEC561600135010'
+
+    $Info = Get-InnoInfo -Path $Fixture
+
+    $Info.SupportedArchitectures | Should -Be @('x64', 'arm64')
+    $Info.UnsupportedArchitectures | Should -Be @('x86')
+    $Info.RequiredArchitectureConstants | Should -Be @('commonpf64')
+    @($Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitConstant') | Should -HaveCount 1
+
+    $X64Info = Get-InnoInfo -Path $Fixture -Architecture x64
+    @($X64Info.Diagnostics | Where-Object Id -EQ 'Inno.Architecture.Required64BitConstant') | Should -HaveCount 0
+    $X64Info.SupportedArchitectures | Should -Be $Info.SupportedArchitectures
+    $X64Info.UnsupportedArchitectures | Should -Be $Info.UnsupportedArchitectures
+    $X64Info.RequiredArchitectureConstants | Should -Be $Info.RequiredArchitectureConstants
+    $X64Info.ArchitectureRequirementEvidence[0].Field | Should -Be 'DefaultDirName'
+
+    Read-UnsupportedArchitecturesFromInno -Path $Fixture | Should -Be @('x86')
+    Test-InnoUnsupportedArchitecture -Path $Fixture -Architecture x86 | Should -BeTrue
+    Test-InnoUnsupportedArchitecture -Path $Fixture -Architecture x64 | Should -BeFalse
   }
 
   It 'Should detect a default-user dual-scope Inno installer through the bridge' {
@@ -110,7 +171,7 @@ Describe 'Inno bridge' {
       $Info = Get-InnoInfo -Path $Fixture
     }
 
-    $Info.InstallerType | Should -Be 'Inno'
+    $Info.InstallerType | Should -Be 'inno'
     $Info.DisplayName | Should -Be 'Argente'
     $Info.AppId | Should -Be 'Argente'
     $Info.ProductCode | Should -BeNullOrEmpty

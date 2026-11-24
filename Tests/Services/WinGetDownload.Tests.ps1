@@ -9,7 +9,7 @@ BeforeAll {
   . (Join-Path $Script:DumplingsModuleRoot 'Index.ps1')
 }
 
-Describe 'WinGet native download compatibility probe' {
+Describe 'WinGet native download compatibility probe' -Tag Unit {
   It 'serializes WinGet CLI probes through the shared named mutex' {
     InModuleScope WinGetDownload {
       function Use-Mutex {

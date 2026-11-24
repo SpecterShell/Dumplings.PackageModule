@@ -11,7 +11,7 @@
 # guidance; Patchright is consumed as the pinned drop-in Playwright runtime.
 
 # Patchright is a drop-in Playwright driver with Chromium anti-detection patches.
-# It remains asynchronous internally, so Dumplings deliberately exposes a
+# It remains asynchronous internally, so Dumplings exposes a
 # synchronous PowerShell boundary: task scripts run only as the outer scoped
 # block, Task objects are completed by PlaywrightTaskBridge, and network routing
 # is handled by PlaywrightSession's compiled C# delegate. Never pass a PowerShell

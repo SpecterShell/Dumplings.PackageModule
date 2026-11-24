@@ -14,7 +14,10 @@ BeforeAll {
 
   function Get-VM {}
   function Get-VMIntegrationService {}
-  function Copy-VMFile {}
+  function Copy-VMFile {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Pester binds these stub parameters for mock invocation filters.')]
+    param ([string]$VMName, [string]$SourcePath, [string]$DestinationPath, [string]$FileSource, [switch]$CreateFullPath, [switch]$Force)
+  }
 
   function Get-VMTestSnapshot {
     param(
@@ -176,8 +179,8 @@ Describe 'VM installed-state comparison script' {
 Describe 'Hyper-V installed-state host controller' {
   It 'imports the inbox Hyper-V module natively in PowerShell Core' {
     $Text = Get-Content -LiteralPath $Script:HostScript -Raw
-    $Text | Should -Match ([regex]::Escape("`$env:PSModulePath += ';C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules'"))
     $Text | Should -Match ([regex]::Escape('Import-Module Hyper-V -PassThru'))
+    $Text | Should -Not -Match ([regex]::Escape('$env:PSModulePath'))
     $Text | Should -Not -Match ([regex]::Escape('-UseWindowsPowerShell'))
   }
 
@@ -197,7 +200,9 @@ Describe 'Hyper-V installed-state host controller' {
     $Result = & $Script:HostScript -Action Stage -VMName TestVM
 
     $Result.GuestScriptPath | Should -Be 'C:\DumplingsValidation\Get-WinGetVMInstalledState.ps1'
-    Should -Invoke Copy-VMFile -Times 1 -Exactly
+    $Result.GuestWaitScriptPath | Should -Be 'C:\DumplingsValidation\Wait-WinGetVMProcess.ps1'
+    Should -Invoke Copy-VMFile -Times 2 -Exactly
+    Should -Invoke Copy-VMFile -Times 1 -Exactly -ParameterFilter { $DestinationPath -eq 'C:\DumplingsValidation\Wait-WinGetVMProcess.ps1' }
   }
 
   It 'retrieves capture JSON through mocked PowerShell Direct' {

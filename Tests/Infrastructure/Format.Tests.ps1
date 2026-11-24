@@ -4,7 +4,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Data\Format.psm1') -Force
 }
 
-Describe 'Format-Text WinGet-safe character handling' {
+Describe 'Format-Text WinGet-safe character handling' -Tag Unit {
   It 'removes every control character rejected by the WinGet YAML parser' {
     $BlockedCodePoints = @(0x00..0x08) + @(0x0B, 0x0C) + @(0x0E..0x1F) + @(0x7F)
     $InputText = 'A' + ( -join ($BlockedCodePoints | ForEach-Object { [char]$_ })) + 'B'
@@ -48,7 +48,7 @@ Describe 'Format-Text WinGet-safe character handling' {
   }
 }
 
-Describe 'Format-Text formatting regressions' {
+Describe 'Format-Text formatting regressions' -Tag Unit {
   It 'retains CJK spacing and punctuation formatting' {
     ('当你凝视着bug，bug也凝视着你;' | Format-Text) | Should -Be '当你凝视着 bug，bug 也凝视着你。'
   }

@@ -10,7 +10,7 @@ BeforeDiscovery {
   Import-Module (Join-Path $Script:DumplingsModuleRoot 'Libraries\Messaging\Matrix.psm1') -Force
 }
 
-Describe 'Shared message splitting' {
+Describe 'Shared message splitting' -Tag Unit {
   It 'packs complete lines before splitting an oversized line' {
     $Message = "alpha`nbeta`ngamma`n" + ('delta ' * 10)
     $Chunks = @(Split-MessageText -Message $Message -MaximumLength 20 -LengthMode UTF16 -Format PlainText)
@@ -69,7 +69,7 @@ after
   }
 }
 
-Describe 'Telegram messaging' {
+Describe 'Telegram messaging' -Tag Unit {
   InModuleScope Telegram {
     It 'preserves the complete text of a single Markdown chunk' {
       $script:WrittenMessage = $null
@@ -216,7 +216,7 @@ Describe 'Telegram messaging' {
   }
 }
 
-Describe 'Matrix messaging' {
+Describe 'Matrix messaging' -Tag Unit {
   InModuleScope Matrix {
     It 'preserves the complete text of a single Markdown chunk' {
       Mock Assert-MatrixPlaintextAllowed

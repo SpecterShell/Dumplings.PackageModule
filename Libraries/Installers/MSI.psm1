@@ -443,8 +443,8 @@ function Get-MsiAssociationInfoFromStaticTableInfo {
   $FileExtensionAssociations = [System.Collections.Generic.List[object]]::new()
   foreach ($Association in @($RegistryAssociationInfo.FileExtensionAssociations)) { $FileExtensionAssociations.Add($Association) }
   $SeenTableExtensions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-  $Warnings = [System.Collections.Generic.List[string]]::new()
-  foreach ($Warning in @($RegistryAssociationInfo.Warnings)) { $Warnings.Add($Warning) }
+  $Warnings = [System.Collections.Generic.List[object]]::new()
+  foreach ($Warning in @($RegistryAssociationInfo.Diagnostics)) { $Warnings.Add($Warning) }
 
   # Merge explicit Registry-table associations with MSI's normalized Extension/ProgId/Verb/MIME
   # tables, deduplicating by literal extension.
@@ -483,7 +483,7 @@ function Get-MsiAssociationInfoFromStaticTableInfo {
     ProtocolAssociations      = @($RegistryAssociationInfo.ProtocolAssociations)
     FileExtensionAssociations = @($FileExtensionAssociations)
     RegistryAssociationInfo   = $RegistryAssociationInfo
-    Warnings                  = @($Warnings | Select-Object -Unique)
+    Diagnostics               = @(Merge-InstallerDiagnostics -Diagnostic @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings) -Source 'MSI' -Kind Incomplete -Areas Metadata))
   }
 }
 
@@ -803,7 +803,7 @@ function Get-MsiElevationInfoFromStaticTableInfo {
   )
 
   $Evidence = [System.Collections.Generic.List[object]]::new()
-  $Warnings = [System.Collections.Generic.List[string]]::new()
+  $Warnings = [System.Collections.Generic.List[object]]::new()
   $SummaryWordCount = [int]$StaticTableInfo.SummaryInfo.WordCount
   $AllowsInstallWithoutElevation = ($SummaryWordCount -band 0x08) -ne 0
 
@@ -925,57 +925,60 @@ function Get-MsiElevationInfoFromStaticTableInfo {
     Evidence                      = [object[]]$Evidence.ToArray()
     SummaryWordCount              = $SummaryWordCount
     AllowsInstallWithoutElevation = $AllowsInstallWithoutElevation
-    Warnings                      = [string[]]$Warnings.ToArray()
+    Diagnostics                   = @(ConvertTo-InstallerDiagnostic -InputObject @([object[]]$Warnings.ToArray()) -Source 'MSI' -Kind Incomplete -Areas Metadata)
   }
 }
 
-function Get-MsiBuilderFromStaticTableInfo {
+function Get-MsiBuilderEvidenceFromStaticTableInfo {
   <#
   .SYNOPSIS
-    Classify the MSI authoring system from structured tables, properties, actions, and summary data.
+    Classify the MSI authoring system and report the source of that classification.
   .PARAMETER StaticTableInfo
     Immutable table projection returned by Get-MsiStaticTableInfo. Unknown evidence returns Unknown rather than guessing.
   #>
+  [OutputType([pscustomobject])]
   param (
     [Parameter(Mandatory)]
     [psobject]$StaticTableInfo
   )
 
   $Properties = $StaticTableInfo.Properties
-  $Tables = @($StaticTableInfo.Tables)
   $CustomActionNames = @($StaticTableInfo.CustomActionRows.Action)
-  $SummaryInfoText = @(
-    # DTF maps Summary Information PID_APPNAME (shown as "Program Name" by the Windows shell) to
-    # CreatingApp. CreatingApplication is not a DTF property and previously discarded Bytello's
-    # explicit "Windows Installer XML Toolset (...)" authoring marker.
-    $StaticTableInfo.SummaryInfo.CreatingApp
-    $StaticTableInfo.SummaryInfo.Comments
-    $Properties.Values
-    $Properties.Keys
-    $Tables
-    $CustomActionNames
-  ) -join "`n"
+  $CreatingApplication = [string]$StaticTableInfo.SummaryInfo.CreatingApp
 
-  # Prefer tool-owned tables/properties/actions over free-form summary text. Return Unknown when no
-  # source-backed signature survives compilation.
-  if ($Tables | Where-Object { $_ -like 'AI_*' }) { return 'AdvancedInstaller' }
-  if ($Properties.Keys | Where-Object { $_ -like 'AI_*' -or $_ -in @('AI_PACKAGE_TYPE', 'AI_PRODUCTNAME_ARP') }) { return 'AdvancedInstaller' }
-  if ($CustomActionNames | Where-Object { $_ -like 'AI_*' }) { return 'AdvancedInstaller' }
+  # PID_APPNAME is the database author's direct declaration of the creating
+  # application. It outranks incidental property and custom-action names that
+  # an application can carry independently of the MSI compiler.
+  $SummaryBuilder = switch -Regex ($CreatingApplication) {
+    '(?i)\bAKInstallerMSI\b' { 'AKInstallerMSI'; break }
+    '(?i)\bAdvanced Installer\b' { 'AdvancedInstaller'; break }
+    '(?i)\bInstallShield\b' { 'InstallShield'; break }
+    '(?i)\b(WiX|Windows Installer XML|WixSharp)\b' { 'WiX'; break }
+    '(?i)\bWise(?:\s+for\s+Windows Installer|\s+Installer)?\b' { 'Wise'; break }
+    default { $null }
+  }
+  if ($SummaryBuilder) {
+    return [pscustomobject][ordered]@{
+      Builder = $SummaryBuilder
+      Source  = 'SummaryInformation.CreatingApp'
+      Value   = $CreatingApplication
+    }
+  }
 
-  # Wise for Windows Installer leaves explicit Wise-prefixed database structures. Detect those
-  # before InstallShield so unrelated names such as IsolatedComponent cannot become IS evidence.
-  if ($Tables | Where-Object { $_ -clike 'Wise*' }) { return 'Wise' }
-  if ($Properties.Keys | Where-Object { $_ -clike 'Wise*' -or $_ -clike '_Wise*' }) { return 'Wise' }
-  if ($CustomActionNames | Where-Object { $_ -clike 'Wise*' }) { return 'Wise' }
-
-  # InstallShield-owned identifiers conventionally use an uppercase IS prefix.
-  # Match that prefix case-sensitively so ordinary properties such as IsLight
-  # do not outrank explicit WiX/WixSharp authoring evidence.
-  if ($Tables | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
-  if ($Properties.Keys | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
-  if ($CustomActionNames | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) { return 'InstallShield' }
-  if ($SummaryInfoText -match '(?i)\bInstallShield\b') { return 'InstallShield' }
-
+  # Fallbacks use explicit compiler-owned identifiers. Table names are omitted:
+  # packages can import vendor tables without having been authored by that tool.
+  if ($Properties.Keys | Where-Object { $_ -like 'AI_*' -or $_ -in @('AI_PACKAGE_TYPE', 'AI_PRODUCTNAME_ARP') }) {
+    return [pscustomobject][ordered]@{ Builder = 'AdvancedInstaller'; Source = 'Property'; Value = $null }
+  }
+  if ($CustomActionNames | Where-Object { $_ -like 'AI_*' }) {
+    return [pscustomobject][ordered]@{ Builder = 'AdvancedInstaller'; Source = 'CustomAction'; Value = $null }
+  }
+  if ($Properties.Keys | Where-Object { $_ -clike 'Wise*' -or $_ -clike '_Wise*' }) {
+    return [pscustomobject][ordered]@{ Builder = 'Wise'; Source = 'Property'; Value = $null }
+  }
+  if ($CustomActionNames | Where-Object { $_ -clike 'Wise*' }) {
+    return [pscustomobject][ordered]@{ Builder = 'Wise'; Source = 'CustomAction'; Value = $null }
+  }
   # Chromium enterprise MSIs are compiled from WiX source but do not retain
   # generic Wix tables or properties in the resulting database.
   # Source: https://chromium.googlesource.com/chromium/src/+/main/chrome/updater/win/signing/enterprise_standalone_installer.wxs.xml
@@ -984,13 +987,33 @@ function Get-MsiBuilderFromStaticTableInfo {
   $HasChromiumWiXBinaryAction = [bool]($StaticTableInfo.CustomActionRows | Where-Object {
       $_.Action -eq 'ExtractTagInfoFromInstaller' -and $_.Source -eq 'MsiInstallerCustomActionDll'
     })
-  if ($HasChromiumWiXActions -and $HasChromiumWiXBinaryAction) { return 'WiX' }
+  if ($HasChromiumWiXActions -and $HasChromiumWiXBinaryAction) {
+    return [pscustomobject][ordered]@{ Builder = 'WiX'; Source = 'ChromiumEnterpriseActions'; Value = $null }
+  }
+  if ($Properties.Keys | Where-Object { $_ -like 'Wix*' -or $_ -eq 'WIXUI_INSTALLDIR' }) {
+    return [pscustomobject][ordered]@{ Builder = 'WiX'; Source = 'Property'; Value = $null }
+  }
+  if ($CustomActionNames | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) {
+    return [pscustomobject][ordered]@{ Builder = 'InstallShield'; Source = 'CustomAction'; Value = $null }
+  }
+  if ($Properties.Keys | Where-Object { $_ -clike 'IS*' -or $_ -clike 'InstallShield*' }) {
+    return [pscustomobject][ordered]@{ Builder = 'InstallShield'; Source = 'Property'; Value = $null }
+  }
 
-  if ($Tables | Where-Object { $_ -like 'Wix*' }) { return 'WiX' }
-  if ($Properties.Keys | Where-Object { $_ -like 'Wix*' -or $_ -eq 'WIXUI_INSTALLDIR' }) { return 'WiX' }
-  if ($SummaryInfoText -match '(?i)\b(WiX|Windows Installer XML)\b') { return 'WiX' }
+  return [pscustomobject][ordered]@{ Builder = 'Unknown'; Source = $null; Value = $null }
+}
 
-  return 'Unknown'
+function Get-MsiBuilderFromStaticTableInfo {
+  <#
+  .SYNOPSIS
+    Return the MSI authoring-system name from structured database evidence.
+  .PARAMETER StaticTableInfo
+    Immutable table projection returned by Get-MsiStaticTableInfo.
+  #>
+  [OutputType([string])]
+  param ([Parameter(Mandatory)][psobject]$StaticTableInfo)
+
+  return (Get-MsiBuilderEvidenceFromStaticTableInfo -StaticTableInfo $StaticTableInfo).Builder
 }
 
 function Get-MsiInstallerBuilderVersionInfo {
@@ -1013,6 +1036,7 @@ function Get-MsiInstallerBuilderVersionInfo {
   $CreatingApplication = [string]$StaticTableInfo.SummaryInfo.CreatingApp
   $Pattern = switch ($InstallerBuilder) {
     'AdvancedInstaller' { '(?i)\bAdvanced Installer(?:\s+|/)(?<Version>\d+(?:\.\d+){1,3})\b' }
+    'AKInstallerMSI' { '(?i)\bAKInstallerMSI(?:\s+V?)?(?<Version>\d+(?:\.\d+){1,3})\b' }
     default { $null }
   }
   if ($Pattern -and $CreatingApplication -match $Pattern) {
@@ -1196,7 +1220,8 @@ function Get-MsiAppsAndFeaturesInfo {
       } else {
         $ProductCode
       }
-      $InstallerBuilder = Get-MsiBuilderFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $InstallerBuilderEvidence = Get-MsiBuilderEvidenceFromStaticTableInfo -StaticTableInfo $StaticTableInfo
+      $InstallerBuilder = $InstallerBuilderEvidence.Builder
       $InstallShieldProjectInfo = Get-MsiInstallShieldProjectTypeFromStaticTableInfo -StaticTableInfo $StaticTableInfo
       $VisibleAppsAndFeaturesRegistryRows = if ($CustomAppsAndFeaturesProductCode) {
         $CustomAppsAndFeaturesRegistryRows
@@ -1227,6 +1252,7 @@ function Get-MsiAppsAndFeaturesInfo {
         ProductVersion                    = $Properties['ProductVersion']
         UpgradeCode                       = $Properties['UpgradeCode']
         InstallerBuilder                  = $InstallerBuilder
+        InstallerBuilderSource            = $InstallerBuilderEvidence.Source
         InstallShieldProjectType          = $InstallShieldProjectInfo.ProjectType
         InstallShieldProjectTypeEvidence  = $InstallShieldProjectInfo
         AppsAndFeaturesInstallerType      = $AppsAndFeaturesInstallerType
@@ -1443,10 +1469,18 @@ function Get-MsiInstallerInfo {
         WritesAppsAndFeaturesEntry          = $AppsAndFeaturesInfo.HasCustomAppsAndFeaturesEntry -or -not $AppsAndFeaturesInfo.HidesMsiAppsAndFeaturesEntry
         AppsAndFeaturesProductCode          = $AppsAndFeaturesInfo.AppsAndFeaturesProductCode
         AppsAndFeaturesInstallerType        = $AppsAndFeaturesInfo.AppsAndFeaturesInstallerType
-        Warnings                            = [string[]]@($ElevationInfo.Warnings + $InstallShieldLauncherRequirement.Warnings + @($InstallShieldScriptInfo.Warnings) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        Diagnostics                         = @(
+          Merge-InstallerDiagnostics -Diagnostic @(
+            $ElevationInfo.Diagnostics
+            $InstallShieldLauncherRequirement.Diagnostics
+            $InstallShieldScriptInfo.Diagnostics
+          )
+        )
         UnresolvedFields                    = [string[]]@()
+
         AllUsers                            = $Properties['ALLUSERS']
         InstallerBuilder                    = $AppsAndFeaturesInfo.InstallerBuilder
+        InstallerBuilderSource              = $AppsAndFeaturesInfo.InstallerBuilderSource
         InstallerBuilderVersion             = $InstallerBuilderVersionInfo.Version
         InstallerBuilderVersionSource       = $InstallerBuilderVersionInfo.Source
         SummaryCreatingApplication          = [string]$StaticTableInfo.SummaryInfo.CreatingApp

@@ -167,6 +167,7 @@ function Get-DumplingsTestFixture {
       return $Path
     }
 
+    if ($env:DUMPLINGS_TEST_OFFLINE -eq '1') { throw "Offline test requested an unavailable fixture: $RelativePath" }
     Remove-Item -LiteralPath $Path, "$Path.fixture.json" -Force -ErrorAction SilentlyContinue
     $ResolvedUri = $Uri
     if ($UseSourceForgeMetaRefresh) {
