@@ -294,10 +294,15 @@ function Get-EmbeddedLinks {
   <#
   .SYNOPSIS
     Extract embedded <a>links</a> from string
-  .PARAMETER InputObject
+  .PARAMETER Content
     The string containing the links
+  .OUTPUTS
+    System.Management.Automation.PSObject[]
+    One array containing links from all input strings in input and document order.
+    The array is empty when no links match and is not enumerated on output.
+    Assign the result before piping individual links to another command.
   #>
-  [OutputType([string])]
+  [OutputType([pscustomobject[]])]
   param (
     [Parameter(Position = 0, ValueFromPipeline, ValueFromPipelineByPropertyName, Mandatory, HelpMessage = 'The string containing the links')]
     [ValidateNotNullOrEmpty()]
@@ -305,14 +310,19 @@ function Get-EmbeddedLinks {
   )
 
   begin {
+    $Links = [System.Collections.Generic.List[pscustomobject]]::new()
     $LinkRegex = [Microsoft.PowerShell.Commands.BasicHtmlWebResponseObject].GetNestedType('HtmlParser', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static).GetField('LinkRegex', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static).GetValue($null)
     $CreateHtmlObject = [Microsoft.PowerShell.Commands.BasicHtmlWebResponseObject].GetMethod('CreateHtmlObject', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static)
   }
 
   process {
     foreach ($Match in $LinkRegex.Matches($Content)) {
-      Write-Output -InputObject $CreateHtmlObject.Invoke($null, @($Match.Value, 'A'))
+      $Links.Add($CreateHtmlObject.Invoke($null, @($Match.Value, 'A')))
     }
+  }
+
+  end {
+    Write-Output -NoEnumerate -InputObject $Links.ToArray()
   }
 }
 
