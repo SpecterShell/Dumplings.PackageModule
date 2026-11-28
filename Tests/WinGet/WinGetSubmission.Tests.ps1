@@ -42,6 +42,30 @@ BeforeAll {
       previous_filename = $PreviousFileName
     }
   }
+
+  # A body names each reference on a line of its own, while a title is one line where a reference sits
+  # beside other text, so the same expectation needs two match modes that are each strict for its text.
+  function Test-TestIssueReference {
+    param (
+      [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+      [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Reference,
+      [ValidateSet('Anywhere', 'OwnLine')][string]$Placement = 'Anywhere'
+    )
+
+    $Line = $Text -split '\r?\n'
+    foreach ($Item in $Reference) {
+      # Exactly once: a missing reference leaves the issue unresolved, and a repeated one names it twice.
+      $Named = @([regex]::Matches($Text, [regex]::Escape($Item))).Count -eq 1
+      if ($Placement -eq 'OwnLine') {
+        $Named = @($Line -eq $Item).Count -eq 1
+      }
+      if (-not $Named) {
+        return $false
+      }
+    }
+
+    return $true
+  }
 }
 
 Describe 'Get-WinGetPullRequestConflictInfo' -Tag Unit {
@@ -284,6 +308,11 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
   BeforeAll {
     $Script:SavedPreference = Get-Variable -Name DumplingsPreference -Scope Global -ErrorAction Ignore
     $Script:SavedOutput = Get-Variable -Name DumplingsOutput -Scope Global -ErrorAction Ignore
+    # Which issues a task resolves is arbitrary, so the fixture below is the only place that names them: it
+    # keeps the free-form shape a task writes, with both separators and trailing padding, and every
+    # expectation parses that same setting instead of repeating the numbers.
+    $Script:ResolveIssues = '91, 92;93  '
+    $Script:ResolveIssue = ($Script:ResolveIssues -split '[,;\s]+' | Where-Object -FilterScript { $_ })[0]
   }
 
   BeforeEach {
@@ -310,6 +339,8 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
     # Isolate the submission orchestration from source reads, parsing, validation,
     # and GitHub writes. The real comparison helper still exercises its retries.
     Mock Get-WinGetLocalRepoPath -ModuleName WinGetSubmission { $null }
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { $null }
+    Mock Get-WinGetGitHubManifestVersionCommit -ModuleName WinGetSubmission { $null }
     Mock Get-WinGetGitHubBranch -ModuleName WinGetSubmission { @{ object = @{ sha = 'a' * 40 } } }
     Mock Get-WinGetGitHubPackageVersion -ModuleName WinGetSubmission { '1.0' }
     Mock Get-WinGetGitHubApiTokenUser -ModuleName WinGetSubmission { @{ login = 'DumplingsBot' } }
@@ -560,9 +591,9 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
     Should -Invoke Get-WinGetGitHubComparison -ModuleName WinGetSubmission -Exactly 6
     Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1
     Should -Invoke Invoke-WinGetSubmissionCandidateBranchCleanup -ModuleName WinGetSubmission -Exactly 0
-    $Warnings = @($Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' }))
+    $Warnings = @($Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' -and $_.Message -like '*Failed to compare the candidate changes*' }))
     $Warnings | Should -HaveCount 1
-    $Warnings[0].Message | Should -BeLike '*Failed to compare the candidate changes*GitHub temporarily unavailable*'
+    $Warnings[0].Message | Should -BeLike '*GitHub temporarily unavailable*'
     $Warnings[0].Message | Should -BeLike '*continue without empty-change or exact duplicate pull-request checks*'
   }
 
@@ -608,7 +639,75 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
 
     Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1
     Should -Invoke Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $PullRequestNumber -eq 42 }
-    $Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' }).Message | Should -BeLike '*Normal replacement submission will continue*PR files temporarily unavailable*'
+    $Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' -and $_.Message -like '*PR files temporarily unavailable*' }).Message | Should -BeLike '*Normal replacement submission will continue*'
+  }
+
+  It 'names the resolved issues in the body and in the title when the merge does not keep the body' {
+    $Global:DumplingsPreference.WinGetResolveIssues = $Script:ResolveIssues
+    $Script:ExpectedReferences = @(New-WinGetGitHubIssueReference -IssueNumber $Script:ResolveIssues)
+    Mock Get-WinGetGitHubIssueReferencePlace -ModuleName WinGetSubmission { @('Body', 'Title') }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter {
+      # Every given issue is named once in the body, one reference per line, and once in the title,
+      # because a repository that squashes with the title as its only commit message reads the title.
+      (Test-TestIssueReference -Text $Body -Reference $Script:ExpectedReferences -Placement OwnLine) -and
+      (Test-TestIssueReference -Text $Title -Reference $Script:ExpectedReferences)
+    }
+  }
+
+  It 'accepts the issue links that a task setting or a command line carries' {
+    # A caller copies the link GitHub shows: a bare number, a qualified reference, or the issue URL.
+    $Script:ResolveIssues = '92, octo-org/octo-repo#100, https://github.com/octo-org/octo-repo/issues/7'
+    $Global:DumplingsPreference.WinGetResolveIssues = $Script:ResolveIssues
+    $Script:ExpectedReferences = @(New-WinGetGitHubIssueReference -IssueNumber $Script:ResolveIssues)
+    Mock Get-WinGetGitHubIssueReferencePlace -ModuleName WinGetSubmission { @('Body', 'Title') }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    $Script:ExpectedReferences.Count | Should -Be 3
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter {
+      (Test-TestIssueReference -Text $Body -Reference $Script:ExpectedReferences -Placement OwnLine) -and
+      (Test-TestIssueReference -Text $Title -Reference $Script:ExpectedReferences)
+    }
+  }
+
+  It 'keeps the title free of resolved issues when the merge keeps the body' {
+    $Script:ExpectedReferences = @(New-WinGetGitHubIssueReference -IssueNumber $Script:ResolveIssue)
+    $Global:DumplingsPreference.WinGetResolveIssues = $Script:ResolveIssue
+    Mock Get-WinGetGitHubIssueReferencePlace -ModuleName WinGetSubmission { @('Body') }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter {
+      (Test-TestIssueReference -Text $Body -Reference $Script:ExpectedReferences) -and
+      -not (Test-TestIssueReference -Text $Title -Reference $Script:ExpectedReferences)
+    }
+  }
+
+  It 'names the resolved issues in the title when the merge settings cannot be read' {
+    $Script:ExpectedReferences = @(New-WinGetGitHubIssueReference -IssueNumber $Script:ResolveIssue)
+    $Global:DumplingsPreference.WinGetResolveIssues = $Script:ResolveIssue
+    Mock Get-WinGetGitHubIssueReferencePlace -ModuleName WinGetSubmission { throw 'Resource not accessible by integration' }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter {
+      Test-TestIssueReference -Text $Title -Reference $Script:ExpectedReferences
+    }
+    @($Script:SubmissionTask.Logs.Where({ $_.Level -eq 'Warning' -and $_.Message -like '*writes a merge commit*' })).Count | Should -Be 1
+  }
+
+  It 'keeps the pull request free of resolved issues when none are given' {
+    $Script:SubmissionTask.Config.WinGetResolveIssues = @()
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke New-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter {
+      # No reference in any form GitHub reads may appear when the task resolves no issue.
+      @(Select-WinGetGitHubIssueReference -Text $Body).Count -eq 0 -and @(Select-WinGetGitHubIssueReference -Text $Title).Count -eq 0
+    }
   }
 
   It 'still throws a PR creation failure and leaves existing PRs open' {
@@ -619,6 +718,39 @@ Describe 'Send-WinGetManifest comparison failure policy' -Tag Unit {
     { Send-WinGetManifest -Task $Script:SubmissionTask } | Should -Throw '*PR creation failed*'
 
     Should -Invoke Close-WinGetGitHubPullRequest -ModuleName WinGetSubmission -Exactly 0
+  }
+
+  It 'forks at the newer of the reference history and the manifest version update' {
+    Mock ConvertFrom-WinGetManifestYaml -ModuleName WinGetSubmission { [pscustomobject]@{ Installers = @(); ManifestVersion = '1.12.0' } }
+    Mock Update-WinGetManifest -ModuleName WinGetSubmission { [pscustomobject]@{ Installers = @(); ManifestVersion = '1.28.0' } }
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { [pscustomobject]@{ sha = ('d' * 40); Path = 'manifests/v/Vendor/Package/1.0'; commit = [pscustomobject]@{ committer = [pscustomobject]@{ date = '2026-01-01T00:00:00Z' } } } }
+    Mock Get-WinGetGitHubManifestVersionCommit -ModuleName WinGetSubmission { [pscustomobject]@{ sha = ('e' * 40); commit = [pscustomobject]@{ committer = [pscustomobject]@{ date = '2026-11-11T17:34:17Z' } } } }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke Get-WinGetGitHubManifestVersionCommit -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $ManifestVersion -eq '1.28.0' -and $RepoOwner -eq 'microsoft' -and $RepoBranch -eq 'master' }
+    Should -Invoke New-WinGetGitHubBranch -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $SourceSha -eq ('e' * 40) }
+  }
+
+  It 'keeps the reference history that is newer than the manifest version update' {
+    Mock ConvertFrom-WinGetManifestYaml -ModuleName WinGetSubmission { [pscustomobject]@{ Installers = @(); ManifestVersion = '1.12.0' } }
+    Mock Update-WinGetManifest -ModuleName WinGetSubmission { [pscustomobject]@{ Installers = @(); ManifestVersion = '1.28.0' } }
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { [pscustomobject]@{ sha = ('d' * 40); Path = 'manifests/v/Vendor/Package/1.0'; commit = [pscustomobject]@{ committer = [pscustomobject]@{ date = '2026-12-01T00:00:00Z' } } } }
+    Mock Get-WinGetGitHubManifestVersionCommit -ModuleName WinGetSubmission { [pscustomobject]@{ sha = ('e' * 40); commit = [pscustomobject]@{ committer = [pscustomobject]@{ date = '2026-11-11T17:34:17Z' } } } }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke New-WinGetGitHubBranch -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $SourceSha -eq ('d' * 40) }
+  }
+
+  It 'does not look up a manifest version update when the version is unchanged' {
+    Mock ConvertFrom-WinGetManifestYaml -ModuleName WinGetSubmission { [pscustomobject]@{ Installers = @(); ManifestVersion = '1.28.0' } }
+    Mock Update-WinGetManifest -ModuleName WinGetSubmission { [pscustomobject]@{ Installers = @(); ManifestVersion = '1.28.0' } }
+
+    Send-WinGetManifest -Task $Script:SubmissionTask
+
+    Should -Invoke Get-WinGetGitHubManifestVersionCommit -ModuleName WinGetSubmission -Exactly 0
+    Should -Invoke New-WinGetGitHubBranch -ModuleName WinGetSubmission -Exactly 1 -ParameterFilter { $SourceSha -eq ('a' * 40) }
   }
 
   AfterAll {
@@ -641,5 +773,86 @@ Describe 'Select-WinGetPullRequestForClosure' -Tag Unit {
     $Selected = @(Select-WinGetPullRequestForClosure -PullRequest $PullRequests -ExcludedNumber 10, 12)
 
     $Selected.number | Should -Be @(11)
+  }
+}
+
+Describe 'Resolve-WinGetSubmissionReference' -Tag Unit {
+  BeforeEach {
+    $Script:ReferenceLogs = [System.Collections.Generic.List[object]]::new()
+    $Script:ReferenceTask = [pscustomobject]@{}
+    $Script:ReferenceTask | Add-Member -MemberType ScriptMethod -Name Log -Value {
+      param($Message, $Level)
+      $Script:ReferenceLogs.Add([pscustomobject]@{ Message = $Message; Level = $Level })
+    }
+    $Script:ReferenceParameters = @{
+      Task               = $Script:ReferenceTask
+      PackageIdentifier  = 'Vendor.Package'
+      PackageVersion     = '1.2.3'
+      UpstreamRepoOwner  = 'microsoft'
+      UpstreamRepoName   = 'winget-pkgs'
+      UpstreamRepoBranch = 'master'
+      OriginRepoOwner    = 'DumplingsBot'
+      OriginRepoName     = 'winget-pkgs'
+      OriginRepoBranch   = 'master'
+      RootPath           = 'manifests'
+    }
+  }
+
+  It 'uses the newest commit the submission depends on' {
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { [pscustomobject]@{ sha = ('a' * 40); commit = [pscustomobject]@{ committer = [pscustomobject]@{ date = '2026-11-11T17:34:17Z' } }; Path = 'manifests/v/Vendor/Package/1.2.3' } }
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetSubmission { throw 'Must not resolve the origin head' }
+
+    $Reference = Resolve-WinGetSubmissionReference @Script:ReferenceParameters
+
+    $Reference.RepoOwner | Should -BeExactly 'microsoft'
+    $Reference.RepoName | Should -BeExactly 'winget-pkgs'
+    $Reference.RepoBranch | Should -BeExactly 'master'
+    $Reference.Sha | Should -Be ('a' * 40)
+    $Reference.Date | Should -Be '2026-11-11T17:34:17Z'
+    Should -Invoke Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission -Times 1 -Exactly -ParameterFilter { $PackageVersion -eq '1.2.3' }
+    $Script:ReferenceLogs | Should -HaveCount 1
+    $Script:ReferenceLogs[0].Level | Should -BeExactly 'Verbose'
+    $Script:ReferenceLogs[0].Message | Should -BeLike '*manifests/v/Vendor/Package/1.2.3*'
+  }
+
+  It 'falls back to the origin head when the submission has no upstream history' {
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { }
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetSubmission { [pscustomobject]@{ object = [pscustomobject]@{ sha = ('b' * 40) } } }
+
+    $Reference = Resolve-WinGetSubmissionReference @Script:ReferenceParameters
+
+    $Reference.RepoOwner | Should -BeExactly 'DumplingsBot'
+    $Reference.Sha | Should -Be ('b' * 40)
+    $Reference.Date | Should -BeNullOrEmpty
+  }
+
+  It 'keeps the local checkout as the reference source and only falls back for the branch base' {
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { }
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetSubmission { throw 'Must not resolve the origin head' }
+
+    $Reference = Resolve-WinGetSubmissionReference @Script:ReferenceParameters -LocalRepository
+
+    $Reference.RepoOwner | Should -BeExactly 'DumplingsBot'
+    $Reference.Sha | Should -BeNullOrEmpty
+    Should -Invoke Get-WinGetGitHubBranch -ModuleName WinGetSubmission -Times 0 -Exactly
+  }
+
+  It 'warns and falls back when the upstream history lookup fails' {
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { throw 'boom' }
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetSubmission { [pscustomobject]@{ object = [pscustomobject]@{ sha = ('b' * 40) } } }
+
+    $Reference = Resolve-WinGetSubmissionReference @Script:ReferenceParameters
+
+    $Reference.Sha | Should -Be ('b' * 40)
+    $Script:ReferenceLogs | Should -HaveCount 1
+    $Script:ReferenceLogs[0].Level | Should -BeExactly 'Warning'
+    $Script:ReferenceLogs[0].Message | Should -BeLike '*boom*'
+  }
+
+  It 'throws when neither the upstream history nor the origin head is available' {
+    Mock Get-WinGetGitHubSubmissionCommit -ModuleName WinGetSubmission { }
+    Mock Get-WinGetGitHubBranch -ModuleName WinGetSubmission { [pscustomobject]@{ object = [pscustomobject]@{ sha = '' } } }
+
+    { Resolve-WinGetSubmissionReference @Script:ReferenceParameters } | Should -Throw '*did not return a commit SHA*'
   }
 }

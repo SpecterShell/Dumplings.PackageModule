@@ -17,6 +17,11 @@ using module Microsoft.PowerShell.Utility
 # normal index. Standalone imports continue to work without Core-owned globals.
 if ($DumplingsDefaultParameterValues) { $PSDefaultParameterValues = $DumplingsDefaultParameterValues }
 
+# Response headers of the most recent request that asked for them. Invoke-RestMethod can only assign
+# -ResponseHeadersVariable in the scope that runs the request, which is this module, so the headers are
+# kept here and read through Get-GitHubApiResponseHeader.
+$Script:GitHubApiResponseHeaders = $null
+
 function Initialize-GitHubApiRequest {
   <#
   .SYNOPSIS
@@ -212,6 +217,47 @@ function ConvertTo-GitHubApiException {
   return [System.InvalidOperationException]::new($Diagnostic, $ErrorRecord.Exception)
 }
 
+function ConvertFrom-GitHubLinkHeader {
+  <#
+  .SYNOPSIS
+    Get the last page number reported by a GitHub Link response header
+  .DESCRIPTION
+    GitHub paginated responses advertise the neighbouring pages in a Link header, for example
+    <https://api.github.com/repositories/1/commits?per_page=1&page=2>; rel="next",
+    <https://api.github.com/repositories/1/commits?per_page=1&page=57>; rel="last".
+    Return the page number of the rel="last" target. A missing, malformed, or last-relation-free header
+    reports 1 because the response then already holds the only page.
+  .PARAMETER Link
+    The raw Link header value, or every value reported for that header
+  .OUTPUTS
+    System.Int32 containing the last page number.
+  .EXAMPLE
+    PS> ConvertFrom-GitHubLinkHeader -Link '<https://api.github.com/repositories/1/commits?per_page=1&page=57>; rel="last"'
+
+    57
+  #>
+  [OutputType([int])]
+  param (
+    [Parameter(Mandatory, Position = 0, ValueFromPipeline, HelpMessage = 'The raw Link header value')]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [AllowEmptyCollection()]
+    [string[]]$Link
+  )
+
+  process {
+    $LastPage = 1
+    foreach ($Value in $Link) {
+      if ([string]::IsNullOrWhiteSpace($Value)) { continue }
+      foreach ($Relation in [regex]::Matches($Value, '<(?<Uri>[^>]+)>\s*;\s*rel="(?<Rel>[^"]+)"')) {
+        if ($Relation.Groups['Rel'].Value -ne 'last') { continue }
+        $Page = 0
+        if ([int]::TryParse([regex]::Match($Relation.Groups['Uri'].Value, '[?&]page=(?<Page>\d+)').Groups['Page'].Value, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$Page)) { $LastPage = $Page }
+      }
+    }
+    return $LastPage
+  }
+}
 function Write-GitHubApiResponse {
   <#
   .SYNOPSIS
@@ -259,6 +305,42 @@ function Write-GitHubApiResponse {
   }
 }
 
+function Get-GitHubApiResponseHeader {
+  <#
+  .SYNOPSIS
+    Get a response header of the most recent Invoke-GitHubApi request
+  .DESCRIPTION
+    A module function cannot assign -ResponseHeadersVariable in its caller's scope, so a request that passes
+    that parameter keeps its response headers in module state instead. This function exposes them, which is
+    what pagination consumers need because GitHub reports the page count only in the Link header.
+    Every request clears the state, so the headers always describe the most recent request that asked for
+    them and nothing is reported after a request that did not.
+  .PARAMETER Name
+    The name of the header, compared without regard to case
+  .OUTPUTS
+    The header values, or nothing when the header was absent or the most recent request did not request
+    response headers.
+  .EXAMPLE
+    PS> Invoke-GitHubApi -Uri $Uri -ResponseHeadersVariable Headers
+    PS> Get-GitHubApiResponseHeader -Name 'Link'
+
+    <https://api.github.com/repositories/1/commits?per_page=1&page=2>; rel="next", <...page=57>; rel="last"
+  #>
+  [OutputType([string[]])]
+  param (
+    [Parameter(Position = 0, Mandatory, HelpMessage = 'The name of the header, compared without regard to case')]
+    [string]$Name
+  )
+
+  process {
+    if ($null -eq $Script:GitHubApiResponseHeaders) { return }
+    foreach ($Key in $Script:GitHubApiResponseHeaders.Keys) {
+      if ([string]::Equals([string]$Key, $Name, [StringComparison]::OrdinalIgnoreCase)) {
+        return $Script:GitHubApiResponseHeaders[$Key]
+      }
+    }
+  }
+}
 function Invoke-GitHubApi {
   <#
   .SYNOPSIS
@@ -416,6 +498,7 @@ function Invoke-GitHubApi {
 
   begin {
     Initialize-GitHubApiRequest -BoundParameters $PSBoundParameters
+    $Script:GitHubApiResponseHeaders = $null
     $RequestMethod = if ($PSBoundParameters['CustomMethod']) {
       [string]$PSBoundParameters['CustomMethod']
     } elseif ($PSBoundParameters['Method']) {
@@ -460,6 +543,14 @@ function Invoke-GitHubApi {
       throw (ConvertTo-GitHubApiException -ErrorRecord $_ -Uri $Uri -Method $RequestMethod)
     }
     if ($null -ne $Result) { Write-GitHubApiResponse -InputObject $Result -Uri $Uri }
+
+    # Invoke-RestMethod assigns -ResponseHeadersVariable inside the scope that runs the request, and a module
+    # function cannot write into its caller's scope. The collected headers are therefore kept in module state
+    # and exposed through Get-GitHubApiResponseHeader.
+    $ResponseHeadersName = [string]$PSBoundParameters['ResponseHeadersVariable']
+    if (-not [string]::IsNullOrWhiteSpace($ResponseHeadersName)) {
+      $Script:GitHubApiResponseHeaders = $ExecutionContext.SessionState.PSVariable.GetValue($ResponseHeadersName)
+    }
   }
 
   clean {

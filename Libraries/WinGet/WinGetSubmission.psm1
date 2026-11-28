@@ -476,6 +476,12 @@ function Send-WinGetManifest {
     3. Validate new manifests.
     4. Upload new manifests to origin.
     5. Create pull requests in upstream.
+    The reference revision is the newest upstream commit the submission depends on, which is the latest
+    commit of the version directory for an already published version, of the package directory for a new
+    version, and of the containing folder for a new package. The candidate branch is created at that
+    commit, so the pull request only carries the manifest changes even when the origin fork is behind
+    upstream. Writing manifests with a newer manifest version than the reference forks at the newer of that
+    commit and the commit that made the manifest version current.
   .PARAMETER Task
     The task object to be handled
   .PARAMETER SkipInstallerAnalysis
@@ -512,20 +518,20 @@ function Send-WinGetManifest {
     $PendingReference = $null
     $PendingAction = $null
     # Version discovery, document reads, and branch creation must describe the
-    # same source revision even when other tasks advance the origin branch.
-    $ReferenceRevision = $null
+    # same source revision. The revision is the newest upstream commit the
+    # submission depends on: the version directory a published version is
+    # rewritten from, the package directory a new version is modeled after, or
+    # the folder that established a new package.
     $HasLocalRepo = $LocalRepoPath -and (Test-Path -Path $LocalRepoPath)
-    if (-not $HasLocalRepo) {
-      $ReferenceRevision = (Get-WinGetGitHubBranch -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch).object.sha
-      if ([string]::IsNullOrWhiteSpace($ReferenceRevision)) { throw 'The reference branch did not return a commit SHA.' }
-    }
+    $Reference = Resolve-WinGetSubmissionReference -Task $Task -PackageIdentifier $RefPackageIdentifier -PackageVersion $NewPackageVersion -UpstreamRepoOwner $UpstreamRepoOwner -UpstreamRepoName $UpstreamRepoName -UpstreamRepoBranch $UpstreamRepoBranch -OriginRepoOwner $OriginRepoOwner -OriginRepoName $OriginRepoName -OriginRepoBranch $OriginRepoBranch -RootPath $RootPath -LocalRepository:$HasLocalRepo
+    $ReferenceRevision = $Reference.Sha
     $ReferenceVersions = if ($HasLocalRepo) {
       $PackagePath = Get-WinGetLocalPackagePath -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath
       if (-not $PendingFallbackEnabled -or (Test-Path -LiteralPath $PackagePath -PathType Container)) {
         Get-WinGetLocalPackageVersion -PackageIdentifier $RefPackageIdentifier -RootPath $LocalRepoPath
       }
     } else {
-      Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath -AllowMissing:$PendingFallbackEnabled
+      Get-WinGetGitHubPackageVersion -PackageIdentifier $RefPackageIdentifier -RepoOwner $Reference.RepoOwner -RepoName $Reference.RepoName -RepoBranch $ReferenceRevision -RootPath $RootPath -AllowMissing:$PendingFallbackEnabled
     }
     $RefPackageVersion = @($ReferenceVersions) | Select-Object -Last 1
     $PublishedPackageVersion = $RefPackageVersion
@@ -573,6 +579,22 @@ function Send-WinGetManifest {
       }
     }
     $NewCommitName = "${NewCommitType}: ${NewPackageIdentifier} version ${NewPackageVersion}$($Task.CurrentState.Contains('RealVersion') ? " ($($Task.CurrentState.Version))" : '')"
+
+    # A task setting or the command line preference (-WinGetResolveIssues "123,456") names the issues
+    # the submission resolves. GitHub closes an issue only when the merge writes the closing keyword
+    # into the commit on the base branch, which holds the pull request title and keeps the body only
+    # under some repository settings, so the references go into the title whenever the body may not
+    # survive the merge. The title carries them into the candidate commit message as well.
+    $ResolvedIssueReferences = @(New-WinGetGitHubIssueReference -IssueNumber @($Task.Config['WinGetResolveIssues'] ?? $Global:DumplingsPreference['WinGetResolveIssues']) -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
+    if ($ResolvedIssueReferences) {
+      try {
+        $IssueReferencePlace = @(Get-WinGetGitHubIssueReferencePlace -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName)
+      } catch {
+        $IssueReferencePlace = @('Body', 'Title')
+        $Task.Log("Unable to read how ${UpstreamRepoOwner}/${UpstreamRepoName} writes a merge commit: ${_}. Naming the resolved issues in the pull request title as well.", 'Warning')
+      }
+      if ($IssueReferencePlace -contains 'Title') { $NewCommitName = "$NewCommitName - $($ResolvedIssueReferences -join ', ')" }
+    }
 
     $Script:GitHubTokenUsername ??= (Get-WinGetGitHubApiTokenUser).login
     #endregion
@@ -644,7 +666,7 @@ function Send-WinGetManifest {
         $Task.Log("Reading existing manifests from local repo at $LocalRepoPath", 'Verbose')
         $PublishedManifest = Read-WinGetLocalManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $PublishedPackageVersion -RootPath $LocalRepoPath | ConvertFrom-WinGetManifestYaml
       } else {
-        $PublishedManifest = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $PublishedPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $ReferenceRevision -RootPath $RootPath | ConvertFrom-WinGetManifestYaml
+        $PublishedManifest = Read-WinGetGitHubManifests -PackageIdentifier $RefPackageIdentifier -PackageVersion $PublishedPackageVersion -RepoOwner $Reference.RepoOwner -RepoName $Reference.RepoName -RepoBranch $ReferenceRevision -RootPath $RootPath | ConvertFrom-WinGetManifestYaml
       }
     }
     $RefManifest = $PendingReference ? $PendingReference.Manifest : $PublishedManifest
@@ -699,13 +721,43 @@ function Send-WinGetManifest {
       }
     }
 
+    # A submission that writes manifests with a newer manifest version than the reference has to fork at or
+    # after the commit that made that version current in the manifests repository, so the candidate branch
+    # and the repository describe the same schema version. The commit is resolved from the version the
+    # authoring tool declares instead of its commit message, and the newer of that commit and the history
+    # the reference manifests were read from wins.
+    $BranchBaseRevision = $ReferenceRevision
+    $NewManifestVersion = [version]::new()
+    $ReferenceManifestVersion = [version]::new()
+    if (-not $HasLocalRepo -and
+      [version]::TryParse([string]($NewManifest ? $NewManifest.PSObject.Properties['ManifestVersion']?.Value : ''), [ref]$NewManifestVersion) -and
+      [version]::TryParse([string]($RefManifest ? $RefManifest.PSObject.Properties['ManifestVersion']?.Value : ''), [ref]$ReferenceManifestVersion) -and
+      $NewManifestVersion -gt $ReferenceManifestVersion) {
+      try {
+        $ManifestVersionCommit = Get-WinGetGitHubManifestVersionCommit -ManifestVersion $NewManifestVersion.ToString() -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName -RepoBranch $UpstreamRepoBranch
+        if ($ManifestVersionCommit -and (-not $Reference.Date -or [datetimeoffset]$ManifestVersionCommit.commit.committer.date -gt [datetimeoffset]$Reference.Date)) {
+          $BranchBaseRevision = [string]$ManifestVersionCommit.sha
+          $Task.Log("Basing the candidate branch on ${BranchBaseRevision}, at or after the commit that made manifest version ${NewManifestVersion} current", 'Verbose')
+        }
+      } catch {
+        $Task.Log("Failed to resolve the commit that made manifest version ${NewManifestVersion} current: ${_}", 'Warning')
+      }
+    }
+
     # Create a new branch in the origin repo
-    # Base the new branch on the origin repository's default branch.
-    # This is to mitigate the occasional and weird issue of "ref not found" when creating a branch based on the upstream default branch
-    # The origin repo should be synced as early as possible to avoid conflicts with other commits
+    # The branch is based on the newest upstream commit the submission depends on, so the pull request only
+    # carries the manifest changes even when the origin fork is behind upstream. The branch is created in the
+    # origin repo instead of upstream to avoid the occasional "ref not found" failure, and a fork that does
+    # not contain the upstream commit falls back to the head of the origin branch.
     $SourceArguments = @{}
-    if ($ReferenceRevision) { $SourceArguments.SourceSha = $ReferenceRevision }
-    $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch @SourceArguments
+    if ($BranchBaseRevision) { $SourceArguments.SourceSha = $BranchBaseRevision }
+    try {
+      $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch @SourceArguments
+    } catch {
+      if (-not $SourceArguments.ContainsKey('SourceSha')) { throw }
+      $Task.Log("Failed to create the candidate branch at ${BranchBaseRevision} in ${OriginRepoOwner}/${OriginRepoName}: ${_}. Retrying from the current head of ${OriginRepoOwner}/${OriginRepoName}:${OriginRepoBranch}.", 'Warning')
+      $NewBranch = New-WinGetGitHubBranch -Name $NewBranchName -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch
+    }
 
     # Upload new manifests
     $NewCommitSha = Add-WinGetGitHubManifests -PackageIdentifier $NewPackageIdentifier -PackageVersion $NewPackageVersion -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $NewBranchName -RepoSha $NewBranch.object.sha -RootPath $RootPath -Manifest $NewManifests -CommitMessage $NewCommitName
@@ -795,6 +847,8 @@ function Send-WinGetManifest {
     if ($PendingReference) {
       $NewPullRequestBody += "`n`nReference manifests: $($PendingReference.PullRequest.html_url), version ${RefPackageVersion}, commit $($PendingReference.HeadSha). The referenced PR remains open."
     }
+    # The body always records the issues, one reference per line, for a human reading the pull request.
+    if ($ResolvedIssueReferences) { $NewPullRequestBody += "`n`n$($ResolvedIssueReferences -join "`n")" }
     $NewPullRequest = New-WinGetGitHubPullRequest -Title $NewCommitName -Body $NewPullRequestBody -Head "${OriginRepoOwner}:${NewBranchName}" -Base $UpstreamRepoBranch -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName
     $Task.Log("Pull request created: $($NewPullRequest.title) - $($NewPullRequest.html_url)", 'Info')
 
@@ -820,6 +874,118 @@ function Send-WinGetManifest {
         $null = $ClosedPullRequestNumbers.Add([long]$_.number)
         $Task.Log("Closed old pull request of the same package: $($_.title) - $($_.html_url)", 'Info')
       }
+    }
+  }
+}
+
+function Resolve-WinGetSubmissionReference {
+  <#
+  .SYNOPSIS
+    Resolve the revision that submission reads reference manifests from and bases the candidate branch on
+  .DESCRIPTION
+    The reference revision is the newest upstream commit the submission depends on. Basing the candidate
+    branch on that commit instead of the head of the origin branch keeps the pull request limited to the
+    manifest changes even when the origin fork has not been synced with upstream, and it makes version
+    discovery, document reads, and branch creation describe the same tree.
+    The commit depends on what the submission writes. Rewriting a published version only needs that
+    version, so the newest commit of the version directory applies. A new version is modeled after the
+    package, so the newest commit of the package directory applies. A new package has no package
+    directory yet, so the newest of the commits that created the containing folders applies, from the
+    publisher folder up to the first-character folder. A first-character folder holds more history than
+    GitHub paginates in one listing because a single commit created all of them when the manifests were
+    partitioned by publisher, so the commit that established it is resolved by narrowing that listing by
+    date.
+    A local checkout supplies the reference manifests, so it only falls back to the current head of the
+    origin branch when none of those commits has upstream history.
+  .PARAMETER Task
+    The task object used for logging
+  .PARAMETER PackageIdentifier
+    The identifier of the reference package
+  .PARAMETER PackageVersion
+    The version of the package that the submission writes
+  .PARAMETER UpstreamRepoOwner
+    The owner of the repository that receives the pull request
+  .PARAMETER UpstreamRepoName
+    The name of the repository that receives the pull request
+  .PARAMETER UpstreamRepoBranch
+    The branch of the repository that receives the pull request
+  .PARAMETER OriginRepoOwner
+    The owner of the fork that stores the candidate branch
+  .PARAMETER OriginRepoName
+    The name of the fork that stores the candidate branch
+  .PARAMETER OriginRepoBranch
+    The branch of the fork that stores the candidate branch
+  .PARAMETER RootPath
+    The path to the root folder of the manifests repository
+  .PARAMETER LocalRepository
+    Indicates that the reference manifests come from a local checkout
+  .OUTPUTS
+    An object with RepoOwner, RepoName, RepoBranch, Sha, and Date. Sha and Date are empty only when a
+    local checkout is used and the upstream history is unknown, in which case branch creation resolves
+    the origin head itself.
+  #>
+  [OutputType([pscustomobject])]
+  param (
+    [Parameter(Mandatory, HelpMessage = 'The task object used for logging')]
+    $Task,
+    [Parameter(Mandatory, HelpMessage = 'The identifier of the reference package')]
+    [string]$PackageIdentifier,
+    [Parameter(Mandatory, HelpMessage = 'The version of the package that the submission writes')]
+    [string]$PackageVersion,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the repository that receives the pull request')]
+    [string]$UpstreamRepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the repository that receives the pull request')]
+    [string]$UpstreamRepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch of the repository that receives the pull request')]
+    [string]$UpstreamRepoBranch,
+    [Parameter(Mandatory, HelpMessage = 'The owner of the fork that stores the candidate branch')]
+    [string]$OriginRepoOwner,
+    [Parameter(Mandatory, HelpMessage = 'The name of the fork that stores the candidate branch')]
+    [string]$OriginRepoName,
+    [Parameter(Mandatory, HelpMessage = 'The branch of the fork that stores the candidate branch')]
+    [string]$OriginRepoBranch,
+    [Parameter(Mandatory, HelpMessage = 'The path to the root folder of the manifests repository')]
+    [string]$RootPath,
+    [Parameter(HelpMessage = 'Indicates that the reference manifests come from a local checkout')]
+    [switch]$LocalRepository
+  )
+
+  process {
+    try {
+      $Commit = Get-WinGetGitHubSubmissionCommit -PackageIdentifier $PackageIdentifier -PackageVersion $PackageVersion -RepoOwner $UpstreamRepoOwner -RepoName $UpstreamRepoName -RepoBranch $UpstreamRepoBranch -RootPath $RootPath
+      if ($Commit -and -not [string]::IsNullOrWhiteSpace([string]$Commit.sha)) {
+        $CommitPath = $Commit.PSObject.Properties['Path']
+        if ($CommitPath) { $Task.Log("Basing the candidate branch on the $($Commit.sha) commit of $($CommitPath.Value)", 'Verbose') }
+        return [pscustomobject]@{
+          RepoOwner  = $UpstreamRepoOwner
+          RepoName   = $UpstreamRepoName
+          RepoBranch = $UpstreamRepoBranch
+          Sha        = [string]$Commit.sha
+          Date       = $Commit.commit.committer.date
+        }
+      }
+    } catch {
+      $Task.Log("Failed to resolve the latest commit of the ${PackageIdentifier} manifest directory in ${UpstreamRepoOwner}/${UpstreamRepoName}: ${_}", 'Warning')
+    }
+
+    if ($LocalRepository) {
+      return [pscustomobject]@{
+        RepoOwner  = $OriginRepoOwner
+        RepoName   = $OriginRepoName
+        RepoBranch = $OriginRepoBranch
+        Sha        = $null
+        Date       = $null
+      }
+    }
+
+    $Sha = (Get-WinGetGitHubBranch -RepoOwner $OriginRepoOwner -RepoName $OriginRepoName -RepoBranch $OriginRepoBranch).object.sha
+    if ([string]::IsNullOrWhiteSpace($Sha)) { throw 'The reference branch did not return a commit SHA.' }
+    return [pscustomobject]@{
+      RepoOwner  = $OriginRepoOwner
+      RepoName   = $OriginRepoName
+      RepoBranch = $OriginRepoBranch
+      Sha        = [string]$Sha
+      Date       = $null
     }
   }
 }
